@@ -38,9 +38,7 @@ class TargetProfile(ConfigModel):
     target_ref: str | None = None
     kernel_args: list[str] = Field(default_factory=list)
     timeout_seconds: int = Field(default=300, ge=1)
-    cleanup_policy: Literal["preserve_all", "preserve_failed", "stop_failed", "remove_temporary"] = (
-        "preserve_failed"
-    )
+    cleanup_policy: Literal["preserve_all", "preserve_failed", "stop_failed", "remove_temporary"] = "preserve_failed"
     debug_gdbstub: bool = False
 
 
@@ -50,9 +48,7 @@ class DebugProfile(ConfigModel):
     gdbstub_endpoint: str | None = None
     kaslr_policy: Literal["disabled", "known", "unknown"] = "disabled"
     symbol_identity_required: bool = True
-    evaluation_mode: Literal["disabled", "predefined_inspectors", "limited_expressions"] = (
-        "predefined_inspectors"
-    )
+    evaluation_mode: Literal["disabled", "predefined_inspectors", "limited_expressions"] = "predefined_inspectors"
 
 
 class ArtifactPolicy(ConfigModel):

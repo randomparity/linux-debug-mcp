@@ -4,16 +4,13 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-
 REDACTION = "[REDACTED]"
 
 
 class Redactor:
     def __init__(self, secret_values: list[str] | None = None) -> None:
         self._secret_values = [value for value in secret_values or [] if value]
-        self._key_value_pattern = re.compile(
-            r"(?i)\b(password|passwd|token|api[_-]?key|secret)(\s*[=:]\s*)([^\s]+)"
-        )
+        self._key_value_pattern = re.compile(r"(?i)\b(password|passwd|token|api[_-]?key|secret)(\s*[=:]\s*)([^\s]+)")
         self._secret_key_pattern = re.compile(r"(?i)(password|passwd|token|api[_-]?key|secret)")
 
     def redact_text(self, text: str) -> str:
@@ -38,9 +35,7 @@ class Redactor:
             sensitive = value.get("sensitive") is True
             redacted: dict[str, Any] = {}
             for key, item in value.items():
-                if sensitive and key == "path":
-                    redacted[key] = REDACTION
-                elif isinstance(item, str) and self._secret_key_pattern.search(str(key)):
+                if sensitive and key == "path" or isinstance(item, str) and self._secret_key_pattern.search(str(key)):
                     redacted[key] = REDACTION
                 else:
                     redacted[key] = self.redact_value(item)

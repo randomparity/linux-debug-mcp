@@ -14,9 +14,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = [
+  "detect-secrets>=1.5,<2",
+  "pre-commit>=4.0,<5",
+  "ruff>=0.8,<1",
+]
 test = [
   "pytest>=8.2,<9",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [project.scripts]
 linux-debug-mcp = "linux_debug_mcp.server:main"

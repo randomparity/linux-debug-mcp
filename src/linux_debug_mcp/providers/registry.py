@@ -20,7 +20,7 @@ class ProviderRegistry:
         return list(self._providers.values())
 
     @classmethod
-    def with_defaults(cls) -> "ProviderRegistry":
+    def with_defaults(cls) -> ProviderRegistry:
         registry = cls()
         registry.register(
             sprint0_capability(

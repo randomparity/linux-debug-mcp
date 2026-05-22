@@ -19,6 +19,19 @@ serial commands, attach gdb, or collect real VM artifacts.
 
 ## Install
 
+For a new development checkout, install `uv` and run:
+
+```bash
+just setup
+```
+
+The setup target verifies that `uv` is available, installs editable Python
+development dependencies, runs the Sprint 0 host prerequisite checks, generates
+the secrets baseline, installs pre-commit hooks, and runs the hooks once across
+the repository.
+
+For a minimal editable install without hooks:
+
 ```bash
 python -m pip install -e '.[test]'
 ```

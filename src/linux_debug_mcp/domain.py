@@ -160,7 +160,7 @@ class ToolResponse(Model):
         data: dict[str, Any] | None = None,
         artifacts: list[ArtifactRef] | None = None,
         suggested_next_actions: list[str] | None = None,
-    ) -> "ToolResponse":
+    ) -> ToolResponse:
         return cls(
             ok=True,
             status=status,
@@ -180,7 +180,7 @@ class ToolResponse(Model):
         run_id: str | None = None,
         details: dict[str, Any] | None = None,
         suggested_next_actions: list[str] | None = None,
-    ) -> "ToolResponse":
+    ) -> ToolResponse:
         return cls(
             ok=False,
             status=StepStatus.FAILED,

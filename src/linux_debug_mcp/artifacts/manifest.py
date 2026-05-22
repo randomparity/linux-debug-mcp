@@ -19,7 +19,7 @@ class RunManifest(Model):
     cleanup_state: str = "not_started"
 
     @classmethod
-    def create(cls, *, run_id: str, request: RunRequest) -> "RunManifest":
+    def create(cls, *, run_id: str, request: RunRequest) -> RunManifest:
         return cls(
             run_id=run_id,
             request=request,
@@ -33,7 +33,7 @@ class RunManifest(Model):
             ],
         )
 
-    def with_step_result(self, result: StepResult) -> "RunManifest":
+    def with_step_result(self, result: StepResult) -> RunManifest:
         if result.step_name in self.step_results:
             existing = self.step_results[result.step_name]
             if existing.status == StepStatus.SUCCEEDED:

@@ -13,7 +13,6 @@ from linux_debug_mcp.providers.registry import ProviderRegistry
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_source_path
 from linux_debug_mcp.safety.redaction import Redactor
 
-
 DEFAULT_ARTIFACT_ROOT = Path(".linux-debug-mcp/runs")
 
 
@@ -74,7 +73,9 @@ def get_manifest_handler(*, artifact_root: Path, run_id: str) -> ToolResponse:
         summary=f"loaded manifest for {run_id}",
         run_id=run_id,
         data={"manifest": Redactor().redact_value(manifest.model_dump(mode="json"))},
-        artifacts=[ArtifactRef(path=str(artifact_root.expanduser().resolve() / run_id / "manifest.json"), kind="manifest")],
+        artifacts=[
+            ArtifactRef(path=str(artifact_root.expanduser().resolve() / run_id / "manifest.json"), kind="manifest")
+        ],
     )
 
 

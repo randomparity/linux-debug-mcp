@@ -1,5 +1,5 @@
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 from linux_debug_mcp.prereqs.checks import check_prerequisites
 

@@ -4,9 +4,9 @@ import json
 import os
 import shutil
 import uuid
-from contextlib import contextmanager
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Iterator
 
 from pydantic import ValidationError
 
@@ -122,7 +122,5 @@ class ArtifactStore:
             yield
         finally:
             os.close(fd)
-            try:
+            with suppress(FileNotFoundError):
                 lock_path.unlink()
-            except FileNotFoundError:
-                pass
