@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -49,16 +50,22 @@ class ArtifactStore:
         if run_dir.exists():
             raise ManifestStateError(f"run already exists: {run_id}", ErrorCategory.CONFIGURATION_ERROR)
 
+        created_run_dir = False
         try:
             run_dir.mkdir(parents=False)
+            created_run_dir = True
             for subdir in self.SUBDIRS:
                 (run_dir / subdir).mkdir()
 
             manifest = RunManifest.create(run_id=run_id, request=request.model_copy(update={"run_id": run_id}))
             self._write_manifest(run_dir, manifest)
         except FileExistsError as exc:
+            if created_run_dir:
+                shutil.rmtree(run_dir, ignore_errors=True)
             raise ManifestStateError(f"run already exists: {run_id}", ErrorCategory.CONFIGURATION_ERROR) from exc
         except OSError as exc:
+            if created_run_dir:
+                shutil.rmtree(run_dir, ignore_errors=True)
             raise ManifestStateError(f"failed to create run {run_id}: {exc}") from exc
         return manifest
 

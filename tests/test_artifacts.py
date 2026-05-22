@@ -46,6 +46,29 @@ def test_create_run_refuses_duplicate_run_id(tmp_path: Path) -> None:
         store.create_run(request(run_id="run-abc123"))
 
 
+def test_create_run_cleans_partial_workspace_on_creation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
+    run_dir = tmp_path / "runs" / "run-abc123"
+    target_dir = run_dir / "target"
+    original_mkdir = Path.mkdir
+
+    def fail_for_target_subdir(self: Path, *args: object, **kwargs: object) -> None:
+        if self == target_dir:
+            raise PermissionError("permission denied")
+        original_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_for_target_subdir)
+
+    with pytest.raises(ManifestStateError, match="failed to create run"):
+        store.create_run(request(run_id="run-abc123"))
+
+    assert not run_dir.exists()
+
+
 def test_artifact_store_rejects_source_checkout_as_root(tmp_path: Path) -> None:
     source = make_source_tree(tmp_path)
 
