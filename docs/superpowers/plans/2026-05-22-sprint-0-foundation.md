@@ -70,7 +70,7 @@ def test_package_exports_version() -> None:
 Run:
 
 ```bash
-python -m pytest tests/test_domain.py::test_package_exports_version -v
+python -c "import linux_debug_mcp"
 ```
 
 Expected: FAIL with `ModuleNotFoundError: No module named 'linux_debug_mcp'`.
@@ -120,7 +120,17 @@ Create `src/linux_debug_mcp/__init__.py`:
 __version__ = "0.1.0"
 ```
 
-- [ ] **Step 4: Run the package/version test to verify it passes**
+- [ ] **Step 4: Install editable package with test dependencies**
+
+Run:
+
+```bash
+python -m pip install -e '.[test]'
+```
+
+Expected: command exits 0 and installs `linux-debug-mcp`, `mcp`, `pydantic`, and `pytest` into the active environment.
+
+- [ ] **Step 5: Run the package/version test to verify it passes**
 
 Run:
 
@@ -130,7 +140,7 @@ python -m pytest tests/test_domain.py::test_package_exports_version -v
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add pyproject.toml src/linux_debug_mcp/__init__.py tests/test_domain.py
@@ -784,8 +794,10 @@ from linux_debug_mcp.safety.paths import (
     validate_artifact_root,
     validate_guest_path,
     validate_run_id,
+    validate_secret_file_reference,
     validate_source_path,
 )
+from linux_debug_mcp.safety.secrets import SecretReference, SecretReferenceKind
 
 
 def test_artifact_root_allows_creatable_child_of_existing_parent(tmp_path: Path) -> None:
@@ -836,6 +848,18 @@ def test_guest_path_requires_absolute_safe_posix_path() -> None:
     for value in ["tmp", "/tmp/../etc", "/tmp//x", "/tmp/has;semi"]:
         with pytest.raises(PathSafetyError):
             validate_guest_path(value)
+
+
+def test_secret_file_reference_validates_shape_and_optional_existence(tmp_path: Path) -> None:
+    secret_file = tmp_path / "id_ed25519"
+    secret_file.write_text("fake-key", encoding="utf-8")
+    ref = SecretReference(kind=SecretReferenceKind.FILE, label="ssh-key", reference=str(secret_file))
+
+    assert validate_secret_file_reference(ref, must_exist=True) == secret_file.resolve()
+
+    unsafe = SecretReference(kind=SecretReferenceKind.FILE, label="ssh-key", reference="../id_ed25519")
+    with pytest.raises(PathSafetyError, match="secret file reference must be absolute"):
+        validate_secret_file_reference(unsafe)
 ```
 
 - [ ] **Step 3: Run safety tests to verify they fail**
@@ -866,7 +890,7 @@ class Redactor:
     def __init__(self, secret_values: list[str] | None = None) -> None:
         self._secret_values = [value for value in secret_values or [] if value]
         self._key_value_pattern = re.compile(
-            r"(?i)\\b(password|passwd|token|api[_-]?key|secret)(\\s*[=:]\\s*)([^\\s]+)"
+            r"(?i)\b(password|passwd|token|api[_-]?key|secret)(\s*[=:]\s*)([^\s]+)"
         )
 
     def redact_text(self, text: str) -> str:
@@ -894,6 +918,8 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+
+from linux_debug_mcp.safety.secrets import SecretReference, SecretReferenceKind
 
 
 class PathSafetyError(ValueError):
@@ -977,6 +1003,20 @@ def validate_guest_path(path: str) -> str:
     if any(char in _SHELL_METACHARS for char in path) or any(ord(char) < 32 for char in path):
         raise PathSafetyError("guest path contains unsafe characters")
     return path
+
+
+def validate_secret_file_reference(ref: SecretReference, *, must_exist: bool = False) -> Path:
+    if ref.kind != SecretReferenceKind.FILE:
+        raise PathSafetyError("secret reference is not file-based")
+    path = Path(ref.reference).expanduser()
+    if not path.is_absolute():
+        raise PathSafetyError("secret file reference must be absolute")
+    resolved = path.resolve()
+    if any(char in _SHELL_METACHARS for char in str(resolved)) or any(ord(char) < 32 for char in str(resolved)):
+        raise PathSafetyError("secret file reference contains unsafe characters")
+    if must_exist and not resolved.is_file():
+        raise PathSafetyError("secret file reference does not exist")
+    return resolved
 ```
 
 - [ ] **Step 6: Run safety tests to verify they pass**
@@ -1236,12 +1276,21 @@ def request(run_id: str | None = None) -> RunRequest:
     )
 
 
+def make_source_tree(tmp_path: Path) -> Path:
+    source = tmp_path / "linux"
+    source.mkdir()
+    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
+    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    return source
+
+
 def test_create_run_workspace_and_manifest(tmp_path: Path) -> None:
-    store = ArtifactStore(tmp_path)
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
 
     manifest = store.create_run(request(run_id="run-abc123"))
 
-    run_dir = tmp_path / "run-abc123"
+    run_dir = tmp_path / "runs" / "run-abc123"
     assert manifest.run_id == "run-abc123"
     assert (run_dir / "manifest.json").exists()
     for name in ["inputs", "logs", "build", "target", "tests", "debug", "summaries", "sensitive"]:
@@ -1249,15 +1298,24 @@ def test_create_run_workspace_and_manifest(tmp_path: Path) -> None:
 
 
 def test_create_run_refuses_duplicate_run_id(tmp_path: Path) -> None:
-    store = ArtifactStore(tmp_path)
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
     store.create_run(request(run_id="run-abc123"))
 
     with pytest.raises(ManifestStateError, match="already exists"):
         store.create_run(request(run_id="run-abc123"))
 
 
+def test_artifact_store_rejects_source_checkout_as_root(tmp_path: Path) -> None:
+    source = make_source_tree(tmp_path)
+
+    with pytest.raises(ManifestStateError, match="artifact root overlaps source path"):
+        ArtifactStore(source, source_paths=[source])
+
+
 def test_manifest_round_trips_and_records_schema_version(tmp_path: Path) -> None:
-    store = ArtifactStore(tmp_path)
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
     created = store.create_run(request(run_id="run-abc123"))
 
     loaded = store.load_manifest("run-abc123")
@@ -1268,7 +1326,8 @@ def test_manifest_round_trips_and_records_schema_version(tmp_path: Path) -> None
 
 
 def test_completed_step_result_is_not_overwritten(tmp_path: Path) -> None:
-    store = ArtifactStore(tmp_path)
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
     store.create_run(request(run_id="run-abc123"))
     result = StepResult(step_name="create_run", status=StepStatus.SUCCEEDED, summary="created")
 
@@ -1280,6 +1339,20 @@ def test_completed_step_result_is_not_overwritten(tmp_path: Path) -> None:
 
     assert updated.step_results["create_run"].summary == "created"
     assert repeated.step_results["create_run"].summary == "created"
+
+
+def test_existing_manifest_lock_returns_structured_state_error(tmp_path: Path) -> None:
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
+    store.create_run(request(run_id="run-abc123"))
+    lock_path = tmp_path / "runs" / "run-abc123" / ".manifest.lock"
+    lock_path.write_text("12345", encoding="utf-8")
+
+    with pytest.raises(ManifestStateError, match="manifest is locked"):
+        store.record_step_result(
+            "run-abc123",
+            StepResult(step_name="create_run", status=StepStatus.SUCCEEDED, summary="created"),
+        )
 ```
 
 - [ ] **Step 2: Run artifact tests to verify they fail**
@@ -1369,7 +1442,7 @@ from pydantic import ValidationError
 
 from linux_debug_mcp.artifacts.manifest import RunManifest
 from linux_debug_mcp.domain import ErrorCategory, RunRequest, StepResult
-from linux_debug_mcp.safety.paths import PathSafetyError, validate_run_id
+from linux_debug_mcp.safety.paths import PathSafetyError, validate_artifact_root, validate_run_id
 
 
 class ManifestStateError(RuntimeError):
@@ -1381,8 +1454,21 @@ class ManifestStateError(RuntimeError):
 class ArtifactStore:
     SUBDIRS = ("inputs", "logs", "build", "target", "tests", "debug", "summaries", "sensitive")
 
-    def __init__(self, artifact_root: Path) -> None:
-        self.artifact_root = artifact_root.expanduser().resolve()
+    def __init__(
+        self,
+        artifact_root: Path,
+        *,
+        source_paths: list[Path] | None = None,
+        sensitive_paths: list[Path] | None = None,
+    ) -> None:
+        try:
+            self.artifact_root = validate_artifact_root(
+                artifact_root,
+                source_paths=source_paths or [],
+                sensitive_paths=sensitive_paths or [],
+            )
+        except PathSafetyError as exc:
+            raise ManifestStateError(str(exc), ErrorCategory.CONFIGURATION_ERROR) from exc
         self.artifact_root.mkdir(parents=True, exist_ok=True)
 
     def create_run(self, request: RunRequest) -> RunManifest:
@@ -1436,7 +1522,10 @@ class ArtifactStore:
     @contextmanager
     def _manifest_lock(self, run_dir: Path) -> Iterator[None]:
         lock_path = run_dir / ".manifest.lock"
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as exc:
+            raise ManifestStateError("manifest is locked", ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
         try:
             os.write(fd, str(os.getpid()).encode("ascii"))
             yield
@@ -1508,9 +1597,25 @@ def test_prereq_checks_report_missing_tools(tmp_path: Path) -> None:
     by_id = {check.check_id: check for check in checks}
 
     assert by_id["python.version"].status == "passed"
+    assert by_id["python.package.mcp"].status in {"passed", "failed"}
     assert by_id["tool.make"].status == "passed"
     assert by_id["tool.gdb"].status == "failed"
+    assert by_id["compiler.c"].status == "failed"
     assert by_id["libvirt.uri"].status == "skipped"
+
+
+def test_prereq_checks_accept_clang_when_gcc_is_missing(tmp_path: Path) -> None:
+    checks = check_prerequisites(
+        artifact_root=tmp_path,
+        source_path=None,
+        enable_libvirt_check=False,
+        runner=FakeRunner({"make", "clang", "bash", "git", "qemu-system-x86_64", "virsh", "gdb"}),
+    )
+
+    by_id = {check.check_id: check for check in checks}
+
+    assert by_id["compiler.c"].status == "passed"
+    assert by_id["compiler.c"].details["command"] == "clang"
 
 
 def test_prereq_checks_validate_source_tree(tmp_path: Path) -> None:
@@ -1559,6 +1664,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from importlib import util as importlib_util
 from pathlib import Path
 from typing import Protocol
 
@@ -1599,8 +1705,10 @@ def check_prerequisites(
     runner = runner or SubprocessPrerequisiteRunner()
     checks: list[PrerequisiteCheck] = []
     checks.append(_python_version_check())
-    for tool in ["make", "gcc", "bash", "git", "qemu-system-x86_64", "virsh", "gdb"]:
+    checks.extend(_python_package_checks())
+    for tool in ["make", "bash", "git", "qemu-system-x86_64", "virsh", "gdb"]:
         checks.append(_tool_check(tool, runner))
+    checks.append(_compiler_check(runner))
     checks.append(_artifact_root_check(artifact_root, source_path))
     checks.append(_source_tree_check(source_path))
     checks.append(_libvirt_check(enable_libvirt_check, runner))
@@ -1631,6 +1739,39 @@ def _tool_check(tool: str, runner: PrerequisiteRunner) -> PrerequisiteCheck:
         status=PrerequisiteStatus.FAILED,
         message=f"{tool} was not found",
         suggested_fix=f"Install {tool} with your distribution package manager.",
+    )
+
+
+def _python_package_checks() -> list[PrerequisiteCheck]:
+    checks: list[PrerequisiteCheck] = []
+    for package in ["mcp", "pydantic"]:
+        found = importlib_util.find_spec(package) is not None
+        checks.append(
+            PrerequisiteCheck(
+                check_id=f"python.package.{package}",
+                status=PrerequisiteStatus.PASSED if found else PrerequisiteStatus.FAILED,
+                message=f"Python package {package} {'is installed' if found else 'is not installed'}",
+                suggested_fix=None if found else "Run: python -m pip install -e '.[test]'",
+            )
+        )
+    return checks
+
+
+def _compiler_check(runner: PrerequisiteRunner) -> PrerequisiteCheck:
+    for command in ["gcc", "clang"]:
+        path = runner.which(command)
+        if path:
+            return PrerequisiteCheck(
+                check_id="compiler.c",
+                status=PrerequisiteStatus.PASSED,
+                message=f"{command} found",
+                details={"command": command, "path": path},
+            )
+    return PrerequisiteCheck(
+        check_id="compiler.c",
+        status=PrerequisiteStatus.FAILED,
+        message="neither gcc nor clang was found",
+        suggested_fix="Install gcc or clang with your distribution package manager.",
     )
 
 
@@ -1684,6 +1825,13 @@ def _libvirt_check(enable_libvirt_check: bool, runner: PrerequisiteRunner) -> Pr
             check_id="libvirt.uri",
             status=PrerequisiteStatus.SKIPPED,
             message="libvirt check disabled",
+        )
+    if runner.which("virsh") is None:
+        return PrerequisiteCheck(
+            check_id="libvirt.uri",
+            status=PrerequisiteStatus.FAILED,
+            message="virsh was not found",
+            suggested_fix="Install libvirt client tools before enabling the libvirt URI check.",
         )
     code, stdout, stderr = runner.run(["virsh", "uri"], timeout=10)
     if code == 0:
@@ -1763,6 +1911,26 @@ def test_create_run_handler_creates_manifest(tmp_path: Path) -> None:
     assert response.run_id == "run-abc123"
     assert (tmp_path / "run-abc123" / "manifest.json").exists()
     assert response.suggested_next_actions == ["kernel.build"]
+
+
+def test_create_run_handler_rejects_source_checkout_as_artifact_root(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    source.mkdir()
+    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
+    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+
+    response = create_run_handler(
+        artifact_root=source,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        run_id="run-abc123",
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
 
 
 def test_get_manifest_handler_returns_redacted_manifest(tmp_path: Path) -> None:
@@ -1887,7 +2055,6 @@ def create_run_handler(
             message=str(exc),
             details={"source_path": source_path},
         )
-    store = ArtifactStore(artifact_root)
     request = RunRequest(
         source_path=str(resolved_source_path),
         build_profile=build_profile,
@@ -1898,6 +2065,7 @@ def create_run_handler(
         run_id=run_id,
     )
     try:
+        store = ArtifactStore(artifact_root, source_paths=[resolved_source_path])
         manifest = store.create_run(request)
     except ManifestStateError as exc:
         return ToolResponse.failure(
@@ -1916,8 +2084,8 @@ def create_run_handler(
 
 
 def get_manifest_handler(*, artifact_root: Path, run_id: str) -> ToolResponse:
-    store = ArtifactStore(artifact_root)
     try:
+        store = ArtifactStore(artifact_root)
         manifest = store.load_manifest(run_id)
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
@@ -2180,7 +2348,7 @@ python -m pytest
 
 Expected: PASS for all tests.
 
-- [ ] **Step 3: Verify editable install metadata and console script**
+- [ ] **Step 3: Verify editable install metadata and app construction**
 
 Run:
 
@@ -2199,7 +2367,17 @@ FastMCP
 
 The `pip install` command should exit 0. The second command prints `0.1.0`. The third command prints `FastMCP`.
 
-- [ ] **Step 4: Run diff hygiene check**
+- [ ] **Step 4: Verify the console entrypoint starts**
+
+Run:
+
+```bash
+timeout 2 linux-debug-mcp || test $? -eq 124
+```
+
+Expected: command exits 0. Exit 124 from `timeout` is accepted because it means the MCP server stayed running until the bounded smoke check stopped it; any immediate import, packaging, or startup failure makes the command exit nonzero.
+
+- [ ] **Step 5: Run diff hygiene check**
 
 Run:
 
@@ -2209,7 +2387,7 @@ git diff --check
 
 Expected: no output and exit 0.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add README.md
@@ -2225,6 +2403,7 @@ Before marking implementation complete, verify each Sprint 0 requirement:
 - [ ] Python package installs in editable mode with `python -m pip install -e '.[test]'`.
 - [ ] Unit tests pass with `python -m pytest` and do not require libvirt, QEMU, a Linux checkout, or gdb.
 - [ ] `create_app()` constructs the MCP server.
+- [ ] `timeout 2 linux-debug-mcp || test $? -eq 124` proves the console entrypoint starts without an immediate crash.
 - [ ] `host.check_prerequisites` handler returns structured checks and does not modify the host.
 - [ ] `kernel.create_run` handler creates the run directory and `manifest.json`.
 - [ ] `artifacts.get_manifest` returns a manifest through the shared response envelope.
