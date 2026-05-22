@@ -20,3 +20,37 @@ def test_redacts_environment_mapping() -> None:
         "API_TOKEN": "[REDACTED]",
         "PATH": "/usr/bin",
     }
+
+
+def test_redacts_nested_values_and_sensitive_artifact_paths() -> None:
+    redactor = Redactor(secret_values=["topsecret"])
+
+    value = {
+        "step_results": {
+            "collect": {
+                "details": {"token": "topsecret", "nested": ["password=hunter2"]},
+                "artifacts": [
+                    {
+                        "kind": "log",
+                        "path": "/tmp/runs/run-abc123/sensitive/serial.log",
+                        "sensitive": True,
+                    }
+                ],
+            }
+        }
+    }
+
+    assert redactor.redact_value(value) == {
+        "step_results": {
+            "collect": {
+                "details": {"token": "[REDACTED]", "nested": ["password=[REDACTED]"]},
+                "artifacts": [
+                    {
+                        "kind": "log",
+                        "path": "[REDACTED]",
+                        "sensitive": True,
+                    }
+                ],
+            }
+        }
+    }
