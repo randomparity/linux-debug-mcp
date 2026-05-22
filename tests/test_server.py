@@ -53,6 +53,38 @@ def test_create_run_handler_rejects_source_checkout_as_artifact_root(tmp_path: P
     assert response.error.category == "configuration_error"
 
 
+def test_create_run_handler_returns_failure_when_artifact_root_cannot_be_created(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "linux"
+    source.mkdir()
+    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
+    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    artifact_root = tmp_path / "runs"
+    original_mkdir = Path.mkdir
+
+    def fail_for_artifact_root(self: Path, *args: object, **kwargs: object) -> None:
+        if self == artifact_root:
+            raise PermissionError("permission denied")
+        original_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_for_artifact_root)
+
+    response = create_run_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        run_id="run-abc123",
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "infrastructure_failure"
+
+
 def test_create_run_handler_rejects_unsafe_run_id(tmp_path: Path) -> None:
     source = tmp_path / "linux"
     source.mkdir()

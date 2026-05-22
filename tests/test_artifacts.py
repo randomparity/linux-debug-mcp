@@ -53,6 +53,22 @@ def test_artifact_store_rejects_source_checkout_as_root(tmp_path: Path) -> None:
         ArtifactStore(source, source_paths=[source])
 
 
+def test_artifact_store_wraps_artifact_root_creation_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = make_source_tree(tmp_path)
+    artifact_root = tmp_path / "runs"
+    original_mkdir = Path.mkdir
+
+    def fail_for_artifact_root(self: Path, *args: object, **kwargs: object) -> None:
+        if self == artifact_root:
+            raise PermissionError("permission denied")
+        original_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_for_artifact_root)
+
+    with pytest.raises(ManifestStateError, match="failed to create artifact root"):
+        ArtifactStore(artifact_root, source_paths=[source])
+
+
 def test_manifest_round_trips_and_records_schema_version(tmp_path: Path) -> None:
     source = make_source_tree(tmp_path)
     store = ArtifactStore(tmp_path / "runs", source_paths=[source])
