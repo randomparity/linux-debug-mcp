@@ -172,7 +172,22 @@ def _libvirt_check(enable_libvirt_check: bool, runner: PrerequisiteRunner) -> Pr
             message="virsh was not found",
             suggested_fix="Install libvirt client tools before enabling the libvirt URI check.",
         )
-    code, stdout, stderr = runner.run(["virsh", "uri"], timeout=10)
+    try:
+        code, stdout, stderr = runner.run(["virsh", "uri"], timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        return PrerequisiteCheck(
+            check_id="libvirt.uri",
+            status=PrerequisiteStatus.FAILED,
+            message=f"virsh uri timed out after {exc.timeout} seconds",
+            suggested_fix="Confirm libvirt is responsive or disable the libvirt URI check.",
+        )
+    except OSError as exc:
+        return PrerequisiteCheck(
+            check_id="libvirt.uri",
+            status=PrerequisiteStatus.FAILED,
+            message=f"virsh uri could not run: {exc}",
+            suggested_fix="Confirm libvirt client tools are installed and runnable.",
+        )
     if code == 0:
         return PrerequisiteCheck(
             check_id="libvirt.uri",

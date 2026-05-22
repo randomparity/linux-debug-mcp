@@ -51,6 +51,26 @@ def test_create_run_handler_rejects_source_checkout_as_artifact_root(tmp_path: P
     assert response.error.category == "configuration_error"
 
 
+def test_create_run_handler_rejects_unsafe_run_id(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    source.mkdir()
+    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
+    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+
+    response = create_run_handler(
+        artifact_root=tmp_path,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        run_id="../run-abc123",
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+
+
 def test_get_manifest_handler_returns_redacted_manifest(tmp_path: Path) -> None:
     source = tmp_path / "linux"
     source.mkdir()
@@ -70,6 +90,14 @@ def test_get_manifest_handler_returns_redacted_manifest(tmp_path: Path) -> None:
 
     assert response.ok is True
     assert response.data["manifest"]["run_id"] == "run-abc123"
+
+
+def test_get_manifest_handler_rejects_unsafe_run_id(tmp_path: Path) -> None:
+    response = get_manifest_handler(artifact_root=tmp_path, run_id="../run-abc123")
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
 
 
 def test_prerequisites_handler_returns_checks(tmp_path: Path) -> None:

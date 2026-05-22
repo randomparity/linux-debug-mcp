@@ -41,21 +41,26 @@ class ArtifactStore:
         self.artifact_root.mkdir(parents=True, exist_ok=True)
 
     def create_run(self, request: RunRequest) -> RunManifest:
-        run_id = validate_run_id(request.run_id or self._generate_run_id())
+        run_id = self._validate_run_id(request.run_id or self._generate_run_id())
         run_dir = self._run_dir(run_id)
         if run_dir.exists():
             raise ManifestStateError(f"run already exists: {run_id}", ErrorCategory.CONFIGURATION_ERROR)
 
-        run_dir.mkdir(parents=False)
-        for subdir in self.SUBDIRS:
-            (run_dir / subdir).mkdir()
+        try:
+            run_dir.mkdir(parents=False)
+            for subdir in self.SUBDIRS:
+                (run_dir / subdir).mkdir()
 
-        manifest = RunManifest.create(run_id=run_id, request=request.model_copy(update={"run_id": run_id}))
-        self._write_manifest(run_dir, manifest)
+            manifest = RunManifest.create(run_id=run_id, request=request.model_copy(update={"run_id": run_id}))
+            self._write_manifest(run_dir, manifest)
+        except FileExistsError as exc:
+            raise ManifestStateError(f"run already exists: {run_id}", ErrorCategory.CONFIGURATION_ERROR) from exc
+        except OSError as exc:
+            raise ManifestStateError(f"failed to create run {run_id}: {exc}") from exc
         return manifest
 
     def load_manifest(self, run_id: str) -> RunManifest:
-        run_dir = self._run_dir(validate_run_id(run_id))
+        run_dir = self._run_dir(run_id)
         manifest_path = run_dir / "manifest.json"
         try:
             return RunManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
@@ -63,7 +68,7 @@ class ArtifactStore:
             raise ManifestStateError(f"failed to read manifest for {run_id}: {exc}") from exc
 
     def record_step_result(self, run_id: str, result: StepResult) -> RunManifest:
-        run_id = validate_run_id(run_id)
+        run_id = self._validate_run_id(run_id)
         run_dir = self._run_dir(run_id)
         with self._manifest_lock(run_dir):
             manifest = self.load_manifest(run_id)
@@ -73,11 +78,14 @@ class ArtifactStore:
             return updated
 
     def _run_dir(self, run_id: str) -> Path:
+        safe_run_id = self._validate_run_id(run_id)
+        return self.artifact_root / safe_run_id
+
+    def _validate_run_id(self, run_id: str) -> str:
         try:
-            safe_run_id = validate_run_id(run_id)
+            return validate_run_id(run_id)
         except PathSafetyError as exc:
             raise ManifestStateError(str(exc), ErrorCategory.CONFIGURATION_ERROR) from exc
-        return self.artifact_root / safe_run_id
 
     def _write_manifest(self, run_dir: Path, manifest: RunManifest) -> None:
         manifest_path = run_dir / "manifest.json"

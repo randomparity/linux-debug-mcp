@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 from linux_debug_mcp.prereqs.checks import check_prerequisites
 
@@ -14,6 +15,11 @@ class FakeRunner:
         if command == ["virsh", "uri"]:
             return (0, "qemu:///system\n", "")
         return (1, "", "unsupported")
+
+
+class TimeoutRunner(FakeRunner):
+    def run(self, command: list[str], timeout: int) -> tuple[int, str, str]:
+        raise subprocess.TimeoutExpired(command, timeout)
 
 
 def test_prereq_checks_report_missing_tools(tmp_path: Path) -> None:
@@ -66,3 +72,17 @@ def test_prereq_checks_validate_source_tree(tmp_path: Path) -> None:
     assert by_id["artifact_root.writable"].status == "passed"
     assert by_id["source.linux_tree"].status == "passed"
     assert by_id["libvirt.uri"].status == "passed"
+
+
+def test_prereq_checks_report_libvirt_timeout(tmp_path: Path) -> None:
+    checks = check_prerequisites(
+        artifact_root=tmp_path,
+        source_path=None,
+        enable_libvirt_check=True,
+        runner=TimeoutRunner({"virsh"}),
+    )
+
+    by_id = {check.check_id: check for check in checks}
+
+    assert by_id["libvirt.uri"].status == "failed"
+    assert "timed out" in by_id["libvirt.uri"].message
