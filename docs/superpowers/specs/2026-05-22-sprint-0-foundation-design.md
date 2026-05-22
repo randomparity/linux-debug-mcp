@@ -19,6 +19,8 @@ the same structured shapes that later workflow tools will return.
 Sprint 0 includes:
 
 - Python package and test harness.
+- `pyproject.toml` with package metadata, console entry points, runtime
+  dependencies, and test dependencies.
 - MCP server entrypoint with foundational tools and explicit stubs for later
   workflow tools.
 - Configuration and domain models for profiles, runs, artifacts, providers,
@@ -56,11 +58,32 @@ artifact contracts are tested as real behavior from the beginning.
 
 ## Architecture
 
+### Technology Choices
+
+Sprint 0 should make enough dependency choices for the implementation plan to be
+directly executable:
+
+- Python 3.11 or newer.
+- `pyproject.toml` using `setuptools` package discovery with a `src/` layout.
+- Pydantic v2 for configuration, domain, manifest, and response models.
+- The Python MCP SDK package imported as `mcp` for the server implementation.
+- `pytest` for unit tests.
+- Standard-library `logging` with JSON-friendly structured fields; no external
+  logging dependency in Sprint 0.
+
+Dependency versions should be pinned with lower bounds in `pyproject.toml` and
+kept narrow enough that a fresh editable install exercises the same dependency
+families used during development. The implementation plan may choose exact
+minimum versions, but it must not leave the MCP SDK, model framework, or test
+runner implicit.
+
 ### Package Layout
 
 The implementation should use a `src/` layout:
 
 ```text
+pyproject.toml
+README.md
 src/linux_debug_mcp/
   __init__.py
   config.py
@@ -83,6 +106,7 @@ src/linux_debug_mcp/
     __init__.py
     checks.py
   logging.py
+tests/
 ```
 
 Tests should mirror these boundaries under `tests/`.
@@ -152,6 +176,37 @@ Error categories are:
 - `infrastructure_failure`
 - `not_implemented`
 
+### MCP Response Contract
+
+Every MCP tool returns a JSON-serializable response envelope. Tool-specific
+fields live under `data` so the common contract stays stable as tools are added.
+
+Success responses include:
+
+- `ok: true`
+- `status`: `succeeded`, `skipped`, or another non-error step status when the
+  operation is state-reporting rather than mutating.
+- `run_id` when the operation is run-scoped.
+- `summary`: a concise human-readable result.
+- `data`: tool-specific structured data.
+- `artifacts`: redacted artifact references relevant to the result.
+- `suggested_next_actions`: concise next MCP calls or operator actions.
+
+Error responses include:
+
+- `ok: false`
+- `status: failed`
+- `run_id` when available.
+- `error.category` using the domain error categories.
+- `error.message`.
+- `error.details` with redacted diagnostic data.
+- `suggested_next_actions`.
+
+All response envelopes must be serializable through the same Pydantic model
+family used for manifests and domain objects. Long logs, raw command output, and
+secret-bearing values stay on disk as artifacts and are represented by redacted
+references or short redacted snippets.
+
 ### Provider Registry
 
 Sprint 0 implements a static registry with named providers and declared
@@ -198,10 +253,26 @@ Sprint 0 only needs to create the layout, persist the manifest, reload it, and
 record step results. The idempotency rule is:
 
 - Retrying a completed step returns the recorded result.
-- Retrying a failed, running, or canceled step requires an explicit policy in
-  later orchestration code.
+- Retrying a failed or canceled step requires an explicit retry policy in later
+  orchestration code.
+- Retrying a `running` step returns the recorded in-progress state unless a
+  stale-lock policy proves that the prior writer is gone. Sprint 0 only records
+  the state and must not auto-recover stale running steps.
 - Sprint 0 foundational tools must not silently overwrite a completed step
   result.
+
+Manifest writes must be safe under duplicate MCP calls from the same agentic
+session:
+
+- Generate run IDs with enough entropy to avoid accidental collisions.
+- Refuse caller-supplied run IDs that already exist unless the caller explicitly
+  asks to read the existing run.
+- Write manifest updates through a temporary file followed by an atomic rename.
+- Use a per-run lock file for manifest mutation inside a single host filesystem.
+- Record schema version and writer version in every manifest.
+- Treat invalid JSON, unknown schema versions, and partial manifests as
+  `infrastructure_failure` or `configuration_error` responses with the original
+  file preserved for investigation.
 
 ### Secret References And Redaction
 
@@ -220,6 +291,39 @@ The redaction layer should handle:
 Raw secret-bearing artifacts are only allowed when an artifact policy explicitly
 permits them. Such artifacts are stored under `sensitive/` and marked sensitive
 in the manifest.
+
+### Path Safety
+
+Sprint 0 validates host and guest paths before a run is created. Validation is
+conservative because later sprints will execute commands and write artifacts
+based on these values.
+
+Host path rules:
+
+- Resolve `~`, relative segments, and symlinks before comparing paths.
+- Require the artifact root to be an existing writable directory or a creatable
+  child of an existing writable parent.
+- Reject artifact roots that resolve to `/`, the user's home directory, a source
+  checkout root, or another configured sensitive path.
+- Create run directories only as direct children of the resolved artifact root.
+- Reject run IDs containing path separators, `..`, shell metacharacters, control
+  characters, or leading dots.
+- Treat kernel source paths as read-only inputs in Sprint 0; `kernel.create_run`
+  may verify tree markers but must not write into the source checkout.
+- Validate file-based secret references for path shape and existence when
+  requested, but never read or copy the secret value during prerequisite checks
+  or manifest creation.
+
+Guest path rules:
+
+- Guest writable paths must be absolute POSIX paths.
+- Reject guest paths containing `..`, empty components, shell metacharacters, or
+  control characters.
+- Guest paths are recorded as guest paths only; Sprint 0 must not map them to
+  host paths.
+
+Path validation failures use `configuration_error` with the rejected path
+redacted when it falls under a secret reference.
 
 ### Prerequisite Checks
 
@@ -331,9 +435,11 @@ Required tests:
 - Redaction removes fake secrets from command lines, environment maps, logs, and
   response snippets.
 - Secret references serialize without exposing values.
+- Path validation rejects unsafe artifact roots, run IDs, source paths, secret
+  file references, and guest writable paths.
 - Prerequisite checks can be tested with fake command runners.
 - MCP tool handlers return the expected structured shapes for implemented and
-  stubbed tools.
+  stubbed tools, including both success and error response envelopes.
 
 ## Acceptance Criteria
 
