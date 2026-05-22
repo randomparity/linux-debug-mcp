@@ -115,6 +115,8 @@ class ArtifactStore:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError as exc:
             raise ManifestStateError("manifest is locked", ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
+        except OSError as exc:
+            raise ManifestStateError(f"failed to lock manifest: {exc}") from exc
         try:
             os.write(fd, str(os.getpid()).encode("ascii"))
             yield

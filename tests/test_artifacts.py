@@ -134,6 +134,17 @@ def test_existing_manifest_lock_returns_structured_state_error(tmp_path: Path) -
         )
 
 
+def test_record_step_result_for_missing_run_returns_state_error(tmp_path: Path) -> None:
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
+
+    with pytest.raises(ManifestStateError, match="failed to lock manifest"):
+        store.record_step_result(
+            "run-abc123",
+            StepResult(step_name="create_run", status=StepStatus.SUCCEEDED, summary="created"),
+        )
+
+
 def test_load_manifest_rejects_unsafe_run_id_as_state_error(tmp_path: Path) -> None:
     source = make_source_tree(tmp_path)
     store = ArtifactStore(tmp_path / "runs", source_paths=[source])
