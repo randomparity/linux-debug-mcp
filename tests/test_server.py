@@ -12,11 +12,31 @@ from linux_debug_mcp.server import (
 )
 
 
-def test_create_run_handler_creates_manifest(tmp_path: Path) -> None:
+def make_source_tree(tmp_path: Path) -> Path:
     source = tmp_path / "linux"
     source.mkdir()
     (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
     (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    return source
+
+
+def create_test_run(tmp_path: Path, run_id: str = "run-abc123") -> tuple[Path, Path]:
+    source = make_source_tree(tmp_path)
+    artifact_root = tmp_path / "runs"
+
+    create_run_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        run_id=run_id,
+    )
+    return source, artifact_root
+
+
+def test_create_run_handler_creates_manifest(tmp_path: Path) -> None:
+    source = make_source_tree(tmp_path)
     artifact_root = tmp_path / "runs"
 
     response = create_run_handler(
@@ -35,10 +55,7 @@ def test_create_run_handler_creates_manifest(tmp_path: Path) -> None:
 
 
 def test_create_run_handler_rejects_source_checkout_as_artifact_root(tmp_path: Path) -> None:
-    source = tmp_path / "linux"
-    source.mkdir()
-    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
-    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    source = make_source_tree(tmp_path)
 
     response = create_run_handler(
         artifact_root=source,
@@ -58,10 +75,7 @@ def test_create_run_handler_returns_failure_when_artifact_root_cannot_be_created
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    source = tmp_path / "linux"
-    source.mkdir()
-    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
-    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    source = make_source_tree(tmp_path)
     artifact_root = tmp_path / "runs"
     original_mkdir = Path.mkdir
 
@@ -87,10 +101,7 @@ def test_create_run_handler_returns_failure_when_artifact_root_cannot_be_created
 
 
 def test_create_run_handler_rejects_unsafe_run_id(tmp_path: Path) -> None:
-    source = tmp_path / "linux"
-    source.mkdir()
-    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
-    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    source = make_source_tree(tmp_path)
     artifact_root = tmp_path / "runs"
 
     response = create_run_handler(
@@ -108,20 +119,7 @@ def test_create_run_handler_rejects_unsafe_run_id(tmp_path: Path) -> None:
 
 
 def test_get_manifest_handler_returns_redacted_manifest(tmp_path: Path) -> None:
-    source = tmp_path / "linux"
-    source.mkdir()
-    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
-    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
-    artifact_root = tmp_path / "runs"
-
-    create_run_handler(
-        artifact_root=artifact_root,
-        source_path=str(source),
-        build_profile="x86_64-default",
-        target_profile="local-qemu",
-        rootfs_profile="minimal",
-        run_id="run-abc123",
-    )
+    _, artifact_root = create_test_run(tmp_path)
 
     response = get_manifest_handler(artifact_root=artifact_root, run_id="run-abc123")
 
@@ -130,19 +128,7 @@ def test_get_manifest_handler_returns_redacted_manifest(tmp_path: Path) -> None:
 
 
 def test_get_manifest_handler_redacts_sensitive_manifest_fields(tmp_path: Path) -> None:
-    source = tmp_path / "linux"
-    source.mkdir()
-    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
-    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
-    artifact_root = tmp_path / "runs"
-    create_run_handler(
-        artifact_root=artifact_root,
-        source_path=str(source),
-        build_profile="x86_64-default",
-        target_profile="local-qemu",
-        rootfs_profile="minimal",
-        run_id="run-abc123",
-    )
+    source, artifact_root = create_test_run(tmp_path)
     store = ArtifactStore(artifact_root, source_paths=[source])
     store.record_step_result(
         "run-abc123",

@@ -19,7 +19,7 @@ sync-dev: check-uv
 
 check-host: sync-dev
     @echo "Running host.check_prerequisites"
-    uv run python -c 'from pathlib import Path; from linux_debug_mcp.server import prerequisites_handler; response = prerequisites_handler(artifact_root=Path(".linux-debug-mcp"), source_path=None, enable_libvirt_check=False); checks = response.data["checks"]; failed = [check for check in checks if check["status"] == "failed"]; [print(f"{check['\''status'\'']:7} {check['\''check_id'\'']}: {check['\''message'\'']}") for check in checks]; print("\nHost prerequisite checks failed. Install the missing OS-level tools and rerun `just setup`.") if failed else None; raise SystemExit(1 if failed else 0)'
+    uv run python -m linux_debug_mcp.dev_setup check-host
 
 install-hooks: sync-dev
     uv run detect-secrets scan > .secrets.baseline

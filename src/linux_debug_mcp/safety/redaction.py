@@ -20,13 +20,7 @@ class Redactor:
         return self._key_value_pattern.sub(lambda match: f"{match.group(1)}{match.group(2)}{REDACTION}", redacted)
 
     def redact_mapping(self, values: Mapping[str, object]) -> dict[str, object]:
-        redacted: dict[str, object] = {}
-        for key, value in values.items():
-            if isinstance(value, str) and self._secret_key_pattern.search(key):
-                redacted[key] = REDACTION
-            else:
-                redacted[key] = self.redact_value(value)
-        return redacted
+        return self.redact_value(dict(values))
 
     def redact_value(self, value: Any) -> Any:
         if isinstance(value, str):
