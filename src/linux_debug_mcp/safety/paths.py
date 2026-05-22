@@ -32,6 +32,10 @@ def _is_relative_to(child: Path, parent: Path) -> bool:
         return False
 
 
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return left == right or _is_relative_to(left, right) or _is_relative_to(right, left)
+
+
 def validate_artifact_root(
     artifact_root: Path,
     *,
@@ -49,12 +53,12 @@ def validate_artifact_root(
 
     for source in source_paths:
         source_resolved = _resolve_existing_or_parent(source)
-        if resolved == source_resolved or _is_relative_to(resolved, source_resolved):
+        if _paths_overlap(resolved, source_resolved):
             raise PathSafetyError("artifact root overlaps source path")
 
     for sensitive in sensitive_paths:
         sensitive_resolved = _resolve_existing_or_parent(sensitive)
-        if resolved == sensitive_resolved or _is_relative_to(resolved, sensitive_resolved):
+        if _paths_overlap(resolved, sensitive_resolved):
             raise PathSafetyError("artifact root overlaps sensitive path")
 
     return resolved

@@ -32,6 +32,14 @@ def test_artifact_root_rejects_source_checkout(tmp_path: Path) -> None:
         validate_artifact_root(source, source_paths=[source], sensitive_paths=[])
 
 
+def test_artifact_root_rejects_parent_of_source_checkout(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    source.mkdir()
+
+    with pytest.raises(PathSafetyError, match="artifact root overlaps source path"):
+        validate_artifact_root(tmp_path, source_paths=[source], sensitive_paths=[])
+
+
 def test_run_id_rejects_path_traversal_and_leading_dot() -> None:
     for value in ["../x", ".hidden", "run/123", "run;rm"]:
         with pytest.raises(PathSafetyError):

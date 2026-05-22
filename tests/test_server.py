@@ -17,9 +17,10 @@ def test_create_run_handler_creates_manifest(tmp_path: Path) -> None:
     source.mkdir()
     (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
     (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    artifact_root = tmp_path / "runs"
 
     response = create_run_handler(
-        artifact_root=tmp_path,
+        artifact_root=artifact_root,
         source_path=str(source),
         build_profile="x86_64-default",
         target_profile="local-qemu",
@@ -29,7 +30,7 @@ def test_create_run_handler_creates_manifest(tmp_path: Path) -> None:
 
     assert response.ok is True
     assert response.run_id == "run-abc123"
-    assert (tmp_path / "run-abc123" / "manifest.json").exists()
+    assert (artifact_root / "run-abc123" / "manifest.json").exists()
     assert response.suggested_next_actions == ["kernel.build"]
 
 
@@ -90,9 +91,10 @@ def test_create_run_handler_rejects_unsafe_run_id(tmp_path: Path) -> None:
     source.mkdir()
     (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
     (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    artifact_root = tmp_path / "runs"
 
     response = create_run_handler(
-        artifact_root=tmp_path,
+        artifact_root=artifact_root,
         source_path=str(source),
         build_profile="x86_64-default",
         target_profile="local-qemu",
@@ -110,9 +112,10 @@ def test_get_manifest_handler_returns_redacted_manifest(tmp_path: Path) -> None:
     source.mkdir()
     (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
     (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    artifact_root = tmp_path / "runs"
 
     create_run_handler(
-        artifact_root=tmp_path,
+        artifact_root=artifact_root,
         source_path=str(source),
         build_profile="x86_64-default",
         target_profile="local-qemu",
@@ -120,7 +123,7 @@ def test_get_manifest_handler_returns_redacted_manifest(tmp_path: Path) -> None:
         run_id="run-abc123",
     )
 
-    response = get_manifest_handler(artifact_root=tmp_path, run_id="run-abc123")
+    response = get_manifest_handler(artifact_root=artifact_root, run_id="run-abc123")
 
     assert response.ok is True
     assert response.data["manifest"]["run_id"] == "run-abc123"
@@ -131,15 +134,16 @@ def test_get_manifest_handler_redacts_sensitive_manifest_fields(tmp_path: Path) 
     source.mkdir()
     (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
     (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    artifact_root = tmp_path / "runs"
     create_run_handler(
-        artifact_root=tmp_path,
+        artifact_root=artifact_root,
         source_path=str(source),
         build_profile="x86_64-default",
         target_profile="local-qemu",
         rootfs_profile="minimal",
         run_id="run-abc123",
     )
-    store = ArtifactStore(tmp_path, source_paths=[source])
+    store = ArtifactStore(artifact_root, source_paths=[source])
     store.record_step_result(
         "run-abc123",
         StepResult(
@@ -149,7 +153,7 @@ def test_get_manifest_handler_redacts_sensitive_manifest_fields(tmp_path: Path) 
             details={"password": "hunter2"},
             artifacts=[
                 ArtifactRef(
-                    path=str(tmp_path / "run-abc123" / "sensitive" / "serial.log"),
+                    path=str(artifact_root / "run-abc123" / "sensitive" / "serial.log"),
                     kind="serial-log",
                     sensitive=True,
                 )
@@ -157,7 +161,7 @@ def test_get_manifest_handler_redacts_sensitive_manifest_fields(tmp_path: Path) 
         ),
     )
 
-    response = get_manifest_handler(artifact_root=tmp_path, run_id="run-abc123")
+    response = get_manifest_handler(artifact_root=artifact_root, run_id="run-abc123")
 
     manifest = response.data["manifest"]
     result = manifest["step_results"]["collect_artifacts"]
@@ -167,7 +171,7 @@ def test_get_manifest_handler_redacts_sensitive_manifest_fields(tmp_path: Path) 
 
 
 def test_get_manifest_handler_rejects_unsafe_run_id(tmp_path: Path) -> None:
-    response = get_manifest_handler(artifact_root=tmp_path, run_id="../run-abc123")
+    response = get_manifest_handler(artifact_root=tmp_path / "runs", run_id="../run-abc123")
 
     assert response.ok is False
     assert response.error is not None
@@ -176,7 +180,7 @@ def test_get_manifest_handler_rejects_unsafe_run_id(tmp_path: Path) -> None:
 
 def test_prerequisites_handler_returns_checks(tmp_path: Path) -> None:
     response = prerequisites_handler(
-        artifact_root=tmp_path,
+        artifact_root=tmp_path / "runs",
         source_path=None,
         enable_libvirt_check=False,
     )
