@@ -178,6 +178,15 @@ def test_get_manifest_handler_rejects_unsafe_run_id(tmp_path: Path) -> None:
     assert response.error.category == "configuration_error"
 
 
+def test_get_manifest_handler_does_not_create_missing_artifact_root(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "missing-runs"
+
+    response = get_manifest_handler(artifact_root=artifact_root, run_id="run-abc123")
+
+    assert response.ok is False
+    assert not artifact_root.exists()
+
+
 def test_prerequisites_handler_returns_checks(tmp_path: Path) -> None:
     response = prerequisites_handler(
         artifact_root=tmp_path / "runs",

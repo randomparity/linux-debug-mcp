@@ -66,7 +66,7 @@ def create_run_handler(
 
 def get_manifest_handler(*, artifact_root: Path, run_id: str) -> ToolResponse:
     try:
-        store = ArtifactStore(artifact_root)
+        store = ArtifactStore(artifact_root, create_root=False)
         manifest = store.load_manifest(run_id)
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)

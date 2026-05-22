@@ -30,6 +30,7 @@ class ArtifactStore:
         *,
         source_paths: list[Path] | None = None,
         sensitive_paths: list[Path] | None = None,
+        create_root: bool = True,
     ) -> None:
         try:
             self.artifact_root = validate_artifact_root(
@@ -39,10 +40,11 @@ class ArtifactStore:
             )
         except PathSafetyError as exc:
             raise ManifestStateError(str(exc), ErrorCategory.CONFIGURATION_ERROR) from exc
-        try:
-            self.artifact_root.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise ManifestStateError(f"failed to create artifact root: {exc}") from exc
+        if create_root:
+            try:
+                self.artifact_root.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise ManifestStateError(f"failed to create artifact root: {exc}") from exc
 
     def create_run(self, request: RunRequest) -> RunManifest:
         run_id = self._validate_run_id(request.run_id or self._generate_run_id())
