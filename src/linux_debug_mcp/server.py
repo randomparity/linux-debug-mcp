@@ -51,7 +51,7 @@ DEFAULT_TARGET_PROFILES = {
     "local-qemu-debug": TargetProfile(
         name="local-qemu-debug",
         architecture="x86_64",
-        target_ref="mcp-linux-debug-dev",
+        target_ref="mcp-linux-debug-dev-debug",
         managed_domain=True,
         managed_domain_prefix="mcp-linux-debug-",
         libvirt_uri="qemu:///system",

@@ -232,6 +232,9 @@ def test_workflow_build_boot_debug_uses_manifest_debug_profile_when_omitted(
 
 def test_default_target_profiles_include_debug_enabled_qemu_profile() -> None:
     debug_profile = DEFAULT_TARGET_PROFILES["local-qemu-debug"]
+    non_debug_profile = DEFAULT_TARGET_PROFILES["local-qemu"]
 
     assert debug_profile.debug_gdbstub is True
     assert debug_profile.gdbstub_endpoint == "127.0.0.1:1234"
+    assert debug_profile.target_ref != non_debug_profile.target_ref
+    assert debug_profile.target_ref.startswith(debug_profile.managed_domain_prefix)
