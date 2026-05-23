@@ -236,3 +236,7 @@ def test_collect_artifacts_recollects_when_debug_artifacts_are_added_after_succe
     assert second.ok is True
     kinds = {artifact.kind for artifact in second.artifacts}
     assert {"debug-session", "debug-transcript", "debug-command-metadata", "debug-summary"} <= kinds
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest(run_id)
+    recorded_collect = manifest.step_results["collect_artifacts"]
+    recorded_kinds = {artifact.kind for artifact in recorded_collect.artifacts}
+    assert {"debug-session", "debug-transcript", "debug-command-metadata", "debug-summary"} <= recorded_kinds

@@ -1560,6 +1560,7 @@ def artifacts_collect_handler(
         with store.collect_lock(run_id):
             locked_manifest = store.load_manifest(run_id)
             existing = locked_manifest.step_results.get("collect_artifacts")
+            replace_succeeded = force_recollect or bool(existing and existing.status == StepStatus.SUCCEEDED)
             if (
                 existing
                 and existing.status == StepStatus.SUCCEEDED
@@ -1590,7 +1591,7 @@ def artifacts_collect_handler(
                 artifacts=artifacts,
                 details={"bundle": bundle, "rollup": bundle["rollup"]},
             )
-            store.record_step_result(run_id, result, replace_succeeded=force_recollect)
+            store.record_step_result(run_id, result, replace_succeeded=replace_succeeded)
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
     redactor = Redactor()
