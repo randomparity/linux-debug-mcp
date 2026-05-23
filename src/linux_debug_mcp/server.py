@@ -1601,7 +1601,7 @@ def _workflow_failure_response(
     }
     category = response.error.category if response.error else ErrorCategory.INFRASTRUCTURE_FAILURE
     message = response.error.message if response.error else response.summary or f"{failing_step} failed"
-    return ToolResponse.failure(
+    failure_response = ToolResponse.failure(
         category=category,
         message=message,
         run_id=run_id,
@@ -1609,6 +1609,8 @@ def _workflow_failure_response(
         artifacts=[*(response.artifacts or []), *((collect_response.artifacts if collect_response else []) or [])],
         suggested_next_actions=["artifacts.get_manifest", "Inspect artifact bundle"],
     )
+    failure_response.data = details
+    return failure_response
 
 
 def workflow_build_boot_test_handler(
@@ -1777,6 +1779,141 @@ def workflow_build_boot_test_handler(
         },
         artifacts=collect_response.artifacts,
         suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
+def workflow_build_boot_debug_handler(
+    *,
+    artifact_root: Path,
+    source_path: str,
+    build_profile: str,
+    target_profile: str,
+    rootfs_profile: str,
+    run_id: str | None = None,
+    debug_profile: str | None = None,
+    force_rebuild: bool = False,
+    force_reboot: bool = False,
+    new_session: bool = False,
+) -> ToolResponse:
+    if run_id is not None:
+        try:
+            store = ArtifactStore(artifact_root, create_root=False)
+            manifest_path = store.run_dir(run_id) / "manifest.json"
+            if manifest_path.is_file():
+                manifest = store.load_manifest(run_id)
+                resolved_debug_profile = debug_profile if debug_profile is not None else manifest.request.debug_profile
+                try:
+                    resolved_source_path = str(validate_source_path(Path(source_path)))
+                except PathSafetyError as exc:
+                    return ToolResponse.failure(
+                        category=ErrorCategory.CONFIGURATION_ERROR,
+                        message=str(exc),
+                        run_id=run_id,
+                        details={"source_path": source_path},
+                    )
+                expected = {
+                    "source_path": resolved_source_path,
+                    "build_profile": build_profile,
+                    "target_profile": target_profile,
+                    "rootfs_profile": rootfs_profile,
+                    "debug_profile": resolved_debug_profile,
+                }
+                actual = {
+                    "source_path": manifest.request.source_path,
+                    "build_profile": manifest.request.build_profile,
+                    "target_profile": manifest.request.target_profile,
+                    "rootfs_profile": manifest.request.rootfs_profile,
+                    "debug_profile": manifest.request.debug_profile,
+                }
+                mismatches = {
+                    key: {"requested": expected[key], "manifest": actual[key]}
+                    for key in expected
+                    if expected[key] != actual[key]
+                }
+                if mismatches:
+                    return ToolResponse.failure(
+                        category=ErrorCategory.CONFIGURATION_ERROR,
+                        message="immutable run manifest request mismatch",
+                        run_id=run_id,
+                        details={"mismatches": mismatches},
+                    )
+                debug_profile = resolved_debug_profile
+        except ManifestStateError as exc:
+            return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    if run_id is None or not (artifact_root / run_id / "manifest.json").is_file():
+        create_response = create_run_handler(
+            artifact_root=artifact_root,
+            source_path=source_path,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            run_id=run_id,
+            debug_profile=debug_profile,
+        )
+        if not create_response.ok:
+            return create_response
+        run_id = create_response.run_id
+
+    build_response = kernel_build_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        build_profile=build_profile,
+        force_rebuild=force_rebuild,
+    )
+    if not build_response.ok:
+        return _workflow_failure_response(
+            run_id=run_id,
+            failing_step="build",
+            latest_successful_step=None,
+            response=build_response,
+            collect_response=None,
+        )
+
+    boot_response = target_boot_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        target_profile=target_profile,
+        rootfs_profile=rootfs_profile,
+        force_reboot=force_reboot,
+    )
+    if not boot_response.ok:
+        return _workflow_failure_response(
+            run_id=run_id,
+            failing_step="boot",
+            latest_successful_step="build",
+            response=boot_response,
+            collect_response=None,
+        )
+
+    debug_response = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_profile=debug_profile,
+        new_session=new_session,
+    )
+    if not debug_response.ok:
+        return _workflow_failure_response(
+            run_id=run_id,
+            failing_step="debug",
+            latest_successful_step="boot",
+            response=debug_response,
+            collect_response=None,
+        )
+
+    return ToolResponse.success(
+        summary="build, boot, debug workflow succeeded",
+        run_id=run_id,
+        data={
+            "steps": {
+                "build": build_response.model_dump(mode="json"),
+                "boot": boot_response.model_dump(mode="json"),
+                "debug": debug_response.model_dump(mode="json"),
+            },
+            "latest_successful_step": "debug",
+        },
+        artifacts=debug_response.artifacts,
+        suggested_next_actions=["debug.read_registers", "debug.evaluate", "debug.end_session"],
     )
 
 
@@ -2091,16 +2228,31 @@ def create_app() -> FastMCP:
             force_recollect=force_recollect,
         ).model_dump(mode="json")
 
-    def make_stub(bound_tool_name: str):
-        def stub(run_id: str | None = None) -> dict[str, Any]:
-            return not_implemented_handler(bound_tool_name, run_id=run_id).model_dump(mode="json")
-
-        return stub
-
-    for tool_name in [
-        "workflow.build_boot_debug",
-    ]:
-        app.tool(name=tool_name)(make_stub(tool_name))
+    @app.tool(name="workflow.build_boot_debug")
+    def workflow_build_boot_debug(
+        source_path: str,
+        build_profile: str,
+        target_profile: str,
+        rootfs_profile: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        run_id: str | None = None,
+        debug_profile: str | None = None,
+        force_rebuild: bool = False,
+        force_reboot: bool = False,
+        new_session: bool = False,
+    ) -> dict[str, Any]:
+        return workflow_build_boot_debug_handler(
+            artifact_root=Path(artifact_root),
+            source_path=source_path,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            run_id=run_id,
+            debug_profile=debug_profile,
+            force_rebuild=force_rebuild,
+            force_reboot=force_reboot,
+            new_session=new_session,
+        ).model_dump(mode="json")
 
     return app
 
