@@ -16,6 +16,19 @@ _ALLOWED_SSH_OPTIONS = {
     "LogLevel": {"values": {"ERROR", "QUIET", "VERBOSE"}},
     "StrictHostKeyChecking": {"values": {"accept-new", "yes"}},
 }
+SPRINT_4_DEBUG_OPERATIONS = [
+    "debug.start_session",
+    "debug.interrupt",
+    "debug.continue",
+    "debug.set_breakpoint",
+    "debug.clear_breakpoint",
+    "debug.list_breakpoints",
+    "debug.read_registers",
+    "debug.read_symbol",
+    "debug.read_memory",
+    "debug.evaluate",
+    "debug.end_session",
+]
 
 
 def _has_control_character(value: str) -> bool:
@@ -162,6 +175,7 @@ class TargetProfile(ConfigModel):
     timeout_seconds: int = Field(default=300, ge=1)
     cleanup_policy: Literal["preserve_on_failure", "stop_on_failure"] = "preserve_on_failure"
     debug_gdbstub: bool = False
+    gdbstub_endpoint: str = "127.0.0.1:1234"
     libvirt_uri: str | None = None
     managed_domain: bool = False
     managed_domain_prefix: str | None = None
@@ -169,11 +183,10 @@ class TargetProfile(ConfigModel):
 
 class DebugProfile(ConfigModel):
     name: str
-    enabled_operations: list[str] = Field(default_factory=list)
-    gdbstub_endpoint: str | None = None
-    kaslr_policy: Literal["disabled", "known", "unknown"] = "disabled"
+    enabled_operations: list[str] = Field(default_factory=lambda: list(SPRINT_4_DEBUG_OPERATIONS))
+    kaslr_policy: Literal["disabled"] = "disabled"
     symbol_identity_required: bool = True
-    evaluation_mode: Literal["disabled", "predefined_inspectors", "limited_expressions"] = "predefined_inspectors"
+    evaluation_mode: Literal["predefined_inspectors"] = "predefined_inspectors"
 
 
 class ArtifactPolicy(ConfigModel):

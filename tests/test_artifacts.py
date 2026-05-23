@@ -214,6 +214,26 @@ def test_collect_lock_excludes_concurrent_collection(tmp_path: Path) -> None:
         pass
 
 
+def test_debug_lock_serializes_per_run(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    manifest = store.create_run(
+        RunRequest(
+            source_path=str(tmp_path),
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+            run_id="run-debug-lock",
+        )
+    )
+
+    with (
+        store.debug_lock(manifest.run_id),
+        pytest.raises(ManifestStateError, match="debug is locked"),
+        store.debug_lock(manifest.run_id),
+    ):
+        pass
+
+
 def test_running_build_result_can_be_replaced_by_success(tmp_path: Path) -> None:
     source = make_source_tree(tmp_path)
     store = ArtifactStore(tmp_path / "runs", source_paths=[source])

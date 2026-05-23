@@ -51,13 +51,13 @@ def test_server_config_accepts_valid_pilot_profiles(tmp_path: Path) -> None:
                 timeout_seconds=300,
                 cleanup_policy="preserve_on_failure",
                 debug_gdbstub=True,
+                gdbstub_endpoint="localhost:1234",
             )
         },
         debug_profiles={
             "gdbstub": DebugProfile(
                 name="gdbstub",
                 enabled_operations=["interrupt", "continue", "read_registers"],
-                gdbstub_endpoint="localhost:1234",
                 kaslr_policy="disabled",
                 symbol_identity_required=True,
                 evaluation_mode="predefined_inspectors",
@@ -101,6 +101,50 @@ def test_sprint_2_profiles_accept_libvirt_boot_fields(tmp_path: Path) -> None:
     assert rootfs.source_type == "disk_image"
     assert target.libvirt_uri == "qemu:///system"
     assert target.managed_domain is True
+
+
+def test_target_profile_accepts_local_gdbstub_endpoint() -> None:
+    profile = TargetProfile(
+        name="local-qemu",
+        architecture="x86_64",
+        target_ref="mcp-linux-debug-dev",
+        managed_domain=True,
+        libvirt_uri="qemu:///system",
+        debug_gdbstub=True,
+        gdbstub_endpoint="127.0.0.1:1234",
+    )
+
+    assert profile.debug_gdbstub is True
+    assert profile.gdbstub_endpoint == "127.0.0.1:1234"
+
+
+def test_default_debug_profile_matches_sprint_4_policy() -> None:
+    profile = DebugProfile(name="qemu-gdbstub-default")
+
+    assert profile.kaslr_policy == "disabled"
+    assert profile.symbol_identity_required is True
+    assert profile.evaluation_mode == "predefined_inspectors"
+    assert profile.enabled_operations == [
+        "debug.start_session",
+        "debug.interrupt",
+        "debug.continue",
+        "debug.set_breakpoint",
+        "debug.clear_breakpoint",
+        "debug.list_breakpoints",
+        "debug.read_registers",
+        "debug.read_symbol",
+        "debug.read_memory",
+        "debug.evaluate",
+        "debug.end_session",
+    ]
+
+
+def test_debug_profile_rejects_unsupported_sprint_4_policy() -> None:
+    with pytest.raises(ValidationError):
+        DebugProfile(name="bad", kaslr_policy="known")
+
+    with pytest.raises(ValidationError):
+        DebugProfile(name="bad", evaluation_mode="limited_expressions")
 
 
 def test_sprint_3_rootfs_profile_accepts_ssh_access_fields() -> None:
