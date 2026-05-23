@@ -82,7 +82,7 @@ def test_plan_builds_ssh_argv_with_quoted_remote_command_and_provider_defaults(t
     assert "BatchMode=yes" in command.ssh_argv
     assert "UserKnownHostsFile=" + str(tmp_path / "target" / "known_hosts") in command.ssh_argv
     assert "-i" in command.ssh_argv
-    assert command.ssh_argv[-3:] == ["root@127.0.0.1", "--", "uname -a"]
+    assert command.ssh_argv[-3:] == ["--", "root@127.0.0.1", "uname -a"]
 
 
 def test_plan_allows_adhoc_only_without_default_suite_commands(tmp_path: Path) -> None:

@@ -364,7 +364,7 @@ class LocalSshTestProvider:
         if rootfs_profile.ssh_key_ref:
             ssh_argv.extend(["-i", rootfs_profile.ssh_key_ref])
         remote_command = " ".join(shlex.quote(item) for item in command)
-        ssh_argv.extend([f"{rootfs_profile.ssh_user}@{rootfs_profile.ssh_host}", "--", remote_command])
+        ssh_argv.extend(["--", f"{rootfs_profile.ssh_user}@{rootfs_profile.ssh_host}", remote_command])
         return ssh_argv
 
     def _run_dmesg(self, plan: TestPlan) -> dict[str, object]:
