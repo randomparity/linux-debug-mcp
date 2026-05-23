@@ -50,6 +50,7 @@ def test_default_registry_exposes_sprint_1_providers() -> None:
         "local-prereqs",
         "local-kernel-build",
         "local-libvirt-qemu",
+        "local-ssh-tests",
         "stub-workflows",
     }
     assert "kernel.build" in providers["local-kernel-build"].operations
@@ -74,3 +75,9 @@ def test_default_registry_exposes_sprint_1_providers() -> None:
     assert libvirt_qemu.semantics.destructive is True
     assert libvirt_qemu.semantics.cancelable is False
     assert libvirt_qemu.semantics.concurrent_safe is False
+
+    ssh_tests = providers["local-ssh-tests"]
+    assert ssh_tests.operations == ["target.run_tests"]
+    assert "target.run_tests" not in providers["stub-workflows"].operations
+    assert ssh_tests.required_host_tools == ["ssh"]
+    assert ssh_tests.target_kinds == [TargetKind.VIRTUAL]

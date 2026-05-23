@@ -7,7 +7,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
-from linux_debug_mcp.config import BuildProfile, RootfsProfile, TargetProfile
+from linux_debug_mcp.config import BuildProfile, RootfsProfile, TargetProfile, TestCommand, TestSuiteProfile
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
@@ -37,7 +37,23 @@ DEFAULT_ROOTFS_PROFILES = {
         source="/var/lib/linux-debug-mcp/rootfs/minimal.qcow2",
         mutability="read_only",
         readiness_marker="linux-debug-mcp-ready",
+        ssh_host="127.0.0.1",
+        ssh_port=22,
+        ssh_user="root",
     ),
+}
+DEFAULT_TEST_SUITES = {
+    "smoke-basic": TestSuiteProfile(
+        name="smoke-basic",
+        timeout_seconds=30,
+        stop_on_failure=True,
+        collect_dmesg=True,
+        commands=[
+            TestCommand(name="uname", argv=["uname", "-a"]),
+            TestCommand(name="proc-version", argv=["test", "-r", "/proc/version"]),
+            TestCommand(name="proc-cmdline", argv=["cat", "/proc/cmdline"]),
+        ],
+    )
 }
 RUNNING_BUILD_MESSAGE = (
     "previous build is still recorded as running; inspect logs and create a new run or manually clean stale build state"

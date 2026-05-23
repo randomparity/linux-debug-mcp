@@ -3,6 +3,7 @@ from pathlib import Path
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.domain import ArtifactRef, StepResult, StepStatus
 from linux_debug_mcp.server import (
+    DEFAULT_TEST_SUITES,
     create_app,
     create_run_handler,
     get_manifest_handler,
@@ -194,8 +195,22 @@ def test_list_providers_handler_returns_default_capabilities() -> None:
         "local-kernel-build",
         "local-libvirt-qemu",
         "local-prereqs",
+        "local-ssh-tests",
         "stub-workflows",
     }
+
+
+def test_default_smoke_basic_suite_matches_sprint_3_contract() -> None:
+    suite = DEFAULT_TEST_SUITES["smoke-basic"]
+
+    assert [command.argv for command in suite.commands] == [
+        ["uname", "-a"],
+        ["test", "-r", "/proc/version"],
+        ["cat", "/proc/cmdline"],
+    ]
+    assert suite.timeout_seconds == 30
+    assert suite.stop_on_failure is True
+    assert suite.collect_dmesg is True
 
 
 def test_not_implemented_handler_returns_structured_error() -> None:
