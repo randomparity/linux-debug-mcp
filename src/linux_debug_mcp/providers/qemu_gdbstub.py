@@ -319,11 +319,15 @@ class QemuGdbstubProvider:
         )
 
     def validate_symbol_name(self, symbol: str) -> str:
+        if type(symbol) is not str:
+            raise ProviderDebugError("invalid symbol name", category=ErrorCategory.CONFIGURATION_ERROR)
         if not SYMBOL_PATTERN.match(symbol):
             raise ProviderDebugError("invalid symbol name", category=ErrorCategory.CONFIGURATION_ERROR)
         return symbol
 
     def validate_register_name(self, register: str) -> str:
+        if type(register) is not str:
+            raise ProviderDebugError("invalid register name", category=ErrorCategory.CONFIGURATION_ERROR)
         if not REGISTER_PATTERN.match(register):
             raise ProviderDebugError("invalid register name", category=ErrorCategory.CONFIGURATION_ERROR)
         return register
@@ -353,7 +357,7 @@ class QemuGdbstubProvider:
                 "gdbstub endpoint must use localhost",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
-        if not isinstance(port, int) or port < 1 or port > 65535:
+        if type(port) is not int or port < 1 or port > 65535:
             raise ProviderDebugError(
                 "gdbstub endpoint port must be in 1..65535",
                 category=ErrorCategory.CONFIGURATION_ERROR,

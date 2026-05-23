@@ -178,6 +178,52 @@ def test_symbol_validation_rejects_unsafe_names(tmp_path: Path, symbol: str) -> 
     assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
 
 
+@pytest.mark.parametrize("symbol", [None, 1234, True])
+def test_symbol_validation_rejects_non_string_values(tmp_path: Path, symbol: object) -> None:
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider.validate_symbol_name(symbol)  # type: ignore[arg-type]
+
+    assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_register_validation_accepts_safe_name(tmp_path: Path) -> None:
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+
+    assert provider.validate_register_name("rax") == "rax"
+
+
+@pytest.mark.parametrize("register", ["", "bad-name", "bad name", "bad/name"])
+def test_register_validation_rejects_unsafe_names(tmp_path: Path, register: str) -> None:
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider.validate_register_name(register)
+
+    assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+@pytest.mark.parametrize("register", [None, 1234, True])
+def test_register_validation_rejects_non_string_values(tmp_path: Path, register: object) -> None:
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider.validate_register_name(register)  # type: ignore[arg-type]
+
+    assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+@pytest.mark.parametrize("port", [True, False, "1234"])
+def test_endpoint_validation_rejects_non_integer_ports(tmp_path: Path, port: object) -> None:
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider._validated_endpoint({"host": "127.0.0.1", "port": port})
+
+    assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
 @pytest.mark.parametrize("byte_count", [-1, 0, 4097])
 def test_memory_validation_rejects_invalid_byte_counts(tmp_path: Path, byte_count: int) -> None:
     provider = QemuGdbstubProvider(runner=FakeGdbRunner())
