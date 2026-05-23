@@ -1,7 +1,11 @@
 from pathlib import Path
 
 from linux_debug_mcp.domain import ErrorCategory, ToolResponse
-from linux_debug_mcp.server import create_run_handler, workflow_build_boot_debug_handler
+from linux_debug_mcp.server import (
+    DEFAULT_TARGET_PROFILES,
+    create_run_handler,
+    workflow_build_boot_debug_handler,
+)
 
 
 def success(summary: str, *, run_id: str = "run-abc123") -> ToolResponse:
@@ -178,3 +182,56 @@ def test_workflow_build_boot_debug_allows_explicit_profile_when_manifest_did_not
 
     assert response.ok is True
     assert captured_debug["debug_profile"] == "qemu-gdbstub-default"
+
+
+def test_workflow_build_boot_debug_uses_manifest_debug_profile_when_omitted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "linux"
+    source.mkdir()
+    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
+    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    artifact_root = tmp_path / "runs"
+    created = create_run_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu-debug",
+        rootfs_profile="minimal",
+        run_id="run-debug",
+        debug_profile="qemu-gdbstub-default",
+    )
+    assert created.ok is True
+    captured_debug: dict[str, object] = {}
+    monkeypatch.setattr(
+        "linux_debug_mcp.server.kernel_build_handler", lambda **kwargs: success("built", run_id="run-debug")
+    )
+    monkeypatch.setattr(
+        "linux_debug_mcp.server.target_boot_handler", lambda **kwargs: success("booted", run_id="run-debug")
+    )
+
+    def fake_debug(**kwargs: object) -> ToolResponse:
+        captured_debug.update(kwargs)
+        return success("debug session started", run_id="run-debug")
+
+    monkeypatch.setattr("linux_debug_mcp.server.debug_start_session_handler", fake_debug)
+
+    response = workflow_build_boot_debug_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu-debug",
+        rootfs_profile="minimal",
+        run_id="run-debug",
+    )
+
+    assert response.ok is True
+    assert captured_debug["debug_profile"] == "qemu-gdbstub-default"
+
+
+def test_default_target_profiles_include_debug_enabled_qemu_profile() -> None:
+    debug_profile = DEFAULT_TARGET_PROFILES["local-qemu-debug"]
+
+    assert debug_profile.debug_gdbstub is True
+    assert debug_profile.gdbstub_endpoint == "127.0.0.1:1234"
