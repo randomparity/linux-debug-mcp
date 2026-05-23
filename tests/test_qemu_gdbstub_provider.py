@@ -618,12 +618,35 @@ def test_end_session_terminates_recorded_live_controller_pid(tmp_path: Path) -> 
         result = provider.end_session(run_dir=tmp_path, session=session)
 
         assert result.session.current_execution_state == "ended"
-        assert result.session.controller_last_observed_state == "terminate_requested"
+        assert result.session.controller_last_observed_state == "exited"
         for _ in range(50):
             if process.poll() is not None:
                 break
             time.sleep(0.02)
         assert process.poll() is not None
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=5)
+
+
+def test_end_session_rejects_live_pid_without_matching_identity(tmp_path: Path) -> None:
+    process = subprocess.Popen(["sleep", "30"])
+    try:
+        provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+        session = provider.write_session_for_test(
+            tmp_path,
+            state="stopped",
+            controller_mode="attached",
+            pid=process.pid,
+        ).model_copy(update={"active_controller_identity": {}})
+
+        with pytest.raises(ProviderDebugError) as exc_info:
+            provider.end_session(run_dir=tmp_path, session=session)
+
+        assert exc_info.value.category == ErrorCategory.DEBUG_ATTACH_FAILURE
+        assert exc_info.value.details["controller_last_observed_state"] == "alive_unverified"
+        assert process.poll() is None
     finally:
         if process.poll() is None:
             process.terminate()

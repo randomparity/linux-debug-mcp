@@ -7,6 +7,7 @@ import re
 import shutil
 import signal
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -43,6 +44,7 @@ class DebugSession(BaseModel):
     controller_mode: Literal["batch", "attached"] = "batch"
     active_controller_pid: int | None = None
     controller_last_observed_state: str = "not_started"
+    active_controller_identity: dict[str, object] = Field(default_factory=dict)
     transcript_path: str
     command_metadata_path: str
     latest_summary_path: str
@@ -220,6 +222,7 @@ class QemuGdbstubProvider:
             controller_mode=controller_mode,
             active_controller_pid=pid,
             controller_last_observed_state="running" if pid is not None else "not_started",
+            active_controller_identity=self._controller_identity(pid) if pid is not None else {},
             transcript_path=str(transcript_path),
             command_metadata_path=str(command_metadata_path),
             latest_summary_path=str(latest_summary_path),
@@ -544,6 +547,21 @@ class QemuGdbstubProvider:
                     "controller_mode": session.controller_mode,
                 },
             )
+        if session.active_controller_pid is None or not self._controller_identity_matches(session):
+            raise ProviderDebugError(
+                "stateful debug operations require a live attached controller",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={
+                    "debug_session_id": session.session_id,
+                    "active_controller_pid": session.active_controller_pid,
+                    "controller_last_observed_state": (
+                        "exited"
+                        if session.active_controller_pid is not None
+                        and not self._pid_is_alive(session.active_controller_pid)
+                        else session.controller_last_observed_state
+                    ),
+                },
+            )
 
     def set_breakpoint(
         self,
@@ -673,17 +691,26 @@ class QemuGdbstubProvider:
         run_dir: Path,
         session: DebugSession,
     ) -> DebugProviderResult:
-        self.ensure_attached_controller(session)
+        if session.attach_status != "attached" or session.controller_mode != "attached":
+            self.ensure_attached_controller(session)
         controller_state = session.controller_last_observed_state
         if session.current_execution_state != "ended":
             controller_state = self._terminate_controller_if_safe(session)
-        if session.active_controller_pid is not None and controller_state == "not_started":
-            controller_state = "exited"
+        if controller_state not in {"exited", "terminate_confirmed"}:
+            raise ProviderDebugError(
+                "debug controller did not exit",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={
+                    "debug_session_id": session.session_id,
+                    "active_controller_pid": session.active_controller_pid,
+                    "controller_last_observed_state": controller_state,
+                },
+            )
         updated = session.model_copy(
             update={
                 "current_execution_state": "ended",
                 "ended_at": session.ended_at or datetime.now(UTC).isoformat(),
-                "controller_last_observed_state": controller_state,
+                "controller_last_observed_state": "exited",
             }
         )
         return self._record_stateful_operation(
@@ -963,15 +990,23 @@ class QemuGdbstubProvider:
             return "invalid"
         if not self._pid_is_alive(pid):
             return "exited"
+        if not self._controller_identity_matches(session):
+            return "alive_unverified"
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             return "exited"
         except PermissionError:
             return "alive_permission_denied"
-        return "terminate_requested"
+        for _ in range(50):
+            if not self._pid_is_alive(pid):
+                return "terminate_confirmed"
+            time.sleep(0.02)
+        return "alive_after_terminate"
 
     def _pid_is_alive(self, pid: int) -> bool:
+        if self._pid_is_zombie(pid):
+            return False
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -981,6 +1016,18 @@ class QemuGdbstubProvider:
         except OSError as exc:
             return exc.errno != errno.ESRCH
         return True
+
+    def _pid_is_zombie(self, pid: int) -> bool:
+        stat_path = Path("/proc") / str(pid) / "stat"
+        try:
+            stat_text = stat_path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        _prefix, separator, suffix = stat_text.rpartition(") ")
+        if not separator:
+            return False
+        fields = suffix.split()
+        return bool(fields and fields[0] == "Z")
 
     def _pid_looks_like_controller(self, pid: int) -> bool:
         cmdline_path = Path("/proc") / str(pid) / "cmdline"
@@ -995,6 +1042,43 @@ class QemuGdbstubProvider:
         argv0 = cmdline.split(b"\0", 1)[0].decode("utf-8", errors="ignore")
         executable = Path(argv0).name
         return "gdb" in executable
+
+    def _controller_identity(self, pid: int) -> dict[str, object]:
+        identity: dict[str, object] = {"pid": pid}
+        stat_path = Path("/proc") / str(pid) / "stat"
+        cmdline_path = Path("/proc") / str(pid) / "cmdline"
+        try:
+            stat_text = stat_path.read_text(encoding="utf-8")
+            _prefix, _separator, suffix = stat_text.rpartition(") ")
+            fields = suffix.split()
+            if len(fields) >= 20:
+                identity["start_time_ticks"] = fields[19]
+        except OSError:
+            return identity
+        try:
+            cmdline = cmdline_path.read_bytes()
+        except OSError:
+            cmdline = b""
+        if cmdline:
+            argv0 = cmdline.split(b"\0", 1)[0].decode("utf-8", errors="replace")
+            identity["argv0"] = argv0
+        return identity
+
+    def _controller_identity_matches(self, session: DebugSession) -> bool:
+        pid = session.active_controller_pid
+        if type(pid) is not int or pid <= 1 or pid == os.getpid():
+            return False
+        if not self._pid_is_alive(pid):
+            return False
+        expected = session.active_controller_identity
+        if not expected:
+            return False
+        observed = self._controller_identity(pid)
+        return (
+            observed.get("pid") == expected.get("pid")
+            and observed.get("start_time_ticks") is not None
+            and observed.get("start_time_ticks") == expected.get("start_time_ticks")
+        )
 
     def _session_artifacts(self, session: DebugSession) -> list[ArtifactRef]:
         session_path = Path(session.command_metadata_path).parents[1] / "sessions" / f"{session.session_id}.json"
