@@ -760,13 +760,20 @@ def target_run_tests_handler(
                     details=Redactor().redact_value(terminal.details),
                     suggested_next_actions=["artifacts.collect"],
                 )
-            redacted_details = Redactor().redact_value(execution.details)
+            redactor = Redactor()
+            safe_details = redactor.redact_value(execution.details)
+            safe_summary = redactor.redact_text(execution.summary)
+            safe_diagnostic = redactor.redact_text(execution.diagnostic or "")
+            safe_artifacts = [
+                ArtifactRef.model_validate(redactor.redact_value(artifact.model_dump(mode="json")))
+                for artifact in execution.artifacts
+            ]
             terminal = StepResult(
                 step_name="run_tests",
                 status=execution.status,
-                summary=Redactor().redact_text(execution.summary),
-                artifacts=execution.artifacts,
-                details=redacted_details,
+                summary=safe_summary,
+                artifacts=safe_artifacts,
+                details=safe_details,
             )
             store.record_step_result(run_id, terminal, replace_succeeded=force_rerun)
     except ManifestStateError as exc:
@@ -783,21 +790,21 @@ def target_run_tests_handler(
 
     if execution.status == StepStatus.SUCCEEDED:
         return ToolResponse.success(
-            summary=Redactor().redact_text(execution.summary),
+            summary=safe_summary,
             run_id=run_id,
-            data=Redactor().redact_value(execution.details),
-            artifacts=execution.artifacts,
+            data=safe_details,
+            artifacts=safe_artifacts,
             suggested_next_actions=["artifacts.collect"],
         )
     return ToolResponse.failure(
         category=execution.error_category or ErrorCategory.TEST_FAILURE,
-        message=Redactor().redact_text(execution.summary),
+        message=safe_summary,
         run_id=run_id,
         details={
-            **Redactor().redact_value(execution.details),
-            "diagnostic": Redactor().redact_text(execution.diagnostic or ""),
+            **safe_details,
+            "diagnostic": safe_diagnostic,
         },
-        artifacts=execution.artifacts,
+        artifacts=safe_artifacts,
         suggested_next_actions=["artifacts.collect"],
     )
 

@@ -232,3 +232,72 @@ def test_run_tests_maps_provider_failure_to_test_failure(tmp_path: Path) -> None
     assert response.error is not None
     assert response.error.category == "test_failure"
     assert response.suggested_next_actions == ["artifacts.collect"]
+
+
+def test_run_tests_response_redacts_secret_like_snippets(tmp_path: Path) -> None:
+    artifact_root = create_booted_run(tmp_path)
+    provider = FakeTestProvider(
+        result=TestExecutionResult(
+            status=StepStatus.FAILED,
+            summary="test failed token=secret-token-value",
+            details={
+                "counts": {"passed": 0, "failed": 1},
+                "commands": [
+                    {
+                        "label": "001-uname",
+                        "stdout_snippet": "API_TOKEN=secret-token-value",
+                        "stderr_snippet": "password=hunter2",
+                    }
+                ],
+            },
+            error_category=ErrorCategory.TEST_FAILURE,
+            diagnostic="password=hunter2",
+        )
+    )
+
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=provider,
+        rootfs_profiles={"minimal": rootfs(tmp_path)},
+        test_suites=suites(),
+    )
+
+    payload = response.model_dump(mode="json")
+    assert "secret-token-value" not in str(payload)
+    assert "hunter2" not in str(payload)
+    assert "[REDACTED]" in str(payload)
+
+
+def test_run_tests_success_response_redacts_secret_like_snippets(tmp_path: Path) -> None:
+    artifact_root = create_booted_run(tmp_path)
+    provider = FakeTestProvider(
+        result=TestExecutionResult(
+            status=StepStatus.SUCCEEDED,
+            summary="test passed token=secret-token-value",
+            details={
+                "counts": {"passed": 1, "failed": 0},
+                "commands": [
+                    {
+                        "label": "001-uname",
+                        "stdout_snippet": "API_TOKEN=secret-token-value",
+                        "stderr_snippet": "password=hunter2",
+                    }
+                ],
+            },
+        )
+    )
+
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=provider,
+        rootfs_profiles={"minimal": rootfs(tmp_path)},
+        test_suites=suites(),
+    )
+
+    payload = response.model_dump(mode="json")
+    assert response.ok is True
+    assert "secret-token-value" not in str(payload)
+    assert "hunter2" not in str(payload)
+    assert "[REDACTED]" in str(payload)
