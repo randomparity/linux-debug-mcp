@@ -736,12 +736,16 @@ class QemuGdbstubProvider:
         run_dir: Path,
         session: DebugSession,
     ) -> DebugProviderResult:
-        if session.attach_status != "attached" or session.controller_mode != "attached":
+        if session.attach_status != "attached":
             self.ensure_attached_controller(session)
         controller_state = session.controller_last_observed_state
         if session.current_execution_state != "ended":
-            controller_state = self._terminate_controller_if_safe(session)
-        if controller_state not in {"exited", "terminate_confirmed"}:
+            if session.controller_mode == "attached":
+                controller_state = self._terminate_controller_if_safe(session)
+            else:
+                controller_state = session.controller_last_observed_state
+        no_controller = session.controller_mode == "batch" and session.active_controller_pid is None
+        if not no_controller and controller_state not in {"exited", "terminate_confirmed"}:
             raise ProviderDebugError(
                 "debug controller did not exit",
                 category=ErrorCategory.DEBUG_ATTACH_FAILURE,
@@ -751,11 +755,12 @@ class QemuGdbstubProvider:
                     "controller_last_observed_state": controller_state,
                 },
             )
+        final_controller_state = "exited" if controller_state in {"exited", "terminate_confirmed"} else controller_state
         updated = session.model_copy(
             update={
                 "current_execution_state": "ended",
                 "ended_at": session.ended_at or datetime.now(UTC).isoformat(),
-                "controller_last_observed_state": "exited",
+                "controller_last_observed_state": final_controller_state,
             }
         )
         return self._record_stateful_operation(

@@ -604,6 +604,18 @@ def test_end_session_is_idempotent_when_controller_already_exited(tmp_path: Path
     assert second.session.current_execution_state == "ended"
 
 
+def test_end_session_finalizes_batch_session_without_controller(tmp_path: Path) -> None:
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+    session = provider.write_session_for_test(tmp_path, state="stopped", controller_mode="batch")
+
+    first = provider.end_session(run_dir=tmp_path, session=session)
+    second = provider.end_session(run_dir=tmp_path, session=first.session)
+
+    assert first.session.current_execution_state == "ended"
+    assert first.session.controller_last_observed_state == "not_started"
+    assert second.session.current_execution_state == "ended"
+
+
 def test_end_session_terminates_recorded_live_controller_pid(tmp_path: Path) -> None:
     process = subprocess.Popen(["sleep", "30"])
     try:
