@@ -89,7 +89,9 @@ Recommended fields:
 - `output_policy`: default `per_run`.
 - `targets`: default pilot target list, initially `["bzImage"]`.
 - `command_timeout_seconds`: build timeout.
-- `required_tools`: host tools checked before execution.
+- `required_tools`: host tools checked before execution. The effective tool
+  list must always include `make`, even when the configured profile list is
+  empty.
 - `jobs`: optional explicit parallelism.
 - `make_variables`: safe string map for profile-owned make variables.
 - `config_fragments`: retained as an explicit future option, disabled by
@@ -97,6 +99,12 @@ Recommended fields:
 
 The profile controls execution policy. It should not hide host-sensitive
 behavior or ad hoc command fragments.
+
+Profile validation should reject `make_variables` keys that are not simple make
+variable names, values containing NUL or control characters, and attempts to
+override provider-owned variables such as `O`, `ARCH`, or `KBUILD_OUTPUT`.
+Profile variables are appended as individual argv entries only after validation;
+they are not shell-expanded.
 
 ## Command Planning
 
@@ -112,6 +120,10 @@ If `jobs` is configured, the provider adds `-j<jobs>`. If no `jobs` value is
 configured, Sprint 1 omits `-j`. Automatic CPU-count parallelism should be
 explicit in the profile design, not hidden in the provider.
 
+`make_variables` may add validated make variable assignments such as
+`LLVM=1`. They must not replace the provider-owned `-C`, `O=`, `ARCH=`,
+target, or timeout decisions.
+
 The command metadata recorded in the manifest should include:
 
 - argv
@@ -124,6 +136,12 @@ The command metadata recorded in the manifest should include:
 - timeout
 - exit status
 - relevant environment overrides
+
+`source revision` in the MCP response and build summary should be captured from
+the manifest source path before execution. For Git checkouts, record the resolved
+`HEAD` commit and whether the worktree has uncommitted changes. If revision
+detection fails or the source is not a Git checkout, record `null` plus the
+reason in the build summary rather than inventing a version string.
 
 ## Artifact Layout
 
@@ -161,11 +179,25 @@ should become required before Sprint 4 live debug workflows depend on it.
 
 - `run_id`
 - `artifact_root`, defaulting to the server default
+- optional `build_profile`, defaulting to the run manifest request profile
 - optional `force_rebuild`, default `false`
 
 Sprint 1 should implement `force_rebuild=false` behavior fully. If the manifest
 already contains a succeeded `build` result and `force_rebuild` is false, the
 handler returns the recorded result without rerunning `make`.
+
+If a `build_profile` argument is supplied, it must match the build profile stored
+in the immutable run manifest request. Sprint 1 should reject attempts to switch
+profiles for an existing run with `configuration_error`; callers that need a
+different build profile should create a new run.
+
+Handler validation order matters:
+
+1. Validate `run_id` and load the manifest.
+2. Reject unsupported `force_rebuild=true`.
+3. Resolve and validate the requested profile against the manifest request.
+4. Return an existing succeeded `build` result when `force_rebuild=false`.
+5. Plan and execute a new build only when no succeeded build result exists.
 
 If `force_rebuild=true`, Sprint 1 returns `configuration_error` with a clear
 message that rebuild cleanup policy is not implemented yet. The design leaves
@@ -181,7 +213,8 @@ On success, the MCP response includes:
 - artifact references
 - structured data with profile, architecture, targets, output path, source
   revision, and elapsed time
-- suggested next action: `target.boot`
+- suggested next action: `artifacts.get_manifest`. `target.boot` remains a
+  later-sprint action until Sprint 2 implements boot support.
 
 On failure, the MCP response includes:
 
@@ -205,7 +238,9 @@ Expected error categories:
 
 Build output can contain secrets from environment or command output, so snippets
 returned through MCP responses must pass through the existing redaction helper.
-Full logs remain on disk as artifacts.
+Diagnostic snippets should come from a bounded tail of the build log so large or
+hostile output cannot make the MCP response unbounded. Full logs remain on disk
+as artifacts.
 
 ## Provider Boundary
 
@@ -213,10 +248,15 @@ Sprint 1 should introduce a concrete local provider module rather than putting
 build execution directly in the MCP handler. The handler should coordinate:
 
 1. Load manifest.
-2. Resolve build profile.
-3. Ask the provider to plan and execute the build.
-4. Record the provider's `StepResult`.
-5. Return a `ToolResponse`.
+2. Re-validate the manifest source path and reject paths that no longer satisfy
+   the source-tree and artifact-root safety rules.
+3. Resolve build profile.
+4. Ask the provider to plan the build.
+5. Acquire the per-run build lock.
+6. Record the running `StepResult`.
+7. Ask the provider to execute the planned build.
+8. Record the terminal `StepResult`.
+9. Return a `ToolResponse`.
 
 The provider interface should make future remote implementations possible. It
 does not need plugin loading in Sprint 1, but the operation should be expressed
@@ -228,9 +268,17 @@ The `build` step follows the Sprint 0 manifest idempotency rule.
 
 - A succeeded build result is not overwritten on repeat calls.
 - Failed build results may be replaced by a later successful retry.
-- Running build state should not be auto-recovered in Sprint 1.
-- Concurrent builds for the same run are rejected by the manifest lock or an
-  equivalent per-run build lock.
+- Before invoking `make`, the handler must acquire an exclusive per-run build
+  lock and record a `build` step result with `status: running`, the provider
+  name, command metadata, log path, and start timestamp. The manifest lock is
+  held only while updating the manifest; the build lock covers the long-running
+  subprocess.
+- If another build already holds the build lock for the same run, return a
+  structured failure without invoking `make`.
+- Running build state should not be auto-recovered in Sprint 1. If a previous
+  process died after writing `status: running`, the next call should fail clearly
+  and tell the operator to inspect the log and create a new run or manually clean
+  the stale build lock.
 
 Build execution should write enough state that an interrupted run leaves useful
 evidence in `logs/build.log` and the manifest can still report the latest known
@@ -244,7 +292,10 @@ unit test suite.
 Required tests:
 
 - Build profile validation for new fields.
+- Build profile validation rejects reserved or unsafe `make_variables`.
 - Command planning for x86_64 per-run `O=` builds.
+- Command planning includes validated `make_variables` without allowing them to
+  override `O=`, `ARCH=`, targets, or source path.
 - Config seeding from source `.config`.
 - Failure when no config exists.
 - Use of existing per-run `.config` without overwriting it.
@@ -252,10 +303,17 @@ Required tests:
   manifest step result.
 - Non-zero fake subprocess exit returns `build_failure`.
 - Missing required host tools returns `missing_dependency`.
+- The effective required tool list includes `make` even when profile
+  configuration omits it.
 - Repeated successful `kernel.build` returns the recorded result without
   invoking subprocess again.
 - `force_rebuild=true` returns the explicit unsupported `configuration_error`
   response.
+- Concurrent calls for the same run use the per-run build lock so only one fake
+  subprocess starts.
+- `build_profile` mismatches for an existing run return `configuration_error`.
+- Build summary provenance records Git revision and dirty state when available,
+  or a structured unknown reason when unavailable.
 - Provider registry lists the local build provider and no longer represents
   `kernel.build` only as a stub.
 
