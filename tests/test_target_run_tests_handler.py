@@ -29,6 +29,12 @@ class FakeTestProvider:
         return self.result
 
 
+class PlanRejectingProvider(FakeTestProvider):
+    def plan_tests(self, **kwargs: object) -> object:
+        self.plans.append(kwargs)
+        raise ValueError("ConnectTimeout cannot exceed command timeout")
+
+
 def make_source_tree(tmp_path: Path) -> Path:
     source = tmp_path / "linux"
     source.mkdir(parents=True)
@@ -251,6 +257,27 @@ def test_run_tests_rejects_rootfs_missing_ssh_endpoint_as_configuration_error(tm
     assert response.error.category == "configuration_error"
     assert "ssh_host and ssh_user" in response.error.message
     assert provider.plans == []
+    assert provider.executions == 0
+
+
+def test_run_tests_maps_provider_planning_value_error_to_configuration_error(tmp_path: Path) -> None:
+    artifact_root = create_booted_run(tmp_path)
+    provider = PlanRejectingProvider()
+
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=provider,
+        rootfs_profiles={"minimal": rootfs(tmp_path)},
+        test_suites=suites(),
+    )
+
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert "ConnectTimeout" in response.error.message
+    assert "run_tests" not in manifest.step_results
     assert provider.executions == 0
 
 

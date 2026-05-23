@@ -736,6 +736,17 @@ def target_run_tests_handler(
                 store.record_step_result(run_id, stale_failed)
 
             attempt = _next_test_attempt(store.run_dir(run_id))
+            try:
+                plan = provider.plan_tests(
+                    run_id=run_id,
+                    run_dir=store.run_dir(run_id),
+                    rootfs_profile=resolved_rootfs_profile,
+                    suite=suite_profile,
+                    adhoc_commands=adhoc_commands,
+                    attempt=attempt,
+                )
+            except ValueError as exc:
+                return _configuration_failure(run_id=run_id, message=str(exc))
             running = StepResult(
                 step_name="run_tests",
                 status=StepStatus.RUNNING,
@@ -748,14 +759,6 @@ def target_run_tests_handler(
             )
             store.record_step_result(run_id, running, replace_succeeded=force_rerun)
             try:
-                plan = provider.plan_tests(
-                    run_id=run_id,
-                    run_dir=store.run_dir(run_id),
-                    rootfs_profile=resolved_rootfs_profile,
-                    suite=suite_profile,
-                    adhoc_commands=adhoc_commands,
-                    attempt=attempt,
-                )
                 execution = provider.execute_tests(plan)
             except Exception as exc:
                 terminal = StepResult(
