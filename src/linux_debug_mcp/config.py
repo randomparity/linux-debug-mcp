@@ -33,6 +33,15 @@ class BuildProfile(ConfigModel):
                 tools.append(tool)
         return tools
 
+    @field_validator("targets")
+    @classmethod
+    def validate_targets(cls, value: list[str]) -> list[str]:
+        target_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./+-]*$")
+        for target in value:
+            if not target_pattern.match(target):
+                raise ValueError(f"target {target!r} is not a simple make target")
+        return value
+
     @field_validator("make_variables")
     @classmethod
     def validate_make_variables(cls, value: dict[str, str]) -> dict[str, str]:

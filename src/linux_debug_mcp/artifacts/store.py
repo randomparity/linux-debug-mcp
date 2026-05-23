@@ -95,20 +95,12 @@ class ArtifactStore:
     @contextmanager
     def build_lock(self, run_id: str) -> Iterator[None]:
         run_dir = self._run_dir(run_id)
-        lock_path = run_dir / ".build.lock"
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            raise ManifestStateError("build is locked", ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
-        except OSError as exc:
-            raise ManifestStateError(f"failed to lock build: {exc}") from exc
-        try:
-            os.write(fd, str(os.getpid()).encode("ascii"))
+        with self._file_lock(
+            run_dir / ".build.lock",
+            locked_message="build is locked",
+            failure_prefix="failed to lock build",
+        ):
             yield
-        finally:
-            os.close(fd)
-            with suppress(FileNotFoundError):
-                lock_path.unlink()
 
     def _run_dir(self, run_id: str) -> Path:
         safe_run_id = self._validate_run_id(run_id)
@@ -131,13 +123,21 @@ class ArtifactStore:
 
     @contextmanager
     def _manifest_lock(self, run_dir: Path) -> Iterator[None]:
-        lock_path = run_dir / ".manifest.lock"
+        with self._file_lock(
+            run_dir / ".manifest.lock",
+            locked_message="manifest is locked",
+            failure_prefix="failed to lock manifest",
+        ):
+            yield
+
+    @contextmanager
+    def _file_lock(self, lock_path: Path, *, locked_message: str, failure_prefix: str) -> Iterator[None]:
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError as exc:
-            raise ManifestStateError("manifest is locked", ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
+            raise ManifestStateError(locked_message, ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
         except OSError as exc:
-            raise ManifestStateError(f"failed to lock manifest: {exc}") from exc
+            raise ManifestStateError(f"{failure_prefix}: {exc}") from exc
         try:
             os.write(fd, str(os.getpid()).encode("ascii"))
             yield

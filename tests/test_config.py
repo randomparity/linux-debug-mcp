@@ -133,3 +133,9 @@ def test_build_profile_rejects_control_characters_in_make_variable_values(value:
 def test_build_profile_rejects_invalid_jobs() -> None:
     with pytest.raises(ValidationError):
         BuildProfile(name="bad", architecture="x86_64", jobs=0)
+
+
+@pytest.mark.parametrize("target", ["", "O=/tmp/out", "ARCH=arm64", "--eval=$(shell id)", "-f", "bad target"])
+def test_build_profile_rejects_targets_that_can_change_make_policy(target: str) -> None:
+    with pytest.raises(ValidationError):
+        BuildProfile(name="bad", architecture="x86_64", targets=[target])

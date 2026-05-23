@@ -25,6 +25,26 @@ RUNNING_BUILD_MESSAGE = (
 )
 
 
+def _recorded_build_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
+    return ToolResponse.success(
+        summary=result.summary,
+        run_id=run_id,
+        data=result.details,
+        artifacts=result.artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
+def _running_build_response(*, run_id: str, result: StepResult) -> ToolResponse:
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        message=RUNNING_BUILD_MESSAGE,
+        run_id=run_id,
+        details=result.details,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
 def _build_profile_from_manifest(profile_name: str) -> BuildProfile:
     try:
         return DEFAULT_BUILD_PROFILES[profile_name]
@@ -178,23 +198,11 @@ def kernel_build_handler(
         )
     existing = manifest.step_results.get("build")
     if existing and existing.status == StepStatus.SUCCEEDED:
-        return ToolResponse.success(
-            summary=existing.summary,
-            run_id=run_id,
-            data=existing.details,
-            artifacts=existing.artifacts,
-            suggested_next_actions=["artifacts.get_manifest"],
-        )
+        return _recorded_build_success_response(run_id=run_id, result=existing)
     if existing and existing.status == StepStatus.RUNNING:
         try:
             with store.build_lock(run_id):
-                return ToolResponse.failure(
-                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                    message=RUNNING_BUILD_MESSAGE,
-                    run_id=run_id,
-                    details=existing.details,
-                    suggested_next_actions=["artifacts.get_manifest"],
-                )
+                return _running_build_response(run_id=run_id, result=existing)
         except ManifestStateError as exc:
             return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
     try:
@@ -217,21 +225,9 @@ def kernel_build_handler(
             locked_manifest = store.load_manifest(run_id)
             existing = locked_manifest.step_results.get("build")
             if existing and existing.status == StepStatus.SUCCEEDED:
-                return ToolResponse.success(
-                    summary=existing.summary,
-                    run_id=run_id,
-                    data=existing.details,
-                    artifacts=existing.artifacts,
-                    suggested_next_actions=["artifacts.get_manifest"],
-                )
+                return _recorded_build_success_response(run_id=run_id, result=existing)
             if existing and existing.status == StepStatus.RUNNING:
-                return ToolResponse.failure(
-                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                    message=RUNNING_BUILD_MESSAGE,
-                    run_id=run_id,
-                    details=existing.details,
-                    suggested_next_actions=["artifacts.get_manifest"],
-                )
+                return _running_build_response(run_id=run_id, result=existing)
             running = StepResult(
                 step_name="build",
                 status=StepStatus.RUNNING,

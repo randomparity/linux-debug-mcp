@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -94,15 +95,37 @@ class FakeRunner:
         self.returncode = returncode
         self.output = output
         self.commands: list[list[str]] = []
+        self.environments: list[dict[str, str]] = []
 
     def which(self, command: str) -> str | None:
         return self.tools.get(command)
 
-    def run(self, argv: list[str], *, timeout: int, log_path: Path) -> int:
+    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
         self.commands.append(argv)
+        self.environments.append(env)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text(self.output, encoding="utf-8")
         return self.returncode
+
+
+def test_plan_build_sanitizes_host_make_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+    monkeypatch.setenv("MAKEFLAGS", "-j128 --keep-going")
+    monkeypatch.setenv("MFLAGS", "-j128")
+    monkeypatch.setenv("GNUMAKEFLAGS", "--warn-undefined-variables")
+    monkeypatch.setenv("KCFLAGS", "-Werror")
+    monkeypatch.setenv("KBUILD_OUTPUT", "/tmp/hidden-output")
+    provider = LocalKernelBuildProvider()
+    profile = BuildProfile(name="x86_64-default", architecture="x86_64")
+
+    plan = provider.plan_build(source_path=tmp_path / "linux", output_path=tmp_path / "build", profile=profile)
+
+    assert "PATH" in plan.environment
+    assert "MAKEFLAGS" not in plan.environment
+    assert "MFLAGS" not in plan.environment
+    assert "GNUMAKEFLAGS" not in plan.environment
+    assert "KCFLAGS" not in plan.environment
+    assert "KBUILD_OUTPUT" not in plan.environment
 
 
 def test_prepare_config_seeds_source_config_when_output_config_missing(tmp_path: Path) -> None:
@@ -173,6 +196,10 @@ def test_execute_success_records_artifacts_and_summary(tmp_path: Path) -> None:
     }
     summary = json.loads((summaries / "build-summary.json").read_text(encoding="utf-8"))
     assert any(artifact["kind"] == "build-summary" for artifact in summary["artifacts"])
+    assert summary["environment"] == {
+        "mode": "sanitized",
+        "passed_keys": sorted(plan.environment),
+    }
     assert (summaries / "build-summary.json").exists()
 
 
@@ -277,6 +304,39 @@ def test_execute_nonzero_make_returns_build_failure_with_redacted_tail(tmp_path:
     assert result.status == "failed"
     assert result.error_category == ErrorCategory.BUILD_FAILURE
     assert "token=[REDACTED]" in result.diagnostic
+
+
+def test_execute_nonzero_summary_write_failure_returns_infrastructure_failure(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    output = tmp_path / "build"
+    summary_parent = tmp_path / "summary-parent"
+    source.mkdir()
+    (source / ".config").write_text("CONFIG_TEST=y\n", encoding="utf-8")
+    summary_parent.write_text("not a directory", encoding="utf-8")
+    provider = LocalKernelBuildProvider(runner=FakeRunner(returncode=2, output="failed\n"))
+    profile = BuildProfile(name="x86_64-default", architecture="x86_64")
+    plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
+
+    result = provider.execute_build(
+        plan=plan,
+        log_path=tmp_path / "build.log",
+        summary_path=summary_parent / "build-summary.json",
+    )
+
+    assert result.status == "failed"
+    assert result.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_log_tail_reads_recent_suffix_and_redacts(tmp_path: Path) -> None:
+    log_path = tmp_path / "build.log"
+    log_path.write_text("a" * 5000 + " token=secret\n", encoding="utf-8")
+    provider = LocalKernelBuildProvider()
+
+    tail = provider._log_tail(log_path, limit=32)
+
+    assert tail is not None
+    assert len(tail) <= 64
+    assert "token=[REDACTED]" in tail
 
 
 def test_source_revision_for_non_git_tree_records_unknown_reason(tmp_path: Path) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -30,13 +31,14 @@ class BuildPlan:
     profile_name: str
     timeout_seconds: int
     required_tools: list[str]
+    environment: dict[str, str]
 
 
 class BuildRunner(Protocol):
     def which(self, command: str) -> str | None:
         raise NotImplementedError
 
-    def run(self, argv: list[str], *, timeout: int, log_path: Path) -> int:
+    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
         raise NotImplementedError
 
 
@@ -44,13 +46,14 @@ class SubprocessBuildRunner:
     def which(self, command: str) -> str | None:
         return shutil.which(command)
 
-    def run(self, argv: list[str], *, timeout: int, log_path: Path) -> int:
+    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
         with log_path.open("w", encoding="utf-8") as log_file:
             completed = subprocess.run(
                 argv,
                 check=False,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
+                env=env,
                 text=True,
                 timeout=timeout,
             )
@@ -98,6 +101,7 @@ class LocalKernelBuildProvider:
             profile_name=profile.name,
             timeout_seconds=profile.command_timeout_seconds,
             required_tools=profile.effective_required_tools(),
+            environment=self._sanitized_environment(),
         )
 
     def prepare_config(self, *, source_path: Path, output_path: Path) -> Path:
@@ -152,7 +156,9 @@ class LocalKernelBuildProvider:
             )
         try:
             self.prepare_config(source_path=plan.source_path, output_path=plan.output_path)
-            exit_status = self.runner.run(plan.argv, timeout=plan.timeout_seconds, log_path=log_path)
+            exit_status = self.runner.run(
+                plan.argv, timeout=plan.timeout_seconds, log_path=log_path, env=plan.environment
+            )
         except ValueError as exc:
             return BuildExecutionResult(
                 status=StepStatus.FAILED,
@@ -182,6 +188,10 @@ class LocalKernelBuildProvider:
             "timeout_seconds": plan.timeout_seconds,
             "exit_status": exit_status,
             "elapsed_seconds": (ended_at - started_at).total_seconds(),
+            "environment": {
+                "mode": "sanitized",
+                "passed_keys": sorted(plan.environment),
+            },
         }
         try:
             artifacts = self._detect_artifacts(plan=plan, log_path=log_path, summary_path=summary_path)
@@ -193,16 +203,14 @@ class LocalKernelBuildProvider:
             return self._infrastructure_failure(exc=exc, plan=plan, log_path=log_path, details=details)
         if exit_status != 0:
             artifacts = [artifact for artifact in artifacts if artifact.kind in {"build-log", "build-summary"}]
-            summary = "kernel build failed"
-            try:
-                self._write_summary(summary_path=summary_path, details=details, artifacts=artifacts)
-            except OSError as exc:
-                return self._infrastructure_failure(exc=exc, plan=plan, log_path=log_path, details=details)
-            return BuildExecutionResult(
-                status=StepStatus.FAILED,
-                summary=summary,
-                artifacts=artifacts,
+            return self._finalize_build_result(
+                plan=plan,
+                log_path=log_path,
+                summary_path=summary_path,
                 details=details,
+                artifacts=artifacts,
+                status=StepStatus.FAILED,
+                summary="kernel build failed",
                 error_category=ErrorCategory.BUILD_FAILURE,
                 diagnostic=self._log_tail(log_path),
             )
@@ -211,27 +219,25 @@ class LocalKernelBuildProvider:
         missing = sorted(required - present)
         if missing:
             details = {**details, "missing_artifacts": missing}
-            try:
-                self._write_summary(summary_path=summary_path, details=details, artifacts=artifacts)
-            except OSError as exc:
-                return self._infrastructure_failure(exc=exc, plan=plan, log_path=log_path, details=details)
-            return BuildExecutionResult(
+            return self._finalize_build_result(
+                plan=plan,
+                log_path=log_path,
+                summary_path=summary_path,
+                details=details,
+                artifacts=artifacts,
                 status=StepStatus.FAILED,
                 summary="kernel build did not produce required artifacts",
-                artifacts=artifacts,
-                details=details,
                 error_category=ErrorCategory.BUILD_FAILURE,
                 diagnostic=self._log_tail(log_path),
             )
-        try:
-            self._write_summary(summary_path=summary_path, details=details, artifacts=artifacts)
-        except OSError as exc:
-            return self._infrastructure_failure(exc=exc, plan=plan, log_path=log_path, details=details)
-        return BuildExecutionResult(
+        return self._finalize_build_result(
+            plan=plan,
+            log_path=log_path,
+            summary_path=summary_path,
+            details=details,
+            artifacts=artifacts,
             status=StepStatus.SUCCEEDED,
             summary="kernel build succeeded",
-            artifacts=artifacts,
-            details=details,
         )
 
     def _detect_artifacts(self, *, plan: BuildPlan, log_path: Path, summary_path: Path) -> list[ArtifactRef]:
@@ -248,6 +254,36 @@ class LocalKernelBuildProvider:
         payload = {**details, "artifacts": [artifact.model_dump(mode="json") for artifact in artifacts]}
         summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
+    def _finalize_build_result(
+        self,
+        *,
+        plan: BuildPlan,
+        log_path: Path,
+        summary_path: Path,
+        details: dict[str, object],
+        artifacts: list[ArtifactRef],
+        status: StepStatus,
+        summary: str,
+        error_category: ErrorCategory | None = None,
+        diagnostic: str | None = None,
+    ) -> BuildExecutionResult:
+        try:
+            self._write_summary(summary_path=summary_path, details=details, artifacts=artifacts)
+        except OSError as exc:
+            return self._infrastructure_failure(exc=exc, plan=plan, log_path=log_path, details=details)
+        return BuildExecutionResult(
+            status=status,
+            summary=summary,
+            artifacts=artifacts,
+            details=details,
+            error_category=error_category,
+            diagnostic=diagnostic,
+        )
+
+    def _sanitized_environment(self) -> dict[str, str]:
+        allowed_exact = {"HOME", "LANG", "LOGNAME", "PATH", "TMPDIR", "USER"}
+        return {key: value for key, value in os.environ.items() if key in allowed_exact or key.startswith("LC_")}
+
     def _infrastructure_failure(
         self, *, exc: OSError, plan: BuildPlan, log_path: Path, details: dict[str, object] | None = None
     ) -> BuildExecutionResult:
@@ -262,8 +298,12 @@ class LocalKernelBuildProvider:
     def _log_tail(self, log_path: Path, *, limit: int = 4000) -> str | None:
         if not log_path.is_file():
             return None
-        text = log_path.read_text(encoding="utf-8", errors="replace")
-        return self.redactor.redact_text(text[-limit:])
+        with log_path.open("rb") as log_file:
+            log_file.seek(0, os.SEEK_END)
+            size = log_file.tell()
+            log_file.seek(max(size - limit, 0))
+            text = log_file.read().decode("utf-8", errors="replace")
+        return self.redactor.redact_text(text)
 
 
 def local_kernel_build_capability() -> ProviderCapability:
