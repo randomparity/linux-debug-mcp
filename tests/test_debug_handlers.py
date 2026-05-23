@@ -4,7 +4,7 @@ from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import DebugProfile
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
 from linux_debug_mcp.providers.qemu_gdbstub import DebugProviderResult, DebugSession, ProviderDebugError
-from linux_debug_mcp.server import debug_start_session_handler
+from linux_debug_mcp.server import debug_read_memory_handler, debug_start_session_handler
 
 
 class FakeDebugProvider:
@@ -40,6 +40,7 @@ class FakeDebugProvider:
             latest_summary_path=str(summary_path),
             symbol_identity_validation={"same_run_artifact_linkage": True, "live_banner_match": True},
         )
+        session_path.write_text(session.model_dump_json(indent=2), encoding="utf-8")
         return DebugProviderResult(
             status=StepStatus.SUCCEEDED,
             summary="debug session started",
@@ -51,6 +52,21 @@ class FakeDebugProvider:
                 ArtifactRef(path=str(summary_path), kind="debug-summary"),
             ],
             details={"debug_session_id": "debug-1"},
+        )
+
+    def read_memory(self, **kwargs):
+        self.calls += 1
+        self.call_kwargs.append(kwargs)
+        return DebugProviderResult(
+            status=StepStatus.SUCCEEDED,
+            summary="memory read succeeded",
+            session=kwargs["session"],
+            details={
+                "address": "0x1000",
+                "byte_count": 2,
+                "bytes": ["0x12", "0x34"],
+                "stdout_snippet": "0x1000:\t0x12\t0x34\n",
+            },
         )
 
 
@@ -220,3 +236,45 @@ def test_debug_start_session_replaces_ended_session_without_new_session_flag(tmp
     assert provider.calls == 2
     manifest = store.load_manifest(run_id)
     assert manifest.step_results["debug"].details["current_execution_state"] == "stopped"
+
+
+def test_debug_read_memory_requires_active_session(tmp_path: Path) -> None:
+    artifact_root, run_id = create_debug_ready_run(tmp_path)
+
+    response = debug_read_memory_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        address=0x1000,
+        byte_count=16,
+        provider=FakeDebugProvider(),
+    )
+
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_debug_read_memory_loads_active_session_and_invokes_provider(tmp_path: Path) -> None:
+    artifact_root, run_id = create_debug_ready_run(tmp_path)
+    provider = FakeDebugProvider()
+    start = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=provider,
+        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
+    )
+    assert start.ok is True
+
+    response = debug_read_memory_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        address=0x1000,
+        byte_count=2,
+        provider=provider,
+    )
+
+    assert response.ok is True
+    assert response.data["bytes"] == ["0x12", "0x34"]
+    assert provider.call_kwargs[-1]["run_dir"] == artifact_root / run_id
+    assert provider.call_kwargs[-1]["address"] == 0x1000
+    assert provider.call_kwargs[-1]["byte_count"] == 2
+    assert provider.call_kwargs[-1]["session"].session_id == "debug-1"

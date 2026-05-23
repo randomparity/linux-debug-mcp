@@ -497,3 +497,38 @@ def test_memory_validation_rejects_non_integer_values(tmp_path: Path, address: o
         provider.validate_memory_read(address=address, byte_count=byte_count)  # type: ignore[arg-type]
 
     assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_read_registers_parses_fake_gdb_output(tmp_path: Path) -> None:
+    runner = FakeGdbRunner()
+    runner.run_batch = lambda argv, commands, timeout, transcript_path: GdbCommandResult(  # type: ignore[method-assign]
+        exit_status=0,
+        stdout="rax            0x1\nrip            0xffffffff81000000\n",
+        stderr="",
+    )
+    provider = QemuGdbstubProvider(runner=runner)
+    session = provider.write_session_for_test(tmp_path, state="stopped")
+
+    result = provider.read_registers(run_dir=tmp_path, session=session, registers=["rax", "rip"])
+
+    assert result.details["registers"] == {"rax": "0x1", "rip": "0xffffffff81000000"}
+
+
+def test_read_memory_enforces_4096_byte_limit(tmp_path: Path) -> None:
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+    session = provider.write_session_for_test(tmp_path, state="stopped")
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider.read_memory(run_dir=tmp_path, session=session, address=0x1000, byte_count=4097)
+
+    assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_evaluate_rejects_unknown_inspector(tmp_path: Path) -> None:
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+    session = provider.write_session_for_test(tmp_path, state="stopped")
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider.evaluate(run_dir=tmp_path, session=session, inspector="raw", arguments={})
+
+    assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR

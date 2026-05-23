@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import ValidationError
 
 from linux_debug_mcp.artifacts.manifest import RunManifest
 from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
@@ -24,7 +25,12 @@ from linux_debug_mcp.prereqs.checks import check_prerequisites
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
 from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider
-from linux_debug_mcp.providers.qemu_gdbstub import ProviderDebugError, QemuGdbstubProvider
+from linux_debug_mcp.providers.qemu_gdbstub import (
+    DebugProviderResult,
+    DebugSession,
+    ProviderDebugError,
+    QemuGdbstubProvider,
+)
 from linux_debug_mcp.providers.registry import ProviderRegistry
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_source_path
 from linux_debug_mcp.safety.redaction import Redactor
@@ -1008,6 +1014,197 @@ def debug_start_session_handler(
     )
 
 
+def _load_active_debug_session(
+    store: ArtifactStore,
+    run_id: str,
+    debug_session_id: str | None = None,
+) -> DebugSession:
+    manifest = store.load_manifest(run_id)
+    debug_result = manifest.step_results.get("debug")
+    if debug_result is None:
+        raise ProviderDebugError(
+            "active debug session required",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    active_details = _active_debug_session_from_result(debug_result)
+    if active_details is None:
+        raise ProviderDebugError(
+            "active debug session required",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    active_session_id = active_details.get("debug_session_id")
+    if debug_session_id is not None and active_session_id != debug_session_id:
+        raise ProviderDebugError(
+            "requested debug session is not active",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"requested_debug_session_id": debug_session_id, "active_debug_session_id": active_session_id},
+        )
+    session_path_value = active_details.get("session_path")
+    if type(session_path_value) is not str:
+        raise ProviderDebugError(
+            "active debug session did not record a session path",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    session_path = Path(session_path_value)
+    try:
+        session = DebugSession.model_validate_json(session_path.read_text(encoding="utf-8"))
+    except (OSError, ValidationError) as exc:
+        raise ProviderDebugError(
+            "failed to load active debug session",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"session_path": str(session_path), "error": str(exc)},
+        ) from exc
+    if session.session_id != active_session_id:
+        raise ProviderDebugError(
+            "active debug session file does not match manifest",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"session_path": str(session_path), "session_id": session.session_id},
+        )
+    if session.current_execution_state == "ended" or session.attach_status != "attached":
+        raise ProviderDebugError(
+            "active debug session required",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"debug_session_id": session.session_id},
+        )
+    return session
+
+
+def _debug_read_response(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None,
+    provider: QemuGdbstubProvider | None,
+    method_name: str,
+    kwargs: dict[str, object],
+) -> ToolResponse:
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        manifest_path = store.run_dir(run_id) / "manifest.json"
+        if not manifest_path.is_file():
+            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    provider = provider or QemuGdbstubProvider()
+    redactor = Redactor()
+    try:
+        with store.debug_lock(run_id):
+            session = _load_active_debug_session(store, run_id, debug_session_id)
+            result: DebugProviderResult = getattr(provider, method_name)(
+                run_dir=store.run_dir(run_id),
+                session=session,
+                **kwargs,
+            )
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    except ProviderDebugError as exc:
+        return ToolResponse.failure(
+            category=exc.category,
+            message=redactor.redact_text(str(exc)),
+            run_id=run_id,
+            details=redactor.redact_value(exc.details),
+            artifacts=_redacted_artifacts(exc.artifacts, redactor),
+            suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+        )
+
+    safe_details = redactor.redact_value(result.details)
+    safe_artifacts = _redacted_artifacts(result.artifacts, redactor)
+    safe_summary = redactor.redact_text(result.summary)
+    if result.status == StepStatus.SUCCEEDED:
+        return ToolResponse.success(
+            summary=safe_summary,
+            run_id=run_id,
+            data=safe_details,
+            artifacts=safe_artifacts,
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+    return ToolResponse.failure(
+        category=result.error_category or ErrorCategory.DEBUG_ATTACH_FAILURE,
+        message=safe_summary,
+        run_id=run_id,
+        details={
+            **safe_details,
+            "diagnostic": redactor.redact_text(result.diagnostic or ""),
+        },
+        artifacts=safe_artifacts,
+        suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+    )
+
+
+def debug_read_registers_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    registers: list[str],
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+) -> ToolResponse:
+    return _debug_read_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="read_registers",
+        kwargs={"registers": registers},
+    )
+
+
+def debug_read_symbol_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    symbol: str,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+) -> ToolResponse:
+    return _debug_read_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="read_symbol",
+        kwargs={"symbol": symbol},
+    )
+
+
+def debug_read_memory_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    address: int,
+    byte_count: int,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+) -> ToolResponse:
+    return _debug_read_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="read_memory",
+        kwargs={"address": address, "byte_count": byte_count},
+    )
+
+
+def debug_evaluate_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    inspector: str,
+    arguments: dict[str, object] | None = None,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+) -> ToolResponse:
+    return _debug_read_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="evaluate",
+        kwargs={"inspector": inspector, "arguments": arguments or {}},
+    )
+
+
 def _bundle_for_manifest(
     *,
     manifest: RunManifest,
@@ -1485,6 +1682,66 @@ def create_app() -> FastMCP:
             new_session=new_session,
         ).model_dump(mode="json")
 
+    @app.tool(name="debug.read_registers")
+    def debug_read_registers(
+        run_id: str,
+        registers: list[str],
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_read_registers_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            registers=registers,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.read_symbol")
+    def debug_read_symbol(
+        run_id: str,
+        symbol: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_read_symbol_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            symbol=symbol,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.read_memory")
+    def debug_read_memory(
+        run_id: str,
+        address: int,
+        byte_count: int,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_read_memory_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            address=address,
+            byte_count=byte_count,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.evaluate")
+    def debug_evaluate(
+        run_id: str,
+        inspector: str,
+        arguments: dict[str, object] | None = None,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_evaluate_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            inspector=inspector,
+            arguments=arguments,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
     @app.tool(name="workflow.build_boot_test")
     def workflow_build_boot_test(
         source_path: str,
@@ -1528,10 +1785,6 @@ def create_app() -> FastMCP:
         "debug.set_breakpoint",
         "debug.clear_breakpoint",
         "debug.list_breakpoints",
-        "debug.read_registers",
-        "debug.read_symbol",
-        "debug.read_memory",
-        "debug.evaluate",
         "debug.end_session",
     ]:
         app.tool(name=tool_name)(make_stub(tool_name))

@@ -183,6 +183,39 @@ class QemuGdbstubProvider:
         self.runner = runner or SubprocessGdbRunner()
         self.redactor = redactor or Redactor()
 
+    def write_session_for_test(self, run_dir: Path, *, state: str = "stopped") -> DebugSession:
+        debug_dir = run_dir / "debug"
+        session_id = "debug-test"
+        session_path = debug_dir / "sessions" / f"{session_id}.json"
+        transcript_path = debug_dir / "attempt-001" / "transcript.txt"
+        command_metadata_path = debug_dir / "attempt-001" / "commands.jsonl"
+        latest_summary_path = debug_dir / "attempt-001" / "debug-summary.json"
+        vmlinux_path = run_dir / "build" / "vmlinux"
+        vmlinux_path.parent.mkdir(parents=True, exist_ok=True)
+        vmlinux_path.write_text("fake vmlinux", encoding="utf-8")
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        transcript_path.write_text("", encoding="utf-8")
+        command_metadata_path.write_text("", encoding="utf-8")
+        latest_summary_path.write_text("{}", encoding="utf-8")
+        session = DebugSession(
+            session_id=session_id,
+            run_id="run-debug",
+            provider_name=self.name,
+            gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
+            vmlinux_path=str(vmlinux_path),
+            selected_debug_profile="qemu-gdbstub-default",
+            attach_status="attached",
+            started_at=datetime.now(UTC).isoformat(),
+            current_execution_state=state,  # type: ignore[arg-type]
+            transcript_path=str(transcript_path),
+            command_metadata_path=str(command_metadata_path),
+            latest_summary_path=str(latest_summary_path),
+            symbol_identity_validation={"same_run_artifact_linkage": True, "live_banner_match": True},
+        )
+        session_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_json(session_path, session.model_dump(mode="json"))
+        return session
+
     def start_session(
         self,
         *,
@@ -375,6 +408,285 @@ class QemuGdbstubProvider:
             diagnostic=self._snippet(result.stderr or result.stdout) if effective_status == StepStatus.FAILED else None,
         )
 
+    def read_registers(
+        self,
+        *,
+        run_dir: Path,
+        session: DebugSession,
+        registers: list[str],
+    ) -> DebugProviderResult:
+        if type(registers) is not list or not registers:
+            raise ProviderDebugError(
+                "registers must be a non-empty list",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        validated_registers = [self.validate_register_name(register) for register in registers]
+        result = self._run_read_operation(
+            run_dir=run_dir,
+            session=session,
+            operation="read_registers",
+            read_command=f"info registers {' '.join(validated_registers)}",
+        )
+        if result.status == StepStatus.SUCCEEDED:
+            result.details["registers"] = self._parse_registers(result.details["stdout_snippet"], validated_registers)
+        return result
+
+    def read_symbol(self, *, run_dir: Path, session: DebugSession, symbol: str) -> DebugProviderResult:
+        validated_symbol = self.validate_symbol_name(symbol)
+        result = self._run_read_operation(
+            run_dir=run_dir,
+            session=session,
+            operation="read_symbol",
+            read_command=f"p {validated_symbol}",
+        )
+        if result.status == StepStatus.SUCCEEDED:
+            value = self._parse_gdb_value(result.details["stdout_snippet"])
+            result.details.update({"symbol": validated_symbol, "value": value})
+        return result
+
+    def read_memory(
+        self,
+        *,
+        run_dir: Path,
+        session: DebugSession,
+        address: int,
+        byte_count: int,
+    ) -> DebugProviderResult:
+        self.validate_memory_read(address=address, byte_count=byte_count)
+        result = self._run_read_operation(
+            run_dir=run_dir,
+            session=session,
+            operation="read_memory",
+            read_command=f"x/{byte_count}xb 0x{address:x}",
+        )
+        if result.status == StepStatus.SUCCEEDED:
+            result.details.update(
+                {
+                    "address": f"0x{address:x}",
+                    "byte_count": byte_count,
+                    "bytes": self._parse_memory_bytes(result.details["stdout_snippet"], byte_count),
+                }
+            )
+        return result
+
+    def evaluate(
+        self,
+        *,
+        run_dir: Path,
+        session: DebugSession,
+        inspector: str,
+        arguments: dict[str, object],
+    ) -> DebugProviderResult:
+        if inspector == "kernel_version":
+            result = self._run_read_operation(
+                run_dir=run_dir,
+                session=session,
+                operation="evaluate.kernel_version",
+                read_command="p linux_banner",
+            )
+            if result.status == StepStatus.SUCCEEDED:
+                result.details.update(
+                    {
+                        "inspector": inspector,
+                        "kernel_version": self._parse_gdb_value(result.details["stdout_snippet"]),
+                    }
+                )
+            return result
+        if inspector == "symbol_address":
+            if type(arguments) is not dict:
+                raise ProviderDebugError(
+                    "symbol_address arguments must be an object",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                )
+            symbol = self.validate_symbol_name(arguments.get("symbol"))  # type: ignore[arg-type]
+            result = self._run_read_operation(
+                run_dir=run_dir,
+                session=session,
+                operation="evaluate.symbol_address",
+                read_command=f"p &{symbol}",
+            )
+            if result.status == StepStatus.SUCCEEDED:
+                result.details.update(
+                    {
+                        "inspector": inspector,
+                        "symbol": symbol,
+                        "address": self._parse_gdb_value(result.details["stdout_snippet"]),
+                    }
+                )
+            return result
+        raise ProviderDebugError(
+            "unknown debug inspector",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"inspector": inspector},
+        )
+
+    def _run_read_operation(
+        self,
+        *,
+        run_dir: Path,
+        session: DebugSession,
+        operation: str,
+        read_command: str,
+    ) -> DebugProviderResult:
+        gdb_path = self.runner.which("gdb")
+        if gdb_path is None:
+            raise ProviderDebugError(
+                "missing required GDB tool",
+                category=ErrorCategory.MISSING_DEPENDENCY,
+                details={"missing_tools": ["gdb"]},
+            )
+        if session.current_execution_state == "ended" or session.attach_status != "attached":
+            raise ProviderDebugError(
+                "debug session is not active",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"debug_session_id": session.session_id},
+            )
+        resolved_run_dir = run_dir.expanduser().resolve()
+        resolved_vmlinux = self._resolve_existing_path(
+            Path(session.vmlinux_path),
+            description="session vmlinux path",
+            required_parent=resolved_run_dir,
+        )
+        endpoint = self._validated_endpoint(session.gdbstub_endpoint)
+        transcript_path = Path(session.transcript_path)
+        command_metadata_path = Path(session.command_metadata_path)
+        commands = [
+            "set pagination off",
+            "set confirm off",
+            f"file {self._gdb_path(resolved_vmlinux)}",
+            f"target remote {endpoint['host']}:{endpoint['port']}",
+            read_command,
+        ]
+        argv = [gdb_path, "-nx", "-batch", "-q"]
+        for command in commands:
+            argv.extend(["-ex", command])
+
+        started_at = datetime.now(UTC)
+        runner_error_category = None
+        try:
+            command_result = self.runner.run_batch(
+                argv,
+                commands,
+                timeout=30,
+                transcript_path=transcript_path,
+            )
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            runner_error_category = ErrorCategory.INFRASTRUCTURE_FAILURE
+            command_result = GdbCommandResult(
+                exit_status=-1,
+                stderr=f"{type(exc).__name__}: {exc}",
+            )
+            self._append_failure_transcript(
+                transcript_path=transcript_path,
+                argv=argv,
+                commands=commands,
+                timeout=30,
+                result=command_result,
+            )
+        ended_at = datetime.now(UTC)
+        status = (
+            StepStatus.SUCCEEDED
+            if command_result.exit_status == 0 and not command_result.timed_out
+            else StepStatus.FAILED
+        )
+        command_record = self._command_metadata(
+            argv=argv,
+            commands=commands,
+            result=command_result,
+            started_at=started_at,
+            ended_at=ended_at,
+            timeout=30,
+            transcript_path=transcript_path,
+        )
+        details = self.redactor.redact_value(
+            {
+                "debug_session_id": session.session_id,
+                "operation": operation,
+                "exit_status": command_result.exit_status,
+                "timed_out": command_result.timed_out,
+                "stdout_snippet": self._snippet(command_result.stdout),
+                "stderr_snippet": self._snippet(command_result.stderr),
+            }
+        )
+        artifacts = self._session_artifacts(session)
+        summary_payload = {
+            "run_id": session.run_id,
+            "provider": self.name,
+            "status": status,
+            "operation": operation,
+            "started_at": started_at.isoformat(),
+            "ended_at": ended_at.isoformat(),
+            "session": session.model_dump(mode="json"),
+            "artifacts": [artifact.model_dump(mode="json") for artifact in artifacts],
+            "command": command_record,
+        }
+        try:
+            self._append_jsonl(command_metadata_path, command_record)
+            self._write_json(Path(session.latest_summary_path), self.redactor.redact_value(summary_payload))
+        except OSError as exc:
+            raise ProviderDebugError(
+                "failed to write debug read artifacts",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={**details, "error": str(exc)},
+                artifacts=self._existing_artifacts(artifacts),
+            ) from exc
+
+        error_category = runner_error_category or (
+            ErrorCategory.DEBUG_ATTACH_FAILURE if status == StepStatus.FAILED else None
+        )
+        diagnostic = None
+        if status == StepStatus.FAILED:
+            diagnostic = self._snippet(command_result.stderr or command_result.stdout)
+        return DebugProviderResult(
+            status=status,
+            summary=f"debug {operation} {'succeeded' if status == StepStatus.SUCCEEDED else 'failed'}",
+            session=session,
+            artifacts=self._existing_artifacts(artifacts),
+            details=details,
+            error_category=error_category,
+            diagnostic=diagnostic,
+        )
+
+    def _session_artifacts(self, session: DebugSession) -> list[ArtifactRef]:
+        session_path = Path(session.command_metadata_path).parents[1] / "sessions" / f"{session.session_id}.json"
+        return [
+            ArtifactRef(path=session.transcript_path, kind="debug-transcript", sensitive=True),
+            ArtifactRef(path=session.command_metadata_path, kind="debug-command-metadata"),
+            ArtifactRef(path=session.latest_summary_path, kind="debug-summary"),
+            ArtifactRef(path=str(session_path), kind="debug-session"),
+        ]
+
+    def _existing_artifacts(self, artifacts: list[ArtifactRef]) -> list[ArtifactRef]:
+        return [artifact for artifact in artifacts if Path(artifact.path).is_file()]
+
+    def _parse_registers(self, output: object, requested_registers: list[str]) -> dict[str, str]:
+        requested = set(requested_registers)
+        registers: dict[str, str] = {}
+        for line in str(output).splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] in requested:
+                registers[parts[0]] = parts[1]
+        return registers
+
+    def _parse_memory_bytes(self, output: object, byte_count: int) -> list[str]:
+        values: list[str] = []
+        for line in str(output).splitlines():
+            _separator, _colon, payload = line.partition(":")
+            for value in re.findall(r"\b0x[0-9a-fA-F]{1,2}\b", payload):
+                values.append(value.lower())
+                if len(values) == byte_count:
+                    return values
+        return values
+
+    def _parse_gdb_value(self, output: object) -> str:
+        text = str(output).strip()
+        _prefix, separator, value = text.partition("=")
+        if separator:
+            text = value.strip()
+        if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+            text = text[1:-1].replace("\\n", "\n").replace('\\"', '"')
+        return self.redactor.redact_text(self._snippet(text))
+
     def validate_symbol_name(self, symbol: str) -> str:
         if type(symbol) is not str:
             raise ProviderDebugError("invalid symbol name", category=ErrorCategory.CONFIGURATION_ERROR)
@@ -471,6 +783,26 @@ class QemuGdbstubProvider:
     ) -> None:
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         with transcript_path.open("w", encoding="utf-8") as transcript:
+            transcript.write(f"$ {' '.join(argv)}\n")
+            transcript.write("commands:\n")
+            for command in commands:
+                transcript.write(f"  {command}\n")
+            transcript.write(f"timeout_seconds: {timeout}\n")
+            transcript.write(f"stderr: {self._snippet(result.stderr)}\n")
+            transcript.write(f"timed_out: {str(result.timed_out).lower()}\n")
+            transcript.write(f"exit_status: {result.exit_status}\n")
+
+    def _append_failure_transcript(
+        self,
+        *,
+        transcript_path: Path,
+        argv: list[str],
+        commands: list[str],
+        timeout: int,
+        result: GdbCommandResult,
+    ) -> None:
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        with transcript_path.open("a", encoding="utf-8") as transcript:
             transcript.write(f"$ {' '.join(argv)}\n")
             transcript.write("commands:\n")
             for command in commands:
