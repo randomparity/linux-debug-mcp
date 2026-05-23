@@ -704,6 +704,11 @@ def target_run_tests_handler(
             run_id=run_id,
             message="rootfs profile requires SSH access for test execution",
         )
+    if not resolved_rootfs_profile.ssh_host or not resolved_rootfs_profile.ssh_user:
+        return _configuration_failure(
+            run_id=run_id,
+            message="rootfs profile requires ssh_host and ssh_user for SSH test execution",
+        )
     try:
         suite_profile = test_suites[requested_suite] if requested_suite is not None else None
     except KeyError:

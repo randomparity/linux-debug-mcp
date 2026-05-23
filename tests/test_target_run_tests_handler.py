@@ -234,6 +234,26 @@ def test_run_tests_maps_provider_failure_to_test_failure(tmp_path: Path) -> None
     assert response.suggested_next_actions == ["artifacts.collect"]
 
 
+def test_run_tests_rejects_rootfs_missing_ssh_endpoint_as_configuration_error(tmp_path: Path) -> None:
+    artifact_root = create_booted_run(tmp_path)
+    provider = FakeTestProvider()
+
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=provider,
+        rootfs_profiles={"minimal": rootfs(tmp_path).model_copy(update={"ssh_host": None})},
+        test_suites=suites(),
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert "ssh_host and ssh_user" in response.error.message
+    assert provider.plans == []
+    assert provider.executions == 0
+
+
 def test_run_tests_response_redacts_secret_like_snippets(tmp_path: Path) -> None:
     artifact_root = create_booted_run(tmp_path)
     provider = FakeTestProvider(
