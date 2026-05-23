@@ -60,6 +60,7 @@ class BuildProfile(ConfigModel):
 class RootfsProfile(ConfigModel):
     name: str
     source: str
+    source_type: Literal["disk_image", "directory"] = "disk_image"
     mutability: Literal["read_only", "copy_on_write", "mutable"] = "copy_on_write"
     access_method: Literal["ssh", "serial", "ssh_and_serial", "none"] = "ssh"
     credential_refs: list[SecretReference] = Field(default_factory=list)
@@ -70,12 +71,15 @@ class RootfsProfile(ConfigModel):
 class TargetProfile(ConfigModel):
     name: str
     architecture: str
-    provider_name: str
+    provider_name: str = "local-libvirt-qemu"
     target_ref: str | None = None
     kernel_args: list[str] = Field(default_factory=list)
     timeout_seconds: int = Field(default=300, ge=1)
-    cleanup_policy: Literal["preserve_all", "preserve_failed", "stop_failed", "remove_temporary"] = "preserve_failed"
+    cleanup_policy: Literal["preserve_on_failure", "stop_on_failure"] = "preserve_on_failure"
     debug_gdbstub: bool = False
+    libvirt_uri: str | None = None
+    managed_domain: bool = False
+    managed_domain_prefix: str | None = None
 
 
 class DebugProfile(ConfigModel):

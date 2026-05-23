@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -174,6 +175,19 @@ def test_build_lock_excludes_concurrent_builds(tmp_path: Path) -> None:
         pass
 
 
+def test_boot_lock_excludes_concurrent_boots(tmp_path: Path) -> None:
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
+    store.create_run(request(run_id="run-abc123"))
+
+    with (
+        store.boot_lock("run-abc123"),
+        pytest.raises(ManifestStateError, match="boot is locked"),
+        store.boot_lock("run-abc123"),
+    ):
+        pass
+
+
 def test_running_build_result_can_be_replaced_by_success(tmp_path: Path) -> None:
     source = make_source_tree(tmp_path)
     store = ArtifactStore(tmp_path / "runs", source_paths=[source])
@@ -190,3 +204,77 @@ def test_running_build_result_can_be_replaced_by_success(tmp_path: Path) -> None
 
     assert manifest.step_results["build"].summary == "build succeeded"
     assert manifest.step_results["build"].status == StepStatus.SUCCEEDED
+
+
+def test_succeeded_boot_result_can_be_replaced_when_explicit(tmp_path: Path) -> None:
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
+    store.create_run(request(run_id="run-abc123"))
+
+    store.record_step_result("run-abc123", StepResult(step_name="boot", status=StepStatus.SUCCEEDED, summary="old"))
+    manifest = store.record_step_result(
+        "run-abc123",
+        StepResult(step_name="boot", status=StepStatus.SUCCEEDED, summary="new"),
+        replace_succeeded=True,
+    )
+
+    assert manifest.step_results["boot"].summary == "new"
+
+
+def test_target_lock_excludes_concurrent_domain_mutation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = make_source_tree(tmp_path)
+    store_a = ArtifactStore(tmp_path / "runs-a", source_paths=[source])
+    store_b = ArtifactStore(tmp_path / "runs-b", source_paths=[source])
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+
+    with (
+        store_a.target_lock("mcp-linux-debug-dev"),
+        pytest.raises(ManifestStateError, match="target domain is locked"),
+        store_b.target_lock("mcp-linux-debug-dev"),
+    ):
+        pass
+
+
+def test_target_lock_fallback_creates_private_lock_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr("linux_debug_mcp.artifacts.store.tempfile.gettempdir", lambda: str(tmp_path))
+
+    with store.target_lock("mcp-linux-debug-dev"):
+        pass
+
+    lock_dir = next(tmp_path.glob("linux-debug-mcp-*/locks"))
+    assert lock_dir.stat().st_mode & 0o777 == 0o700
+
+
+def test_target_lock_rejects_unsafe_fallback_lock_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr("linux_debug_mcp.artifacts.store.tempfile.gettempdir", lambda: str(tmp_path))
+    lock_dir = tmp_path / f"linux-debug-mcp-{os.getuid()}" / "locks"
+    lock_dir.mkdir(parents=True)
+    lock_dir.chmod(0o777)
+
+    with (
+        pytest.raises(ManifestStateError, match="unsafe target lock directory"),
+        store.target_lock("mcp-linux-debug-dev"),
+    ):
+        pass
+
+
+def test_target_lock_rejects_symlink_fallback_lock_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr("linux_debug_mcp.artifacts.store.tempfile.gettempdir", lambda: str(tmp_path))
+    symlink_target = tmp_path / "symlink-target"
+    symlink_target.mkdir()
+    (tmp_path / f"linux-debug-mcp-{os.getuid()}").symlink_to(symlink_target, target_is_directory=True)
+
+    with (
+        pytest.raises(ManifestStateError, match="unsafe target lock directory"),
+        store.target_lock("mcp-linux-debug-dev"),
+    ):
+        pass
