@@ -33,10 +33,10 @@ class RunManifest(Model):
             ],
         )
 
-    def with_step_result(self, result: StepResult) -> RunManifest:
+    def with_step_result(self, result: StepResult, *, replace_succeeded: bool = False) -> RunManifest:
         if result.step_name in self.step_results:
             existing = self.step_results[result.step_name]
-            if existing.status == StepStatus.SUCCEEDED:
+            if existing.status == StepStatus.SUCCEEDED and not replace_succeeded:
                 return self
         clone = self.model_copy(deep=True)
         clone.step_results[result.step_name] = result

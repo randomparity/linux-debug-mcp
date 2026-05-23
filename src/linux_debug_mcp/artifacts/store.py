@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from hashlib import sha256
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -79,12 +81,12 @@ class ArtifactStore:
         except (OSError, ValidationError, json.JSONDecodeError) as exc:
             raise ManifestStateError(f"failed to read manifest for {run_id}: {exc}") from exc
 
-    def record_step_result(self, run_id: str, result: StepResult) -> RunManifest:
+    def record_step_result(self, run_id: str, result: StepResult, *, replace_succeeded: bool = False) -> RunManifest:
         run_id = self._validate_run_id(run_id)
         run_dir = self._run_dir(run_id)
         with self._manifest_lock(run_dir):
             manifest = self.load_manifest(run_id)
-            updated = manifest.with_step_result(result)
+            updated = manifest.with_step_result(result, replace_succeeded=replace_succeeded)
             if updated != manifest:
                 self._write_manifest(run_dir, updated)
             return updated
@@ -99,6 +101,28 @@ class ArtifactStore:
             run_dir / ".build.lock",
             locked_message="build is locked",
             failure_prefix="failed to lock build",
+        ):
+            yield
+
+    @contextmanager
+    def boot_lock(self, run_id: str) -> Iterator[None]:
+        run_dir = self._run_dir(run_id)
+        with self._file_lock(
+            run_dir / ".boot.lock",
+            locked_message="boot is locked",
+            failure_prefix="failed to lock boot",
+        ):
+            yield
+
+    @contextmanager
+    def target_lock(self, target_ref: str) -> Iterator[None]:
+        lock_dir = self._target_lock_dir()
+        lock_name = self._safe_lock_name(target_ref)
+        lock_path = lock_dir / f"target-{lock_name}.lock"
+        with self._file_lock(
+            lock_path,
+            locked_message="target domain is locked",
+            failure_prefix="failed to lock target domain",
         ):
             yield
 
@@ -120,6 +144,49 @@ class ArtifactStore:
 
     def _generate_run_id(self) -> str:
         return f"run-{uuid.uuid4().hex[:16]}"
+
+    def _target_lock_dir(self) -> Path:
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+        if runtime_dir:
+            lock_dir = Path(runtime_dir) / "linux-debug-mcp" / "locks"
+            try:
+                lock_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise ManifestStateError(f"failed to create target lock directory: {exc}") from exc
+        else:
+            base_dir = Path(tempfile.gettempdir()) / f"linux-debug-mcp-{os.getuid()}"
+            self._ensure_private_target_lock_dir(base_dir)
+            lock_dir = base_dir / "locks"
+            self._ensure_private_target_lock_dir(lock_dir)
+        return lock_dir
+
+    def _ensure_private_target_lock_dir(self, lock_dir: Path) -> None:
+        if lock_dir.is_symlink():
+            raise ManifestStateError("unsafe target lock directory")
+        existed = lock_dir.exists()
+        try:
+            lock_dir.mkdir(mode=0o700, exist_ok=True)
+        except OSError as exc:
+            raise ManifestStateError(f"failed to create target lock directory: {exc}") from exc
+        if lock_dir.is_symlink():
+            raise ManifestStateError("unsafe target lock directory")
+        if not existed:
+            try:
+                lock_dir.chmod(0o700)
+            except OSError as exc:
+                raise ManifestStateError(f"failed to create target lock directory: {exc}") from exc
+        try:
+            stat_result = lock_dir.stat()
+        except OSError as exc:
+            raise ManifestStateError(f"failed to inspect target lock directory: {exc}") from exc
+        if stat_result.st_uid != os.getuid() or stat_result.st_mode & 0o022:
+            raise ManifestStateError("unsafe target lock directory")
+
+    def _safe_lock_name(self, value: str) -> str:
+        safe_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
+        if value and all(char in safe_chars for char in value):
+            return value
+        return sha256(value.encode("utf-8")).hexdigest()
 
     @contextmanager
     def _manifest_lock(self, run_dir: Path) -> Iterator[None]:

@@ -7,10 +7,11 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
-from linux_debug_mcp.config import BuildProfile
+from linux_debug_mcp.config import BuildProfile, RootfsProfile, TargetProfile
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
+from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
 from linux_debug_mcp.providers.registry import ProviderRegistry
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_source_path
@@ -20,9 +21,28 @@ DEFAULT_ARTIFACT_ROOT = Path(".linux-debug-mcp/runs")
 DEFAULT_BUILD_PROFILES = {
     "x86_64-default": BuildProfile(name="x86_64-default", architecture="x86_64"),
 }
+DEFAULT_TARGET_PROFILES = {
+    "local-qemu": TargetProfile(
+        name="local-qemu",
+        architecture="x86_64",
+        target_ref="mcp-linux-debug-dev",
+        managed_domain=True,
+        managed_domain_prefix="mcp-linux-debug-",
+        libvirt_uri="qemu:///system",
+    ),
+}
+DEFAULT_ROOTFS_PROFILES = {
+    "minimal": RootfsProfile(
+        name="minimal",
+        source="/var/lib/linux-debug-mcp/rootfs/minimal.qcow2",
+        mutability="read_only",
+        readiness_marker="linux-debug-mcp-ready",
+    ),
+}
 RUNNING_BUILD_MESSAGE = (
     "previous build is still recorded as running; inspect logs and create a new run or manually clean stale build state"
 )
+RUNNING_BOOT_MESSAGE = "previous boot is still recorded as running"
 
 
 def _recorded_build_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
@@ -70,6 +90,43 @@ def _record_terminal_build_result(
                 raise
             time.sleep(delay_seconds)
             delay_seconds *= 2
+
+
+def _recorded_boot_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
+    return ToolResponse.success(
+        summary=result.summary,
+        run_id=run_id,
+        data=result.details,
+        artifacts=result.artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
+def _running_boot_response(*, run_id: str, result: StepResult, message: str = RUNNING_BOOT_MESSAGE) -> ToolResponse:
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        message=message,
+        run_id=run_id,
+        details=result.details,
+        artifacts=result.artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
+def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any] | None = None) -> ToolResponse:
+    return ToolResponse.failure(
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        message=message,
+        run_id=run_id,
+        details=details,
+    )
+
+
+def _find_kernel_image(build_result: StepResult) -> ArtifactRef | None:
+    for artifact in build_result.artifacts:
+        if artifact.kind == "kernel-image":
+            return artifact
+    return None
 
 
 def create_run_handler(
@@ -289,6 +346,237 @@ def kernel_build_handler(
     )
 
 
+def target_boot_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    target_profile: str | None = None,
+    rootfs_profile: str | None = None,
+    force_reboot: bool = False,
+    provider: LibvirtQemuProvider | None = None,
+    target_profiles: dict[str, TargetProfile] | None = None,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    default_libvirt_uri: str | None = None,
+) -> ToolResponse:
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        manifest_path = store.run_dir(run_id) / "manifest.json"
+        if not manifest_path.is_file():
+            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    requested_target_profile = target_profile or manifest.request.target_profile
+    requested_rootfs_profile = rootfs_profile or manifest.request.rootfs_profile
+    if requested_target_profile != manifest.request.target_profile:
+        return _configuration_failure(
+            run_id=run_id,
+            message="target_profile must match the immutable run manifest request",
+            details={
+                "requested_profile": requested_target_profile,
+                "manifest_profile": manifest.request.target_profile,
+            },
+        )
+    if requested_rootfs_profile != manifest.request.rootfs_profile:
+        return _configuration_failure(
+            run_id=run_id,
+            message="rootfs_profile must match the immutable run manifest request",
+            details={
+                "requested_profile": requested_rootfs_profile,
+                "manifest_profile": manifest.request.rootfs_profile,
+            },
+        )
+
+    target_profiles = target_profiles if target_profiles is not None else DEFAULT_TARGET_PROFILES
+    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    try:
+        resolved_target_profile = target_profiles[requested_target_profile]
+    except KeyError:
+        return _configuration_failure(run_id=run_id, message=f"unknown target profile: {requested_target_profile}")
+    try:
+        resolved_rootfs_profile = rootfs_profiles[requested_rootfs_profile]
+    except KeyError:
+        return _configuration_failure(run_id=run_id, message=f"unknown rootfs profile: {requested_rootfs_profile}")
+    if resolved_target_profile.libvirt_uri is None and default_libvirt_uri is not None:
+        resolved_target_profile = resolved_target_profile.model_copy(update={"libvirt_uri": default_libvirt_uri})
+    if resolved_target_profile.target_ref is None:
+        return _configuration_failure(run_id=run_id, message="target profile target_ref is required")
+
+    build_result = manifest.step_results.get("build")
+    if build_result is None or build_result.status != StepStatus.SUCCEEDED:
+        return _configuration_failure(run_id=run_id, message="target boot requires a succeeded build")
+    kernel_image = _find_kernel_image(build_result)
+    if kernel_image is None:
+        return _configuration_failure(run_id=run_id, message="succeeded build did not record a kernel-image artifact")
+    build_architecture = build_result.details.get("architecture")
+    if build_architecture is not None and build_architecture != resolved_target_profile.architecture:
+        return _configuration_failure(
+            run_id=run_id,
+            message="build architecture does not match target profile architecture",
+            details={
+                "build_architecture": build_architecture,
+                "target_architecture": resolved_target_profile.architecture,
+            },
+        )
+
+    existing = manifest.step_results.get("boot")
+    if existing and existing.status == StepStatus.SUCCEEDED and not force_reboot:
+        return _recorded_boot_success_response(run_id=run_id, result=existing)
+
+    provider = provider or LibvirtQemuProvider()
+
+    def execute_boot(*, plan: Any, retrying_after_failure: bool, replace_succeeded: bool) -> ToolResponse:
+        running = StepResult(
+            step_name="boot",
+            status=StepStatus.RUNNING,
+            summary="target boot running",
+            details={
+                "provider": provider.name,
+                "domain": plan.domain_name,
+                "target_profile": resolved_target_profile.name,
+                "rootfs_profile": resolved_rootfs_profile.name,
+                "kernel_image_path": str(kernel_image.path),
+                "boot_log_path": str(plan.boot_log_path),
+                "boot_plan_path": str(plan.boot_plan_path),
+            },
+            artifacts=[ArtifactRef(path=str(plan.boot_log_path), kind="boot-log")],
+        )
+        store.record_step_result(run_id, running, replace_succeeded=replace_succeeded)
+        try:
+            execution = provider.execute_boot(
+                plan,
+                force_reboot=force_reboot,
+                retrying_after_failure=retrying_after_failure,
+            )
+        except ProviderBootError as exc:
+            failed = StepResult(
+                step_name="boot",
+                status=StepStatus.FAILED,
+                summary=str(exc),
+                artifacts=exc.artifacts,
+                details=exc.details,
+            )
+            store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded)
+            return ToolResponse.failure(
+                category=exc.category,
+                message=str(exc),
+                run_id=run_id,
+                details=exc.details,
+                artifacts=exc.artifacts,
+                suggested_next_actions=["artifacts.get_manifest"],
+            )
+        except Exception as exc:
+            failed = StepResult(
+                step_name="boot",
+                status=StepStatus.FAILED,
+                summary="unexpected boot provider failure",
+                artifacts=[ArtifactRef(path=str(plan.boot_log_path), kind="boot-log")],
+                details={
+                    "provider": provider.name,
+                    "domain": plan.domain_name,
+                    "exception_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded)
+            return ToolResponse.failure(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                message=failed.summary,
+                run_id=run_id,
+                details=failed.details,
+                artifacts=failed.artifacts,
+                suggested_next_actions=["artifacts.get_manifest"],
+            )
+        terminal = StepResult(
+            step_name="boot",
+            status=execution.status,
+            summary=execution.summary,
+            artifacts=execution.artifacts,
+            details=execution.details,
+        )
+        store.record_step_result(run_id, terminal, replace_succeeded=replace_succeeded)
+        if execution.status == StepStatus.SUCCEEDED:
+            return ToolResponse.success(
+                summary=execution.summary,
+                run_id=run_id,
+                data=execution.details,
+                artifacts=execution.artifacts,
+                suggested_next_actions=["artifacts.get_manifest"],
+            )
+        return ToolResponse.failure(
+            category=execution.error_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
+            message=execution.summary,
+            run_id=run_id,
+            details={**execution.details, "diagnostic": execution.diagnostic},
+            artifacts=execution.artifacts,
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+
+    try:
+        with store.boot_lock(run_id):
+            locked_manifest = store.load_manifest(run_id)
+            locked_existing = locked_manifest.step_results.get("boot")
+            if locked_existing and locked_existing.status == StepStatus.SUCCEEDED and not force_reboot:
+                return _recorded_boot_success_response(run_id=run_id, result=locked_existing)
+            retrying_after_failure = bool(locked_existing and locked_existing.status == StepStatus.FAILED)
+            replace_succeeded = bool(locked_existing and locked_existing.status == StepStatus.SUCCEEDED)
+            with store.target_lock(resolved_target_profile.target_ref):
+                if locked_existing and locked_existing.status == StepStatus.RUNNING:
+                    stale_failed = StepResult(
+                        step_name="boot",
+                        status=StepStatus.FAILED,
+                        summary=locked_existing.summary,
+                        artifacts=locked_existing.artifacts,
+                        details={**locked_existing.details, "stale_running_recovered": True},
+                    )
+                    store.record_step_result(run_id, stale_failed)
+                    retrying_after_failure = True
+                try:
+                    plan = provider.plan_boot(
+                        run_id=run_id,
+                        run_dir=store.run_dir(run_id),
+                        kernel_image_path=Path(kernel_image.path),
+                        target_profile=resolved_target_profile,
+                        rootfs_profile=resolved_rootfs_profile,
+                    )
+                except ProviderBootError as exc:
+                    failed = StepResult(
+                        step_name="boot",
+                        status=StepStatus.FAILED,
+                        summary=str(exc),
+                        artifacts=exc.artifacts,
+                        details=exc.details,
+                    )
+                    store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded or force_reboot)
+                    return ToolResponse.failure(
+                        category=exc.category,
+                        message=str(exc),
+                        run_id=run_id,
+                        details=exc.details,
+                        artifacts=exc.artifacts,
+                        suggested_next_actions=["artifacts.get_manifest"],
+                    )
+                except (ManifestStateError, OSError, ValueError) as exc:
+                    return _configuration_failure(run_id=run_id, message=str(exc))
+                return execute_boot(
+                    plan=plan,
+                    retrying_after_failure=retrying_after_failure,
+                    replace_succeeded=replace_succeeded or force_reboot,
+                )
+    except ManifestStateError as exc:
+        if "boot is locked" in str(exc):
+            try:
+                refreshed = store.load_manifest(run_id).step_results.get("boot")
+            except ManifestStateError:
+                refreshed = None
+            if refreshed and refreshed.status == StepStatus.RUNNING:
+                return _running_boot_response(run_id=run_id, result=refreshed)
+            if existing and existing.status == StepStatus.RUNNING:
+                return _running_boot_response(run_id=run_id, result=existing)
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+
 def not_implemented_handler(tool_name: str, *, run_id: str | None = None) -> ToolResponse:
     sprint_by_prefix = {
         "kernel.build": "Sprint 1",
@@ -372,6 +660,22 @@ def create_app() -> FastMCP:
             force_rebuild=force_rebuild,
         ).model_dump(mode="json")
 
+    @app.tool(name="target.boot")
+    def target_boot(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        target_profile: str | None = None,
+        rootfs_profile: str | None = None,
+        force_reboot: bool = False,
+    ) -> dict[str, Any]:
+        return target_boot_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            force_reboot=force_reboot,
+        ).model_dump(mode="json")
+
     def make_stub(bound_tool_name: str):
         def stub(run_id: str | None = None) -> dict[str, Any]:
             return not_implemented_handler(bound_tool_name, run_id=run_id).model_dump(mode="json")
@@ -379,7 +683,6 @@ def create_app() -> FastMCP:
         return stub
 
     for tool_name in [
-        "target.boot",
         "target.run_tests",
         "artifacts.collect",
         "workflow.build_boot_test",

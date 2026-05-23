@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from linux_debug_mcp.domain import ProviderCapability
 from linux_debug_mcp.providers.base import sprint0_capability
+from linux_debug_mcp.providers.libvirt_qemu import local_libvirt_qemu_capability
 from linux_debug_mcp.providers.local_kernel_build import local_kernel_build_capability
 
 
@@ -40,11 +41,11 @@ class ProviderRegistry:
             )
         )
         registry.register(local_kernel_build_capability())
+        registry.register(local_libvirt_qemu_capability())
         registry.register(
             sprint0_capability(
                 name="stub-workflows",
                 operations=[
-                    "target.boot",
                     "target.run_tests",
                     "artifacts.collect",
                     "workflow.build_boot_test",

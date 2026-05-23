@@ -43,11 +43,11 @@ def test_server_config_accepts_valid_pilot_profiles(tmp_path: Path) -> None:
             "local-qemu": TargetProfile(
                 name="local-qemu",
                 architecture="x86_64",
-                provider_name="libvirt-qemu",
+                provider_name="local-libvirt-qemu",
                 target_ref="linux-debug-dev",
                 kernel_args=["console=ttyS0", "nokaslr"],
                 timeout_seconds=300,
-                cleanup_policy="preserve_failed",
+                cleanup_policy="preserve_on_failure",
                 debug_gdbstub=True,
             )
         },
@@ -72,6 +72,44 @@ def test_server_config_accepts_valid_pilot_profiles(tmp_path: Path) -> None:
     assert config.artifact_root == tmp_path / "runs"
     assert config.build_profiles["x86_64-default"].architecture == "x86_64"
     assert config.rootfs_profiles["minimal"].credential_refs[0].label == "ssh-key"
+
+
+def test_sprint_2_profiles_accept_libvirt_boot_fields(tmp_path: Path) -> None:
+    rootfs = RootfsProfile(
+        name="minimal",
+        source=str(tmp_path / "rootfs.qcow2"),
+        source_type="disk_image",
+        mutability="read_only",
+        access_method="serial",
+        readiness_marker="linux-debug-ready",
+    )
+    target = TargetProfile(
+        name="local-qemu",
+        architecture="x86_64",
+        provider_name="local-libvirt-qemu",
+        target_ref="mcp-linux-debug-dev",
+        kernel_args=["nokaslr"],
+        timeout_seconds=120,
+        cleanup_policy="preserve_on_failure",
+        libvirt_uri="qemu:///system",
+        managed_domain=True,
+        managed_domain_prefix="mcp-",
+    )
+
+    assert rootfs.source_type == "disk_image"
+    assert target.libvirt_uri == "qemu:///system"
+    assert target.managed_domain is True
+
+
+@pytest.mark.parametrize("cleanup_policy", ["preserve_all", "preserve_failed", "stop_failed", "remove_temporary"])
+def test_sprint_2_target_profile_rejects_old_cleanup_policy_values(cleanup_policy: str) -> None:
+    with pytest.raises(ValidationError):
+        TargetProfile(
+            name="local-qemu",
+            architecture="x86_64",
+            provider_name="local-libvirt-qemu",
+            cleanup_policy=cleanup_policy,
+        )
 
 
 def test_profile_names_must_match_dictionary_keys(tmp_path: Path) -> None:

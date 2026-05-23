@@ -45,7 +45,32 @@ def test_default_registry_exposes_sprint_1_providers() -> None:
 
     providers = {provider.provider_name: provider for provider in registry.list_capabilities()}
 
-    assert set(providers) == {"local-artifacts", "local-prereqs", "local-kernel-build", "stub-workflows"}
+    assert set(providers) == {
+        "local-artifacts",
+        "local-prereqs",
+        "local-kernel-build",
+        "local-libvirt-qemu",
+        "stub-workflows",
+    }
     assert "kernel.build" in providers["local-kernel-build"].operations
     assert "kernel.build" not in providers["stub-workflows"].operations
     assert "make" in providers["local-kernel-build"].required_host_tools
+
+    libvirt_qemu = providers["local-libvirt-qemu"]
+    assert libvirt_qemu.operations == ["target.boot"]
+    assert "target.boot" not in providers["stub-workflows"].operations
+    assert libvirt_qemu.required_host_tools == ["virsh"]
+    assert libvirt_qemu.target_kinds == [TargetKind.VIRTUAL]
+    assert libvirt_qemu.access_methods == ["libvirt", "serial-console", "filesystem"]
+    assert libvirt_qemu.destructive_permissions == [
+        "define MCP-owned libvirt domains",
+        "update MCP-owned libvirt domains",
+        "start MCP-owned libvirt domains",
+        "stop MCP-owned libvirt domains",
+        "destroy MCP-owned libvirt domains",
+    ]
+    assert libvirt_qemu.semantics.idempotent is True
+    assert libvirt_qemu.semantics.retryable is True
+    assert libvirt_qemu.semantics.destructive is True
+    assert libvirt_qemu.semantics.cancelable is False
+    assert libvirt_qemu.semantics.concurrent_safe is False
