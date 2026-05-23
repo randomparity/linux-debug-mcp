@@ -19,6 +19,7 @@ stub providers that always fail before external side effects.
 Sprint 5 includes:
 
 - richer provider capability declarations
+- static in-repo plugin declaration mechanics for provider bundles
 - in-repo contract models for future provider families
 - in-repo stub providers for remote build, reservation, provisioning, hardware
   control, serial console access, and real hardware boot
@@ -62,6 +63,11 @@ and request validation before any real lab integration is added.
 
 The existing `ProviderRegistry` should remain small and static in Sprint 5, but
 provider capabilities should describe more than a flat operation list.
+The current `operations` list and top-level `semantics` field should remain for
+backward compatibility with Sprint 0-4 tests and clients. Sprint 5 should add
+the richer fields as backward-compatible model fields with defaults instead of
+forcing every local provider call site to move in the same sprint.
+
 Capability metadata should support:
 
 - provider name and version
@@ -75,6 +81,28 @@ Capability metadata should support:
 - operation-level semantics for every advertised operation
 - human-readable limitations
 
+Add a typed operation metadata model named `ProviderOperationCapability` with
+these fields:
+
+- `operation`: MCP tool or provider operation name
+- `implementation_state`: `implemented`, `stub`, or `external_reserved`
+- `semantics`: `OperationSemantics`
+- `required_host_tools`: operation-specific host tools, defaulting to empty
+- `destructive_permissions`: operation-specific permissions, defaulting to empty
+- `limitations`: human-readable strings, defaulting to empty
+
+`ProviderCapability` should gain:
+
+- `provider_family`
+- `implementation_state`
+- `transports`
+- `limitations`
+- `operation_capabilities`
+
+For Sprint 5, `operations` should be derived from or kept consistent with
+`operation_capabilities`. Tests should fail if a provider advertises an
+operation in one field but not the other.
+
 The registry should continue to list local implemented providers:
 
 - `local-artifacts`
@@ -84,8 +112,8 @@ The registry should continue to list local implemented providers:
 - `local-ssh-tests`
 - `local-qemu-gdbstub`
 
-Sprint 5 should add in-repo stub providers for future families. Suggested
-provider names are:
+Sprint 5 should add in-repo stub providers for future families with these
+provider names:
 
 - `remote-build-stub`
 - `remote-artifact-sync-stub`
@@ -97,6 +125,30 @@ provider names are:
 
 These providers should advertise future operations and dependencies, but their
 implementation state must clearly mark them as stubs.
+
+## Plugin Loading Boundary
+
+The architecture spec calls for plugin loading mechanics. Sprint 5 should
+satisfy that requirement with a static in-repo declaration boundary, not dynamic
+external package loading.
+
+Add a small plugin declaration model named `ProviderPluginSpec` with:
+
+- plugin name
+- plugin version
+- implementation state
+- provider capability factories
+- optional documentation paths
+- limitations
+
+`ProviderRegistry.with_defaults()` should load built-in provider plugin specs
+from in-repo Python objects. It should not scan entry points, import modules by
+string from user config, read plugin manifests from arbitrary paths, or execute
+third-party package code.
+
+This creates a migration path for later dynamic plugins while keeping Sprint 5
+safe and deterministic. Future dynamic loading can reuse the same declaration
+shape after adding trust, versioning, and compatibility checks.
 
 ## Provider Contracts
 
@@ -141,6 +193,22 @@ should reject empty provider names, unknown architecture strings, invalid
 timeout values, unsafe labels, and malformed operation-specific inputs before a
 provider is invoked.
 
+Provider selection should be deterministic:
+
+1. If a request includes `provider_name`, select exactly that provider or return
+   `configuration_error`.
+2. If a request omits `provider_name`, select the single stub provider that
+   advertises the requested operation and architecture.
+3. If zero or multiple providers match, return `configuration_error` with the
+   candidate provider names when any exist.
+4. Never fall back from an explicitly selected provider to a different provider.
+
+Sprint 5 should not add future provider profile models to the main server
+configuration. The future-facing contracts should carry only request-scoped
+profile labels such as `profile_name`, `target_name`, or `reservation_pool`.
+Those labels are validated as safe identifiers but are not resolved to real
+external systems until a later sprint adds real providers.
+
 ## MCP Tool Surface
 
 Sprint 5 should add these callable MCP tools:
@@ -166,6 +234,28 @@ Stub tools should not create run workspaces. There is no real workflow evidence
 to preserve yet, and creating failed run state for non-operational future paths
 would make pilot runs harder to reason about.
 
+`workflow.reserve_provision_boot` should validate its request and then
+short-circuit to a single `not_implemented` response. It should not create a
+run, request a reservation, prepare provisioning state, issue hardware control,
+or call the individual stub handlers in sequence. This prevents a future-facing
+workflow stub from producing confusing partial progress.
+
+Minimum request fields should be explicit in the contract tests:
+
+- `remote.build_kernel`: `architecture`, `source_ref`, `build_profile`
+- `remote.sync_artifacts`: `architecture`, `external_artifact_ref`
+- `reservation.request_host`: `architecture`, `reservation_pool`
+- `reservation.release_host`: `architecture`, `reservation_id`
+- `provision.prepare_target`: `architecture`, `target_name`,
+  `provisioning_profile`
+- `hardware.power_control`: `architecture`, `target_name`, `action`
+- `hardware.boot_kernel`: `architecture`, `target_name`, `kernel_artifact_ref`
+- `console.open_session`: `architecture`, `target_name`, `access_method`
+- `console.read`: `architecture`, `console_session_id`, `max_bytes`
+- `console.write`: `architecture`, `console_session_id`, `data`
+- `workflow.reserve_provision_boot`: `architecture`, `reservation_pool`,
+  `target_name`, `provisioning_profile`, `kernel_artifact_ref`
+
 ## Stub Provider Behavior
 
 Stub providers must fail before external side effects.
@@ -180,7 +270,7 @@ They must not:
 - create reservation jobs
 - create provisioning jobs
 - power on, power off, or reboot hardware
-- write outside normal test-controlled process memory
+- write runtime files or artifacts for stub-only tool calls
 
 The allowed behavior is:
 
@@ -210,6 +300,28 @@ An example response is:
 
 The exact wording may vary, but the category and details keys should remain
 stable enough for agents to branch on.
+
+## Secrets And Response Redaction
+
+Future-facing requests should follow the existing secret-reference policy even
+though providers are stubs. Contracts may include credential reference fields
+such as `credential_ref`, `ssh_key_ref`, `bmc_credential_ref`, or
+`reservation_token_ref`, but they must not accept raw secret values.
+
+Stub responses and validation errors must not echo high-risk request payloads.
+In particular, they should not include raw values for:
+
+- console write data
+- reservation tokens or credential material
+- SSH private key paths when represented as secret references
+- BMC, HMC, or IPMI credential values
+- environment variables
+- command text intended for future remote execution
+
+Handlers should pass future-facing `ToolResponse` data through the existing
+redaction path before returning it. Error details should prefer stable labels,
+field names, provider names, operation names, architecture, and documentation
+paths over raw request content.
 
 ## Data Flow
 
@@ -263,8 +375,8 @@ Stub errors should include:
 - implementation state
 - reason the operation is unavailable
 
-Suggested next actions should generally include `providers.list`. When the
-ppc64le spike is relevant, responses may include a documentation path.
+Suggested next actions should include `providers.list`. When the ppc64le spike
+is relevant, responses should also include the documentation path.
 
 ## Testing Strategy
 
@@ -303,11 +415,13 @@ Sprint 5 is complete when:
 
 1. `providers.list` shows implemented local providers and in-repo stub
    providers with clear implementation states.
-2. The new future-facing MCP tools are callable.
-3. Valid future-facing tool requests return stable `not_implemented` responses.
-4. Malformed future-facing tool requests return stable `configuration_error`
+2. Built-in provider plugin specs register local and stub provider capability
+   factories without dynamic external imports.
+3. The new future-facing MCP tools are callable.
+4. Valid future-facing tool requests return stable `not_implemented` responses.
+5. Malformed future-facing tool requests return stable `configuration_error`
    responses.
-5. Stub tools do not create run workspaces or perform external side effects.
-6. Typed provider contracts exist for the future provider families.
-7. A ppc64le design spike is documented.
-8. Existing local build, boot, test, artifact, and debug tests continue to pass.
+6. Stub tools do not create run workspaces or perform external side effects.
+7. Typed provider contracts exist for the future provider families.
+8. A ppc64le design spike is documented.
+9. Existing local build, boot, test, artifact, and debug tests continue to pass.
