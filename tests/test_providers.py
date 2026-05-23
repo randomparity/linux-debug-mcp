@@ -79,5 +79,6 @@ def test_default_registry_exposes_sprint_1_providers() -> None:
     ssh_tests = providers["local-ssh-tests"]
     assert ssh_tests.operations == ["target.run_tests"]
     assert "target.run_tests" not in providers["stub-workflows"].operations
+    assert "artifacts.collect" not in providers["stub-workflows"].operations
     assert ssh_tests.required_host_tools == ["ssh"]
     assert ssh_tests.target_kinds == [TargetKind.VIRTUAL]

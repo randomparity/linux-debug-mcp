@@ -1067,6 +1067,18 @@ def create_app() -> FastMCP:
             force_rerun=force_rerun,
         ).model_dump(mode="json")
 
+    @app.tool(name="artifacts.collect")
+    def artifacts_collect(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        force_recollect: bool = False,
+    ) -> dict[str, Any]:
+        return artifacts_collect_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            force_recollect=force_recollect,
+        ).model_dump(mode="json")
+
     def make_stub(bound_tool_name: str):
         def stub(run_id: str | None = None) -> dict[str, Any]:
             return not_implemented_handler(bound_tool_name, run_id=run_id).model_dump(mode="json")
@@ -1074,7 +1086,6 @@ def create_app() -> FastMCP:
         return stub
 
     for tool_name in [
-        "artifacts.collect",
         "workflow.build_boot_test",
         "workflow.build_boot_debug",
         "debug.start_session",

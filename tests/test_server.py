@@ -251,3 +251,12 @@ def test_target_run_tests_handler_response_serializes(tmp_path: Path) -> None:
     response = get_manifest_handler(artifact_root=artifact_root, run_id="run-abc123")
 
     assert response.model_dump(mode="json")["run_id"] == "run-abc123"
+
+
+def test_artifacts_collect_tool_is_registered_with_force_recollect() -> None:
+    app = create_app()
+    tool = app._tool_manager._tools["artifacts.collect"]
+
+    assert "artifacts.collect" in tool_names()
+    assert "force_recollect" in tool.parameters["properties"]
+    assert tool.fn.__name__ == "artifacts_collect"
