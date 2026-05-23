@@ -8,6 +8,7 @@ from linux_debug_mcp.providers.qemu_gdbstub import (
     GdbCommandResult,
     ProviderDebugError,
     QemuGdbstubProvider,
+    SubprocessGdbRunner,
 )
 
 
@@ -62,6 +63,24 @@ def test_start_session_records_files_and_uses_constrained_attach_batch(tmp_path:
     assert Path(result.session.command_metadata_path).is_file()
     assert Path(result.session.latest_summary_path).is_file()
     assert result.artifacts_by_kind["debug-transcript"].is_file()
+
+
+def test_subprocess_runner_transcript_records_non_timeout_status(tmp_path: Path) -> None:
+    transcript_path = tmp_path / "debug" / "attempt-001" / "transcript.txt"
+    transcript_path.parent.mkdir(parents=True)
+    runner = SubprocessGdbRunner()
+
+    runner._append_transcript(
+        transcript_path=transcript_path,
+        argv=["gdb", "-batch"],
+        commands=["set pagination off"],
+        timeout=30,
+        result=GdbCommandResult(exit_status=0, stdout="ok\n", stderr="", timed_out=False),
+    )
+
+    transcript = transcript_path.read_text(encoding="utf-8")
+    assert "timed_out: false\n" in transcript
+    assert "timed out after 30s" not in transcript
 
 
 @pytest.mark.parametrize("symbol", ["", "bad-name", "bad;name", "bad name", "bad/name"])

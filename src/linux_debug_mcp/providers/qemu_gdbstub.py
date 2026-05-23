@@ -13,14 +13,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from linux_debug_mcp.config import DebugProfile
-from linux_debug_mcp.domain import (
-    ArtifactRef,
-    ErrorCategory,
-    OperationSemantics,
-    ProviderCapability,
-    StepStatus,
-    TargetKind,
-)
+from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, StepStatus
 from linux_debug_mcp.safety.redaction import Redactor
 
 MAX_MEMORY_READ_BYTES = 4096
@@ -169,6 +162,7 @@ class SubprocessGdbRunner:
             transcript.write(result.stderr)
             if result.stderr and not result.stderr.endswith("\n"):
                 transcript.write("\n")
+            transcript.write(f"timed_out: {str(result.timed_out).lower()}\n")
             if result.timed_out:
                 transcript.write(f"timed out after {timeout}s\n")
             transcript.write(f"exit_status: {result.exit_status}\n")
@@ -394,35 +388,3 @@ class QemuGdbstubProvider:
 
     def _snippet(self, value: str) -> str:
         return value[:MAX_RESPONSE_SNIPPET]
-
-
-def local_qemu_gdbstub_capability() -> ProviderCapability:
-    return ProviderCapability(
-        provider_name="local-qemu-gdbstub",
-        provider_version="0.1.0",
-        architectures=["x86_64"],
-        target_kinds=[TargetKind.VIRTUAL],
-        operations=[
-            "debug.start_session",
-            "debug.interrupt",
-            "debug.continue",
-            "debug.set_breakpoint",
-            "debug.clear_breakpoint",
-            "debug.list_breakpoints",
-            "debug.read_registers",
-            "debug.read_symbol",
-            "debug.read_memory",
-            "debug.evaluate",
-            "debug.end_session",
-        ],
-        required_host_tools=["gdb"],
-        destructive_permissions=[],
-        access_methods=["gdbstub", "filesystem"],
-        semantics=OperationSemantics(
-            idempotent=False,
-            retryable=True,
-            destructive=False,
-            cancelable=False,
-            concurrent_safe=False,
-        ),
-    )
