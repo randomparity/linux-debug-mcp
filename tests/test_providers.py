@@ -40,9 +40,12 @@ def test_registry_rejects_duplicate_names() -> None:
         registry.register(capability("local-artifacts"))
 
 
-def test_default_registry_exposes_sprint_0_providers() -> None:
+def test_default_registry_exposes_sprint_1_providers() -> None:
     registry = ProviderRegistry.with_defaults()
 
-    names = {provider.provider_name for provider in registry.list_capabilities()}
+    providers = {provider.provider_name: provider for provider in registry.list_capabilities()}
 
-    assert names == {"local-artifacts", "local-prereqs", "stub-workflows"}
+    assert set(providers) == {"local-artifacts", "local-prereqs", "local-kernel-build", "stub-workflows"}
+    assert "kernel.build" in providers["local-kernel-build"].operations
+    assert "kernel.build" not in providers["stub-workflows"].operations
+    assert "make" in providers["local-kernel-build"].required_host_tools

@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import Protocol
 
 from linux_debug_mcp.config import BuildProfile
-from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, StepStatus
+from linux_debug_mcp.domain import (
+    ArtifactRef,
+    ErrorCategory,
+    OperationSemantics,
+    ProviderCapability,
+    StepStatus,
+    TargetKind,
+)
 from linux_debug_mcp.safety.redaction import Redactor
 
 
@@ -104,20 +111,44 @@ class LocalKernelBuildProvider:
         shutil.copy2(source_config, output_config)
         return output_config
 
+    def detect_source_revision(self, source_path: Path) -> dict[str, object]:
+        try:
+            commit = subprocess.check_output(
+                ["git", "-C", str(source_path), "rev-parse", "HEAD"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+            ).strip()
+            dirty_status = subprocess.check_output(
+                ["git", "-C", str(source_path), "status", "--porcelain"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"commit": None, "dirty": None, "reason": str(exc)}
+        return {"commit": commit, "dirty": bool(dirty_status.strip()), "reason": None}
+
     def execute_build(self, *, plan: BuildPlan, log_path: Path, summary_path: Path) -> BuildExecutionResult:
         started_at = datetime.now(UTC)
+        source_revision = self.detect_source_revision(plan.source_path)
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             summary_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            return self._infrastructure_failure(exc=exc, plan=plan, log_path=log_path)
+            return self._infrastructure_failure(
+                exc=exc,
+                plan=plan,
+                log_path=log_path,
+                details={"argv": plan.argv, "source_revision": source_revision},
+            )
         missing_tools = [tool for tool in plan.required_tools if self.runner.which(tool) is None]
         if missing_tools:
             return BuildExecutionResult(
                 status=StepStatus.FAILED,
                 summary="missing required build tools",
                 error_category=ErrorCategory.MISSING_DEPENDENCY,
-                details={"missing_tools": missing_tools, "argv": plan.argv},
+                details={"missing_tools": missing_tools, "argv": plan.argv, "source_revision": source_revision},
             )
         try:
             self.prepare_config(source_path=plan.source_path, output_path=plan.output_path)
@@ -127,19 +158,20 @@ class LocalKernelBuildProvider:
                 status=StepStatus.FAILED,
                 summary=str(exc),
                 error_category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"argv": plan.argv},
+                details={"argv": plan.argv, "source_revision": source_revision},
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return BuildExecutionResult(
                 status=StepStatus.FAILED,
                 summary=f"build infrastructure failure: {exc}",
                 error_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"argv": plan.argv},
+                details={"argv": plan.argv, "source_revision": source_revision},
                 diagnostic=self._log_tail(log_path),
             )
         ended_at = datetime.now(UTC)
         details = {
             "argv": plan.argv,
+            "source_revision": source_revision,
             "source_path": str(plan.source_path),
             "output_path": str(plan.output_path),
             "architecture": plan.architecture,
@@ -232,3 +264,23 @@ class LocalKernelBuildProvider:
             return None
         text = log_path.read_text(encoding="utf-8", errors="replace")
         return self.redactor.redact_text(text[-limit:])
+
+
+def local_kernel_build_capability() -> ProviderCapability:
+    return ProviderCapability(
+        provider_name="local-kernel-build",
+        provider_version="0.1.0",
+        architectures=["x86_64"],
+        target_kinds=[TargetKind.LOCAL],
+        operations=["kernel.build"],
+        required_host_tools=["make"],
+        destructive_permissions=[],
+        access_methods=["filesystem", "subprocess"],
+        semantics=OperationSemantics(
+            idempotent=True,
+            retryable=True,
+            destructive=False,
+            cancelable=False,
+            concurrent_safe=False,
+        ),
+    )

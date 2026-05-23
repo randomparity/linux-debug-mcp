@@ -191,6 +191,7 @@ def test_list_providers_handler_returns_default_capabilities() -> None:
     assert response.ok is True
     assert {provider["provider_name"] for provider in response.data["providers"]} == {
         "local-artifacts",
+        "local-kernel-build",
         "local-prereqs",
         "stub-workflows",
     }

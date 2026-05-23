@@ -1,4 +1,6 @@
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -226,6 +228,29 @@ def test_execute_summary_write_failure_returns_infrastructure_failure(tmp_path: 
     assert result.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
+def test_execute_early_infrastructure_failure_records_source_revision(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    output = tmp_path / "build"
+    log_parent = tmp_path / "log-parent"
+    source.mkdir()
+    log_parent.write_text("not a directory", encoding="utf-8")
+    provider = LocalKernelBuildProvider(runner=FakeRunner(output="ok\n"))
+    profile = BuildProfile(name="x86_64-default", architecture="x86_64")
+    plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
+
+    result = provider.execute_build(
+        plan=plan,
+        log_path=log_parent / "build.log",
+        summary_path=tmp_path / "summary.json",
+    )
+
+    assert result.status == "failed"
+    assert result.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert result.details["source_revision"]["commit"] is None
+    assert result.details["source_revision"]["dirty"] is None
+    assert result.details["source_revision"]["reason"]
+
+
 def test_execute_checks_profile_required_tools(tmp_path: Path) -> None:
     provider = LocalKernelBuildProvider(runner=FakeRunner(tools={"make": "/usr/bin/make"}))
     profile = BuildProfile(name="clang", architecture="x86_64", required_tools=["clang"])
@@ -252,3 +277,65 @@ def test_execute_nonzero_make_returns_build_failure_with_redacted_tail(tmp_path:
     assert result.status == "failed"
     assert result.error_category == ErrorCategory.BUILD_FAILURE
     assert "token=[REDACTED]" in result.diagnostic
+
+
+def test_source_revision_for_non_git_tree_records_unknown_reason(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    source.mkdir()
+    provider = LocalKernelBuildProvider()
+
+    revision = provider.detect_source_revision(source)
+
+    assert revision["commit"] is None
+    assert revision["dirty"] is None
+    assert revision["reason"]
+
+
+def test_source_revision_for_git_tree_records_commit_and_dirty_state(tmp_path: Path) -> None:
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    source = tmp_path / "linux"
+    source.mkdir()
+    subprocess.run(["git", "init"], cwd=source, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=source, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=source, check=True)
+    (source / "README").write_text("clean\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README"], cwd=source, check=True)
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-m", "initial"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    expected_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    (source / "dirty").write_text("untracked\n", encoding="utf-8")
+    provider = LocalKernelBuildProvider()
+
+    revision = provider.detect_source_revision(source)
+
+    assert revision == {"commit": expected_commit, "dirty": True, "reason": None}
+
+
+def test_execute_summary_records_source_revision(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    output = tmp_path / "runs" / "run-1" / "build"
+    summaries = tmp_path / "runs" / "run-1" / "summaries"
+    source.mkdir()
+    (source / ".config").write_text("CONFIG_TEST=y\n", encoding="utf-8")
+    (output / "arch" / "x86" / "boot").mkdir(parents=True)
+    (output / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
+    provider = LocalKernelBuildProvider(runner=FakeRunner(output="ok\n"))
+    profile = BuildProfile(name="x86_64-default", architecture="x86_64")
+    plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
+
+    provider.execute_build(
+        plan=plan,
+        log_path=tmp_path / "runs" / "run-1" / "logs" / "build.log",
+        summary_path=summaries / "build-summary.json",
+    )
+
+    summary = json.loads((summaries / "build-summary.json").read_text(encoding="utf-8"))
+    assert summary["source_revision"]["commit"] is None
+    assert summary["source_revision"]["dirty"] is None
+    assert summary["source_revision"]["reason"]
