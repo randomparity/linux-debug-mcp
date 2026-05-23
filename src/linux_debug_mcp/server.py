@@ -152,6 +152,13 @@ def kernel_build_handler(
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
+        manifest_path = store.run_dir(run_id) / "manifest.json"
+        if not manifest_path.is_file():
+            return ToolResponse.failure(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                message=f"run not found: {run_id}",
+                run_id=run_id,
+            )
         manifest = store.load_manifest(run_id)
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
@@ -255,6 +262,7 @@ def kernel_build_handler(
                     message=result.summary,
                     run_id=run_id,
                     details=result.details,
+                    artifacts=result.artifacts,
                     suggested_next_actions=["artifacts.get_manifest"],
                 )
             result = StepResult(
@@ -280,6 +288,7 @@ def kernel_build_handler(
         message=execution.summary,
         run_id=run_id,
         details={**execution.details, "diagnostic": execution.diagnostic},
+        artifacts=execution.artifacts,
         suggested_next_actions=["artifacts.get_manifest"],
     )
 

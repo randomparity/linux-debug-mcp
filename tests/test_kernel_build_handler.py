@@ -40,6 +40,14 @@ class RaisingRunner(NoopRunner):
         raise RuntimeError("boom")
 
 
+class FailingRunner(NoopRunner):
+    def run(self, argv: list[str], *, timeout: int, log_path: Path) -> int:
+        self.commands.append(argv)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("build failed\n", encoding="utf-8")
+        return 2
+
+
 class TransientManifestLockRunner(NoopRunner):
     def run(self, argv: list[str], *, timeout: int, log_path: Path) -> int:
         result = super().run(argv, timeout=timeout, log_path=log_path)
@@ -112,6 +120,18 @@ def test_kernel_build_rejects_missing_manifest_profile(tmp_path: Path) -> None:
     assert "unknown build profile" in response.error.message
 
 
+def test_kernel_build_missing_run_is_configuration_error(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "runs"
+    artifact_root.mkdir()
+
+    response = kernel_build_handler(artifact_root=artifact_root, run_id="run-missing")
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert "run not found" in response.error.message
+
+
 def test_kernel_build_fails_without_developer_config(tmp_path: Path) -> None:
     source, artifact_root = create_run(tmp_path)
     (source / ".config").unlink()
@@ -125,6 +145,16 @@ def test_kernel_build_fails_without_developer_config(tmp_path: Path) -> None:
     assert response.error.category == "configuration_error"
     manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
     assert manifest.step_results["build"].status == StepStatus.FAILED
+
+
+def test_kernel_build_failure_response_includes_artifacts(tmp_path: Path) -> None:
+    _, artifact_root = create_run(tmp_path)
+    provider = LocalKernelBuildProvider(runner=FailingRunner())
+
+    response = kernel_build_handler(artifact_root=artifact_root, run_id="run-abc123", provider=provider)
+
+    assert response.ok is False
+    assert {artifact.kind for artifact in response.artifacts} == {"build-log", "build-summary"}
 
 
 def test_kernel_build_repeat_success_returns_recorded_result(tmp_path: Path) -> None:

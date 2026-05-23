@@ -179,12 +179,14 @@ class ToolResponse(Model):
         message: str,
         run_id: str | None = None,
         details: dict[str, Any] | None = None,
+        artifacts: list[ArtifactRef] | None = None,
         suggested_next_actions: list[str] | None = None,
     ) -> ToolResponse:
         return cls(
             ok=False,
             status=StepStatus.FAILED,
             run_id=run_id,
+            artifacts=artifacts or [],
             error=ErrorInfo(category=category, message=message, details=details or {}),
             suggested_next_actions=suggested_next_actions or [],
         )
