@@ -507,6 +507,9 @@ def target_boot_handler(
     provider = provider or LibvirtQemuProvider()
 
     def execute_boot(*, plan: Any, retrying_after_failure: bool, replace_succeeded: bool) -> ToolResponse:
+        plan_gdbstub_endpoint = getattr(plan, "gdbstub_endpoint", None)
+        if plan_gdbstub_endpoint is not None and hasattr(plan_gdbstub_endpoint, "as_dict"):
+            plan_gdbstub_endpoint = plan_gdbstub_endpoint.as_dict()
         running = StepResult(
             step_name="boot",
             status=StepStatus.RUNNING,
@@ -519,6 +522,9 @@ def target_boot_handler(
                 "kernel_image_path": str(kernel_image.path),
                 "boot_log_path": str(plan.boot_log_path),
                 "boot_plan_path": str(plan.boot_plan_path),
+                "debug_boot": getattr(plan, "debug_gdbstub", False),
+                "gdbstub_endpoint": plan_gdbstub_endpoint,
+                "nokaslr_source": getattr(plan, "nokaslr_source", "not_applicable"),
             },
             artifacts=[ArtifactRef(path=str(plan.boot_log_path), kind="boot-log")],
         )

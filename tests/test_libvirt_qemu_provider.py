@@ -143,6 +143,106 @@ def test_plan_boot_generates_complete_boot_plan(tmp_path: Path) -> None:
     assert plan.dumpxml_argv == ["virsh", "-c", "qemu:///system", "dumpxml", "debug-vm"]
 
 
+class PortCheckingRunner:
+    def __init__(self, *, port_available: bool = True) -> None:
+        self.port_available = port_available
+
+    def which(self, command: str) -> str | None:
+        return "/usr/bin/virsh" if command == "virsh" else None
+
+    def run(self, argv: list[str], *, timeout: int, log_path: Path | None = None) -> CommandResult:
+        return CommandResult(argv=argv, exit_status=0, stdout="")
+
+    def stream_console(
+        self,
+        domain: str,
+        *,
+        libvirt_uri: str,
+        output_path: Path,
+        timeout: int,
+        readiness_marker: str,
+    ) -> ConsoleResult:
+        return ConsoleResult(
+            status="ready",
+            matched_marker=readiness_marker,
+            snippet=readiness_marker,
+            started_at=datetime.now(UTC),
+            ended_at=datetime.now(UTC),
+        )
+
+    def is_tcp_port_available(self, host: str, port: int) -> bool:
+        return self.port_available
+
+
+def test_debug_boot_adds_gdbstub_endpoint_and_nokaslr(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider(runner=PortCheckingRunner())
+
+    plan = provider.plan_boot(
+        run_id="run-debug",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(debug_gdbstub=True, gdbstub_endpoint="127.0.0.1:1234"),
+        rootfs_profile=rootfs_profile(rootfs),
+    )
+    xml_text = provider.render_domain_xml(plan)
+    root = ElementTree.fromstring(xml_text)
+
+    assert plan.debug_gdbstub is True
+    assert plan.gdbstub_endpoint == {"host": "127.0.0.1", "port": 1234}
+    assert plan.nokaslr_source == "provider_added"
+    assert "nokaslr" in plan.kernel_args
+    qemu_args = root.findall(".//{http://libvirt.org/schemas/domain/qemu/1.0}arg")
+    values = [item.attrib["value"] for item in qemu_args]
+    assert "-gdb" in values
+    assert "tcp:127.0.0.1:1234,server=on,wait=off" in values
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "0.0.0.0:1234",
+        "192.168.122.1:1234",
+        "127.0.0.1:0",
+        "127.0.0.1:65536",
+        "127.0.0.1:1234/path",
+        "127.0.0.1:1234?x=1",
+        "127.0.0.1:12 34",
+        "<bad>:1234",
+    ],
+)
+def test_debug_boot_rejects_unsafe_gdbstub_endpoints(tmp_path: Path, endpoint: str) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider(runner=PortCheckingRunner())
+
+    with pytest.raises(ProviderBootError) as exc_info:
+        provider.plan_boot(
+            run_id="run-debug",
+            run_dir=run_dir,
+            kernel_image_path=kernel,
+            target_profile=target_profile(debug_gdbstub=True, gdbstub_endpoint=endpoint),
+            rootfs_profile=rootfs_profile(rootfs),
+        )
+
+    assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_debug_boot_rejects_occupied_gdbstub_port(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider(runner=PortCheckingRunner(port_available=False))
+
+    with pytest.raises(ProviderBootError, match="gdbstub endpoint is already in use") as exc_info:
+        provider.plan_boot(
+            run_id="run-debug",
+            run_dir=run_dir,
+            kernel_image_path=kernel,
+            target_profile=target_profile(debug_gdbstub=True, gdbstub_endpoint="127.0.0.1:1234"),
+            rootfs_profile=rootfs_profile(rootfs),
+        )
+
+    assert exc_info.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
 @pytest.mark.parametrize(
     ("target_overrides", "rootfs_overrides", "message"),
     [
@@ -152,7 +252,6 @@ def test_plan_boot_generates_complete_boot_plan(tmp_path: Path) -> None:
         ({"target_ref": None}, {}, "target_ref is required"),
         ({"managed_domain": False}, {}, "managed_domain=True is required"),
         ({"target_ref": "prod-vm", "managed_domain_prefix": "debug-"}, {}, "target_ref must start with"),
-        ({"debug_gdbstub": True}, {}, "debug_gdbstub is not supported"),
         ({"libvirt_uri": None}, {}, "libvirt_uri is required"),
         ({"architecture": "arm64"}, {}, "unsupported architecture"),
         ({"kernel_args": ["root=/dev/sda"]}, {}, "conflicting root="),

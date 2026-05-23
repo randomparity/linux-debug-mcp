@@ -23,7 +23,25 @@ from linux_debug_mcp.domain import (
 )
 
 MCP_METADATA_NS = "urn:linux-debug-mcp:domain"
+QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 ElementTree.register_namespace("ldmcp", MCP_METADATA_NS)
+ElementTree.register_namespace("qemu", QEMU_NS)
+
+
+@dataclass(frozen=True)
+class GdbstubEndpoint:
+    host: str
+    port: int
+
+    def as_dict(self) -> dict[str, object]:
+        return {"host": self.host, "port": self.port}
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, dict):
+            return self.as_dict() == other
+        if isinstance(other, GdbstubEndpoint):
+            return (self.host, self.port) == (other.host, other.port)
+        return NotImplemented
 
 
 @dataclass(frozen=True)
@@ -53,6 +71,9 @@ class BootPlan:
     start_argv: list[str]
     destroy_argv: list[str]
     dumpxml_argv: list[str]
+    debug_gdbstub: bool
+    gdbstub_endpoint: GdbstubEndpoint | None
+    nokaslr_source: Literal["not_applicable", "profile_supplied", "provider_added"]
 
 
 @dataclass(frozen=True)
@@ -116,6 +137,9 @@ class LibvirtRunner(Protocol):
     ) -> ConsoleResult:
         raise NotImplementedError
 
+    def is_tcp_port_available(self, host: str, port: int) -> bool:
+        raise NotImplementedError
+
 
 class SubprocessLibvirtRunner:
     def __init__(self, *, snippet_limit: int = 4096) -> None:
@@ -123,6 +147,17 @@ class SubprocessLibvirtRunner:
 
     def which(self, command: str) -> str | None:
         return shutil.which(command)
+
+    def is_tcp_port_available(self, host: str, port: int) -> bool:
+        import socket
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((host, port))
+            except OSError:
+                return False
+        return True
 
     def run(self, argv: list[str], *, timeout: int, log_path: Path | None = None) -> CommandResult:
         try:
@@ -278,7 +313,18 @@ class LibvirtQemuProvider:
         rootfs_path = self._resolve_existing_path(rootfs_profile.source, description="rootfs source path")
         resolved_run_dir = self._resolve_existing_path(run_dir, description="run directory")
 
-        kernel_args = self._kernel_args(target_profile.kernel_args)
+        kernel_args, nokaslr_source = self._debug_kernel_args(
+            target_profile.kernel_args,
+            target_profile.debug_gdbstub,
+        )
+        gdbstub_endpoint = None
+        if target_profile.debug_gdbstub:
+            gdbstub_endpoint = self._parse_gdbstub_endpoint(target_profile.gdbstub_endpoint)
+            if not self.runner.is_tcp_port_available(gdbstub_endpoint.host, gdbstub_endpoint.port):
+                raise ProviderBootError(
+                    "gdbstub endpoint is already in use",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                )
         domain_name = target_profile.target_ref
         libvirt_uri = target_profile.libvirt_uri
         if domain_name is None or libvirt_uri is None:
@@ -323,6 +369,9 @@ class LibvirtQemuProvider:
             start_argv=[*virsh_prefix, "start", domain_name],
             destroy_argv=[*virsh_prefix, "destroy", domain_name],
             dumpxml_argv=[*virsh_prefix, "dumpxml", domain_name],
+            debug_gdbstub=target_profile.debug_gdbstub,
+            gdbstub_endpoint=gdbstub_endpoint,
+            nokaslr_source=nokaslr_source,
         )
 
     def execute_boot(
@@ -407,6 +456,9 @@ class LibvirtQemuProvider:
             "console_snippet": console.snippet,
             "started_at": console.started_at.isoformat(),
             "ended_at": console.ended_at.isoformat(),
+            "debug_boot": plan.debug_gdbstub,
+            "gdbstub_endpoint": plan.gdbstub_endpoint.as_dict() if plan.gdbstub_endpoint else None,
+            "nokaslr_source": plan.nokaslr_source,
         }
         if console.status == "ready":
             return self._boot_result(
@@ -461,6 +513,15 @@ class LibvirtQemuProvider:
         console = ElementTree.SubElement(devices, "console", {"type": "pty"})
         ElementTree.SubElement(console, "target", {"type": "serial", "port": "0"})
 
+        if plan.debug_gdbstub and plan.gdbstub_endpoint is not None:
+            qemu_commandline = ElementTree.SubElement(domain, f"{{{QEMU_NS}}}commandline")
+            ElementTree.SubElement(qemu_commandline, f"{{{QEMU_NS}}}arg", {"value": "-gdb"})
+            ElementTree.SubElement(
+                qemu_commandline,
+                f"{{{QEMU_NS}}}arg",
+                {"value": f"tcp:{plan.gdbstub_endpoint.host}:{plan.gdbstub_endpoint.port},server=on,wait=off"},
+            )
+
         return ElementTree.tostring(domain, encoding="unicode")
 
     def validate_existing_domain_ownership(self, plan: BootPlan, domain_xml: str) -> None:
@@ -502,8 +563,6 @@ class LibvirtQemuProvider:
             raise self._configuration_error(
                 f"target_ref must start with managed_domain_prefix {target_profile.managed_domain_prefix!r}"
             )
-        if target_profile.debug_gdbstub:
-            raise self._configuration_error("debug_gdbstub is not supported")
         if target_profile.libvirt_uri is None:
             raise self._configuration_error("libvirt_uri is required")
         if target_profile.cleanup_policy not in {"preserve_on_failure", "stop_on_failure"}:
@@ -523,6 +582,33 @@ class LibvirtQemuProvider:
         if not self._contains_arg(args, "console"):
             args.append(f"console={self.serial_device}")
         return args
+
+    def _parse_gdbstub_endpoint(self, endpoint: str) -> GdbstubEndpoint:
+        if any(char.isspace() for char in endpoint) or any(char in endpoint for char in "<>$;&|?/#"):
+            raise self._configuration_error("unsafe gdbstub endpoint syntax")
+        host, separator, port_text = endpoint.rpartition(":")
+        if separator == "" or host not in {"127.0.0.1", "localhost", "::1"}:
+            raise self._configuration_error("gdbstub endpoint must bind to localhost")
+        try:
+            port = int(port_text)
+        except ValueError as exc:
+            raise self._configuration_error("gdbstub endpoint port must be an integer") from exc
+        if port < 1 or port > 65535:
+            raise self._configuration_error("gdbstub endpoint port must be in 1..65535")
+        normalized_host = "127.0.0.1" if host == "localhost" else host
+        return GdbstubEndpoint(host=normalized_host, port=port)
+
+    def _debug_kernel_args(
+        self,
+        configured_args: list[str],
+        debug_enabled: bool,
+    ) -> tuple[list[str], Literal["not_applicable", "profile_supplied", "provider_added"]]:
+        args = self._kernel_args(configured_args)
+        if not debug_enabled:
+            return args, "not_applicable"
+        if "nokaslr" in args:
+            return args, "profile_supplied"
+        return [*args, "nokaslr"], "provider_added"
 
     def _validate_kernel_args(self, args: list[str]) -> None:
         for arg in args:
@@ -567,6 +653,9 @@ class LibvirtQemuProvider:
             "timeout_seconds": plan.timeout_seconds,
             "readiness_marker": plan.readiness_marker,
             "cleanup_policy": plan.cleanup_policy,
+            "debug_boot": plan.debug_gdbstub,
+            "gdbstub_endpoint": plan.gdbstub_endpoint.as_dict() if plan.gdbstub_endpoint else None,
+            "nokaslr_source": plan.nokaslr_source,
             "ownership": plan.ownership,
             "define_argv": plan.define_argv,
             "start_argv": plan.start_argv,
