@@ -514,6 +514,23 @@ def test_read_registers_parses_fake_gdb_output(tmp_path: Path) -> None:
     assert result.details["registers"] == {"rax": "0x1", "rip": "0xffffffff81000000"}
 
 
+def test_read_registers_redacts_failure_diagnostic(tmp_path: Path) -> None:
+    runner = FakeGdbRunner()
+    runner.run_batch = lambda argv, commands, timeout, transcript_path: GdbCommandResult(  # type: ignore[method-assign]
+        exit_status=1,
+        stdout="",
+        stderr="token=secret\n",
+    )
+    provider = QemuGdbstubProvider(runner=runner)
+    session = provider.write_session_for_test(tmp_path, state="stopped")
+
+    result = provider.read_registers(run_dir=tmp_path, session=session, registers=["rax"])
+
+    assert result.status == StepStatus.FAILED
+    assert result.details["stderr_snippet"] == "token=[REDACTED]\n"
+    assert result.diagnostic == "token=[REDACTED]\n"
+
+
 def test_read_memory_enforces_4096_byte_limit(tmp_path: Path) -> None:
     provider = QemuGdbstubProvider(runner=FakeGdbRunner())
     session = provider.write_session_for_test(tmp_path, state="stopped")

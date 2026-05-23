@@ -636,7 +636,7 @@ class QemuGdbstubProvider:
         )
         diagnostic = None
         if status == StepStatus.FAILED:
-            diagnostic = self._snippet(command_result.stderr or command_result.stdout)
+            diagnostic = self.redactor.redact_text(self._snippet(command_result.stderr or command_result.stdout))
         return DebugProviderResult(
             status=status,
             summary=f"debug {operation} {'succeeded' if status == StepStatus.SUCCEEDED else 'failed'}",
