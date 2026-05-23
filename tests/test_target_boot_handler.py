@@ -314,6 +314,7 @@ def test_target_boot_records_debug_endpoint_in_manifest(tmp_path: Path) -> None:
     assert boot.details["debug_boot"] is True
     assert boot.details["gdbstub_endpoint"] == {"host": "127.0.0.1", "port": 1234}
     assert boot.details["nokaslr_source"] == "provider_added"
+    assert boot.details["kernel_image_path"].endswith("/run-abc123/build/arch/x86/boot/bzImage")
 
 
 @pytest.mark.parametrize(

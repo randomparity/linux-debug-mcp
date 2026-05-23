@@ -216,6 +216,23 @@ def _active_debug_session_from_result(result: StepResult) -> dict[str, Any] | No
     return result.details
 
 
+def _debug_build_metadata(
+    build_result: StepResult, *, kernel_image: ArtifactRef, vmlinux: ArtifactRef
+) -> dict[str, Any]:
+    return {
+        **build_result.details,
+        "kernel_image_path": str(kernel_image.path),
+        "vmlinux_path": str(vmlinux.path),
+    }
+
+
+def _debug_boot_metadata(boot_result: StepResult, *, kernel_image: ArtifactRef) -> dict[str, Any]:
+    return {
+        **boot_result.details,
+        "kernel_image_path": str(boot_result.details.get("kernel_image_path") or kernel_image.path),
+    }
+
+
 def _next_test_attempt(run_dir: Path) -> int:
     attempts = []
     tests_dir = run_dir / "tests"
@@ -605,14 +622,14 @@ def target_boot_handler(
             status=execution.status,
             summary=execution.summary,
             artifacts=execution.artifacts,
-            details=execution.details,
+            details={**execution.details, "kernel_image_path": str(kernel_image.path)},
         )
         store.record_step_result(run_id, terminal, replace_succeeded=replace_succeeded)
         if execution.status == StepStatus.SUCCEEDED:
             return ToolResponse.success(
                 summary=execution.summary,
                 run_id=run_id,
-                data=execution.details,
+                data=terminal.details,
                 artifacts=execution.artifacts,
                 suggested_next_actions=["artifacts.get_manifest"],
             )
@@ -878,9 +895,14 @@ def debug_start_session_handler(
     vmlinux = _find_artifact(build_result, "vmlinux")
     if vmlinux is None:
         return _configuration_failure(run_id=run_id, message="succeeded build did not record a vmlinux artifact")
+    kernel_image = _find_artifact(build_result, "kernel-image")
+    if kernel_image is None:
+        return _configuration_failure(run_id=run_id, message="succeeded build did not record a kernel-image artifact")
     gdbstub_endpoint = boot_result.details.get("gdbstub_endpoint")
     if not isinstance(gdbstub_endpoint, dict):
         return _configuration_failure(run_id=run_id, message="succeeded debug boot did not record a gdbstub endpoint")
+    build_metadata = _debug_build_metadata(build_result, kernel_image=kernel_image, vmlinux=vmlinux)
+    boot_metadata = _debug_boot_metadata(boot_result, kernel_image=kernel_image)
 
     requested_profile = debug_profile or manifest.request.debug_profile or "qemu-gdbstub-default"
     if (
@@ -922,8 +944,8 @@ def debug_start_session_handler(
                     vmlinux_path=Path(vmlinux.path),
                     gdbstub_endpoint=gdbstub_endpoint,
                     debug_profile=resolved_debug_profile,
-                    build_metadata=build_result.details,
-                    boot_metadata=boot_result.details,
+                    build_metadata=build_metadata,
+                    boot_metadata=boot_metadata,
                 )
             except ProviderDebugError as exc:
                 failed = StepResult(

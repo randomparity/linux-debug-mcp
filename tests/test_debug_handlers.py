@@ -12,9 +12,11 @@ class FakeDebugProvider:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.call_kwargs: list[dict[str, object]] = []
 
     def start_session(self, **kwargs):
         self.calls += 1
+        self.call_kwargs.append(kwargs)
         run_dir = kwargs["run_dir"]
         session_path = run_dir / "debug" / "sessions" / "debug-1.json"
         transcript_path = run_dir / "debug" / "attempt-001" / "transcript.txt"
@@ -81,7 +83,7 @@ def create_debug_ready_run(tmp_path: Path) -> tuple[Path, str]:
                 ArtifactRef(path=str(kernel), kind="kernel-image"),
                 ArtifactRef(path=str(vmlinux), kind="vmlinux"),
             ],
-            details={"kernel_release": "6.9.0-test", "kernel_image_path": str(kernel), "vmlinux_path": str(vmlinux)},
+            details={"kernel_release": "6.9.0-test"},
         ),
     )
     store.record_step_result(
@@ -93,7 +95,6 @@ def create_debug_ready_run(tmp_path: Path) -> tuple[Path, str]:
             details={
                 "debug_boot": True,
                 "gdbstub_endpoint": {"host": "127.0.0.1", "port": 1234},
-                "kernel_image_path": str(kernel),
             },
         ),
     )
@@ -121,6 +122,16 @@ def test_debug_start_session_records_manifest_debug_step(tmp_path: Path) -> None
     assert response.data["symbol_identity_validation"] == {
         "same_run_artifact_linkage": True,
         "live_banner_match": True,
+    }
+    assert provider.call_kwargs[0]["build_metadata"] == {
+        "kernel_release": "6.9.0-test",
+        "kernel_image_path": str(artifact_root / run_id / "build" / "bzImage"),
+        "vmlinux_path": str(artifact_root / run_id / "build" / "vmlinux"),
+    }
+    assert provider.call_kwargs[0]["boot_metadata"] == {
+        "debug_boot": True,
+        "gdbstub_endpoint": {"host": "127.0.0.1", "port": 1234},
+        "kernel_image_path": str(artifact_root / run_id / "build" / "bzImage"),
     }
     manifest = ArtifactStore(artifact_root, create_root=False).load_manifest(run_id)
     assert manifest.step_results["debug"].status == StepStatus.SUCCEEDED
