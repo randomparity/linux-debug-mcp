@@ -963,8 +963,6 @@ class QemuGdbstubProvider:
             return "invalid"
         if not self._pid_is_alive(pid):
             return "exited"
-        if not self._pid_looks_like_controller(pid):
-            return "alive_unverified"
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
