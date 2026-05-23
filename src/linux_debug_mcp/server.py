@@ -1023,6 +1023,7 @@ def workflow_build_boot_test_handler(
             manifest_path = store.run_dir(run_id) / "manifest.json"
             if manifest_path.is_file():
                 manifest = store.load_manifest(run_id)
+                resolved_test_suite = test_suite if test_suite is not None else manifest.request.test_suite
                 try:
                     resolved_source_path = str(validate_source_path(Path(source_path)))
                 except PathSafetyError as exc:
@@ -1037,7 +1038,7 @@ def workflow_build_boot_test_handler(
                     "build_profile": build_profile,
                     "target_profile": target_profile,
                     "rootfs_profile": rootfs_profile,
-                    "test_suite": test_suite,
+                    "test_suite": resolved_test_suite,
                 }
                 actual = {
                     "source_path": manifest.request.source_path,
@@ -1058,6 +1059,7 @@ def workflow_build_boot_test_handler(
                         run_id=run_id,
                         details={"mismatches": mismatches},
                     )
+                test_suite = resolved_test_suite
         except ManifestStateError as exc:
             return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
 

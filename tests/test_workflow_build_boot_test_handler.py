@@ -142,6 +142,47 @@ def test_workflow_rejects_existing_run_request_mismatch(tmp_path: Path) -> None:
     assert "immutable run manifest request" in response.error.message
 
 
+def test_workflow_existing_run_uses_manifest_test_suite_when_omitted(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "linux"
+    source.mkdir()
+    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
+    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    artifact_root = tmp_path / "runs"
+    created = create_run_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        run_id="run-abc123",
+        test_suite="smoke-basic",
+    )
+    assert created.ok is True
+
+    captured_tests: dict[str, object] = {}
+    monkeypatch.setattr("linux_debug_mcp.server.kernel_build_handler", lambda **kwargs: success("built"))
+    monkeypatch.setattr("linux_debug_mcp.server.target_boot_handler", lambda **kwargs: success("booted"))
+
+    def fake_run_tests(**kwargs: object) -> ToolResponse:
+        captured_tests.update(kwargs)
+        return success("tested")
+
+    monkeypatch.setattr("linux_debug_mcp.server.target_run_tests_handler", fake_run_tests)
+    monkeypatch.setattr("linux_debug_mcp.server.artifacts_collect_handler", lambda **kwargs: success("collected"))
+
+    response = workflow_build_boot_test_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        run_id="run-abc123",
+    )
+
+    assert response.ok is True
+    assert captured_tests["test_suite"] == "smoke-basic"
+
+
 def test_workflow_creates_missing_supplied_run_id_exactly(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
     calls: list[str] = []
