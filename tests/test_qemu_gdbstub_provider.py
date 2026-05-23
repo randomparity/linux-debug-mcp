@@ -138,6 +138,28 @@ def test_start_session_rejects_directory_vmlinux_path(tmp_path: Path) -> None:
     assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
 
 
+def test_start_session_rejects_vmlinux_outside_run_dir(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    outside_vmlinux = tmp_path / "outside" / "vmlinux"
+    outside_vmlinux.parent.mkdir()
+    outside_vmlinux.write_text("fake vmlinux", encoding="utf-8")
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider.start_session(
+            run_id="run-debug",
+            run_dir=run_dir,
+            vmlinux_path=outside_vmlinux,
+            gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
+            debug_profile=DebugProfile(name="qemu-gdbstub-default"),
+            build_metadata={},
+            boot_metadata={"debug_boot": True},
+        )
+
+    assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
 def test_gdb_path_rejects_control_whitespace(tmp_path: Path) -> None:
     provider = QemuGdbstubProvider(runner=FakeGdbRunner())
 

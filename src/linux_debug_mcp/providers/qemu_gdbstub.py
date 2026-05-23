@@ -200,7 +200,12 @@ class QemuGdbstubProvider:
                 category=ErrorCategory.MISSING_DEPENDENCY,
                 details={"missing_tools": ["gdb"]},
             )
-        resolved_vmlinux = self._resolve_existing_path(vmlinux_path, description="vmlinux path")
+        resolved_run_dir = run_dir.expanduser().resolve()
+        resolved_vmlinux = self._resolve_existing_path(
+            vmlinux_path,
+            description="vmlinux path",
+            required_parent=resolved_run_dir,
+        )
         if boot_metadata.get("debug_boot") is not True:
             raise ProviderDebugError(
                 "boot metadata does not indicate a debug gdbstub boot",
@@ -409,7 +414,7 @@ class QemuGdbstubProvider:
             transcript.write(f"timed_out: {str(result.timed_out).lower()}\n")
             transcript.write(f"exit_status: {result.exit_status}\n")
 
-    def _resolve_existing_path(self, path: Path, *, description: str) -> Path:
+    def _resolve_existing_path(self, path: Path, *, description: str, required_parent: Path | None = None) -> Path:
         resolved = Path(path).expanduser().resolve()
         if not resolved.exists():
             raise ProviderDebugError(
@@ -422,6 +427,12 @@ class QemuGdbstubProvider:
                 f"{description} must be a regular file",
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"path": str(path)},
+            )
+        if required_parent is not None and not resolved.is_relative_to(required_parent):
+            raise ProviderDebugError(
+                f"{description} must be inside the run directory",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"path": str(path), "run_dir": str(required_parent)},
             )
         return resolved
 
