@@ -188,6 +188,32 @@ def test_boot_lock_excludes_concurrent_boots(tmp_path: Path) -> None:
         pass
 
 
+def test_tests_lock_excludes_concurrent_test_runs(tmp_path: Path) -> None:
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
+    store.create_run(request(run_id="run-abc123"))
+
+    with (
+        store.tests_lock("run-abc123"),
+        pytest.raises(ManifestStateError, match="tests are locked"),
+        store.tests_lock("run-abc123"),
+    ):
+        pass
+
+
+def test_collect_lock_excludes_concurrent_collection(tmp_path: Path) -> None:
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
+    store.create_run(request(run_id="run-abc123"))
+
+    with (
+        store.collect_lock("run-abc123"),
+        pytest.raises(ManifestStateError, match="artifact collection is locked"),
+        store.collect_lock("run-abc123"),
+    ):
+        pass
+
+
 def test_running_build_result_can_be_replaced_by_success(tmp_path: Path) -> None:
     source = make_source_tree(tmp_path)
     store = ArtifactStore(tmp_path / "runs", source_paths=[source])
