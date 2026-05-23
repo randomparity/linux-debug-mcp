@@ -239,6 +239,25 @@ def _debug_boot_metadata(boot_result: StepResult, *, kernel_image: ArtifactRef) 
     }
 
 
+def _require_run_debug_path(path: Path, *, run_dir: Path, description: str) -> Path:
+    try:
+        resolved = path.expanduser().resolve()
+        debug_dir = (run_dir / "debug").expanduser().resolve()
+    except OSError as exc:
+        raise ProviderDebugError(
+            f"{description} is invalid",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"path": str(path), "error": str(exc)},
+        ) from exc
+    if not resolved.is_relative_to(debug_dir):
+        raise ProviderDebugError(
+            f"{description} must be inside the run debug directory",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"path": str(path), "debug_dir": str(debug_dir)},
+        )
+    return resolved
+
+
 def _next_test_attempt(run_dir: Path) -> int:
     attempts = []
     tests_dir = run_dir / "tests"
@@ -1045,7 +1064,8 @@ def _load_active_debug_session(
             "active debug session did not record a session path",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    session_path = Path(session_path_value)
+    run_dir = store.run_dir(run_id)
+    session_path = _require_run_debug_path(Path(session_path_value), run_dir=run_dir, description="session path")
     try:
         session = DebugSession.model_validate_json(session_path.read_text(encoding="utf-8"))
     except (OSError, ValidationError) as exc:
@@ -1054,6 +1074,22 @@ def _load_active_debug_session(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"session_path": str(session_path), "error": str(exc)},
         ) from exc
+    if session.run_id != run_id or session.provider_name != "local-qemu-gdbstub":
+        raise ProviderDebugError(
+            "active debug session file does not match run",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={
+                "session_path": str(session_path),
+                "session_run_id": session.run_id,
+                "provider_name": session.provider_name,
+            },
+        )
+    for description, path_value in [
+        ("transcript path", session.transcript_path),
+        ("command metadata path", session.command_metadata_path),
+        ("summary path", session.latest_summary_path),
+    ]:
+        _require_run_debug_path(Path(path_value), run_dir=run_dir, description=description)
     if session.session_id != active_session_id:
         raise ProviderDebugError(
             "active debug session file does not match manifest",

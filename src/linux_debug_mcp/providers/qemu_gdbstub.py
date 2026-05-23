@@ -458,13 +458,13 @@ class QemuGdbstubProvider:
             session=session,
             operation="read_memory",
             read_command=f"x/{byte_count}xb 0x{address:x}",
+            memory_byte_count=byte_count,
         )
         if result.status == StepStatus.SUCCEEDED:
             result.details.update(
                 {
                     "address": f"0x{address:x}",
                     "byte_count": byte_count,
-                    "bytes": self._parse_memory_bytes(result.details["stdout_snippet"], byte_count),
                 }
             )
         return result
@@ -527,6 +527,7 @@ class QemuGdbstubProvider:
         session: DebugSession,
         operation: str,
         read_command: str,
+        memory_byte_count: int | None = None,
     ) -> DebugProviderResult:
         gdb_path = self.runner.which("gdb")
         if gdb_path is None:
@@ -550,6 +551,11 @@ class QemuGdbstubProvider:
         endpoint = self._validated_endpoint(session.gdbstub_endpoint)
         transcript_path = Path(session.transcript_path)
         command_metadata_path = Path(session.command_metadata_path)
+        latest_summary_path = Path(session.latest_summary_path)
+        debug_dir = resolved_run_dir / "debug"
+        self._require_debug_path(transcript_path, debug_dir=debug_dir, description="transcript path")
+        self._require_debug_path(command_metadata_path, debug_dir=debug_dir, description="command metadata path")
+        self._require_debug_path(latest_summary_path, debug_dir=debug_dir, description="summary path")
         commands = [
             "set pagination off",
             "set confirm off",
@@ -576,13 +582,20 @@ class QemuGdbstubProvider:
                 exit_status=-1,
                 stderr=f"{type(exc).__name__}: {exc}",
             )
-            self._append_failure_transcript(
-                transcript_path=transcript_path,
-                argv=argv,
-                commands=commands,
-                timeout=30,
-                result=command_result,
-            )
+            try:
+                self._append_failure_transcript(
+                    transcript_path=transcript_path,
+                    argv=argv,
+                    commands=commands,
+                    timeout=30,
+                    result=command_result,
+                )
+            except OSError as write_exc:
+                raise ProviderDebugError(
+                    "failed to write debug read transcript",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={"path": str(transcript_path), "error": str(write_exc)},
+                ) from write_exc
         ended_at = datetime.now(UTC)
         status = (
             StepStatus.SUCCEEDED
@@ -622,7 +635,7 @@ class QemuGdbstubProvider:
         }
         try:
             self._append_jsonl(command_metadata_path, command_record)
-            self._write_json(Path(session.latest_summary_path), self.redactor.redact_value(summary_payload))
+            self._write_json(latest_summary_path, self.redactor.redact_value(summary_payload))
         except OSError as exc:
             raise ProviderDebugError(
                 "failed to write debug read artifacts",
@@ -637,11 +650,27 @@ class QemuGdbstubProvider:
         diagnostic = None
         if status == StepStatus.FAILED:
             diagnostic = self.redactor.redact_text(self._snippet(command_result.stderr or command_result.stdout))
+        existing_artifacts = self._existing_artifacts(artifacts)
+        if status == StepStatus.SUCCEEDED and memory_byte_count is not None:
+            parsed_bytes = self._parse_memory_bytes(command_result.stdout, memory_byte_count)
+            if len(parsed_bytes) != memory_byte_count:
+                raise ProviderDebugError(
+                    "debug memory read returned fewer bytes than requested",
+                    category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                    details={
+                        "debug_session_id": session.session_id,
+                        "operation": operation,
+                        "byte_count": memory_byte_count,
+                        "parsed_byte_count": len(parsed_bytes),
+                    },
+                    artifacts=existing_artifacts,
+                )
+            details["bytes"] = parsed_bytes
         return DebugProviderResult(
             status=status,
             summary=f"debug {operation} {'succeeded' if status == StepStatus.SUCCEEDED else 'failed'}",
             session=session,
-            artifacts=self._existing_artifacts(artifacts),
+            artifacts=existing_artifacts,
             details=details,
             error_category=error_category,
             diagnostic=diagnostic,
@@ -658,6 +687,24 @@ class QemuGdbstubProvider:
 
     def _existing_artifacts(self, artifacts: list[ArtifactRef]) -> list[ArtifactRef]:
         return [artifact for artifact in artifacts if Path(artifact.path).is_file()]
+
+    def _require_debug_path(self, path: Path, *, debug_dir: Path, description: str) -> Path:
+        try:
+            resolved = path.expanduser().resolve()
+            resolved_debug_dir = debug_dir.expanduser().resolve()
+        except OSError as exc:
+            raise ProviderDebugError(
+                f"{description} is invalid",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"path": str(path), "error": str(exc)},
+            ) from exc
+        if not resolved.is_relative_to(resolved_debug_dir):
+            raise ProviderDebugError(
+                f"{description} must be inside the run debug directory",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"path": str(path), "debug_dir": str(resolved_debug_dir)},
+            )
+        return resolved
 
     def _parse_registers(self, output: object, requested_registers: list[str]) -> dict[str, str]:
         requested = set(requested_registers)

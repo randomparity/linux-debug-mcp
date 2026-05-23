@@ -278,3 +278,37 @@ def test_debug_read_memory_loads_active_session_and_invokes_provider(tmp_path: P
     assert provider.call_kwargs[-1]["address"] == 0x1000
     assert provider.call_kwargs[-1]["byte_count"] == 2
     assert provider.call_kwargs[-1]["session"].session_id == "debug-1"
+
+
+def test_debug_read_memory_rejects_session_paths_outside_run_debug_dir(tmp_path: Path) -> None:
+    artifact_root, run_id = create_debug_ready_run(tmp_path)
+    provider = FakeDebugProvider()
+    start = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=provider,
+        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
+    )
+    assert start.ok is True
+    store = ArtifactStore(artifact_root, create_root=False)
+    manifest = store.load_manifest(run_id)
+    debug_result = manifest.step_results["debug"]
+    session_path = Path(debug_result.details["session_path"])
+    session = DebugSession.model_validate_json(session_path.read_text(encoding="utf-8"))
+    outside_path = tmp_path / "outside-transcript.txt"
+    session_path.write_text(
+        session.model_copy(update={"transcript_path": str(outside_path)}).model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+
+    response = debug_read_memory_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        address=0x1000,
+        byte_count=2,
+        provider=provider,
+    )
+
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert provider.calls == 1

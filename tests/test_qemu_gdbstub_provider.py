@@ -531,6 +531,42 @@ def test_read_registers_redacts_failure_diagnostic(tmp_path: Path) -> None:
     assert result.diagnostic == "token=[REDACTED]\n"
 
 
+def test_read_memory_parses_full_stdout_before_snippet_limit(tmp_path: Path) -> None:
+    byte_count = 1024
+    values = [f"0x{index % 256:02x}" for index in range(byte_count)]
+    stdout = "0x1000:\t" + "\t".join(values) + "\n"
+    assert len(stdout) > 4096
+    runner = FakeGdbRunner()
+    runner.run_batch = lambda argv, commands, timeout, transcript_path: GdbCommandResult(  # type: ignore[method-assign]
+        exit_status=0,
+        stdout=stdout,
+        stderr="",
+    )
+    provider = QemuGdbstubProvider(runner=runner)
+    session = provider.write_session_for_test(tmp_path, state="stopped")
+
+    result = provider.read_memory(run_dir=tmp_path, session=session, address=0x1000, byte_count=byte_count)
+
+    assert result.details["bytes"] == values
+
+
+def test_read_memory_fails_when_gdb_returns_partial_data(tmp_path: Path) -> None:
+    runner = FakeGdbRunner()
+    runner.run_batch = lambda argv, commands, timeout, transcript_path: GdbCommandResult(  # type: ignore[method-assign]
+        exit_status=0,
+        stdout="0x1000:\t0x12\n",
+        stderr="",
+    )
+    provider = QemuGdbstubProvider(runner=runner)
+    session = provider.write_session_for_test(tmp_path, state="stopped")
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider.read_memory(run_dir=tmp_path, session=session, address=0x1000, byte_count=2)
+
+    assert exc_info.value.category == ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc_info.value.details["parsed_byte_count"] == 1
+
+
 def test_read_memory_enforces_4096_byte_limit(tmp_path: Path) -> None:
     provider = QemuGdbstubProvider(runner=FakeGdbRunner())
     session = provider.write_session_for_test(tmp_path, state="stopped")
@@ -539,6 +575,21 @@ def test_read_memory_enforces_4096_byte_limit(tmp_path: Path) -> None:
         provider.read_memory(run_dir=tmp_path, session=session, address=0x1000, byte_count=4097)
 
     assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_read_operation_transcript_write_failure_is_provider_error(tmp_path: Path) -> None:
+    provider = QemuGdbstubProvider(runner=ExplodingGdbRunner())
+    session = provider.write_session_for_test(tmp_path, state="stopped")
+    blocked_parent = tmp_path / "debug" / "blocked"
+    blocked_parent.write_text("not a directory", encoding="utf-8")
+    session = session.model_copy(
+        update={"transcript_path": str(blocked_parent / "transcript.txt")},
+    )
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider.read_registers(run_dir=tmp_path, session=session, registers=["rax"])
+
+    assert exc_info.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_evaluate_rejects_unknown_inspector(tmp_path: Path) -> None:
