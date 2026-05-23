@@ -587,7 +587,7 @@ class LibvirtQemuProvider:
         if any(char.isspace() for char in endpoint) or any(char in endpoint for char in "<>$;&|?/#"):
             raise self._configuration_error("unsafe gdbstub endpoint syntax")
         host, separator, port_text = endpoint.rpartition(":")
-        if separator == "" or host not in {"127.0.0.1", "localhost", "::1"}:
+        if separator == "" or host not in {"127.0.0.1", "localhost"}:
             raise self._configuration_error("gdbstub endpoint must bind to localhost")
         try:
             port = int(port_text)
@@ -688,6 +688,13 @@ class LibvirtQemuProvider:
     def _existing_artifacts(self, artifacts: list[ArtifactRef]) -> list[ArtifactRef]:
         return [artifact for artifact in artifacts if Path(artifact.path).exists()]
 
+    def _debug_details(self, plan: BootPlan) -> dict[str, object]:
+        return {
+            "debug_boot": plan.debug_gdbstub,
+            "gdbstub_endpoint": plan.gdbstub_endpoint.as_dict() if plan.gdbstub_endpoint else None,
+            "nokaslr_source": plan.nokaslr_source,
+        }
+
     def _boot_result(
         self,
         *,
@@ -702,12 +709,13 @@ class LibvirtQemuProvider:
         artifact_list = artifacts or []
         if not any(artifact.path == str(plan.boot_summary_path) for artifact in artifact_list):
             artifact_list = [*artifact_list, ArtifactRef(path=str(plan.boot_summary_path), kind="boot-summary")]
+        result_details = {**(details or {}), **self._debug_details(plan)}
         payload = {
             "status": status,
             "summary": summary,
             "error_category": error_category,
             "diagnostic": diagnostic,
-            "details": details or {},
+            "details": result_details,
             "artifacts": [artifact.model_dump(mode="json") for artifact in artifact_list],
         }
         plan.boot_summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -716,7 +724,7 @@ class LibvirtQemuProvider:
             status=status,
             summary=summary,
             artifacts=artifact_list,
-            details=details or {},
+            details=result_details,
             error_category=error_category,
             diagnostic=diagnostic,
         )

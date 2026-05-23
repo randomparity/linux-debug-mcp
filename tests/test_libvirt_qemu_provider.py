@@ -208,6 +208,7 @@ def test_debug_boot_adds_gdbstub_endpoint_and_nokaslr(tmp_path: Path) -> None:
         "127.0.0.1:1234/path",
         "127.0.0.1:1234?x=1",
         "127.0.0.1:12 34",
+        "::1:1234",
         "<bad>:1234",
     ],
 )
@@ -928,6 +929,26 @@ def test_execute_boot_command_failure_maps_to_infrastructure_failure(tmp_path: P
     assert result.status == StepStatus.FAILED
     assert result.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert runner.commands == [plan.dumpxml_argv, plan.define_argv]
+
+
+def test_execute_boot_debug_start_failure_preserves_debug_details(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    plan = LibvirtQemuProvider(runner=PortCheckingRunner()).plan_boot(
+        run_id="run-debug",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(debug_gdbstub=True, gdbstub_endpoint="127.0.0.1:1234"),
+        rootfs_profile=rootfs_profile(rootfs),
+    )
+    runner = FakeLibvirtRunner(start=CommandResult(plan.start_argv, 1, stderr="start failed\n"))
+
+    result = LibvirtQemuProvider(runner=runner).execute_boot(plan)
+
+    assert result.status == StepStatus.FAILED
+    assert result.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert result.details["debug_boot"] is True
+    assert result.details["gdbstub_endpoint"] == {"host": "127.0.0.1", "port": 1234}
+    assert result.details["nokaslr_source"] == "provider_added"
 
 
 @pytest.mark.parametrize(
