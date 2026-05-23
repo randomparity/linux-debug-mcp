@@ -57,7 +57,7 @@ def test_server_config_accepts_valid_pilot_profiles(tmp_path: Path) -> None:
         debug_profiles={
             "gdbstub": DebugProfile(
                 name="gdbstub",
-                enabled_operations=["interrupt", "continue", "read_registers"],
+                enabled_operations=["debug.interrupt", "debug.continue", "debug.read_registers"],
                 kaslr_policy="disabled",
                 symbol_identity_required=True,
                 evaluation_mode="predefined_inspectors",
@@ -145,6 +145,11 @@ def test_debug_profile_rejects_unsupported_sprint_4_policy() -> None:
 
     with pytest.raises(ValidationError):
         DebugProfile(name="bad", evaluation_mode="limited_expressions")
+
+
+def test_debug_profile_rejects_unknown_enabled_operation() -> None:
+    with pytest.raises(ValidationError):
+        DebugProfile(name="bad", enabled_operations=["debug.raw_gdb"])
 
 
 def test_sprint_3_rootfs_profile_accepts_ssh_access_fields() -> None:

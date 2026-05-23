@@ -187,6 +187,27 @@ def test_debug_start_session_records_manifest_debug_step(tmp_path: Path) -> None
     assert manifest.step_results["debug"].details["debug_session_id"] == "debug-1"
 
 
+def test_debug_start_session_rejects_profile_without_start_operation(tmp_path: Path) -> None:
+    artifact_root, run_id = create_debug_ready_run(tmp_path)
+    provider = FakeDebugProvider()
+
+    response = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=provider,
+        debug_profiles={
+            "qemu-gdbstub-default": DebugProfile(
+                name="qemu-gdbstub-default",
+                enabled_operations=["debug.read_registers"],
+            )
+        },
+    )
+
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert provider.calls == 0
+
+
 def test_debug_start_session_is_idempotent_for_active_session(tmp_path: Path) -> None:
     artifact_root, run_id = create_debug_ready_run(tmp_path)
     provider = FakeDebugProvider()
@@ -300,6 +321,36 @@ def test_debug_read_memory_loads_active_session_and_invokes_provider(tmp_path: P
     assert provider.call_kwargs[-1]["address"] == 0x1000
     assert provider.call_kwargs[-1]["byte_count"] == 2
     assert provider.call_kwargs[-1]["session"].session_id == "debug-1"
+
+
+def test_debug_read_memory_rejects_profile_without_read_memory_operation(tmp_path: Path) -> None:
+    artifact_root, run_id = create_debug_ready_run(tmp_path)
+    provider = FakeDebugProvider()
+    start = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=provider,
+        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
+    )
+    assert start.ok is True
+
+    response = debug_read_memory_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        address=0x1000,
+        byte_count=2,
+        provider=provider,
+        debug_profiles={
+            "qemu-gdbstub-default": DebugProfile(
+                name="qemu-gdbstub-default",
+                enabled_operations=["debug.start_session"],
+            )
+        },
+    )
+
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert provider.calls == 1
 
 
 def test_debug_read_memory_rejects_session_paths_outside_run_debug_dir(tmp_path: Path) -> None:

@@ -188,6 +188,15 @@ class DebugProfile(ConfigModel):
     symbol_identity_required: bool = True
     evaluation_mode: Literal["predefined_inspectors"] = "predefined_inspectors"
 
+    @field_validator("enabled_operations")
+    @classmethod
+    def validate_enabled_operations(cls, value: list[str]) -> list[str]:
+        supported = set(SPRINT_4_DEBUG_OPERATIONS)
+        for operation in value:
+            if operation not in supported:
+                raise ValueError(f"unsupported debug operation: {operation}")
+        return value
+
 
 class ArtifactPolicy(ConfigModel):
     retention_days: int = Field(default=14, ge=1)

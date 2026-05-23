@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from linux_debug_mcp.artifacts.manifest import RunManifest
 from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
 from linux_debug_mcp.config import (
+    SPRINT_4_DEBUG_OPERATIONS,
     BuildProfile,
     DebugProfile,
     RootfsProfile,
@@ -85,6 +86,18 @@ DEFAULT_TEST_SUITES = {
 }
 DEFAULT_DEBUG_PROFILES = {
     "qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default"),
+}
+DEBUG_METHOD_OPERATIONS = {
+    "read_registers": "debug.read_registers",
+    "read_symbol": "debug.read_symbol",
+    "read_memory": "debug.read_memory",
+    "evaluate": "debug.evaluate",
+    "set_breakpoint": "debug.set_breakpoint",
+    "clear_breakpoint": "debug.clear_breakpoint",
+    "list_breakpoints": "debug.list_breakpoints",
+    "continue_execution": "debug.continue",
+    "interrupt": "debug.interrupt",
+    "end_session": "debug.end_session",
 }
 RUNNING_BUILD_MESSAGE = (
     "previous build is still recorded as running; inspect logs and create a new run or manually clean stale build state"
@@ -275,6 +288,37 @@ def _debug_boot_metadata(boot_result: StepResult, *, kernel_image: ArtifactRef) 
         **boot_result.details,
         "kernel_image_path": str(boot_result.details.get("kernel_image_path") or kernel_image.path),
     }
+
+
+def _ensure_debug_operation_enabled(profile: DebugProfile, operation: str) -> None:
+    if operation not in set(SPRINT_4_DEBUG_OPERATIONS):
+        raise ProviderDebugError(
+            "unsupported debug operation",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"operation": operation},
+        )
+    if operation not in profile.enabled_operations:
+        raise ProviderDebugError(
+            "debug operation is disabled by selected profile",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"debug_profile": profile.name, "operation": operation},
+        )
+
+
+def _resolve_debug_profile(
+    *,
+    profile_name: str,
+    debug_profiles: dict[str, DebugProfile] | None,
+) -> DebugProfile:
+    profiles = debug_profiles if debug_profiles is not None else DEFAULT_DEBUG_PROFILES
+    try:
+        return profiles[profile_name]
+    except KeyError as exc:
+        raise ProviderDebugError(
+            "unknown debug profile",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"debug_profile": profile_name},
+        ) from exc
 
 
 def _require_run_debug_path(path: Path, *, run_dir: Path, description: str) -> Path:
@@ -978,11 +1022,14 @@ def debug_start_session_handler(
             message="debug_profile must match the immutable run manifest request",
             details={"requested_profile": debug_profile, "manifest_profile": manifest.request.debug_profile},
         )
-    profiles = debug_profiles if debug_profiles is not None else DEFAULT_DEBUG_PROFILES
     try:
-        resolved_debug_profile = profiles[requested_profile]
-    except KeyError:
-        return _configuration_failure(run_id=run_id, message=f"unknown debug profile: {requested_profile}")
+        resolved_debug_profile = _resolve_debug_profile(
+            profile_name=requested_profile,
+            debug_profiles=debug_profiles,
+        )
+        _ensure_debug_operation_enabled(resolved_debug_profile, "debug.start_session")
+    except ProviderDebugError as exc:
+        return _configuration_failure(run_id=run_id, message=str(exc), details=exc.details)
 
     provider = provider or QemuGdbstubProvider()
     redactor = Redactor()
@@ -1144,6 +1191,7 @@ def _debug_read_response(
     provider: QemuGdbstubProvider | None,
     method_name: str,
     kwargs: dict[str, object],
+    debug_profiles: dict[str, DebugProfile] | None = None,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -1157,6 +1205,11 @@ def _debug_read_response(
     try:
         with store.debug_lock(run_id):
             session = _load_active_debug_session(store, run_id, debug_session_id)
+            profile = _resolve_debug_profile(
+                profile_name=session.selected_debug_profile,
+                debug_profiles=debug_profiles,
+            )
+            _ensure_debug_operation_enabled(profile, DEBUG_METHOD_OPERATIONS[method_name])
             result: DebugProviderResult = getattr(provider, method_name)(
                 run_dir=store.run_dir(run_id),
                 session=session,
@@ -1205,6 +1258,7 @@ def debug_read_registers_handler(
     registers: list[str],
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
 ) -> ToolResponse:
     return _debug_read_response(
         artifact_root=artifact_root,
@@ -1213,6 +1267,7 @@ def debug_read_registers_handler(
         provider=provider,
         method_name="read_registers",
         kwargs={"registers": registers},
+        debug_profiles=debug_profiles,
     )
 
 
@@ -1223,6 +1278,7 @@ def debug_read_symbol_handler(
     symbol: str,
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
 ) -> ToolResponse:
     return _debug_read_response(
         artifact_root=artifact_root,
@@ -1231,6 +1287,7 @@ def debug_read_symbol_handler(
         provider=provider,
         method_name="read_symbol",
         kwargs={"symbol": symbol},
+        debug_profiles=debug_profiles,
     )
 
 
@@ -1242,6 +1299,7 @@ def debug_read_memory_handler(
     byte_count: int,
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
 ) -> ToolResponse:
     return _debug_read_response(
         artifact_root=artifact_root,
@@ -1250,6 +1308,7 @@ def debug_read_memory_handler(
         provider=provider,
         method_name="read_memory",
         kwargs={"address": address, "byte_count": byte_count},
+        debug_profiles=debug_profiles,
     )
 
 
@@ -1261,6 +1320,7 @@ def debug_evaluate_handler(
     arguments: dict[str, object] | None = None,
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
 ) -> ToolResponse:
     return _debug_read_response(
         artifact_root=artifact_root,
@@ -1269,6 +1329,7 @@ def debug_evaluate_handler(
         provider=provider,
         method_name="evaluate",
         kwargs={"inspector": inspector, "arguments": arguments or {}},
+        debug_profiles=debug_profiles,
     )
 
 
@@ -1281,6 +1342,7 @@ def _debug_stateful_response(
     method_name: str,
     kwargs: dict[str, object],
     allow_ended: bool = False,
+    debug_profiles: dict[str, DebugProfile] | None = None,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -1294,6 +1356,11 @@ def _debug_stateful_response(
     try:
         with store.debug_lock(run_id):
             session = _load_active_debug_session(store, run_id, debug_session_id, allow_ended=allow_ended)
+            profile = _resolve_debug_profile(
+                profile_name=session.selected_debug_profile,
+                debug_profiles=debug_profiles,
+            )
+            _ensure_debug_operation_enabled(profile, DEBUG_METHOD_OPERATIONS[method_name])
             result: DebugProviderResult = getattr(provider, method_name)(
                 run_dir=store.run_dir(run_id),
                 session=session,
@@ -1354,6 +1421,7 @@ def debug_set_breakpoint_handler(
     symbol: str,
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -1362,6 +1430,7 @@ def debug_set_breakpoint_handler(
         provider=provider,
         method_name="set_breakpoint",
         kwargs={"symbol": symbol},
+        debug_profiles=debug_profiles,
     )
 
 
@@ -1372,6 +1441,7 @@ def debug_clear_breakpoint_handler(
     breakpoint_id: str,
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -1380,6 +1450,7 @@ def debug_clear_breakpoint_handler(
         provider=provider,
         method_name="clear_breakpoint",
         kwargs={"breakpoint_id": breakpoint_id},
+        debug_profiles=debug_profiles,
     )
 
 
@@ -1389,6 +1460,7 @@ def debug_list_breakpoints_handler(
     run_id: str,
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -1397,6 +1469,7 @@ def debug_list_breakpoints_handler(
         provider=provider,
         method_name="list_breakpoints",
         kwargs={},
+        debug_profiles=debug_profiles,
     )
 
 
@@ -1407,6 +1480,7 @@ def debug_continue_handler(
     timeout_seconds: int | None = None,
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -1415,6 +1489,7 @@ def debug_continue_handler(
         provider=provider,
         method_name="continue_execution",
         kwargs={"timeout_seconds": timeout_seconds},
+        debug_profiles=debug_profiles,
     )
 
 
@@ -1425,6 +1500,7 @@ def debug_interrupt_handler(
     timeout_seconds: int | None = None,
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -1433,6 +1509,7 @@ def debug_interrupt_handler(
         provider=provider,
         method_name="interrupt",
         kwargs={"timeout_seconds": timeout_seconds},
+        debug_profiles=debug_profiles,
     )
 
 
@@ -1442,6 +1519,7 @@ def debug_end_session_handler(
     run_id: str,
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -1451,6 +1529,7 @@ def debug_end_session_handler(
         method_name="end_session",
         kwargs={},
         allow_ended=True,
+        debug_profiles=debug_profiles,
     )
 
 
