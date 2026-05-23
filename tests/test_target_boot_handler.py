@@ -18,6 +18,9 @@ class Plan:
     boot_log_path: Path
     boot_plan_path: Path
     boot_summary_path: Path
+    debug_gdbstub: bool = False
+    gdbstub_endpoint: dict[str, object] | None = None
+    nokaslr_source: str = "not_applicable"
 
 
 class FakeBootProvider:
@@ -70,6 +73,9 @@ class FakeBootProvider:
             boot_log_path=run_dir / "logs" / "boot.log",
             boot_plan_path=run_dir / "target" / "boot-plan.json",
             boot_summary_path=run_dir / "summaries" / "boot-summary.json",
+            debug_gdbstub=target_profile.debug_gdbstub,
+            gdbstub_endpoint={"host": "127.0.0.1", "port": 1234} if target_profile.debug_gdbstub else None,
+            nokaslr_source="provider_added" if target_profile.debug_gdbstub else "not_applicable",
         )
 
     def execute_boot(
@@ -100,7 +106,13 @@ class FakeBootProvider:
         return BootExecutionResult(
             status=self.status,
             summary=self.summary,
-            details={"domain": plan.domain_name, "provider_call": len(self.executions)},
+            details={
+                "domain": plan.domain_name,
+                "provider_call": len(self.executions),
+                "debug_boot": plan.debug_gdbstub,
+                "gdbstub_endpoint": plan.gdbstub_endpoint,
+                "nokaslr_source": plan.nokaslr_source,
+            },
             artifacts=[ArtifactRef(path=str(plan.boot_log_path), kind="boot-log")],
             error_category=self.error_category,
             diagnostic="diagnostic" if self.status == StepStatus.FAILED else None,
@@ -271,6 +283,38 @@ def test_target_boot_public_defaults_resolve_manifest_profile_names(tmp_path: Pa
     assert response.ok is True
     assert provider.plans[0]["target_profile"].name == "local-qemu"
     assert provider.plans[0]["rootfs_profile"].name == "minimal"
+
+
+def test_target_boot_records_debug_endpoint_in_manifest(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    run_id = "run-abc123"
+    record_build(artifact_root, run_id)
+    provider = FakeBootProvider()
+    response = target_boot_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=provider,
+        target_profiles={
+            "local-qemu": TargetProfile(
+                name="local-qemu",
+                architecture="x86_64",
+                target_ref="debug-vm",
+                libvirt_uri="qemu:///system",
+                managed_domain=True,
+                debug_gdbstub=True,
+                gdbstub_endpoint="127.0.0.1:1234",
+            )
+        },
+        rootfs_profiles={"minimal": rootfs_profile(tmp_path)},
+    )
+
+    assert response.ok is True
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest(run_id)
+    boot = manifest.step_results["boot"]
+    assert boot.details["debug_boot"] is True
+    assert boot.details["gdbstub_endpoint"] == {"host": "127.0.0.1", "port": 1234}
+    assert boot.details["nokaslr_source"] == "provider_added"
+    assert boot.details["kernel_image_path"].endswith("/run-abc123/build/arch/x86/boot/bzImage")
 
 
 @pytest.mark.parametrize(

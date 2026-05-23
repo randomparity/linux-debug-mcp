@@ -193,6 +193,9 @@ class LocalKernelBuildProvider:
                 "passed_keys": sorted(plan.environment),
             },
         }
+        kernel_release = self._detect_kernel_release(plan.output_path)
+        if kernel_release is not None:
+            details["kernel_release"] = kernel_release
         try:
             artifacts = self._detect_artifacts(plan=plan, log_path=log_path, summary_path=summary_path)
             if not any(
@@ -249,6 +252,14 @@ class LocalKernelBuildProvider:
             (summary_path, "build-summary"),
         ]
         return [ArtifactRef(path=str(path), kind=kind) for path, kind in candidates if path.is_file()]
+
+    def _detect_kernel_release(self, output_path: Path) -> str | None:
+        kernel_release_path = output_path / "include" / "config" / "kernel.release"
+        try:
+            kernel_release = kernel_release_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        return kernel_release or None
 
     def _write_summary(self, *, summary_path: Path, details: dict[str, object], artifacts: list[ArtifactRef]) -> None:
         payload = {**details, "artifacts": [artifact.model_dump(mode="json") for artifact in artifacts]}

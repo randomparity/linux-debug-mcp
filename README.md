@@ -19,11 +19,12 @@ The current implementation provides:
 - SSH-first `target.run_tests` smoke execution
 - artifact bundle indexing with `artifacts.collect`
 - `workflow.build_boot_test` orchestration
-- structured `not_implemented` responses for debug tools
+- local QEMU gdbstub debug attach and constrained `debug.*` tools
+- `workflow.build_boot_debug` orchestration
 
 The pilot paths do not create root filesystems, install SSH packages or keys,
-discover guest addresses, attach gdb, use remote builders, generate kernel
-configs, or apply config fragments automatically.
+discover guest addresses, use remote builders, generate kernel configs, or
+apply config fragments automatically.
 
 ## Local Kernel Builds
 
@@ -65,8 +66,39 @@ At a high level, a real-host run needs:
 - A Linux source tree with a built `arch/x86/boot/bzImage`.
 - A disk-image rootfs that prints the configured readiness marker on `ttyS0`.
 
-The pilot boot path does not create root filesystems, attach gdb, use remote
-builders, generate kernel configs, or apply config fragments automatically.
+The pilot boot path does not create root filesystems, use remote builders,
+generate kernel configs, or apply config fragments automatically.
+
+## Live Kernel Debug
+
+Sprint 4 adds a local QEMU gdbstub debug workflow for dedicated libvirt/QEMU
+domains. The host must provide `virsh`, QEMU/libvirt, `gdb`, a built Linux
+source tree with matching `arch/x86/boot/bzImage` and `vmlinux`, and the same
+Sprint 2 rootfs readiness behavior described in the Fedora guide.
+
+`workflow.build_boot_debug` creates or reuses a run, builds the kernel, boots
+the target with a localhost-only QEMU gdbstub, waits for serial readiness, and
+attaches a managed gdb session. It does not run `target.run_tests`; run SSH
+smoke tests separately when needed.
+
+Example debug workflow call:
+
+```json
+{
+  "tool": "workflow.build_boot_debug",
+  "arguments": {
+    "source_path": "/home/dave/src/linux",
+    "build_profile": "x86_64-default",
+    "target_profile": "local-qemu-debug",
+    "rootfs_profile": "minimal",
+    "debug_profile": "qemu-gdbstub-default"
+  }
+}
+```
+
+After a session is attached, use the constrained `debug.*` tools for inspection.
+`debug.read_memory` is capped at 4096 bytes per call. Raw gdb transcripts are
+artifact-only; response snippets and manifest views are redacted.
 
 ### Run SSH Smoke Tests
 
@@ -161,7 +193,8 @@ python -m pytest
 ```
 
 The unit tests do not require libvirt, QEMU, a Linux checkout, or gdb.
-The libvirt boot integration test is opt-in and is skipped by default.
+The libvirt boot and live gdbstub integration tests are opt-in and skipped by
+default.
 
 ## Start The Server
 
@@ -183,8 +216,6 @@ durable `manifest.json`.
 `artifacts.get_manifest` returns a redacted manifest view.
 
 `providers.list` returns provider capability declarations.
-
-Later-sprint tools return structured `not_implemented` responses.
 
 ## Artifact Layout
 

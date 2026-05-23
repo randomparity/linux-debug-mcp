@@ -23,6 +23,7 @@ pilot:
 sudo dnf install -y \
   git make gcc flex bison elfutils-libelf-devel openssl-devel bc \
   python3 python3-pip uv \
+  gdb \
   qemu-kvm qemu-img libvirt virt-install virt-viewer \
   guestfs-tools libguestfs-tools-c policycoreutils-python-utils
 ```
@@ -42,6 +43,7 @@ command -v virsh
 command -v qemu-system-x86_64
 command -v qemu-img
 command -v virt-install
+command -v gdb
 ```
 
 ## 2. Choose A Libvirt URI And Authentication Mode
@@ -340,10 +342,47 @@ Expected skipped output:
 1 skipped
 ```
 
-## 7. Inspect Artifacts And Clean Up
+## 7. Run The Live QEMU Gdbstub Debug Pilot
+
+The Sprint 4 debug workflow uses the same host, kernel, rootfs, and readiness
+setup, plus `gdb` and a debug-enabled target profile. The default local debug
+profile exposes QEMU's gdbstub on `127.0.0.1:1234` only. It must not be exposed
+on a non-local interface.
+
+Because the default gdbstub endpoint uses a fixed local port, only one debug
+boot can own `127.0.0.1:1234` at a time. If another process already listens on
+that port, the boot fails before mutating the domain and reports the collision
+as an infrastructure failure. Stop the other debug run or choose a different
+local endpoint for a custom target profile. For the integration test, set
+`LINUX_DEBUG_MCP_GDBSTUB_ENDPOINT=127.0.0.1:<port>` to use a different local
+port. Keep the host as `127.0.0.1`.
+
+Run the live gdbstub integration test with a dedicated debug domain:
+
+```bash
+cd ~/src/linux-debug-mcp
+export LINUX_DEBUG_MCP_DEBUG_DOMAIN=mcp-linux-debug-dev-debug
+LINUX_DEBUG_MCP_LIVE_GDBSTUB=1 \
+LINUX_DEBUG_MCP_SOURCE=~/src/linux \
+LINUX_DEBUG_MCP_ROOTFS="${LINUX_DEBUG_MCP_ROOTFS}" \
+LINUX_DEBUG_MCP_DOMAIN="${LINUX_DEBUG_MCP_DEBUG_DOMAIN}" \
+LINUX_DEBUG_MCP_LIBVIRT_URI="${LINUX_DEBUG_MCP_LIBVIRT_URI}" \
+LINUX_DEBUG_MCP_GDBSTUB_ENDPOINT=127.0.0.1:1234 \
+LINUX_DEBUG_MCP_READINESS_MARKER=linux-debug-mcp-ready \
+uv run pytest tests/test_qemu_gdbstub_integration.py -q
+```
+
+The source tree must contain both `arch/x86/boot/bzImage` and the matching
+unstripped `vmlinux`. The workflow builds, boots with gdbstub enabled, waits for
+serial readiness, and attaches the managed gdb session. It does not run SSH
+smoke tests; run `workflow.build_boot_test` or `target.run_tests` separately if
+you need guest command coverage.
+
+## 8. Inspect Artifacts And Clean Up
 
 The integration test uses a temporary artifact root managed by pytest. For MCP
-tool runs outside the integration test, boot artifacts are written under:
+tool runs outside the integration test, boot and debug artifacts are written
+under:
 
 ```text
 <artifact-root>/<run-id>/
@@ -351,26 +390,28 @@ tool runs outside the integration test, boot artifacts are written under:
   logs/boot.log
   target/domain.xml
   target/boot-plan.json
+  debug/
   summaries/boot-summary.json
 ```
 
 Successful integration runs may leave the dedicated domain running. Stop it
-manually when needed:
+manually when needed. Use the same domain variable you passed to the specific
+integration test:
 
 ```bash
-virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" destroy "${LINUX_DEBUG_MCP_DOMAIN}"
+virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" destroy "${LINUX_DEBUG_MCP_DEBUG_DOMAIN:-$LINUX_DEBUG_MCP_DOMAIN}"
 ```
 
 Inspect the domain XML if a run fails ownership validation:
 
 ```bash
-virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" dumpxml "${LINUX_DEBUG_MCP_DOMAIN}"
+virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" dumpxml "${LINUX_DEBUG_MCP_DEBUG_DOMAIN:-$LINUX_DEBUG_MCP_DOMAIN}"
 ```
 
 Remove the domain definition only if it is dedicated to this project:
 
 ```bash
-virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" undefine "${LINUX_DEBUG_MCP_DOMAIN}"
+virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" undefine "${LINUX_DEBUG_MCP_DEBUG_DOMAIN:-$LINUX_DEBUG_MCP_DOMAIN}"
 ```
 
 ## Troubleshooting

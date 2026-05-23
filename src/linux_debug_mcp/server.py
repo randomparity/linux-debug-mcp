@@ -7,16 +7,31 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import ValidationError
 
 from linux_debug_mcp.artifacts.manifest import RunManifest
 from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
-from linux_debug_mcp.config import BuildProfile, RootfsProfile, TargetProfile, TestCommand, TestSuiteProfile
+from linux_debug_mcp.config import (
+    SPRINT_4_DEBUG_OPERATIONS,
+    BuildProfile,
+    DebugProfile,
+    RootfsProfile,
+    TargetProfile,
+    TestCommand,
+    TestSuiteProfile,
+)
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
 from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider
+from linux_debug_mcp.providers.qemu_gdbstub import (
+    DebugProviderResult,
+    DebugSession,
+    ProviderDebugError,
+    QemuGdbstubProvider,
+)
 from linux_debug_mcp.providers.registry import ProviderRegistry
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_source_path
 from linux_debug_mcp.safety.redaction import Redactor
@@ -33,6 +48,16 @@ DEFAULT_TARGET_PROFILES = {
         managed_domain=True,
         managed_domain_prefix="mcp-linux-debug-",
         libvirt_uri="qemu:///system",
+    ),
+    "local-qemu-debug": TargetProfile(
+        name="local-qemu-debug",
+        architecture="x86_64",
+        target_ref="mcp-linux-debug-dev-debug",
+        managed_domain=True,
+        managed_domain_prefix="mcp-linux-debug-",
+        libvirt_uri="qemu:///system",
+        debug_gdbstub=True,
+        gdbstub_endpoint="127.0.0.1:1234",
     ),
 }
 DEFAULT_ROOTFS_PROFILES = {
@@ -58,6 +83,21 @@ DEFAULT_TEST_SUITES = {
             TestCommand(name="proc-cmdline", argv=["cat", "/proc/cmdline"]),
         ],
     )
+}
+DEFAULT_DEBUG_PROFILES = {
+    "qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default"),
+}
+DEBUG_METHOD_OPERATIONS = {
+    "read_registers": "debug.read_registers",
+    "read_symbol": "debug.read_symbol",
+    "read_memory": "debug.read_memory",
+    "evaluate": "debug.evaluate",
+    "set_breakpoint": "debug.set_breakpoint",
+    "clear_breakpoint": "debug.clear_breakpoint",
+    "list_breakpoints": "debug.list_breakpoints",
+    "continue_execution": "debug.continue",
+    "interrupt": "debug.interrupt",
+    "end_session": "debug.end_session",
 }
 RUNNING_BUILD_MESSAGE = (
     "previous build is still recorded as running; inspect logs and create a new run or manually clean stale build state"
@@ -188,6 +228,108 @@ def _find_kernel_image(build_result: StepResult) -> ArtifactRef | None:
         if artifact.kind == "kernel-image":
             return artifact
     return None
+
+
+def _find_artifact(result: StepResult, kind: str) -> ArtifactRef | None:
+    for artifact in result.artifacts:
+        if artifact.kind == kind:
+            return artifact
+    return None
+
+
+def _debug_session_details_from_result(result: StepResult, *, allow_ended: bool = False) -> dict[str, Any] | None:
+    if result.status != StepStatus.SUCCEEDED:
+        return None
+    if not allow_ended and result.details.get("current_execution_state") == "ended":
+        return None
+    return result.details
+
+
+def _debug_session_manifest_details(*, store: ArtifactStore, run_id: str, session: DebugSession) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "debug_session_id": session.session_id,
+        "session_path": str(store.run_dir(run_id) / "debug" / "sessions" / f"{session.session_id}.json"),
+        "current_execution_state": session.current_execution_state,
+        "gdbstub_endpoint": session.gdbstub_endpoint,
+        "transcript_path": session.transcript_path,
+        "command_metadata_path": session.command_metadata_path,
+        "latest_summary_path": session.latest_summary_path,
+        "symbol_identity_validation": session.symbol_identity_validation,
+        "breakpoints": session.breakpoints,
+        "controller_mode": session.controller_mode,
+        "active_controller_pid": session.active_controller_pid,
+        "controller_last_observed_state": session.controller_last_observed_state,
+    }
+    if session.ended_at is not None:
+        details["ended_at"] = session.ended_at
+    return details
+
+
+def _debug_build_metadata(
+    build_result: StepResult, *, kernel_image: ArtifactRef, vmlinux: ArtifactRef
+) -> dict[str, Any]:
+    return {
+        **build_result.details,
+        "kernel_image_path": str(kernel_image.path),
+        "vmlinux_path": str(vmlinux.path),
+    }
+
+
+def _debug_boot_metadata(boot_result: StepResult, *, kernel_image: ArtifactRef) -> dict[str, Any]:
+    return {
+        **boot_result.details,
+        "kernel_image_path": str(boot_result.details.get("kernel_image_path") or kernel_image.path),
+    }
+
+
+def _ensure_debug_operation_enabled(profile: DebugProfile, operation: str) -> None:
+    if operation not in set(SPRINT_4_DEBUG_OPERATIONS):
+        raise ProviderDebugError(
+            "unsupported debug operation",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"operation": operation},
+        )
+    if operation not in profile.enabled_operations:
+        raise ProviderDebugError(
+            "debug operation is disabled by selected profile",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"debug_profile": profile.name, "operation": operation},
+        )
+
+
+def _resolve_debug_profile(
+    *,
+    profile_name: str,
+    debug_profiles: dict[str, DebugProfile] | None,
+) -> DebugProfile:
+    profiles = debug_profiles if debug_profiles is not None else DEFAULT_DEBUG_PROFILES
+    try:
+        return profiles[profile_name]
+    except KeyError as exc:
+        raise ProviderDebugError(
+            "unknown debug profile",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"debug_profile": profile_name},
+        ) from exc
+
+
+def _require_run_debug_path(path: Path, *, run_dir: Path, description: str) -> Path:
+    try:
+        resolved = path.expanduser().resolve()
+        debug_dir = (run_dir / "debug").expanduser().resolve()
+    except OSError as exc:
+        raise ProviderDebugError(
+            f"{description} is invalid",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"path": str(path), "error": str(exc)},
+        ) from exc
+    if not resolved.is_relative_to(debug_dir):
+        raise ProviderDebugError(
+            f"{description} must be inside the run debug directory",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"path": str(path), "debug_dir": str(debug_dir)},
+        )
+    return resolved
 
 
 def _next_test_attempt(run_dir: Path) -> int:
@@ -507,6 +649,9 @@ def target_boot_handler(
     provider = provider or LibvirtQemuProvider()
 
     def execute_boot(*, plan: Any, retrying_after_failure: bool, replace_succeeded: bool) -> ToolResponse:
+        plan_gdbstub_endpoint = getattr(plan, "gdbstub_endpoint", None)
+        if plan_gdbstub_endpoint is not None and hasattr(plan_gdbstub_endpoint, "as_dict"):
+            plan_gdbstub_endpoint = plan_gdbstub_endpoint.as_dict()
         running = StepResult(
             step_name="boot",
             status=StepStatus.RUNNING,
@@ -519,6 +664,9 @@ def target_boot_handler(
                 "kernel_image_path": str(kernel_image.path),
                 "boot_log_path": str(plan.boot_log_path),
                 "boot_plan_path": str(plan.boot_plan_path),
+                "debug_boot": getattr(plan, "debug_gdbstub", False),
+                "gdbstub_endpoint": plan_gdbstub_endpoint,
+                "nokaslr_source": getattr(plan, "nokaslr_source", "not_applicable"),
             },
             artifacts=[ArtifactRef(path=str(plan.boot_log_path), kind="boot-log")],
         )
@@ -573,14 +721,14 @@ def target_boot_handler(
             status=execution.status,
             summary=execution.summary,
             artifacts=execution.artifacts,
-            details=execution.details,
+            details={**execution.details, "kernel_image_path": str(kernel_image.path)},
         )
         store.record_step_result(run_id, terminal, replace_succeeded=replace_succeeded)
         if execution.status == StepStatus.SUCCEEDED:
             return ToolResponse.success(
                 summary=execution.summary,
                 run_id=run_id,
-                data=execution.details,
+                data=terminal.details,
                 artifacts=execution.artifacts,
                 suggested_next_actions=["artifacts.get_manifest"],
             )
@@ -817,6 +965,547 @@ def target_run_tests_handler(
     )
 
 
+def debug_start_session_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_profile: str | None = None,
+    new_session: bool = False,
+    provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        manifest_path = store.run_dir(run_id) / "manifest.json"
+        if not manifest_path.is_file():
+            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    build_result = manifest.step_results.get("build")
+    if build_result is None or build_result.status != StepStatus.SUCCEEDED:
+        return _configuration_failure(run_id=run_id, message="debug start session requires a succeeded build")
+    boot_result = manifest.step_results.get("boot")
+    if boot_result is None or boot_result.status != StepStatus.SUCCEEDED:
+        return _configuration_failure(run_id=run_id, message="debug start session requires a succeeded boot")
+    if boot_result.details.get("debug_boot") is not True:
+        return _configuration_failure(run_id=run_id, message="debug start session requires a debug boot")
+    vmlinux = _find_artifact(build_result, "vmlinux")
+    if vmlinux is None:
+        return _configuration_failure(run_id=run_id, message="succeeded build did not record a vmlinux artifact")
+    kernel_image = _find_artifact(build_result, "kernel-image")
+    if kernel_image is None:
+        return _configuration_failure(run_id=run_id, message="succeeded build did not record a kernel-image artifact")
+    gdbstub_endpoint = boot_result.details.get("gdbstub_endpoint")
+    if not isinstance(gdbstub_endpoint, dict):
+        return _configuration_failure(run_id=run_id, message="succeeded debug boot did not record a gdbstub endpoint")
+    build_metadata = _debug_build_metadata(build_result, kernel_image=kernel_image, vmlinux=vmlinux)
+    boot_metadata = _debug_boot_metadata(boot_result, kernel_image=kernel_image)
+
+    requested_profile = debug_profile or manifest.request.debug_profile or "qemu-gdbstub-default"
+    if (
+        manifest.request.debug_profile is not None
+        and debug_profile is not None
+        and debug_profile != manifest.request.debug_profile
+    ):
+        return _configuration_failure(
+            run_id=run_id,
+            message="debug_profile must match the immutable run manifest request",
+            details={"requested_profile": debug_profile, "manifest_profile": manifest.request.debug_profile},
+        )
+    try:
+        resolved_debug_profile = _resolve_debug_profile(
+            profile_name=requested_profile,
+            debug_profiles=debug_profiles,
+        )
+        _ensure_debug_operation_enabled(resolved_debug_profile, "debug.start_session")
+    except ProviderDebugError as exc:
+        return _configuration_failure(run_id=run_id, message=str(exc), details=exc.details)
+
+    provider = provider or QemuGdbstubProvider()
+    redactor = Redactor()
+    try:
+        with store.debug_lock(run_id):
+            locked_manifest = store.load_manifest(run_id)
+            existing = locked_manifest.step_results.get("debug")
+            replace_existing_debug = new_session
+            if existing and not new_session:
+                active_session = _debug_session_details_from_result(existing)
+                if active_session is not None:
+                    return ToolResponse.success(
+                        summary=redactor.redact_text(existing.summary),
+                        run_id=run_id,
+                        data=redactor.redact_value(active_session),
+                        artifacts=_redacted_artifacts(existing.artifacts, redactor),
+                        suggested_next_actions=["debug.interrupt", "debug.read_registers", "artifacts.get_manifest"],
+                    )
+                replace_existing_debug = existing.status == StepStatus.SUCCEEDED
+            try:
+                result = provider.start_session(
+                    run_id=run_id,
+                    run_dir=store.run_dir(run_id),
+                    vmlinux_path=Path(vmlinux.path),
+                    gdbstub_endpoint=gdbstub_endpoint,
+                    debug_profile=resolved_debug_profile,
+                    build_metadata=build_metadata,
+                    boot_metadata=boot_metadata,
+                )
+            except ProviderDebugError as exc:
+                failed = StepResult(
+                    step_name="debug",
+                    status=StepStatus.FAILED,
+                    summary=str(exc),
+                    artifacts=exc.artifacts,
+                    details=redactor.redact_value(exc.details),
+                )
+                store.record_step_result(run_id, failed, replace_succeeded=replace_existing_debug)
+                return ToolResponse.failure(
+                    category=exc.category,
+                    message=redactor.redact_text(str(exc)),
+                    run_id=run_id,
+                    details=redactor.redact_value(exc.details),
+                    artifacts=_redacted_artifacts(exc.artifacts, redactor),
+                    suggested_next_actions=["artifacts.get_manifest"],
+                )
+            details = _debug_session_manifest_details(store=store, run_id=run_id, session=result.session)
+            terminal = StepResult(
+                step_name="debug",
+                status=result.status,
+                summary=result.summary,
+                artifacts=result.artifacts,
+                details=details,
+            )
+            store.record_step_result(run_id, terminal, replace_succeeded=replace_existing_debug)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    safe_details = redactor.redact_value(details)
+    safe_artifacts = _redacted_artifacts(result.artifacts, redactor)
+    safe_summary = redactor.redact_text(result.summary)
+    if result.status == StepStatus.SUCCEEDED:
+        return ToolResponse.success(
+            summary=safe_summary,
+            run_id=run_id,
+            data=safe_details,
+            artifacts=safe_artifacts,
+            suggested_next_actions=["debug.interrupt", "debug.read_registers", "artifacts.get_manifest"],
+        )
+    return ToolResponse.failure(
+        category=result.error_category or ErrorCategory.DEBUG_ATTACH_FAILURE,
+        message=safe_summary,
+        run_id=run_id,
+        details=safe_details,
+        artifacts=safe_artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
+def _load_active_debug_session(
+    store: ArtifactStore,
+    run_id: str,
+    debug_session_id: str | None = None,
+    *,
+    allow_ended: bool = False,
+) -> DebugSession:
+    manifest = store.load_manifest(run_id)
+    debug_result = manifest.step_results.get("debug")
+    if debug_result is None:
+        raise ProviderDebugError(
+            "active debug session required",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    active_details = _debug_session_details_from_result(debug_result, allow_ended=allow_ended)
+    if active_details is None:
+        raise ProviderDebugError(
+            "active debug session required",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    active_session_id = active_details.get("debug_session_id")
+    if debug_session_id is not None and active_session_id != debug_session_id:
+        raise ProviderDebugError(
+            "requested debug session is not active",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"requested_debug_session_id": debug_session_id, "active_debug_session_id": active_session_id},
+        )
+    session_path_value = active_details.get("session_path")
+    if type(session_path_value) is not str:
+        raise ProviderDebugError(
+            "active debug session did not record a session path",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    run_dir = store.run_dir(run_id)
+    session_path = _require_run_debug_path(Path(session_path_value), run_dir=run_dir, description="session path")
+    try:
+        session = DebugSession.model_validate_json(session_path.read_text(encoding="utf-8"))
+    except (OSError, ValidationError) as exc:
+        raise ProviderDebugError(
+            "failed to load active debug session",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"session_path": str(session_path), "error": str(exc)},
+        ) from exc
+    if session.run_id != run_id or session.provider_name != "local-qemu-gdbstub":
+        raise ProviderDebugError(
+            "active debug session file does not match run",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={
+                "session_path": str(session_path),
+                "session_run_id": session.run_id,
+                "provider_name": session.provider_name,
+            },
+        )
+    for description, path_value in [
+        ("transcript path", session.transcript_path),
+        ("command metadata path", session.command_metadata_path),
+        ("summary path", session.latest_summary_path),
+    ]:
+        _require_run_debug_path(Path(path_value), run_dir=run_dir, description=description)
+    if session.session_id != active_session_id:
+        raise ProviderDebugError(
+            "active debug session file does not match manifest",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"session_path": str(session_path), "session_id": session.session_id},
+        )
+    if (not allow_ended and session.current_execution_state == "ended") or session.attach_status != "attached":
+        raise ProviderDebugError(
+            "active debug session required",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"debug_session_id": session.session_id},
+        )
+    return session
+
+
+def _debug_operation_response(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None,
+    provider: QemuGdbstubProvider | None,
+    method_name: str,
+    kwargs: dict[str, object],
+    persist_manifest: bool,
+    allow_ended: bool = False,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        manifest_path = store.run_dir(run_id) / "manifest.json"
+        if not manifest_path.is_file():
+            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    provider = provider or QemuGdbstubProvider()
+    redactor = Redactor()
+    try:
+        with store.debug_lock(run_id):
+            session = _load_active_debug_session(store, run_id, debug_session_id, allow_ended=allow_ended)
+            profile = _resolve_debug_profile(
+                profile_name=session.selected_debug_profile,
+                debug_profiles=debug_profiles,
+            )
+            _ensure_debug_operation_enabled(profile, DEBUG_METHOD_OPERATIONS[method_name])
+            result: DebugProviderResult = getattr(provider, method_name)(
+                run_dir=store.run_dir(run_id),
+                session=session,
+                **kwargs,
+            )
+            details = result.details
+            if persist_manifest:
+                details = {
+                    **_debug_session_manifest_details(store=store, run_id=run_id, session=result.session),
+                    **result.details,
+                }
+                terminal = StepResult(
+                    step_name="debug",
+                    status=result.status,
+                    summary=result.summary,
+                    artifacts=result.artifacts,
+                    details=details,
+                )
+                store.record_step_result(run_id, terminal, replace_succeeded=True)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    except ProviderDebugError as exc:
+        return ToolResponse.failure(
+            category=exc.category,
+            message=redactor.redact_text(str(exc)),
+            run_id=run_id,
+            details=redactor.redact_value(exc.details),
+            artifacts=_redacted_artifacts(exc.artifacts, redactor),
+            suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+        )
+
+    safe_details = redactor.redact_value(result.details)
+    safe_artifacts = _redacted_artifacts(result.artifacts, redactor)
+    safe_summary = redactor.redact_text(result.summary)
+    if result.status == StepStatus.SUCCEEDED:
+        return ToolResponse.success(
+            summary=safe_summary,
+            run_id=run_id,
+            data=safe_details,
+            artifacts=safe_artifacts,
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+    return ToolResponse.failure(
+        category=result.error_category or ErrorCategory.DEBUG_ATTACH_FAILURE,
+        message=safe_summary,
+        run_id=run_id,
+        details={
+            **safe_details,
+            "diagnostic": redactor.redact_text(result.diagnostic or ""),
+        },
+        artifacts=safe_artifacts,
+        suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+    )
+
+
+def _debug_read_response(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None,
+    provider: QemuGdbstubProvider | None,
+    method_name: str,
+    kwargs: dict[str, object],
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    return _debug_operation_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name=method_name,
+        kwargs=kwargs,
+        persist_manifest=False,
+        debug_profiles=debug_profiles,
+    )
+
+
+def debug_read_registers_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    registers: list[str],
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    return _debug_read_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="read_registers",
+        kwargs={"registers": registers},
+        debug_profiles=debug_profiles,
+    )
+
+
+def debug_read_symbol_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    symbol: str,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    return _debug_read_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="read_symbol",
+        kwargs={"symbol": symbol},
+        debug_profiles=debug_profiles,
+    )
+
+
+def debug_read_memory_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    address: int,
+    byte_count: int,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    return _debug_read_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="read_memory",
+        kwargs={"address": address, "byte_count": byte_count},
+        debug_profiles=debug_profiles,
+    )
+
+
+def debug_evaluate_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    inspector: str,
+    arguments: dict[str, object] | None = None,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    return _debug_read_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="evaluate",
+        kwargs={"inspector": inspector, "arguments": arguments or {}},
+        debug_profiles=debug_profiles,
+    )
+
+
+def _debug_stateful_response(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None,
+    provider: QemuGdbstubProvider | None,
+    method_name: str,
+    kwargs: dict[str, object],
+    allow_ended: bool = False,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    return _debug_operation_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name=method_name,
+        kwargs=kwargs,
+        persist_manifest=True,
+        allow_ended=allow_ended,
+        debug_profiles=debug_profiles,
+    )
+
+
+def debug_set_breakpoint_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    symbol: str,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="set_breakpoint",
+        kwargs={"symbol": symbol},
+        debug_profiles=debug_profiles,
+    )
+
+
+def debug_clear_breakpoint_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    breakpoint_id: str,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="clear_breakpoint",
+        kwargs={"breakpoint_id": breakpoint_id},
+        debug_profiles=debug_profiles,
+    )
+
+
+def debug_list_breakpoints_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="list_breakpoints",
+        kwargs={},
+        debug_profiles=debug_profiles,
+    )
+
+
+def debug_continue_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    timeout_seconds: int | None = None,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="continue_execution",
+        kwargs={"timeout_seconds": timeout_seconds},
+        debug_profiles=debug_profiles,
+    )
+
+
+def debug_interrupt_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    timeout_seconds: int | None = None,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="interrupt",
+        kwargs={"timeout_seconds": timeout_seconds},
+        debug_profiles=debug_profiles,
+    )
+
+
+def debug_end_session_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="end_session",
+        kwargs={},
+        allow_ended=True,
+        debug_profiles=debug_profiles,
+    )
+
+
 def _bundle_for_manifest(
     *,
     manifest: RunManifest,
@@ -826,6 +1515,7 @@ def _bundle_for_manifest(
     required_kinds_by_step = {
         "build": {"build-log", "kernel-config", "kernel-image"},
         "boot": {"domain-xml", "boot-plan", "console-log", "boot-log"},
+        "debug": {"debug-command-metadata", "debug-session", "debug-summary", "debug-transcript"},
         "run_tests": {"test-summary"},
     }
     optional_kinds_by_step = {"build": {"vmlinux"}}
@@ -883,6 +1573,19 @@ def _bundle_for_manifest(
     return bundle, [*collected_refs, bundle_ref], missing_required, missing_optional
 
 
+def _collection_covers_manifest(*, manifest: RunManifest, collect_result: StepResult) -> bool:
+    collected = {
+        (artifact.path, artifact.kind) for artifact in collect_result.artifacts if artifact.kind != "artifact-bundle"
+    }
+    current = {
+        (artifact.path, artifact.kind)
+        for step_name, result in manifest.step_results.items()
+        if step_name != "collect_artifacts"
+        for artifact in result.artifacts
+    }
+    return current.issubset(collected)
+
+
 def artifacts_collect_handler(
     *,
     artifact_root: Path,
@@ -898,13 +1601,24 @@ def artifacts_collect_handler(
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
     existing = manifest.step_results.get("collect_artifacts")
-    if existing and existing.status == StepStatus.SUCCEEDED and not force_recollect:
+    if (
+        existing
+        and existing.status == StepStatus.SUCCEEDED
+        and not force_recollect
+        and _collection_covers_manifest(manifest=manifest, collect_result=existing)
+    ):
         return _recorded_collect_success_response(run_id=run_id, result=existing)
     try:
         with store.collect_lock(run_id):
             locked_manifest = store.load_manifest(run_id)
             existing = locked_manifest.step_results.get("collect_artifacts")
-            if existing and existing.status == StepStatus.SUCCEEDED and not force_recollect:
+            replace_succeeded = force_recollect or bool(existing and existing.status == StepStatus.SUCCEEDED)
+            if (
+                existing
+                and existing.status == StepStatus.SUCCEEDED
+                and not force_recollect
+                and _collection_covers_manifest(manifest=locked_manifest, collect_result=existing)
+            ):
                 return _recorded_collect_success_response(run_id=run_id, result=existing)
             bundle_path = store.run_dir(run_id) / "summaries" / "artifact-bundle.json"
             bundle, artifacts, missing_required, missing_optional = _bundle_for_manifest(
@@ -929,7 +1643,7 @@ def artifacts_collect_handler(
                 artifacts=artifacts,
                 details={"bundle": bundle, "rollup": bundle["rollup"]},
             )
-            store.record_step_result(run_id, result, replace_succeeded=force_recollect)
+            store.record_step_result(run_id, result, replace_succeeded=replace_succeeded)
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
     redactor = Redactor()
@@ -974,7 +1688,7 @@ def _workflow_failure_response(
     }
     category = response.error.category if response.error else ErrorCategory.INFRASTRUCTURE_FAILURE
     message = response.error.message if response.error else response.summary or f"{failing_step} failed"
-    return ToolResponse.failure(
+    failure_response = ToolResponse.failure(
         category=category,
         message=message,
         run_id=run_id,
@@ -982,6 +1696,8 @@ def _workflow_failure_response(
         artifacts=[*(response.artifacts or []), *((collect_response.artifacts if collect_response else []) or [])],
         suggested_next_actions=["artifacts.get_manifest", "Inspect artifact bundle"],
     )
+    failure_response.data = details
+    return failure_response
 
 
 def workflow_build_boot_test_handler(
@@ -1153,6 +1869,146 @@ def workflow_build_boot_test_handler(
     )
 
 
+def workflow_build_boot_debug_handler(
+    *,
+    artifact_root: Path,
+    source_path: str,
+    build_profile: str,
+    target_profile: str,
+    rootfs_profile: str,
+    run_id: str | None = None,
+    debug_profile: str | None = None,
+    force_rebuild: bool = False,
+    force_reboot: bool = False,
+    new_session: bool = False,
+) -> ToolResponse:
+    if run_id is not None:
+        try:
+            store = ArtifactStore(artifact_root, create_root=False)
+            manifest_path = store.run_dir(run_id) / "manifest.json"
+            if manifest_path.is_file():
+                manifest = store.load_manifest(run_id)
+                resolved_debug_profile = debug_profile if debug_profile is not None else manifest.request.debug_profile
+                try:
+                    resolved_source_path = str(validate_source_path(Path(source_path)))
+                except PathSafetyError as exc:
+                    return ToolResponse.failure(
+                        category=ErrorCategory.CONFIGURATION_ERROR,
+                        message=str(exc),
+                        run_id=run_id,
+                        details={"source_path": source_path},
+                    )
+                expected = {
+                    "source_path": resolved_source_path,
+                    "build_profile": build_profile,
+                    "target_profile": target_profile,
+                    "rootfs_profile": rootfs_profile,
+                    **({"debug_profile": resolved_debug_profile} if manifest.request.debug_profile is not None else {}),
+                }
+                actual = {
+                    "source_path": manifest.request.source_path,
+                    "build_profile": manifest.request.build_profile,
+                    "target_profile": manifest.request.target_profile,
+                    "rootfs_profile": manifest.request.rootfs_profile,
+                    **(
+                        {"debug_profile": manifest.request.debug_profile}
+                        if manifest.request.debug_profile is not None
+                        else {}
+                    ),
+                }
+                mismatches = {
+                    key: {"requested": expected[key], "manifest": actual[key]}
+                    for key in expected
+                    if expected[key] != actual[key]
+                }
+                if mismatches:
+                    return ToolResponse.failure(
+                        category=ErrorCategory.CONFIGURATION_ERROR,
+                        message="immutable run manifest request mismatch",
+                        run_id=run_id,
+                        details={"mismatches": mismatches},
+                    )
+                if manifest.request.debug_profile is not None or debug_profile is None:
+                    debug_profile = resolved_debug_profile
+        except ManifestStateError as exc:
+            return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    if run_id is None or not (artifact_root / run_id / "manifest.json").is_file():
+        create_response = create_run_handler(
+            artifact_root=artifact_root,
+            source_path=source_path,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            run_id=run_id,
+            debug_profile=debug_profile,
+        )
+        if not create_response.ok:
+            return create_response
+        run_id = create_response.run_id
+
+    build_response = kernel_build_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        build_profile=build_profile,
+        force_rebuild=force_rebuild,
+    )
+    if not build_response.ok:
+        return _workflow_failure_response(
+            run_id=run_id,
+            failing_step="build",
+            latest_successful_step=None,
+            response=build_response,
+            collect_response=None,
+        )
+
+    boot_response = target_boot_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        target_profile=target_profile,
+        rootfs_profile=rootfs_profile,
+        force_reboot=force_reboot,
+    )
+    if not boot_response.ok:
+        return _workflow_failure_response(
+            run_id=run_id,
+            failing_step="boot",
+            latest_successful_step="build",
+            response=boot_response,
+            collect_response=None,
+        )
+
+    debug_response = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_profile=debug_profile,
+        new_session=new_session,
+    )
+    if not debug_response.ok:
+        return _workflow_failure_response(
+            run_id=run_id,
+            failing_step="debug",
+            latest_successful_step="boot",
+            response=debug_response,
+            collect_response=None,
+        )
+
+    return ToolResponse.success(
+        summary="build, boot, debug workflow succeeded",
+        run_id=run_id,
+        data={
+            "steps": {
+                "build": build_response.model_dump(mode="json"),
+                "boot": boot_response.model_dump(mode="json"),
+                "debug": debug_response.model_dump(mode="json"),
+            },
+            "latest_successful_step": "debug",
+        },
+        artifacts=debug_response.artifacts,
+        suggested_next_actions=["debug.read_registers", "debug.evaluate", "debug.end_session"],
+    )
+
+
 def not_implemented_handler(tool_name: str, *, run_id: str | None = None) -> ToolResponse:
     sprint_by_prefix = {
         "kernel.build": "Sprint 1",
@@ -1280,6 +2136,160 @@ def create_app() -> FastMCP:
             force_recollect=force_recollect,
         ).model_dump(mode="json")
 
+    @app.tool(name="debug.start_session")
+    def debug_start_session(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_profile: str | None = None,
+        new_session: bool = False,
+    ) -> dict[str, Any]:
+        return debug_start_session_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            debug_profile=debug_profile,
+            new_session=new_session,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.read_registers")
+    def debug_read_registers(
+        run_id: str,
+        registers: list[str],
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_read_registers_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            registers=registers,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.read_symbol")
+    def debug_read_symbol(
+        run_id: str,
+        symbol: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_read_symbol_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            symbol=symbol,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.read_memory")
+    def debug_read_memory(
+        run_id: str,
+        address: int,
+        byte_count: int,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_read_memory_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            address=address,
+            byte_count=byte_count,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.evaluate")
+    def debug_evaluate(
+        run_id: str,
+        inspector: str,
+        arguments: dict[str, object] | None = None,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_evaluate_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            inspector=inspector,
+            arguments=arguments,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.set_breakpoint")
+    def debug_set_breakpoint(
+        run_id: str,
+        symbol: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_set_breakpoint_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            symbol=symbol,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.clear_breakpoint")
+    def debug_clear_breakpoint(
+        run_id: str,
+        breakpoint_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_clear_breakpoint_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            breakpoint_id=breakpoint_id,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.list_breakpoints")
+    def debug_list_breakpoints(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_list_breakpoints_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.continue")
+    def debug_continue(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        return debug_continue_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+            timeout_seconds=timeout_seconds,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.interrupt")
+    def debug_interrupt(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        return debug_interrupt_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+            timeout_seconds=timeout_seconds,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.end_session")
+    def debug_end_session(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_end_session_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
     @app.tool(name="workflow.build_boot_test")
     def workflow_build_boot_test(
         source_path: str,
@@ -1310,27 +2320,31 @@ def create_app() -> FastMCP:
             force_recollect=force_recollect,
         ).model_dump(mode="json")
 
-    def make_stub(bound_tool_name: str):
-        def stub(run_id: str | None = None) -> dict[str, Any]:
-            return not_implemented_handler(bound_tool_name, run_id=run_id).model_dump(mode="json")
-
-        return stub
-
-    for tool_name in [
-        "workflow.build_boot_debug",
-        "debug.start_session",
-        "debug.interrupt",
-        "debug.continue",
-        "debug.set_breakpoint",
-        "debug.clear_breakpoint",
-        "debug.list_breakpoints",
-        "debug.read_registers",
-        "debug.read_symbol",
-        "debug.read_memory",
-        "debug.evaluate",
-        "debug.end_session",
-    ]:
-        app.tool(name=tool_name)(make_stub(tool_name))
+    @app.tool(name="workflow.build_boot_debug")
+    def workflow_build_boot_debug(
+        source_path: str,
+        build_profile: str,
+        target_profile: str,
+        rootfs_profile: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        run_id: str | None = None,
+        debug_profile: str | None = None,
+        force_rebuild: bool = False,
+        force_reboot: bool = False,
+        new_session: bool = False,
+    ) -> dict[str, Any]:
+        return workflow_build_boot_debug_handler(
+            artifact_root=Path(artifact_root),
+            source_path=source_path,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            run_id=run_id,
+            debug_profile=debug_profile,
+            force_rebuild=force_rebuild,
+            force_reboot=force_reboot,
+            new_session=new_session,
+        ).model_dump(mode="json")
 
     return app
 

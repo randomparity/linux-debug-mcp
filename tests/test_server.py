@@ -198,9 +198,9 @@ def test_list_providers_handler_returns_default_capabilities() -> None:
         "local-artifacts",
         "local-kernel-build",
         "local-libvirt-qemu",
+        "local-qemu-gdbstub",
         "local-prereqs",
         "local-ssh-tests",
-        "stub-workflows",
     }
 
 
@@ -228,6 +228,28 @@ def test_not_implemented_handler_returns_structured_error() -> None:
 
 def test_create_app_constructs_fastmcp_server() -> None:
     assert type(create_app()).__name__ == "FastMCP"
+
+
+def test_create_app_registers_sprint_4_tools_as_real_handlers() -> None:
+    app = create_app()
+    tools = app._tool_manager._tools
+    tool_names = set(tools)
+
+    assert "workflow.build_boot_debug" in tool_names
+    assert "debug.start_session" in tool_names
+    assert "debug.read_memory" in tool_names
+    assert "debug.end_session" in tool_names
+    assert tools["workflow.build_boot_debug"].fn.__name__ == "workflow_build_boot_debug"
+    assert "debug_profile" in tools["workflow.build_boot_debug"].parameters["properties"]
+    assert "new_session" in tools["workflow.build_boot_debug"].parameters["properties"]
+    assert tools["debug.start_session"].fn.__name__ == "debug_start_session"
+    assert "debug_profile" in tools["debug.start_session"].parameters["properties"]
+    assert "new_session" in tools["debug.start_session"].parameters["properties"]
+    assert tools["debug.read_memory"].fn.__name__ == "debug_read_memory"
+    assert "address" in tools["debug.read_memory"].parameters["properties"]
+    assert "byte_count" in tools["debug.read_memory"].parameters["properties"]
+    assert tools["debug.end_session"].fn.__name__ == "debug_end_session"
+    assert "debug_session_id" in tools["debug.end_session"].parameters["properties"]
 
 
 def test_target_run_tests_tool_is_registered_with_full_arguments() -> None:

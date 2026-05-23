@@ -23,7 +23,18 @@ from linux_debug_mcp.domain import (
 )
 
 MCP_METADATA_NS = "urn:linux-debug-mcp:domain"
+QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 ElementTree.register_namespace("ldmcp", MCP_METADATA_NS)
+ElementTree.register_namespace("qemu", QEMU_NS)
+
+
+@dataclass(frozen=True)
+class GdbstubEndpoint:
+    host: str
+    port: int
+
+    def as_dict(self) -> dict[str, object]:
+        return {"host": self.host, "port": self.port}
 
 
 @dataclass(frozen=True)
@@ -53,6 +64,9 @@ class BootPlan:
     start_argv: list[str]
     destroy_argv: list[str]
     dumpxml_argv: list[str]
+    debug_gdbstub: bool
+    gdbstub_endpoint: GdbstubEndpoint | None
+    nokaslr_source: Literal["not_applicable", "profile_supplied", "provider_added"]
 
 
 @dataclass(frozen=True)
@@ -116,6 +130,9 @@ class LibvirtRunner(Protocol):
     ) -> ConsoleResult:
         raise NotImplementedError
 
+    def is_tcp_port_available(self, host: str, port: int) -> bool:
+        raise NotImplementedError
+
 
 class SubprocessLibvirtRunner:
     def __init__(self, *, snippet_limit: int = 4096) -> None:
@@ -123,6 +140,17 @@ class SubprocessLibvirtRunner:
 
     def which(self, command: str) -> str | None:
         return shutil.which(command)
+
+    def is_tcp_port_available(self, host: str, port: int) -> bool:
+        import socket
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((host, port))
+            except OSError:
+                return False
+        return True
 
     def run(self, argv: list[str], *, timeout: int, log_path: Path | None = None) -> CommandResult:
         try:
@@ -175,16 +203,24 @@ class SubprocessLibvirtRunner:
         status: Literal["ready", "timeout", "exited"] = "exited"
         matched_marker: str | None = None
         deadline = time.monotonic() + timeout
+        selector: selectors.BaseSelector | None = None
+        if process.stdout is not None:
+            try:
+                selector = selectors.DefaultSelector()
+                selector.register(process.stdout.fileno(), selectors.EVENT_READ)
+            except (AttributeError, OSError, ValueError):
+                if selector is not None:
+                    selector.close()
+                selector = None
         try:
             with output_path.open("w", encoding="utf-8") as output_file:
                 while True:
                     if time.monotonic() >= deadline:
                         status = "timeout"
                         break
-                    line = self._read_console_line(process=process, deadline=deadline)
+                    line = self._read_console_line(process=process, deadline=deadline, selector=selector)
                     if line:
                         output_file.write(line)
-                        output_file.flush()
                         snippet = self._bounded_snippet(snippet + line)
                         if readiness_marker in line or readiness_marker in snippet:
                             status = "ready"
@@ -196,6 +232,8 @@ class SubprocessLibvirtRunner:
                         break
                     time.sleep(0.05)
         finally:
+            if selector is not None:
+                selector.close()
             self._terminate_process(process)
         return ConsoleResult(
             status=status,
@@ -217,22 +255,29 @@ class SubprocessLibvirtRunner:
     def _bounded_snippet(self, text: str) -> str:
         return text[-self.snippet_limit :]
 
-    def _read_console_line(self, *, process: subprocess.Popen[str], deadline: float) -> str:
+    def _read_console_line(
+        self,
+        *,
+        process: subprocess.Popen[str],
+        deadline: float,
+        selector: selectors.BaseSelector | None,
+    ) -> str:
         if process.stdout is None:
             return ""
+        timeout = max(min(deadline - time.monotonic(), 0.05), 0)
+        if selector is not None:
+            if not selector.select(timeout):
+                return ""
+            return os.read(process.stdout.fileno(), 4096).decode("utf-8", errors="replace")
         try:
             file_number = process.stdout.fileno()
         except (AttributeError, OSError):
             return process.stdout.readline()
-        timeout = max(min(deadline - time.monotonic(), 0.05), 0)
-        selector = selectors.DefaultSelector()
-        try:
-            selector.register(file_number, selectors.EVENT_READ)
-            if not selector.select(timeout):
+        with selectors.DefaultSelector() as fallback_selector:
+            fallback_selector.register(file_number, selectors.EVENT_READ)
+            if not fallback_selector.select(timeout):
                 return ""
             return os.read(file_number, 4096).decode("utf-8", errors="replace")
-        finally:
-            selector.close()
 
     def _terminate_process(self, process: subprocess.Popen[str]) -> None:
         try:
@@ -278,7 +323,18 @@ class LibvirtQemuProvider:
         rootfs_path = self._resolve_existing_path(rootfs_profile.source, description="rootfs source path")
         resolved_run_dir = self._resolve_existing_path(run_dir, description="run directory")
 
-        kernel_args = self._kernel_args(target_profile.kernel_args)
+        kernel_args, nokaslr_source = self._debug_kernel_args(
+            target_profile.kernel_args,
+            target_profile.debug_gdbstub,
+        )
+        gdbstub_endpoint = None
+        if target_profile.debug_gdbstub:
+            gdbstub_endpoint = self._parse_gdbstub_endpoint(target_profile.gdbstub_endpoint)
+            if not self.runner.is_tcp_port_available(gdbstub_endpoint.host, gdbstub_endpoint.port):
+                raise ProviderBootError(
+                    "gdbstub endpoint is already in use",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                )
         domain_name = target_profile.target_ref
         libvirt_uri = target_profile.libvirt_uri
         if domain_name is None or libvirt_uri is None:
@@ -323,6 +379,9 @@ class LibvirtQemuProvider:
             start_argv=[*virsh_prefix, "start", domain_name],
             destroy_argv=[*virsh_prefix, "destroy", domain_name],
             dumpxml_argv=[*virsh_prefix, "dumpxml", domain_name],
+            debug_gdbstub=target_profile.debug_gdbstub,
+            gdbstub_endpoint=gdbstub_endpoint,
+            nokaslr_source=nokaslr_source,
         )
 
     def execute_boot(
@@ -407,6 +466,9 @@ class LibvirtQemuProvider:
             "console_snippet": console.snippet,
             "started_at": console.started_at.isoformat(),
             "ended_at": console.ended_at.isoformat(),
+            "debug_boot": plan.debug_gdbstub,
+            "gdbstub_endpoint": plan.gdbstub_endpoint.as_dict() if plan.gdbstub_endpoint else None,
+            "nokaslr_source": plan.nokaslr_source,
         }
         if console.status == "ready":
             return self._boot_result(
@@ -461,6 +523,15 @@ class LibvirtQemuProvider:
         console = ElementTree.SubElement(devices, "console", {"type": "pty"})
         ElementTree.SubElement(console, "target", {"type": "serial", "port": "0"})
 
+        if plan.debug_gdbstub and plan.gdbstub_endpoint is not None:
+            qemu_commandline = ElementTree.SubElement(domain, f"{{{QEMU_NS}}}commandline")
+            ElementTree.SubElement(qemu_commandline, f"{{{QEMU_NS}}}arg", {"value": "-gdb"})
+            ElementTree.SubElement(
+                qemu_commandline,
+                f"{{{QEMU_NS}}}arg",
+                {"value": f"tcp:{plan.gdbstub_endpoint.host}:{plan.gdbstub_endpoint.port},server=on,wait=off"},
+            )
+
         return ElementTree.tostring(domain, encoding="unicode")
 
     def validate_existing_domain_ownership(self, plan: BootPlan, domain_xml: str) -> None:
@@ -502,8 +573,6 @@ class LibvirtQemuProvider:
             raise self._configuration_error(
                 f"target_ref must start with managed_domain_prefix {target_profile.managed_domain_prefix!r}"
             )
-        if target_profile.debug_gdbstub:
-            raise self._configuration_error("debug_gdbstub is not supported")
         if target_profile.libvirt_uri is None:
             raise self._configuration_error("libvirt_uri is required")
         if target_profile.cleanup_policy not in {"preserve_on_failure", "stop_on_failure"}:
@@ -523,6 +592,33 @@ class LibvirtQemuProvider:
         if not self._contains_arg(args, "console"):
             args.append(f"console={self.serial_device}")
         return args
+
+    def _parse_gdbstub_endpoint(self, endpoint: str) -> GdbstubEndpoint:
+        if any(char.isspace() for char in endpoint) or any(char in endpoint for char in "<>$;&|?/#"):
+            raise self._configuration_error("unsafe gdbstub endpoint syntax")
+        host, separator, port_text = endpoint.rpartition(":")
+        if separator == "" or host not in {"127.0.0.1", "localhost"}:
+            raise self._configuration_error("gdbstub endpoint must bind to localhost")
+        try:
+            port = int(port_text)
+        except ValueError as exc:
+            raise self._configuration_error("gdbstub endpoint port must be an integer") from exc
+        if port < 1 or port > 65535:
+            raise self._configuration_error("gdbstub endpoint port must be in 1..65535")
+        normalized_host = "127.0.0.1" if host == "localhost" else host
+        return GdbstubEndpoint(host=normalized_host, port=port)
+
+    def _debug_kernel_args(
+        self,
+        configured_args: list[str],
+        debug_enabled: bool,
+    ) -> tuple[list[str], Literal["not_applicable", "profile_supplied", "provider_added"]]:
+        args = self._kernel_args(configured_args)
+        if not debug_enabled:
+            return args, "not_applicable"
+        if "nokaslr" in args:
+            return args, "profile_supplied"
+        return [*args, "nokaslr"], "provider_added"
 
     def _validate_kernel_args(self, args: list[str]) -> None:
         for arg in args:
@@ -567,6 +663,9 @@ class LibvirtQemuProvider:
             "timeout_seconds": plan.timeout_seconds,
             "readiness_marker": plan.readiness_marker,
             "cleanup_policy": plan.cleanup_policy,
+            "debug_boot": plan.debug_gdbstub,
+            "gdbstub_endpoint": plan.gdbstub_endpoint.as_dict() if plan.gdbstub_endpoint else None,
+            "nokaslr_source": plan.nokaslr_source,
             "ownership": plan.ownership,
             "define_argv": plan.define_argv,
             "start_argv": plan.start_argv,
@@ -599,6 +698,13 @@ class LibvirtQemuProvider:
     def _existing_artifacts(self, artifacts: list[ArtifactRef]) -> list[ArtifactRef]:
         return [artifact for artifact in artifacts if Path(artifact.path).exists()]
 
+    def _debug_details(self, plan: BootPlan) -> dict[str, object]:
+        return {
+            "debug_boot": plan.debug_gdbstub,
+            "gdbstub_endpoint": plan.gdbstub_endpoint.as_dict() if plan.gdbstub_endpoint else None,
+            "nokaslr_source": plan.nokaslr_source,
+        }
+
     def _boot_result(
         self,
         *,
@@ -613,12 +719,13 @@ class LibvirtQemuProvider:
         artifact_list = artifacts or []
         if not any(artifact.path == str(plan.boot_summary_path) for artifact in artifact_list):
             artifact_list = [*artifact_list, ArtifactRef(path=str(plan.boot_summary_path), kind="boot-summary")]
+        result_details = {**(details or {}), **self._debug_details(plan)}
         payload = {
             "status": status,
             "summary": summary,
             "error_category": error_category,
             "diagnostic": diagnostic,
-            "details": details or {},
+            "details": result_details,
             "artifacts": [artifact.model_dump(mode="json") for artifact in artifact_list],
         }
         plan.boot_summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -627,7 +734,7 @@ class LibvirtQemuProvider:
             status=status,
             summary=summary,
             artifacts=artifact_list,
-            details=details or {},
+            details=result_details,
             error_category=error_category,
             diagnostic=diagnostic,
         )
