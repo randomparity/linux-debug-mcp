@@ -190,6 +190,20 @@ def test_kernel_build_existing_running_state_takes_precedence_over_missing_sourc
     assert "previous build is still recorded as running" in response.error.message
 
 
+def test_kernel_build_existing_build_lock_returns_failure(tmp_path: Path) -> None:
+    _, artifact_root = create_run(tmp_path)
+    from linux_debug_mcp.artifacts.store import ArtifactStore
+
+    store = ArtifactStore(artifact_root, create_root=False)
+    with store.build_lock("run-abc123"):
+        response = kernel_build_handler(artifact_root=artifact_root, run_id="run-abc123")
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "infrastructure_failure"
+    assert "build is locked" in response.error.message
+
+
 def test_kernel_build_unexpected_provider_exception_records_failed_result(tmp_path: Path) -> None:
     _, artifact_root = create_run(tmp_path)
     from linux_debug_mcp.artifacts.store import ArtifactStore
