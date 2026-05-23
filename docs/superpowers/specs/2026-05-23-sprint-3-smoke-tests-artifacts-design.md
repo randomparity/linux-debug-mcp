@@ -66,24 +66,36 @@ captured by the SSH test provider as part of `target.run_tests`.
 
 ## Profile Model
 
-Sprint 3 should add a small `TestSuiteProfile` model:
+Sprint 3 should add a small `TestSuiteProfile` model and a command model.
+
+`TestCommand` should support:
+
+- `name`: stable, filesystem-safe command label used in artifact paths.
+- `argv`: non-empty ordered command arguments.
+- `timeout_seconds`: optional per-command timeout override.
+- `required`: whether a nonzero exit or timeout fails the `run_tests` step.
+
+`TestSuiteProfile` should support:
 
 - `name`: stable profile key.
-- `commands`: ordered list of smoke commands.
+- `commands`: ordered list of `TestCommand` entries.
 - `timeout_seconds`: per-command timeout.
 - `stop_on_failure`: whether to stop after the first failing command.
 - `collect_dmesg`: whether to run `dmesg` after commands.
-- `required`: whether a failed command makes the step fail.
 
-Commands should be represented as argv lists, not shell strings. The first
-implementation may run commands through SSH as:
+Commands should be represented as argv lists in configuration and MCP requests.
+OpenSSH still executes the remote command through the user's login shell, so the
+provider must not claim end-to-end shell-free execution. The provider should
+construct a single remote command string by POSIX-quoting each argv element with
+`shlex.quote()` and passing the local SSH invocation with `shell=False`:
 
 ```text
-ssh <options> <user>@<host> -- <command argv...>
+ssh <options> <user>@<host> -- '<quoted remote command>'
 ```
 
-This keeps command planning explicit and avoids local shell expansion. If a
-future suite needs shell semantics, it should use an explicit command such as
+This keeps command intent structured, avoids local shell expansion, and makes
+the remote-shell boundary explicit. If a suite needs shell semantics such as
+pipes or redirection, it must use an explicit command such as
 `["sh", "-lc", "..."]` in the profile.
 
 `RootfsProfile` should grow the SSH fields needed by the local provider:
@@ -96,6 +108,55 @@ future suite needs shell semantics, it should use an explicit command such as
 
 The provider should reject SSH test execution when the selected rootfs profile
 does not declare `access_method` as `ssh` or `ssh_and_serial`.
+
+Sprint 3 uses statically configured SSH reachability. It does not discover guest
+IP addresses from libvirt leases, parse console output for addresses, or create
+host port forwards. If `ssh_host` is absent, the provider fails with
+`configuration_error` and points the caller to the rootfs profile.
+
+Sprint 3 should allow only these profile-owned SSH options:
+
+- `ConnectTimeout`
+- `IdentitiesOnly`
+- `LogLevel`
+- `StrictHostKeyChecking`
+
+Allowed values are constrained:
+
+- `ConnectTimeout`: integer seconds between 1 and the command timeout.
+- `IdentitiesOnly`: `yes` or `no`.
+- `LogLevel`: `ERROR`, `QUIET`, or `VERBOSE`.
+- `StrictHostKeyChecking`: `accept-new` or `yes`.
+
+The provider should always set these provider-owned options:
+
+- `BatchMode=yes`
+- `ConnectTimeout=<min(command timeout, 10)>` when the profile omits
+  `ConnectTimeout`
+- `StrictHostKeyChecking=accept-new` when the profile omits
+  `StrictHostKeyChecking`
+- `UserKnownHostsFile=<run>/target/known_hosts`
+
+These defaults prevent password prompts, bound connection setup, avoid writing
+to the developer's personal `known_hosts`, and still detect changed host keys
+after the first connection for a run. `BatchMode` and `UserKnownHostsFile` are
+not profile-overridable in Sprint 3. Unknown options, invalid option values,
+empty option names, and option names containing whitespace or control characters
+are `configuration_error`.
+
+## Default Smoke Suite
+
+The default pilot smoke suite should be named `smoke-basic` and contain these
+required commands:
+
+1. `["uname", "-a"]`
+2. `["test", "-r", "/proc/version"]`
+3. `["cat", "/proc/cmdline"]`
+
+The suite default timeout is 30 seconds per command, `stop_on_failure=true`, and
+`collect_dmesg=true`. This suite proves that SSH command execution works, the
+guest exposes normal procfs state, and the captured kernel command line can be
+compared with the boot plan.
 
 ## SSH Test Provider
 
@@ -124,6 +185,13 @@ may include a key file path in argv only after redaction has a chance to mask it
 from returned snippets and summaries. Raw key contents must never be read into
 the manifest, summaries, or MCP responses.
 
+`dmesg` collection is diagnostic, not a smoke-test assertion, in Sprint 3. If
+the configured suite has `collect_dmesg=true` and `dmesg` exits nonzero because
+of guest permissions or kernel restrictions, `target.run_tests` should still use
+the required smoke command results to decide pass/fail. The dmesg failure should
+be recorded in the test summary with stdout, stderr, exit status, and an
+artifact reference when output files were created.
+
 ## Test Execution Behavior
 
 `target.run_tests` accepts:
@@ -145,8 +213,9 @@ The handler must validate:
 5. ad hoc commands are non-empty argv lists and contain no control characters
 
 If both a named suite and ad hoc commands are provided, the handler should run
-the named suite first and then the ad hoc commands. If neither is provided and
-the run has no suite, the handler should use the default pilot smoke suite.
+the named suite first and then the ad hoc commands. Ad hoc commands are treated
+as required and get generated labels such as `adhoc-001`. If neither is provided
+and the run has no suite, the handler should use the default pilot smoke suite.
 
 Idempotency rules:
 
@@ -156,11 +225,17 @@ Idempotency rules:
 - A running `run_tests` result returns a structured running response while the
   test lock is held by another process.
 - `force_rerun=true` replaces a succeeded `run_tests` result but does not delete
-  prior test artifacts; new output files should include stable sequence numbers
-  or a rerun attempt directory.
+  prior test artifacts; new output files must be written under the next
+  `tests/attempt-NNN/` directory.
 
 The step succeeds only when all required commands exit zero. Optional commands
 may fail and be reported in the summary without failing the step.
+
+The artifact store should add a `tests_lock(run_id)` that follows the existing
+build and boot lock pattern. Stale recorded `running` test steps may be converted
+to failed only after the caller acquires the tests lock, because lock ownership
+is the only Sprint 3 evidence that no other local process is still writing test
+artifacts.
 
 ## Artifact Layout
 
@@ -196,9 +271,10 @@ Expected test artifact kinds:
 Expected collection artifact kinds:
 
 - `artifact-bundle`
-- existing `build-log`, `kernel-config`, `kernel-image`, `vmlinux`
-- existing `domain-xml`, `boot-plan`, `console-log`, `boot-log`
-- existing test artifacts
+- required build artifacts: `build-log`, `kernel-config`, `kernel-image`
+- optional build artifacts: `vmlinux`
+- required boot artifacts: `domain-xml`, `boot-plan`, `console-log`, `boot-log`
+- existing test artifacts from the latest `run_tests` result
 
 `artifacts.collect` should write a machine-readable bundle with:
 
@@ -208,11 +284,34 @@ Expected collection artifact kinds:
 - step statuses and summaries
 - artifact references grouped by step
 - missing expected artifacts
+- optional expected artifacts that were absent
 - cleanup state
 - concise pass/fail rollup
 
 It should not copy large artifacts in Sprint 3. The bundle is an index over the
 durable run workspace and manifest references.
+
+Required artifact checks are step-aware. For each step that has a recorded
+`succeeded` result, `artifacts.collect` should verify that every artifact
+reference recorded by that step still exists. For each step that has a recorded
+`failed` result, collection should include whatever artifacts the failed step
+recorded and list missing references, but missing files from a failed step do
+not make collection fail. Pending, skipped, and absent steps are listed by
+status and do not create required artifact expectations. Missing required
+artifacts from succeeded steps make `artifacts.collect` fail with
+`infrastructure_failure` because the bundle cannot prove a previously successful
+step. Missing optional artifacts are listed in the bundle but do not fail
+collection.
+
+Collection idempotency rules:
+
+- A succeeded `collect_artifacts` result is returned as recorded unless
+  `force_recollect=true`.
+- `force_recollect=true` rewrites `summaries/artifact-bundle.json` from the
+  current manifest and current filesystem evidence.
+- A failed `collect_artifacts` result may be retried.
+- Collection uses a `collect_lock(run_id)` so two callers cannot write the
+  bundle concurrently.
 
 ## Workflow Behavior
 
@@ -236,13 +335,20 @@ The workflow should:
 1. create a run when `run_id` is omitted or the run does not exist
 2. load an existing run when `run_id` is supplied and exists
 3. call `kernel.build`
-4. stop and return the build failure if build fails
+4. call `artifacts.collect` and return the build failure if build fails
 5. call `target.boot`
-6. stop and return the boot failure if boot fails
+6. call `artifacts.collect` and return the boot failure if boot fails
 7. call `target.run_tests`
 8. call `artifacts.collect` even when tests fail, so failed-run evidence is
    indexed
 9. return a concise workflow summary with artifact bundle path
+
+When `run_id` is supplied and already exists, the workflow must compare the
+existing manifest request with the supplied source path, build profile, target
+profile, rootfs profile, and test suite. Any mismatch is a
+`configuration_error`; the workflow must not reinterpret an existing run ID as a
+new request. When `run_id` is supplied and does not exist, creation uses that
+exact run ID after the normal run ID validation.
 
 The workflow should not hide intermediate failure details. The final response
 should include the failing step, its error category, the latest successful step,
@@ -279,8 +385,11 @@ pass/fail rollup. Long logs remain on disk.
 
 Sprint 3 must preserve the existing safety posture:
 
-- command argv lists are planned without shell expansion
+- local SSH argv lists are planned without shell expansion
+- remote SSH commands are POSIX-quoted from argv lists before crossing the
+  remote shell boundary
 - SSH options are validated as simple option names and values
+- only the explicitly listed SSH options are accepted
 - credential references are recorded by reference, never by value
 - returned snippets are redacted before entering MCP responses
 - summaries avoid raw secret-bearing values
@@ -297,12 +406,14 @@ Unit tests should cover:
 - `TestSuiteProfile` validation
 - rootfs SSH profile validation
 - SSH argv planning with and without key references
+- rejection of unknown SSH options
 - missing `ssh`
 - successful command execution
 - command failure with `stop_on_failure=true`
 - command failure with optional commands
 - timeout behavior
 - dmesg collection success and failure
+- default `smoke-basic` suite behavior
 - test artifact layout
 - `target.run_tests` idempotency and `force_rerun`
 - `artifacts.collect` bundle contents
