@@ -260,3 +260,13 @@ def test_artifacts_collect_tool_is_registered_with_force_recollect() -> None:
     assert "artifacts.collect" in tool_names()
     assert "force_recollect" in tool.parameters["properties"]
     assert tool.fn.__name__ == "artifacts_collect"
+
+
+def test_workflow_build_boot_test_tool_is_registered_with_force_flags() -> None:
+    app = create_app()
+    tool = app._tool_manager._tools["workflow.build_boot_test"]
+
+    assert "workflow.build_boot_test" in tool_names()
+    assert "force_rerun_tests" in tool.parameters["properties"]
+    assert "force_recollect" in tool.parameters["properties"]
+    assert tool.fn.__name__ == "workflow_build_boot_test"

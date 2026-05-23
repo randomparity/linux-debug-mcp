@@ -48,7 +48,6 @@ class ProviderRegistry:
             sprint0_capability(
                 name="stub-workflows",
                 operations=[
-                    "workflow.build_boot_test",
                     "workflow.build_boot_debug",
                     "debug.start_session",
                     "debug.interrupt",

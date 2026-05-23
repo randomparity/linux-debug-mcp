@@ -1272,6 +1272,36 @@ def create_app() -> FastMCP:
             force_recollect=force_recollect,
         ).model_dump(mode="json")
 
+    @app.tool(name="workflow.build_boot_test")
+    def workflow_build_boot_test(
+        source_path: str,
+        build_profile: str,
+        target_profile: str,
+        rootfs_profile: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        run_id: str | None = None,
+        test_suite: str | None = None,
+        commands: list[list[str]] | None = None,
+        force_rebuild: bool = False,
+        force_reboot: bool = False,
+        force_rerun_tests: bool = False,
+        force_recollect: bool = False,
+    ) -> dict[str, Any]:
+        return workflow_build_boot_test_handler(
+            artifact_root=Path(artifact_root),
+            source_path=source_path,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            run_id=run_id,
+            test_suite=test_suite,
+            commands=commands,
+            force_rebuild=force_rebuild,
+            force_reboot=force_reboot,
+            force_rerun_tests=force_rerun_tests,
+            force_recollect=force_recollect,
+        ).model_dump(mode="json")
+
     def make_stub(bound_tool_name: str):
         def stub(run_id: str | None = None) -> dict[str, Any]:
             return not_implemented_handler(bound_tool_name, run_id=run_id).model_dump(mode="json")
@@ -1279,7 +1309,6 @@ def create_app() -> FastMCP:
         return stub
 
     for tool_name in [
-        "workflow.build_boot_test",
         "workflow.build_boot_debug",
         "debug.start_session",
         "debug.interrupt",
