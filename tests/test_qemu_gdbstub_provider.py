@@ -577,6 +577,31 @@ def test_read_memory_enforces_4096_byte_limit(tmp_path: Path) -> None:
     assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
 
 
+def test_breakpoint_operations_require_attached_controller(tmp_path: Path) -> None:
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+    session = provider.write_session_for_test(tmp_path, state="stopped", controller_mode="batch")
+
+    with pytest.raises(ProviderDebugError, match="attached controller"):
+        provider.set_breakpoint(run_dir=tmp_path, session=session, symbol="start_kernel")
+
+
+def test_end_session_is_idempotent_when_controller_already_exited(tmp_path: Path) -> None:
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+    session = provider.write_session_for_test(
+        tmp_path,
+        state="stopped",
+        controller_mode="attached",
+        pid=999999,
+    )
+
+    first = provider.end_session(run_dir=tmp_path, session=session)
+    second = provider.end_session(run_dir=tmp_path, session=first.session)
+
+    assert first.session.current_execution_state == "ended"
+    assert first.session.controller_last_observed_state == "exited"
+    assert second.session.current_execution_state == "ended"
+
+
 def test_read_operation_transcript_write_failure_is_provider_error(tmp_path: Path) -> None:
     provider = QemuGdbstubProvider(runner=ExplodingGdbRunner())
     session = provider.write_session_for_test(tmp_path, state="stopped")

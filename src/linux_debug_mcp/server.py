@@ -222,6 +222,34 @@ def _active_debug_session_from_result(result: StepResult) -> dict[str, Any] | No
     return result.details
 
 
+def _debug_session_details_from_result(result: StepResult, *, allow_ended: bool = False) -> dict[str, Any] | None:
+    if result.status != StepStatus.SUCCEEDED:
+        return None
+    if not allow_ended and result.details.get("current_execution_state") == "ended":
+        return None
+    return result.details
+
+
+def _debug_session_manifest_details(*, store: ArtifactStore, run_id: str, session: DebugSession) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "debug_session_id": session.session_id,
+        "session_path": str(store.run_dir(run_id) / "debug" / "sessions" / f"{session.session_id}.json"),
+        "current_execution_state": session.current_execution_state,
+        "gdbstub_endpoint": session.gdbstub_endpoint,
+        "transcript_path": session.transcript_path,
+        "command_metadata_path": session.command_metadata_path,
+        "latest_summary_path": session.latest_summary_path,
+        "symbol_identity_validation": session.symbol_identity_validation,
+        "breakpoints": session.breakpoints,
+        "controller_mode": session.controller_mode,
+        "active_controller_pid": session.active_controller_pid,
+        "controller_last_observed_state": session.controller_last_observed_state,
+    }
+    if session.ended_at is not None:
+        details["ended_at"] = session.ended_at
+    return details
+
+
 def _debug_build_metadata(
     build_result: StepResult, *, kernel_image: ArtifactRef, vmlinux: ArtifactRef
 ) -> dict[str, Any]:
@@ -991,16 +1019,7 @@ def debug_start_session_handler(
                     artifacts=_redacted_artifacts(exc.artifacts, redactor),
                     suggested_next_actions=["artifacts.get_manifest"],
                 )
-            details = {
-                "debug_session_id": result.session.session_id,
-                "session_path": str(store.run_dir(run_id) / "debug" / "sessions" / f"{result.session.session_id}.json"),
-                "current_execution_state": result.session.current_execution_state,
-                "gdbstub_endpoint": result.session.gdbstub_endpoint,
-                "transcript_path": result.session.transcript_path,
-                "command_metadata_path": result.session.command_metadata_path,
-                "latest_summary_path": result.session.latest_summary_path,
-                "symbol_identity_validation": result.session.symbol_identity_validation,
-            }
+            details = _debug_session_manifest_details(store=store, run_id=run_id, session=result.session)
             terminal = StepResult(
                 step_name="debug",
                 status=result.status,
@@ -1037,6 +1056,8 @@ def _load_active_debug_session(
     store: ArtifactStore,
     run_id: str,
     debug_session_id: str | None = None,
+    *,
+    allow_ended: bool = False,
 ) -> DebugSession:
     manifest = store.load_manifest(run_id)
     debug_result = manifest.step_results.get("debug")
@@ -1045,7 +1066,7 @@ def _load_active_debug_session(
             "active debug session required",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    active_details = _active_debug_session_from_result(debug_result)
+    active_details = _debug_session_details_from_result(debug_result, allow_ended=allow_ended)
     if active_details is None:
         raise ProviderDebugError(
             "active debug session required",
@@ -1096,7 +1117,7 @@ def _load_active_debug_session(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"session_path": str(session_path), "session_id": session.session_id},
         )
-    if session.current_execution_state == "ended" or session.attach_status != "attached":
+    if (not allow_ended and session.current_execution_state == "ended") or session.attach_status != "attached":
         raise ProviderDebugError(
             "active debug session required",
             category=ErrorCategory.CONFIGURATION_ERROR,
@@ -1238,6 +1259,188 @@ def debug_evaluate_handler(
         provider=provider,
         method_name="evaluate",
         kwargs={"inspector": inspector, "arguments": arguments or {}},
+    )
+
+
+def _debug_stateful_response(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None,
+    provider: QemuGdbstubProvider | None,
+    method_name: str,
+    kwargs: dict[str, object],
+    allow_ended: bool = False,
+) -> ToolResponse:
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        manifest_path = store.run_dir(run_id) / "manifest.json"
+        if not manifest_path.is_file():
+            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    provider = provider or QemuGdbstubProvider()
+    redactor = Redactor()
+    try:
+        with store.debug_lock(run_id):
+            session = _load_active_debug_session(store, run_id, debug_session_id, allow_ended=allow_ended)
+            result: DebugProviderResult = getattr(provider, method_name)(
+                run_dir=store.run_dir(run_id),
+                session=session,
+                **kwargs,
+            )
+            details = {
+                **_debug_session_manifest_details(store=store, run_id=run_id, session=result.session),
+                **result.details,
+            }
+            terminal = StepResult(
+                step_name="debug",
+                status=result.status,
+                summary=result.summary,
+                artifacts=result.artifacts,
+                details=details,
+            )
+            store.record_step_result(run_id, terminal, replace_succeeded=True)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    except ProviderDebugError as exc:
+        return ToolResponse.failure(
+            category=exc.category,
+            message=redactor.redact_text(str(exc)),
+            run_id=run_id,
+            details=redactor.redact_value(exc.details),
+            artifacts=_redacted_artifacts(exc.artifacts, redactor),
+            suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+        )
+
+    safe_details = redactor.redact_value(details)
+    safe_artifacts = _redacted_artifacts(result.artifacts, redactor)
+    safe_summary = redactor.redact_text(result.summary)
+    if result.status == StepStatus.SUCCEEDED:
+        return ToolResponse.success(
+            summary=safe_summary,
+            run_id=run_id,
+            data=safe_details,
+            artifacts=safe_artifacts,
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+    return ToolResponse.failure(
+        category=result.error_category or ErrorCategory.DEBUG_ATTACH_FAILURE,
+        message=safe_summary,
+        run_id=run_id,
+        details={
+            **safe_details,
+            "diagnostic": redactor.redact_text(result.diagnostic or ""),
+        },
+        artifacts=safe_artifacts,
+        suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+    )
+
+
+def debug_set_breakpoint_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    symbol: str,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="set_breakpoint",
+        kwargs={"symbol": symbol},
+    )
+
+
+def debug_clear_breakpoint_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    breakpoint_id: str,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="clear_breakpoint",
+        kwargs={"breakpoint_id": breakpoint_id},
+    )
+
+
+def debug_list_breakpoints_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="list_breakpoints",
+        kwargs={},
+    )
+
+
+def debug_continue_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    timeout_seconds: int | None = None,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="continue_execution",
+        kwargs={"timeout_seconds": timeout_seconds},
+    )
+
+
+def debug_interrupt_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    timeout_seconds: int | None = None,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="interrupt",
+        kwargs={"timeout_seconds": timeout_seconds},
+    )
+
+
+def debug_end_session_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None = None,
+    provider: QemuGdbstubProvider | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name="end_session",
+        kwargs={},
+        allow_ended=True,
     )
 
 
@@ -1778,6 +1981,86 @@ def create_app() -> FastMCP:
             debug_session_id=debug_session_id,
         ).model_dump(mode="json")
 
+    @app.tool(name="debug.set_breakpoint")
+    def debug_set_breakpoint(
+        run_id: str,
+        symbol: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_set_breakpoint_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            symbol=symbol,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.clear_breakpoint")
+    def debug_clear_breakpoint(
+        run_id: str,
+        breakpoint_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_clear_breakpoint_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            breakpoint_id=breakpoint_id,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.list_breakpoints")
+    def debug_list_breakpoints(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_list_breakpoints_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.continue")
+    def debug_continue(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        return debug_continue_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+            timeout_seconds=timeout_seconds,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.interrupt")
+    def debug_interrupt(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        return debug_interrupt_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+            timeout_seconds=timeout_seconds,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.end_session")
+    def debug_end_session(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_end_session_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
     @app.tool(name="workflow.build_boot_test")
     def workflow_build_boot_test(
         source_path: str,
@@ -1816,12 +2099,6 @@ def create_app() -> FastMCP:
 
     for tool_name in [
         "workflow.build_boot_debug",
-        "debug.interrupt",
-        "debug.continue",
-        "debug.set_breakpoint",
-        "debug.clear_breakpoint",
-        "debug.list_breakpoints",
-        "debug.end_session",
     ]:
         app.tool(name=tool_name)(make_stub(tool_name))
 

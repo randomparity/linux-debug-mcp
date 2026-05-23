@@ -4,7 +4,7 @@ from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import DebugProfile
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
 from linux_debug_mcp.providers.qemu_gdbstub import DebugProviderResult, DebugSession, ProviderDebugError
-from linux_debug_mcp.server import debug_read_memory_handler, debug_start_session_handler
+from linux_debug_mcp.server import debug_end_session_handler, debug_read_memory_handler, debug_start_session_handler
 
 
 class FakeDebugProvider:
@@ -67,6 +67,28 @@ class FakeDebugProvider:
                 "bytes": ["0x12", "0x34"],
                 "stdout_snippet": "0x1000:\t0x12\t0x34\n",
             },
+        )
+
+    def end_session(self, **kwargs):
+        self.calls += 1
+        self.call_kwargs.append(kwargs)
+        session = kwargs["session"].model_copy(
+            update={
+                "current_execution_state": "ended",
+                "ended_at": "2026-05-23T00:01:00+00:00",
+            }
+        )
+        return DebugProviderResult(
+            status=StepStatus.SUCCEEDED,
+            summary="debug session ended",
+            session=session,
+            artifacts=[
+                ArtifactRef(
+                    path=str(kwargs["run_dir"] / "debug" / "sessions" / f"{session.session_id}.json"),
+                    kind="debug-session",
+                ),
+            ],
+            details={"debug_session_id": session.session_id, "current_execution_state": "ended"},
         )
 
 
@@ -312,3 +334,27 @@ def test_debug_read_memory_rejects_session_paths_outside_run_debug_dir(tmp_path:
     assert response.ok is False
     assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert provider.calls == 1
+
+
+def test_debug_end_session_finalizes_manifest_state(tmp_path: Path) -> None:
+    artifact_root, run_id = create_debug_ready_run(tmp_path)
+    provider = FakeDebugProvider()
+    start = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=provider,
+        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
+    )
+    assert start.ok is True
+
+    response = debug_end_session_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=start.data["debug_session_id"],
+        provider=provider,
+    )
+
+    assert response.ok is True
+    assert response.data["current_execution_state"] == "ended"
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest(run_id)
+    assert manifest.step_results["debug"].details["current_execution_state"] == "ended"

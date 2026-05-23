@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import errno
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 import uuid
 from dataclasses import dataclass, field
@@ -183,7 +186,14 @@ class QemuGdbstubProvider:
         self.runner = runner or SubprocessGdbRunner()
         self.redactor = redactor or Redactor()
 
-    def write_session_for_test(self, run_dir: Path, *, state: str = "stopped") -> DebugSession:
+    def write_session_for_test(
+        self,
+        run_dir: Path,
+        *,
+        state: str = "stopped",
+        controller_mode: Literal["batch", "attached"] = "batch",
+        pid: int | None = None,
+    ) -> DebugSession:
         debug_dir = run_dir / "debug"
         session_id = "debug-test"
         session_path = debug_dir / "sessions" / f"{session_id}.json"
@@ -207,6 +217,9 @@ class QemuGdbstubProvider:
             attach_status="attached",
             started_at=datetime.now(UTC).isoformat(),
             current_execution_state=state,  # type: ignore[arg-type]
+            controller_mode=controller_mode,
+            active_controller_pid=pid,
+            controller_last_observed_state="running" if pid is not None else "not_started",
             transcript_path=str(transcript_path),
             command_metadata_path=str(command_metadata_path),
             latest_summary_path=str(latest_summary_path),
@@ -520,6 +533,172 @@ class QemuGdbstubProvider:
             details={"inspector": inspector},
         )
 
+    def ensure_attached_controller(self, session: DebugSession) -> None:
+        if session.attach_status != "attached" or session.controller_mode != "attached":
+            raise ProviderDebugError(
+                "stateful debug operations require an attached controller",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={
+                    "debug_session_id": session.session_id,
+                    "attach_status": session.attach_status,
+                    "controller_mode": session.controller_mode,
+                },
+            )
+
+    def set_breakpoint(
+        self,
+        *,
+        run_dir: Path,
+        session: DebugSession,
+        symbol: str,
+    ) -> DebugProviderResult:
+        self.ensure_attached_controller(session)
+        self._ensure_session_not_ended(session)
+        validated_symbol = self.validate_symbol_name(symbol)
+        next_id = self._next_breakpoint_id(session)
+        updated = session.model_copy(
+            deep=True,
+            update={
+                "breakpoints": {
+                    **session.breakpoints,
+                    next_id: {
+                        "id": next_id,
+                        "symbol": validated_symbol,
+                        "created_at": datetime.now(UTC).isoformat(),
+                    },
+                }
+            },
+        )
+        return self._record_stateful_operation(
+            run_dir=run_dir,
+            session=updated,
+            operation="set_breakpoint",
+            summary=f"debug breakpoint {next_id} set",
+            details={"debug_session_id": session.session_id, "breakpoint_id": next_id, "symbol": validated_symbol},
+        )
+
+    def clear_breakpoint(
+        self,
+        *,
+        run_dir: Path,
+        session: DebugSession,
+        breakpoint_id: str,
+    ) -> DebugProviderResult:
+        self.ensure_attached_controller(session)
+        self._ensure_session_not_ended(session)
+        if type(breakpoint_id) is not str or not breakpoint_id:
+            raise ProviderDebugError("invalid breakpoint id", category=ErrorCategory.CONFIGURATION_ERROR)
+        if breakpoint_id not in session.breakpoints:
+            raise ProviderDebugError(
+                "breakpoint not found",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"debug_session_id": session.session_id, "breakpoint_id": breakpoint_id},
+            )
+        breakpoints = dict(session.breakpoints)
+        removed = breakpoints.pop(breakpoint_id)
+        updated = session.model_copy(deep=True, update={"breakpoints": breakpoints})
+        return self._record_stateful_operation(
+            run_dir=run_dir,
+            session=updated,
+            operation="clear_breakpoint",
+            summary=f"debug breakpoint {breakpoint_id} cleared",
+            details={"debug_session_id": session.session_id, "breakpoint_id": breakpoint_id, "breakpoint": removed},
+        )
+
+    def list_breakpoints(
+        self,
+        *,
+        run_dir: Path,
+        session: DebugSession,
+    ) -> DebugProviderResult:
+        self.ensure_attached_controller(session)
+        self._ensure_session_not_ended(session)
+        return self._record_stateful_operation(
+            run_dir=run_dir,
+            session=session,
+            operation="list_breakpoints",
+            summary="debug breakpoints listed",
+            details={"debug_session_id": session.session_id, "breakpoints": session.breakpoints},
+        )
+
+    def continue_execution(
+        self,
+        *,
+        run_dir: Path,
+        session: DebugSession,
+        timeout_seconds: int | None = None,
+    ) -> DebugProviderResult:
+        self.ensure_attached_controller(session)
+        self._ensure_session_not_ended(session)
+        self._validate_optional_timeout(timeout_seconds)
+        updated = session.model_copy(update={"current_execution_state": "running"})
+        return self._record_stateful_operation(
+            run_dir=run_dir,
+            session=updated,
+            operation="continue",
+            summary="debug session continued",
+            details={
+                "debug_session_id": session.session_id,
+                "current_execution_state": updated.current_execution_state,
+                "timeout_seconds": timeout_seconds,
+            },
+        )
+
+    def interrupt(
+        self,
+        *,
+        run_dir: Path,
+        session: DebugSession,
+        timeout_seconds: int | None = None,
+    ) -> DebugProviderResult:
+        self.ensure_attached_controller(session)
+        self._ensure_session_not_ended(session)
+        self._validate_optional_timeout(timeout_seconds)
+        updated = session.model_copy(update={"current_execution_state": "stopped"})
+        return self._record_stateful_operation(
+            run_dir=run_dir,
+            session=updated,
+            operation="interrupt",
+            summary="debug session interrupted",
+            details={
+                "debug_session_id": session.session_id,
+                "current_execution_state": updated.current_execution_state,
+                "timeout_seconds": timeout_seconds,
+            },
+        )
+
+    def end_session(
+        self,
+        *,
+        run_dir: Path,
+        session: DebugSession,
+    ) -> DebugProviderResult:
+        self.ensure_attached_controller(session)
+        controller_state = session.controller_last_observed_state
+        if session.current_execution_state != "ended":
+            controller_state = self._terminate_controller_if_safe(session)
+        if session.active_controller_pid is not None and controller_state == "not_started":
+            controller_state = "exited"
+        updated = session.model_copy(
+            update={
+                "current_execution_state": "ended",
+                "ended_at": session.ended_at or datetime.now(UTC).isoformat(),
+                "controller_last_observed_state": controller_state,
+            }
+        )
+        return self._record_stateful_operation(
+            run_dir=run_dir,
+            session=updated,
+            operation="end_session",
+            summary="debug session ended",
+            details={
+                "debug_session_id": session.session_id,
+                "current_execution_state": updated.current_execution_state,
+                "ended_at": updated.ended_at,
+                "controller_last_observed_state": updated.controller_last_observed_state,
+            },
+        )
+
     def _run_read_operation(
         self,
         *,
@@ -675,6 +854,149 @@ class QemuGdbstubProvider:
             error_category=error_category,
             diagnostic=diagnostic,
         )
+
+    def _record_stateful_operation(
+        self,
+        *,
+        run_dir: Path,
+        session: DebugSession,
+        operation: str,
+        summary: str,
+        details: dict[str, object],
+    ) -> DebugProviderResult:
+        resolved_run_dir = run_dir.expanduser().resolve()
+        debug_dir = resolved_run_dir / "debug"
+        transcript_path = self._require_debug_path(
+            Path(session.transcript_path),
+            debug_dir=debug_dir,
+            description="transcript path",
+        )
+        command_metadata_path = self._require_debug_path(
+            Path(session.command_metadata_path),
+            debug_dir=debug_dir,
+            description="command metadata path",
+        )
+        latest_summary_path = self._require_debug_path(
+            Path(session.latest_summary_path),
+            debug_dir=debug_dir,
+            description="summary path",
+        )
+        artifacts = self._session_artifacts(session)
+        session_artifact = next(artifact for artifact in artifacts if artifact.kind == "debug-session")
+        session_path = self._require_debug_path(
+            Path(session_artifact.path),
+            debug_dir=debug_dir,
+            description="session path",
+        )
+        observed_at = datetime.now(UTC).isoformat()
+        record = self.redactor.redact_value(
+            {
+                "kind": "debug-stateful-operation",
+                "operation": operation,
+                "debug_session_id": session.session_id,
+                "observed_at": observed_at,
+                "transcript_path": str(transcript_path),
+                "details": details,
+            }
+        )
+        summary_payload = {
+            "run_id": session.run_id,
+            "provider": self.name,
+            "status": StepStatus.SUCCEEDED,
+            "operation": operation,
+            "observed_at": observed_at,
+            "session": session.model_dump(mode="json"),
+            "artifacts": [artifact.model_dump(mode="json") for artifact in artifacts],
+            "command": record,
+        }
+        try:
+            self._append_jsonl(command_metadata_path, record)
+            self._write_json(session_path, session.model_dump(mode="json"))
+            self._write_json(latest_summary_path, self.redactor.redact_value(summary_payload))
+        except OSError as exc:
+            raise ProviderDebugError(
+                "failed to write debug state artifacts",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={**details, "error": str(exc)},
+                artifacts=self._existing_artifacts(artifacts),
+            ) from exc
+        return DebugProviderResult(
+            status=StepStatus.SUCCEEDED,
+            summary=summary,
+            session=session,
+            artifacts=self._existing_artifacts(artifacts),
+            details=self.redactor.redact_value(details),
+        )
+
+    def _ensure_session_not_ended(self, session: DebugSession) -> None:
+        if session.current_execution_state == "ended":
+            raise ProviderDebugError(
+                "debug session is not active",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"debug_session_id": session.session_id},
+            )
+
+    def _next_breakpoint_id(self, session: DebugSession) -> str:
+        numbers = []
+        for breakpoint_id in session.breakpoints:
+            if breakpoint_id.startswith("bp-"):
+                try:
+                    numbers.append(int(breakpoint_id.removeprefix("bp-")))
+                except ValueError:
+                    continue
+        return f"bp-{max(numbers, default=0) + 1}"
+
+    def _validate_optional_timeout(self, timeout_seconds: int | None) -> None:
+        if timeout_seconds is None:
+            return
+        if type(timeout_seconds) is not int or timeout_seconds < 1 or timeout_seconds > 3600:
+            raise ProviderDebugError(
+                "timeout_seconds must be between 1 and 3600",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+
+    def _terminate_controller_if_safe(self, session: DebugSession) -> str:
+        pid = session.active_controller_pid
+        if pid is None:
+            return session.controller_last_observed_state
+        if type(pid) is not int or pid <= 1 or pid == os.getpid():
+            return "invalid"
+        if not self._pid_is_alive(pid):
+            return "exited"
+        if not self._pid_looks_like_controller(pid):
+            return "alive_unverified"
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return "exited"
+        except PermissionError:
+            return "alive_permission_denied"
+        return "terminate_requested"
+
+    def _pid_is_alive(self, pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError as exc:
+            return exc.errno != errno.ESRCH
+        return True
+
+    def _pid_looks_like_controller(self, pid: int) -> bool:
+        cmdline_path = Path("/proc") / str(pid) / "cmdline"
+        try:
+            cmdline = cmdline_path.read_bytes()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return False
+        if not cmdline:
+            return False
+        argv0 = cmdline.split(b"\0", 1)[0].decode("utf-8", errors="ignore")
+        executable = Path(argv0).name
+        return "gdb" in executable
 
     def _session_artifacts(self, session: DebugSession) -> list[ArtifactRef]:
         session_path = Path(session.command_metadata_path).parents[1] / "sessions" / f"{session.session_id}.json"
