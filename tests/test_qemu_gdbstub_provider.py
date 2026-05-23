@@ -53,6 +53,13 @@ def write_vmlinux(tmp_path: Path) -> Path:
     return vmlinux
 
 
+def write_vmlinux_with_space(tmp_path: Path) -> Path:
+    vmlinux = tmp_path / "build with space" / "vmlinux"
+    vmlinux.parent.mkdir(parents=True)
+    vmlinux.write_text("fake vmlinux", encoding="utf-8")
+    return vmlinux
+
+
 def test_start_session_records_files_and_uses_constrained_attach_batch(tmp_path: Path) -> None:
     vmlinux = write_vmlinux(tmp_path)
     runner = FakeGdbRunner()
@@ -90,6 +97,26 @@ def test_start_session_records_files_and_uses_constrained_attach_batch(tmp_path:
     ]
     assert timeout == 30
     assert transcript_path == Path(result.session.transcript_path)
+
+
+def test_start_session_escapes_spaces_in_gdb_file_command(tmp_path: Path) -> None:
+    vmlinux = write_vmlinux_with_space(tmp_path)
+    runner = FakeGdbRunner()
+    provider = QemuGdbstubProvider(runner=runner)
+
+    provider.start_session(
+        run_id="run-debug",
+        run_dir=tmp_path,
+        vmlinux_path=vmlinux,
+        gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
+        debug_profile=DebugProfile(name="qemu-gdbstub-default"),
+        build_metadata={},
+        boot_metadata={"debug_boot": True},
+    )
+
+    _argv, commands, _timeout, _transcript_path = runner.batches[0]
+    escaped_vmlinux = str(vmlinux.resolve()).replace(" ", "\\ ")
+    assert f"file {escaped_vmlinux}" in commands
 
 
 def test_start_session_allocates_next_attempt_paths(tmp_path: Path) -> None:
@@ -220,6 +247,16 @@ def test_endpoint_validation_rejects_non_integer_ports(tmp_path: Path, port: obj
 
     with pytest.raises(ProviderDebugError) as exc_info:
         provider._validated_endpoint({"host": "127.0.0.1", "port": port})
+
+    assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+@pytest.mark.parametrize("endpoint", [None, True, [], "127.0.0.1:1234"])
+def test_endpoint_validation_rejects_non_object_values(tmp_path: Path, endpoint: object) -> None:
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider._validated_endpoint(endpoint)  # type: ignore[arg-type]
 
     assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
 

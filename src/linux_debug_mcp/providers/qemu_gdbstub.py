@@ -220,7 +220,7 @@ class QemuGdbstubProvider:
         commands = [
             "set pagination off",
             "set confirm off",
-            f"file {resolved_vmlinux}",
+            f"file {self._gdb_path(resolved_vmlinux)}",
             f"target remote {endpoint['host']}:{endpoint['port']}",
             "p linux_banner",
         ]
@@ -350,6 +350,11 @@ class QemuGdbstubProvider:
             )
 
     def _validated_endpoint(self, endpoint: dict[str, object]) -> dict[str, object]:
+        if type(endpoint) is not dict:
+            raise ProviderDebugError(
+                "gdbstub endpoint must be an object",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
         host = endpoint.get("host")
         port = endpoint.get("port")
         if host not in {"127.0.0.1", "localhost"}:
@@ -363,6 +368,9 @@ class QemuGdbstubProvider:
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
         return {"host": "127.0.0.1" if host == "localhost" else host, "port": port}
+
+    def _gdb_path(self, path: Path) -> str:
+        return str(path).replace("\\", "\\\\").replace(" ", "\\ ")
 
     def _next_attempt_dir(self, run_dir: Path) -> Path:
         debug_dir = run_dir / "debug"
