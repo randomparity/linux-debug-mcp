@@ -15,7 +15,7 @@ from linux_debug_mcp.providers.qemu_gdbstub import (
 class FakeGdbRunner:
     def __init__(self, *, gdb_path: str | None = "/usr/bin/gdb") -> None:
         self.gdb_path = gdb_path
-        self.batches: list[tuple[list[str], list[str]]] = []
+        self.batches: list[tuple[list[str], list[str], int, Path]] = []
 
     def which(self, command: str) -> str | None:
         return self.gdb_path if command == "gdb" else None
@@ -28,10 +28,22 @@ class FakeGdbRunner:
         timeout: int,
         transcript_path: Path,
     ) -> GdbCommandResult:
-        self.batches.append((argv, commands))
+        self.batches.append((argv, commands, timeout, transcript_path))
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         transcript_path.write_text("\n".join(commands), encoding="utf-8")
         return GdbCommandResult(exit_status=0, stdout="$1 = 0xffffffff81000000", stderr="")
+
+
+class ExplodingGdbRunner(FakeGdbRunner):
+    def run_batch(
+        self,
+        argv: list[str],
+        commands: list[str],
+        *,
+        timeout: int,
+        transcript_path: Path,
+    ) -> GdbCommandResult:
+        raise OSError("gdb exploded")
 
 
 def write_vmlinux(tmp_path: Path) -> Path:
@@ -43,7 +55,8 @@ def write_vmlinux(tmp_path: Path) -> Path:
 
 def test_start_session_records_files_and_uses_constrained_attach_batch(tmp_path: Path) -> None:
     vmlinux = write_vmlinux(tmp_path)
-    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+    runner = FakeGdbRunner()
+    provider = QemuGdbstubProvider(runner=runner)
 
     result = provider.start_session(
         run_id="run-debug",
@@ -63,6 +76,78 @@ def test_start_session_records_files_and_uses_constrained_attach_batch(tmp_path:
     assert Path(result.session.command_metadata_path).is_file()
     assert Path(result.session.latest_summary_path).is_file()
     assert result.artifacts_by_kind["debug-transcript"].is_file()
+    transcript_artifact = next(artifact for artifact in result.artifacts if artifact.kind == "debug-transcript")
+    assert transcript_artifact.sensitive is True
+    assert len(runner.batches) == 1
+    argv, commands, timeout, transcript_path = runner.batches[0]
+    assert argv[:4] == ["/usr/bin/gdb", "-nx", "-batch", "-q"]
+    assert commands == [
+        "set pagination off",
+        "set confirm off",
+        f"file {vmlinux.resolve()}",
+        "target remote 127.0.0.1:1234",
+        "p linux_banner",
+    ]
+    assert timeout == 30
+    assert transcript_path == Path(result.session.transcript_path)
+
+
+def test_start_session_allocates_next_attempt_paths(tmp_path: Path) -> None:
+    vmlinux = write_vmlinux(tmp_path)
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+
+    first = provider.start_session(
+        run_id="run-debug",
+        run_dir=tmp_path,
+        vmlinux_path=vmlinux,
+        gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
+        debug_profile=DebugProfile(name="qemu-gdbstub-default"),
+        build_metadata={},
+        boot_metadata={"debug_boot": True},
+    )
+    second = provider.start_session(
+        run_id="run-debug",
+        run_dir=tmp_path,
+        vmlinux_path=vmlinux,
+        gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
+        debug_profile=DebugProfile(name="qemu-gdbstub-default"),
+        build_metadata={},
+        boot_metadata={"debug_boot": True},
+    )
+
+    assert first.session.transcript_path != second.session.transcript_path
+    assert first.session.command_metadata_path != second.session.command_metadata_path
+    assert first.session.latest_summary_path != second.session.latest_summary_path
+    for path in [
+        first.session.transcript_path,
+        first.session.command_metadata_path,
+        first.session.latest_summary_path,
+        second.session.transcript_path,
+        second.session.command_metadata_path,
+        second.session.latest_summary_path,
+    ]:
+        assert Path(path).is_file()
+
+
+def test_start_session_converts_runner_failure_to_failed_result_with_artifacts(tmp_path: Path) -> None:
+    vmlinux = write_vmlinux(tmp_path)
+    provider = QemuGdbstubProvider(runner=ExplodingGdbRunner())
+
+    result = provider.start_session(
+        run_id="run-debug",
+        run_dir=tmp_path,
+        vmlinux_path=vmlinux,
+        gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
+        debug_profile=DebugProfile(name="qemu-gdbstub-default"),
+        build_metadata={},
+        boot_metadata={"debug_boot": True},
+    )
+
+    assert result.status == StepStatus.FAILED
+    assert result.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert Path(result.session.latest_summary_path).is_file()
+    assert result.artifacts_by_kind["debug-session"].is_file()
+    assert result.artifacts_by_kind["debug-summary"].is_file()
 
 
 def test_subprocess_runner_transcript_records_non_timeout_status(tmp_path: Path) -> None:
@@ -99,5 +184,21 @@ def test_memory_validation_rejects_invalid_byte_counts(tmp_path: Path, byte_coun
 
     with pytest.raises(ProviderDebugError) as exc_info:
         provider.validate_memory_read(address=0x1000, byte_count=byte_count)
+
+    assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+@pytest.mark.parametrize(
+    ("address", "byte_count"),
+    [
+        ("0x1000", 8),
+        (0x1000, True),
+    ],
+)
+def test_memory_validation_rejects_non_integer_values(tmp_path: Path, address: object, byte_count: object) -> None:
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider.validate_memory_read(address=address, byte_count=byte_count)  # type: ignore[arg-type]
 
     assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR

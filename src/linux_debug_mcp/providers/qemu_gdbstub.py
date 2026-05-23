@@ -210,7 +210,7 @@ class QemuGdbstubProvider:
         endpoint = self._validated_endpoint(gdbstub_endpoint)
         started_at = datetime.now(UTC)
         session_id = f"debug-{uuid.uuid4().hex}"
-        attempt_dir = run_dir / "debug" / "attempt-001"
+        attempt_dir = self._next_attempt_dir(run_dir)
         sessions_dir = run_dir / "debug" / "sessions"
         transcript_path = attempt_dir / "transcript.txt"
         command_metadata_path = attempt_dir / "commands.jsonl"
@@ -228,12 +228,27 @@ class QemuGdbstubProvider:
         for command in commands:
             argv.extend(["-ex", command])
 
-        result = self.runner.run_batch(
-            argv,
-            commands,
-            timeout=30,
-            transcript_path=transcript_path,
-        )
+        runner_error_category = None
+        try:
+            result = self.runner.run_batch(
+                argv,
+                commands,
+                timeout=30,
+                transcript_path=transcript_path,
+            )
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            runner_error_category = ErrorCategory.INFRASTRUCTURE_FAILURE
+            result = GdbCommandResult(
+                exit_status=-1,
+                stderr=f"{type(exc).__name__}: {exc}",
+            )
+            self._write_failure_transcript(
+                transcript_path=transcript_path,
+                argv=argv,
+                commands=commands,
+                timeout=30,
+                result=result,
+            )
         ended_at = datetime.now(UTC)
         status = StepStatus.SUCCEEDED if result.exit_status == 0 and not result.timed_out else StepStatus.FAILED
         session = DebugSession(
@@ -257,7 +272,7 @@ class QemuGdbstubProvider:
             },
         )
         artifacts = [
-            ArtifactRef(path=str(transcript_path), kind="debug-transcript"),
+            ArtifactRef(path=str(transcript_path), kind="debug-transcript", sensitive=True),
             ArtifactRef(path=str(command_metadata_path), kind="debug-command-metadata"),
             ArtifactRef(path=str(latest_summary_path), kind="debug-summary"),
             ArtifactRef(path=str(session_path), kind="debug-session"),
@@ -298,7 +313,8 @@ class QemuGdbstubProvider:
                 "exit_status": result.exit_status,
                 "timed_out": result.timed_out,
             },
-            error_category=ErrorCategory.DEBUG_ATTACH_FAILURE if status == StepStatus.FAILED else None,
+            error_category=runner_error_category
+            or (ErrorCategory.DEBUG_ATTACH_FAILURE if status == StepStatus.FAILED else None),
             diagnostic=self._snippet(result.stderr or result.stdout) if status == StepStatus.FAILED else None,
         )
 
@@ -313,6 +329,11 @@ class QemuGdbstubProvider:
         return register
 
     def validate_memory_read(self, *, address: int, byte_count: int) -> None:
+        if type(address) is not int or type(byte_count) is not int:
+            raise ProviderDebugError(
+                "address and byte_count must be integers",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
         if address < 0 or address > 0xFFFFFFFFFFFFFFFF:
             raise ProviderDebugError(
                 "address must fit in unsigned 64-bit range",
@@ -338,6 +359,37 @@ class QemuGdbstubProvider:
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
         return {"host": "127.0.0.1" if host == "localhost" else host, "port": port}
+
+    def _next_attempt_dir(self, run_dir: Path) -> Path:
+        debug_dir = run_dir / "debug"
+        for attempt in range(1, 1000):
+            candidate = debug_dir / f"attempt-{attempt:03d}"
+            if not candidate.exists():
+                return candidate
+        raise ProviderDebugError(
+            "no available debug attempt directory",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
+
+    def _write_failure_transcript(
+        self,
+        *,
+        transcript_path: Path,
+        argv: list[str],
+        commands: list[str],
+        timeout: int,
+        result: GdbCommandResult,
+    ) -> None:
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        with transcript_path.open("w", encoding="utf-8") as transcript:
+            transcript.write(f"$ {' '.join(argv)}\n")
+            transcript.write("commands:\n")
+            for command in commands:
+                transcript.write(f"  {command}\n")
+            transcript.write(f"timeout_seconds: {timeout}\n")
+            transcript.write(f"stderr: {self._snippet(result.stderr)}\n")
+            transcript.write(f"timed_out: {str(result.timed_out).lower()}\n")
+            transcript.write(f"exit_status: {result.exit_status}\n")
 
     def _resolve_existing_path(self, path: Path, *, description: str) -> Path:
         resolved = Path(path).expanduser().resolve()
