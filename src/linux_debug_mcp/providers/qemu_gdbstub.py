@@ -370,7 +370,13 @@ class QemuGdbstubProvider:
         return {"host": "127.0.0.1" if host == "localhost" else host, "port": port}
 
     def _gdb_path(self, path: Path) -> str:
-        return str(path).replace("\\", "\\\\").replace(" ", "\\ ")
+        text = str(path)
+        if any(char in text for char in "\t\r\n"):
+            raise ProviderDebugError(
+                "gdb paths must not contain control whitespace",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        return text.replace("\\", "\\\\").replace(" ", "\\ ")
 
     def _next_attempt_dir(self, run_dir: Path) -> Path:
         debug_dir = run_dir / "debug"
@@ -408,6 +414,12 @@ class QemuGdbstubProvider:
         if not resolved.exists():
             raise ProviderDebugError(
                 f"{description} does not exist",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"path": str(path)},
+            )
+        if not resolved.is_file():
+            raise ProviderDebugError(
+                f"{description} must be a regular file",
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"path": str(path)},
             )

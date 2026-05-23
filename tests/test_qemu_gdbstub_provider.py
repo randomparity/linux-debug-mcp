@@ -119,6 +119,34 @@ def test_start_session_escapes_spaces_in_gdb_file_command(tmp_path: Path) -> Non
     assert f"file {escaped_vmlinux}" in commands
 
 
+def test_start_session_rejects_directory_vmlinux_path(tmp_path: Path) -> None:
+    vmlinux_dir = tmp_path / "build" / "vmlinux"
+    vmlinux_dir.mkdir(parents=True)
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider.start_session(
+            run_id="run-debug",
+            run_dir=tmp_path,
+            vmlinux_path=vmlinux_dir,
+            gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
+            debug_profile=DebugProfile(name="qemu-gdbstub-default"),
+            build_metadata={},
+            boot_metadata={"debug_boot": True},
+        )
+
+    assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_gdb_path_rejects_control_whitespace(tmp_path: Path) -> None:
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider._gdb_path(Path("bad\tpath/vmlinux"))
+
+    assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
 def test_start_session_allocates_next_attempt_paths(tmp_path: Path) -> None:
     vmlinux = write_vmlinux(tmp_path)
     provider = QemuGdbstubProvider(runner=FakeGdbRunner())
