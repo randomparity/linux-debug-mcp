@@ -952,6 +952,199 @@ def artifacts_collect_handler(
     )
 
 
+def _workflow_failure_response(
+    *,
+    run_id: str | None,
+    failing_step: str,
+    latest_successful_step: str | None,
+    response: ToolResponse,
+    collect_response: ToolResponse | None,
+) -> ToolResponse:
+    details = {
+        "failing_step": failing_step,
+        "latest_successful_step": latest_successful_step,
+        "failed_response": response.model_dump(mode="json"),
+        "collect_response": collect_response.model_dump(mode="json") if collect_response else None,
+    }
+    category = response.error.category if response.error else ErrorCategory.INFRASTRUCTURE_FAILURE
+    message = response.error.message if response.error else response.summary or f"{failing_step} failed"
+    return ToolResponse.failure(
+        category=category,
+        message=message,
+        run_id=run_id,
+        details=details,
+        artifacts=[*(response.artifacts or []), *((collect_response.artifacts if collect_response else []) or [])],
+        suggested_next_actions=["artifacts.get_manifest", "Inspect artifact bundle"],
+    )
+
+
+def workflow_build_boot_test_handler(
+    *,
+    artifact_root: Path,
+    source_path: str,
+    build_profile: str,
+    target_profile: str,
+    rootfs_profile: str,
+    run_id: str | None = None,
+    test_suite: str | None = None,
+    commands: list[list[str]] | None = None,
+    force_rebuild: bool = False,
+    force_reboot: bool = False,
+    force_rerun_tests: bool = False,
+    force_recollect: bool = False,
+) -> ToolResponse:
+    if run_id is not None:
+        try:
+            store = ArtifactStore(artifact_root, create_root=False)
+            manifest_path = store.run_dir(run_id) / "manifest.json"
+            if manifest_path.is_file():
+                manifest = store.load_manifest(run_id)
+                try:
+                    resolved_source_path = str(validate_source_path(Path(source_path)))
+                except PathSafetyError as exc:
+                    return ToolResponse.failure(
+                        category=ErrorCategory.CONFIGURATION_ERROR,
+                        message=str(exc),
+                        run_id=run_id,
+                        details={"source_path": source_path},
+                    )
+                expected = {
+                    "source_path": resolved_source_path,
+                    "build_profile": build_profile,
+                    "target_profile": target_profile,
+                    "rootfs_profile": rootfs_profile,
+                    "test_suite": test_suite,
+                }
+                actual = {
+                    "source_path": manifest.request.source_path,
+                    "build_profile": manifest.request.build_profile,
+                    "target_profile": manifest.request.target_profile,
+                    "rootfs_profile": manifest.request.rootfs_profile,
+                    "test_suite": manifest.request.test_suite,
+                }
+                mismatches = {
+                    key: {"requested": expected[key], "manifest": actual[key]}
+                    for key in expected
+                    if expected[key] != actual[key]
+                }
+                if mismatches:
+                    return ToolResponse.failure(
+                        category=ErrorCategory.CONFIGURATION_ERROR,
+                        message="immutable run manifest request mismatch",
+                        run_id=run_id,
+                        details={"mismatches": mismatches},
+                    )
+        except ManifestStateError as exc:
+            return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    if run_id is None or not (artifact_root / run_id / "manifest.json").is_file():
+        create_response = create_run_handler(
+            artifact_root=artifact_root,
+            source_path=source_path,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            run_id=run_id,
+            test_suite=test_suite,
+        )
+        if not create_response.ok:
+            return create_response
+        run_id = create_response.run_id
+
+    build_response = kernel_build_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        build_profile=build_profile,
+        force_rebuild=force_rebuild,
+    )
+    if not build_response.ok:
+        collect_response = artifacts_collect_handler(
+            artifact_root=artifact_root,
+            run_id=run_id,
+            force_recollect=force_recollect,
+        )
+        return _workflow_failure_response(
+            run_id=run_id,
+            failing_step="build",
+            latest_successful_step=None,
+            response=build_response,
+            collect_response=collect_response,
+        )
+
+    boot_response = target_boot_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        target_profile=target_profile,
+        rootfs_profile=rootfs_profile,
+        force_reboot=force_reboot,
+    )
+    if not boot_response.ok:
+        collect_response = artifacts_collect_handler(
+            artifact_root=artifact_root,
+            run_id=run_id,
+            force_recollect=force_recollect,
+        )
+        return _workflow_failure_response(
+            run_id=run_id,
+            failing_step="boot",
+            latest_successful_step="build",
+            response=boot_response,
+            collect_response=collect_response,
+        )
+
+    test_response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        test_suite=test_suite,
+        commands=commands,
+        force_rerun=force_rerun_tests,
+    )
+    collect_response = artifacts_collect_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        force_recollect=force_recollect,
+    )
+    if not test_response.ok:
+        return _workflow_failure_response(
+            run_id=run_id,
+            failing_step="run_tests",
+            latest_successful_step="boot",
+            response=test_response,
+            collect_response=collect_response,
+        )
+    if not collect_response.ok:
+        return _workflow_failure_response(
+            run_id=run_id,
+            failing_step="collect_artifacts",
+            latest_successful_step="run_tests",
+            response=collect_response,
+            collect_response=collect_response,
+        )
+    return ToolResponse.success(
+        summary="build, boot, test workflow succeeded",
+        run_id=run_id,
+        data={
+            "steps": {
+                "build": build_response.model_dump(mode="json"),
+                "boot": boot_response.model_dump(mode="json"),
+                "run_tests": test_response.model_dump(mode="json"),
+                "collect_artifacts": collect_response.model_dump(mode="json"),
+            },
+            "latest_successful_step": "collect_artifacts",
+            "artifact_bundle": next(
+                (
+                    artifact.model_dump(mode="json")
+                    for artifact in collect_response.artifacts
+                    if artifact.kind == "artifact-bundle"
+                ),
+                None,
+            ),
+        },
+        artifacts=collect_response.artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
 def not_implemented_handler(tool_name: str, *, run_id: str | None = None) -> ToolResponse:
     sprint_by_prefix = {
         "kernel.build": "Sprint 1",
