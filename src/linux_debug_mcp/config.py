@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from pathlib import Path
 from typing import Literal
 
@@ -15,10 +17,35 @@ class ConfigModel(BaseModel):
 class BuildProfile(ConfigModel):
     name: str
     architecture: str
+    provider_name: str = "local-kernel-build"
     output_policy: Literal["per_run", "shared"] = "per_run"
-    config_fragments: list[Path] = Field(default_factory=list)
+    targets: list[str] = Field(default_factory=lambda: ["bzImage"], min_length=1)
     command_timeout_seconds: int = Field(default=3600, ge=1)
     required_tools: list[str] = Field(default_factory=list)
+    jobs: int | None = Field(default=None, ge=1)
+    make_variables: dict[str, str] = Field(default_factory=dict)
+    config_fragments: list[Path] = Field(default_factory=list)
+
+    def effective_required_tools(self) -> list[str]:
+        tools = ["make"]
+        for tool in self.required_tools:
+            if tool != "make":
+                tools.append(tool)
+        return tools
+
+    @field_validator("make_variables")
+    @classmethod
+    def validate_make_variables(cls, value: dict[str, str]) -> dict[str, str]:
+        reserved = {"O", "ARCH", "KBUILD_OUTPUT"}
+        name_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+        for key, item in value.items():
+            if key in reserved:
+                raise ValueError(f"make variable {key} is provider-owned")
+            if not name_pattern.match(key):
+                raise ValueError(f"make variable {key} is not a simple make variable name")
+            if any(unicodedata.category(char) == "Cc" for char in item):
+                raise ValueError(f"make variable {key} contains a control character")
+        return value
 
 
 class RootfsProfile(ConfigModel):
