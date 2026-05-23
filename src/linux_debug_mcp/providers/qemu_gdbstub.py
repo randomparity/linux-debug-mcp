@@ -211,6 +211,19 @@ class QemuGdbstubProvider:
                 "boot metadata does not indicate a debug gdbstub boot",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
+        same_run_artifact_linkage = build_metadata.get("kernel_image_path") == boot_metadata.get(
+            "kernel_image_path"
+        ) and str(vmlinux_path) == str(build_metadata.get("vmlinux_path"))
+        identity = {
+            "same_run_artifact_linkage": same_run_artifact_linkage,
+            "live_banner_match": None,
+            "build_kernel_release": build_metadata.get("kernel_release"),
+        }
+        if debug_profile.symbol_identity_required and not identity["same_run_artifact_linkage"]:
+            raise ProviderDebugError(
+                "strict symbol identity requires same-run artifact linkage",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
 
         endpoint = self._validated_endpoint(gdbstub_endpoint)
         started_at = datetime.now(UTC)
@@ -256,6 +269,16 @@ class QemuGdbstubProvider:
             )
         ended_at = datetime.now(UTC)
         status = StepStatus.SUCCEEDED if result.exit_status == 0 and not result.timed_out else StepStatus.FAILED
+        kernel_release = identity["build_kernel_release"]
+        if isinstance(kernel_release, str) and kernel_release:
+            identity["live_banner_match"] = kernel_release in self._snippet(result.stdout)
+        if debug_profile.symbol_identity_required and (
+            status != StepStatus.SUCCEEDED or identity["live_banner_match"] is not True
+        ):
+            raise ProviderDebugError(
+                "strict symbol identity live target check failed",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            )
         session = DebugSession(
             session_id=session_id,
             run_id=run_id,
@@ -270,11 +293,7 @@ class QemuGdbstubProvider:
             transcript_path=str(transcript_path),
             command_metadata_path=str(command_metadata_path),
             latest_summary_path=str(latest_summary_path),
-            symbol_identity_validation={
-                "command": "p linux_banner",
-                "required": debug_profile.symbol_identity_required,
-                "stdout_snippet": self._snippet(result.stdout),
-            },
+            symbol_identity_validation=identity,
         )
         artifacts = [
             ArtifactRef(path=str(transcript_path), kind="debug-transcript", sensitive=True),

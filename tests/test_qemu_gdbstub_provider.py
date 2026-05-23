@@ -31,7 +31,22 @@ class FakeGdbRunner:
         self.batches.append((argv, commands, timeout, transcript_path))
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         transcript_path.write_text("\n".join(commands), encoding="utf-8")
-        return GdbCommandResult(exit_status=0, stdout="$1 = 0xffffffff81000000", stderr="")
+        return GdbCommandResult(exit_status=0, stdout='$1 = "Linux version 6.9.0-test (builder)\\n"', stderr="")
+
+
+class MismatchedBannerGdbRunner(FakeGdbRunner):
+    def run_batch(
+        self,
+        argv: list[str],
+        commands: list[str],
+        *,
+        timeout: int,
+        transcript_path: Path,
+    ) -> GdbCommandResult:
+        self.batches.append((argv, commands, timeout, transcript_path))
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        transcript_path.write_text("\n".join(commands), encoding="utf-8")
+        return GdbCommandResult(exit_status=0, stdout='$1 = "Linux version 6.8.0-other (builder)\\n"', stderr="")
 
 
 class ExplodingGdbRunner(FakeGdbRunner):
@@ -71,7 +86,11 @@ def test_start_session_records_files_and_uses_constrained_attach_batch(tmp_path:
         vmlinux_path=vmlinux,
         gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
         debug_profile=DebugProfile(name="qemu-gdbstub-default"),
-        build_metadata={"kernel_release": "6.9.0-test"},
+        build_metadata={
+            "kernel_release": "6.9.0-test",
+            "kernel_image_path": str(tmp_path / "bzImage"),
+            "vmlinux_path": str(vmlinux),
+        },
         boot_metadata={"debug_boot": True, "kernel_image_path": str(tmp_path / "bzImage")},
     )
 
@@ -99,6 +118,75 @@ def test_start_session_records_files_and_uses_constrained_attach_batch(tmp_path:
     assert transcript_path == Path(result.session.transcript_path)
 
 
+def test_start_session_requires_same_run_linkage_and_live_banner(tmp_path: Path) -> None:
+    vmlinux = write_vmlinux(tmp_path)
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+
+    result = provider.start_session(
+        run_id="run-debug",
+        run_dir=tmp_path,
+        vmlinux_path=vmlinux,
+        gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
+        debug_profile=DebugProfile(name="qemu-gdbstub-default"),
+        build_metadata={
+            "kernel_release": "6.9.0-test",
+            "kernel_image_path": str(tmp_path / "build" / "bzImage"),
+            "vmlinux_path": str(vmlinux),
+        },
+        boot_metadata={
+            "debug_boot": True,
+            "kernel_image_path": str(tmp_path / "build" / "bzImage"),
+        },
+    )
+
+    assert result.session.symbol_identity_validation["same_run_artifact_linkage"] is True
+    assert result.session.symbol_identity_validation["live_banner_match"] is True
+    assert result.session.symbol_identity_validation["build_kernel_release"] == "6.9.0-test"
+
+
+def test_start_session_fails_when_same_run_linkage_is_missing(tmp_path: Path) -> None:
+    vmlinux = write_vmlinux(tmp_path)
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider.start_session(
+            run_id="run-debug",
+            run_dir=tmp_path,
+            vmlinux_path=vmlinux,
+            gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
+            debug_profile=DebugProfile(name="qemu-gdbstub-default"),
+            build_metadata={"kernel_release": "6.9.0-test", "kernel_image_path": str(tmp_path / "a")},
+            boot_metadata={"debug_boot": True, "kernel_image_path": str(tmp_path / "b")},
+        )
+
+    assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_start_session_fails_when_live_banner_mismatches(tmp_path: Path) -> None:
+    vmlinux = write_vmlinux(tmp_path)
+    provider = QemuGdbstubProvider(runner=MismatchedBannerGdbRunner())
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider.start_session(
+            run_id="run-debug",
+            run_dir=tmp_path,
+            vmlinux_path=vmlinux,
+            gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
+            debug_profile=DebugProfile(name="qemu-gdbstub-default"),
+            build_metadata={
+                "kernel_release": "6.9.0-test",
+                "kernel_image_path": str(tmp_path / "build" / "bzImage"),
+                "vmlinux_path": str(vmlinux),
+            },
+            boot_metadata={
+                "debug_boot": True,
+                "kernel_image_path": str(tmp_path / "build" / "bzImage"),
+            },
+        )
+
+    assert exc_info.value.category == ErrorCategory.DEBUG_ATTACH_FAILURE
+
+
 def test_start_session_escapes_spaces_in_gdb_file_command(tmp_path: Path) -> None:
     vmlinux = write_vmlinux_with_space(tmp_path)
     runner = FakeGdbRunner()
@@ -109,7 +197,7 @@ def test_start_session_escapes_spaces_in_gdb_file_command(tmp_path: Path) -> Non
         run_dir=tmp_path,
         vmlinux_path=vmlinux,
         gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
-        debug_profile=DebugProfile(name="qemu-gdbstub-default"),
+        debug_profile=DebugProfile(name="qemu-gdbstub-default", symbol_identity_required=False),
         build_metadata={},
         boot_metadata={"debug_boot": True},
     )
@@ -178,7 +266,7 @@ def test_start_session_allocates_next_attempt_paths(tmp_path: Path) -> None:
         run_dir=tmp_path,
         vmlinux_path=vmlinux,
         gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
-        debug_profile=DebugProfile(name="qemu-gdbstub-default"),
+        debug_profile=DebugProfile(name="qemu-gdbstub-default", symbol_identity_required=False),
         build_metadata={},
         boot_metadata={"debug_boot": True},
     )
@@ -187,7 +275,7 @@ def test_start_session_allocates_next_attempt_paths(tmp_path: Path) -> None:
         run_dir=tmp_path,
         vmlinux_path=vmlinux,
         gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
-        debug_profile=DebugProfile(name="qemu-gdbstub-default"),
+        debug_profile=DebugProfile(name="qemu-gdbstub-default", symbol_identity_required=False),
         build_metadata={},
         boot_metadata={"debug_boot": True},
     )
@@ -215,7 +303,7 @@ def test_start_session_converts_runner_failure_to_failed_result_with_artifacts(t
         run_dir=tmp_path,
         vmlinux_path=vmlinux,
         gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
-        debug_profile=DebugProfile(name="qemu-gdbstub-default"),
+        debug_profile=DebugProfile(name="qemu-gdbstub-default", symbol_identity_required=False),
         build_metadata={},
         boot_metadata={"debug_boot": True},
     )

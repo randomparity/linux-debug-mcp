@@ -10,13 +10,21 @@ from mcp.server.fastmcp import FastMCP
 
 from linux_debug_mcp.artifacts.manifest import RunManifest
 from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
-from linux_debug_mcp.config import BuildProfile, RootfsProfile, TargetProfile, TestCommand, TestSuiteProfile
+from linux_debug_mcp.config import (
+    BuildProfile,
+    DebugProfile,
+    RootfsProfile,
+    TargetProfile,
+    TestCommand,
+    TestSuiteProfile,
+)
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
 from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider
+from linux_debug_mcp.providers.qemu_gdbstub import ProviderDebugError, QemuGdbstubProvider
 from linux_debug_mcp.providers.registry import ProviderRegistry
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_source_path
 from linux_debug_mcp.safety.redaction import Redactor
@@ -58,6 +66,9 @@ DEFAULT_TEST_SUITES = {
             TestCommand(name="proc-cmdline", argv=["cat", "/proc/cmdline"]),
         ],
     )
+}
+DEFAULT_DEBUG_PROFILES = {
+    "qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default"),
 }
 RUNNING_BUILD_MESSAGE = (
     "previous build is still recorded as running; inspect logs and create a new run or manually clean stale build state"
@@ -188,6 +199,21 @@ def _find_kernel_image(build_result: StepResult) -> ArtifactRef | None:
         if artifact.kind == "kernel-image":
             return artifact
     return None
+
+
+def _find_artifact(result: StepResult, kind: str) -> ArtifactRef | None:
+    for artifact in result.artifacts:
+        if artifact.kind == kind:
+            return artifact
+    return None
+
+
+def _active_debug_session_from_result(result: StepResult) -> dict[str, Any] | None:
+    if result.status != StepStatus.SUCCEEDED:
+        return None
+    if result.details.get("current_execution_state") == "ended":
+        return None
+    return result.details
 
 
 def _next_test_attempt(run_dir: Path) -> int:
@@ -823,6 +849,141 @@ def target_run_tests_handler(
     )
 
 
+def debug_start_session_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_profile: str | None = None,
+    new_session: bool = False,
+    provider: QemuGdbstubProvider | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        manifest_path = store.run_dir(run_id) / "manifest.json"
+        if not manifest_path.is_file():
+            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    build_result = manifest.step_results.get("build")
+    if build_result is None or build_result.status != StepStatus.SUCCEEDED:
+        return _configuration_failure(run_id=run_id, message="debug start session requires a succeeded build")
+    boot_result = manifest.step_results.get("boot")
+    if boot_result is None or boot_result.status != StepStatus.SUCCEEDED:
+        return _configuration_failure(run_id=run_id, message="debug start session requires a succeeded boot")
+    if boot_result.details.get("debug_boot") is not True:
+        return _configuration_failure(run_id=run_id, message="debug start session requires a debug boot")
+    vmlinux = _find_artifact(build_result, "vmlinux")
+    if vmlinux is None:
+        return _configuration_failure(run_id=run_id, message="succeeded build did not record a vmlinux artifact")
+    gdbstub_endpoint = boot_result.details.get("gdbstub_endpoint")
+    if not isinstance(gdbstub_endpoint, dict):
+        return _configuration_failure(run_id=run_id, message="succeeded debug boot did not record a gdbstub endpoint")
+
+    requested_profile = debug_profile or manifest.request.debug_profile or "qemu-gdbstub-default"
+    if (
+        manifest.request.debug_profile is not None
+        and debug_profile is not None
+        and debug_profile != manifest.request.debug_profile
+    ):
+        return _configuration_failure(
+            run_id=run_id,
+            message="debug_profile must match the immutable run manifest request",
+            details={"requested_profile": debug_profile, "manifest_profile": manifest.request.debug_profile},
+        )
+    profiles = debug_profiles if debug_profiles is not None else DEFAULT_DEBUG_PROFILES
+    try:
+        resolved_debug_profile = profiles[requested_profile]
+    except KeyError:
+        return _configuration_failure(run_id=run_id, message=f"unknown debug profile: {requested_profile}")
+
+    provider = provider or QemuGdbstubProvider()
+    redactor = Redactor()
+    try:
+        with store.debug_lock(run_id):
+            locked_manifest = store.load_manifest(run_id)
+            existing = locked_manifest.step_results.get("debug")
+            if existing and not new_session:
+                active_session = _active_debug_session_from_result(existing)
+                if active_session is not None:
+                    return ToolResponse.success(
+                        summary=redactor.redact_text(existing.summary),
+                        run_id=run_id,
+                        data=redactor.redact_value(active_session),
+                        artifacts=_redacted_artifacts(existing.artifacts, redactor),
+                        suggested_next_actions=["debug.interrupt", "debug.read_registers", "artifacts.get_manifest"],
+                    )
+            try:
+                result = provider.start_session(
+                    run_id=run_id,
+                    run_dir=store.run_dir(run_id),
+                    vmlinux_path=Path(vmlinux.path),
+                    gdbstub_endpoint=gdbstub_endpoint,
+                    debug_profile=resolved_debug_profile,
+                    build_metadata=build_result.details,
+                    boot_metadata=boot_result.details,
+                )
+            except ProviderDebugError as exc:
+                failed = StepResult(
+                    step_name="debug",
+                    status=StepStatus.FAILED,
+                    summary=str(exc),
+                    artifacts=exc.artifacts,
+                    details=exc.details,
+                )
+                store.record_step_result(run_id, failed, replace_succeeded=new_session)
+                return ToolResponse.failure(
+                    category=exc.category,
+                    message=redactor.redact_text(str(exc)),
+                    run_id=run_id,
+                    details=redactor.redact_value(exc.details),
+                    artifacts=_redacted_artifacts(exc.artifacts, redactor),
+                    suggested_next_actions=["artifacts.get_manifest"],
+                )
+            details = {
+                "debug_session_id": result.session.session_id,
+                "session_path": str(store.run_dir(run_id) / "debug" / "sessions" / f"{result.session.session_id}.json"),
+                "current_execution_state": result.session.current_execution_state,
+                "gdbstub_endpoint": result.session.gdbstub_endpoint,
+                "transcript_path": result.session.transcript_path,
+                "command_metadata_path": result.session.command_metadata_path,
+                "latest_summary_path": result.session.latest_summary_path,
+                "symbol_identity_validation": result.session.symbol_identity_validation,
+            }
+            terminal = StepResult(
+                step_name="debug",
+                status=result.status,
+                summary=result.summary,
+                artifacts=result.artifacts,
+                details=details,
+            )
+            store.record_step_result(run_id, terminal, replace_succeeded=new_session)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    safe_details = redactor.redact_value(details)
+    safe_artifacts = _redacted_artifacts(result.artifacts, redactor)
+    safe_summary = redactor.redact_text(result.summary)
+    if result.status == StepStatus.SUCCEEDED:
+        return ToolResponse.success(
+            summary=safe_summary,
+            run_id=run_id,
+            data=safe_details,
+            artifacts=safe_artifacts,
+            suggested_next_actions=["debug.interrupt", "debug.read_registers", "artifacts.get_manifest"],
+        )
+    return ToolResponse.failure(
+        category=result.error_category or ErrorCategory.DEBUG_ATTACH_FAILURE,
+        message=safe_summary,
+        run_id=run_id,
+        details=safe_details,
+        artifacts=safe_artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
 def _bundle_for_manifest(
     *,
     manifest: RunManifest,
@@ -1286,6 +1447,20 @@ def create_app() -> FastMCP:
             force_recollect=force_recollect,
         ).model_dump(mode="json")
 
+    @app.tool(name="debug.start_session")
+    def debug_start_session(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_profile: str | None = None,
+        new_session: bool = False,
+    ) -> dict[str, Any]:
+        return debug_start_session_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            debug_profile=debug_profile,
+            new_session=new_session,
+        ).model_dump(mode="json")
+
     @app.tool(name="workflow.build_boot_test")
     def workflow_build_boot_test(
         source_path: str,
@@ -1324,7 +1499,6 @@ def create_app() -> FastMCP:
 
     for tool_name in [
         "workflow.build_boot_debug",
-        "debug.start_session",
         "debug.interrupt",
         "debug.continue",
         "debug.set_breakpoint",
