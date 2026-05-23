@@ -51,15 +51,13 @@ def test_default_registry_exposes_sprint_1_providers() -> None:
         "local-kernel-build",
         "local-libvirt-qemu",
         "local-ssh-tests",
-        "stub-workflows",
+        "local-qemu-gdbstub",
     }
     assert "kernel.build" in providers["local-kernel-build"].operations
-    assert "kernel.build" not in providers["stub-workflows"].operations
     assert "make" in providers["local-kernel-build"].required_host_tools
 
     libvirt_qemu = providers["local-libvirt-qemu"]
     assert libvirt_qemu.operations == ["target.boot"]
-    assert "target.boot" not in providers["stub-workflows"].operations
     assert libvirt_qemu.required_host_tools == ["virsh"]
     assert libvirt_qemu.target_kinds == [TargetKind.VIRTUAL]
     assert libvirt_qemu.access_methods == ["libvirt", "serial-console", "filesystem"]
@@ -78,8 +76,15 @@ def test_default_registry_exposes_sprint_1_providers() -> None:
 
     ssh_tests = providers["local-ssh-tests"]
     assert ssh_tests.operations == ["target.run_tests"]
-    assert "target.run_tests" not in providers["stub-workflows"].operations
-    assert "artifacts.collect" not in providers["stub-workflows"].operations
-    assert "workflow.build_boot_test" not in providers["stub-workflows"].operations
     assert ssh_tests.required_host_tools == ["ssh"]
     assert ssh_tests.target_kinds == [TargetKind.VIRTUAL]
+
+
+def test_registry_advertises_local_qemu_gdbstub_and_removes_sprint_4_stubs() -> None:
+    registry = ProviderRegistry.with_defaults()
+    providers = {provider.provider_name: provider for provider in registry.list_capabilities()}
+
+    debug_provider = providers["local-qemu-gdbstub"]
+    assert "debug.start_session" in debug_provider.operations
+    assert "workflow.build_boot_debug" in debug_provider.operations
+    assert "stub-workflows" not in providers or "debug.start_session" not in providers["stub-workflows"].operations

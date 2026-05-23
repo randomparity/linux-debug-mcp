@@ -17,7 +17,14 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from linux_debug_mcp.config import DebugProfile
-from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, StepStatus
+from linux_debug_mcp.domain import (
+    ArtifactRef,
+    ErrorCategory,
+    OperationSemantics,
+    ProviderCapability,
+    StepStatus,
+    TargetKind,
+)
 from linux_debug_mcp.safety.redaction import Redactor
 
 MAX_MEMORY_READ_BYTES = 4096
@@ -25,6 +32,44 @@ MAX_RESPONSE_SNIPPET = 4096
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$]*$")
 REGISTER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 LINUX_BANNER_RELEASE_PATTERN = re.compile(r"Linux version\s+([^\s]+)")
+QEMU_GDBSTUB_OPERATIONS = [
+    "workflow.build_boot_debug",
+    "debug.start_session",
+    "debug.interrupt",
+    "debug.continue",
+    "debug.set_breakpoint",
+    "debug.clear_breakpoint",
+    "debug.list_breakpoints",
+    "debug.read_registers",
+    "debug.read_symbol",
+    "debug.read_memory",
+    "debug.evaluate",
+    "debug.end_session",
+]
+
+
+def local_qemu_gdbstub_capability() -> ProviderCapability:
+    return ProviderCapability(
+        provider_name="local-qemu-gdbstub",
+        provider_version="0.1.0",
+        architectures=["x86_64"],
+        target_kinds=[TargetKind.VIRTUAL],
+        operations=QEMU_GDBSTUB_OPERATIONS,
+        required_host_tools=["gdb"],
+        destructive_permissions=[
+            "control target execution through QEMU gdbstub",
+            "modify debugger breakpoints",
+            "terminate MCP-owned debug controller processes",
+        ],
+        access_methods=["gdbstub", "filesystem", "subprocess"],
+        semantics=OperationSemantics(
+            idempotent=False,
+            retryable=True,
+            destructive=True,
+            cancelable=False,
+            concurrent_safe=False,
+        ),
+    )
 
 
 class DebugSession(BaseModel):

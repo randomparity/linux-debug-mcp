@@ -198,9 +198,9 @@ def test_list_providers_handler_returns_default_capabilities() -> None:
         "local-artifacts",
         "local-kernel-build",
         "local-libvirt-qemu",
+        "local-qemu-gdbstub",
         "local-prereqs",
         "local-ssh-tests",
-        "stub-workflows",
     }
 
 
@@ -228,6 +228,16 @@ def test_not_implemented_handler_returns_structured_error() -> None:
 
 def test_create_app_constructs_fastmcp_server() -> None:
     assert type(create_app()).__name__ == "FastMCP"
+
+
+def test_create_app_registers_sprint_4_tools_as_real_handlers() -> None:
+    app = create_app()
+    tool_names = set(app._tool_manager._tools)
+
+    assert "workflow.build_boot_debug" in tool_names
+    assert "debug.start_session" in tool_names
+    assert "debug.read_memory" in tool_names
+    assert "debug.end_session" in tool_names
 
 
 def test_target_run_tests_tool_is_registered_with_full_arguments() -> None:

@@ -1463,6 +1463,7 @@ def _bundle_for_manifest(
     required_kinds_by_step = {
         "build": {"build-log", "kernel-config", "kernel-image"},
         "boot": {"domain-xml", "boot-plan", "console-log", "boot-log"},
+        "debug": {"debug-command-metadata", "debug-session", "debug-summary", "debug-transcript"},
         "run_tests": {"test-summary"},
     }
     optional_kinds_by_step = {"build": {"vmlinux"}}

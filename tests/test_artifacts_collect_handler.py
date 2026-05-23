@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
@@ -154,3 +155,48 @@ def test_collect_artifacts_redacts_sensitive_artifact_paths_in_response(tmp_path
     assert response.ok is True
     assert str(sensitive_log) not in str(payload)
     assert "[REDACTED]" in str(payload)
+
+
+def test_collect_artifacts_includes_succeeded_debug_artifacts(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    run_dir = artifact_root / "run-abc123"
+    session_path = run_dir / "debug" / "sessions" / "debug-test.json"
+    transcript_path = run_dir / "debug" / "attempt-001" / "transcript.txt"
+    command_metadata_path = run_dir / "debug" / "attempt-001" / "commands.jsonl"
+    summary_path = run_dir / "debug" / "attempt-001" / "debug-summary.json"
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    session_path.write_text('{"session_id":"debug-test"}\n', encoding="utf-8")
+    transcript_path.write_text("token=secret-token-value\n", encoding="utf-8")
+    command_metadata_path.write_text('{"command":"info registers"}\n', encoding="utf-8")
+    summary_path.write_text('{"summary":"debug ok"}\n', encoding="utf-8")
+    ArtifactStore(artifact_root, create_root=False).record_step_result(
+        "run-abc123",
+        StepResult(
+            step_name="debug",
+            status=StepStatus.SUCCEEDED,
+            summary="debug ok",
+            artifacts=[
+                ArtifactRef(path=str(session_path), kind="debug-session"),
+                ArtifactRef(path=str(transcript_path), kind="debug-transcript", sensitive=True),
+                ArtifactRef(path=str(command_metadata_path), kind="debug-command-metadata"),
+                ArtifactRef(path=str(summary_path), kind="debug-summary"),
+            ],
+        ),
+    )
+
+    response = artifacts_collect_handler(artifact_root=artifact_root, run_id="run-abc123")
+
+    bundle_path = run_dir / "summaries" / "artifact-bundle.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    debug_artifacts = bundle["artifacts_by_step"]["debug"]
+    assert response.ok is True
+    assert {artifact["kind"] for artifact in debug_artifacts} == {
+        "debug-session",
+        "debug-transcript",
+        "debug-command-metadata",
+        "debug-summary",
+    }
+    assert all(artifact["exists"] for artifact in debug_artifacts)
+    assert str(transcript_path) not in bundle_path.read_text(encoding="utf-8")
+    assert response.data["rollup"]["missing_required"] == 0
