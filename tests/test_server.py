@@ -197,12 +197,12 @@ def test_list_providers_handler_returns_default_capabilities() -> None:
 
 
 def test_not_implemented_handler_returns_structured_error() -> None:
-    response = not_implemented_handler("kernel.build")
+    response = not_implemented_handler("target.boot")
 
     assert response.ok is False
     assert response.error is not None
     assert response.error.category == "not_implemented"
-    assert response.error.details["tool"] == "kernel.build"
+    assert response.error.details["tool"] == "target.boot"
 
 
 def test_create_app_constructs_fastmcp_server() -> None:

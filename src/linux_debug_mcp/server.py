@@ -1,19 +1,56 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
-from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, ToolResponse
+from linux_debug_mcp.config import BuildProfile
+from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
+from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
 from linux_debug_mcp.providers.registry import ProviderRegistry
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_source_path
 from linux_debug_mcp.safety.redaction import Redactor
 
 DEFAULT_ARTIFACT_ROOT = Path(".linux-debug-mcp/runs")
+DEFAULT_BUILD_PROFILES = {
+    "x86_64-default": BuildProfile(name="x86_64-default", architecture="x86_64"),
+}
+RUNNING_BUILD_MESSAGE = (
+    "previous build is still recorded as running; "
+    "inspect logs and create a new run or manually clean stale build state"
+)
+
+
+def _build_profile_from_manifest(profile_name: str) -> BuildProfile:
+    try:
+        return DEFAULT_BUILD_PROFILES[profile_name]
+    except KeyError as exc:
+        raise ValueError(f"unknown build profile: {profile_name}") from exc
+
+
+def _record_terminal_build_result(
+    store: ArtifactStore,
+    run_id: str,
+    result: StepResult,
+    *,
+    attempts: int = 5,
+    initial_delay_seconds: float = 0.01,
+) -> None:
+    delay_seconds = initial_delay_seconds
+    for attempt in range(attempts):
+        try:
+            store.record_step_result(run_id, result)
+            return
+        except ManifestStateError as exc:
+            if "manifest is locked" not in str(exc) or attempt == attempts - 1:
+                raise
+            time.sleep(delay_seconds)
+            delay_seconds *= 2
 
 
 def create_run_handler(
@@ -106,6 +143,148 @@ def list_providers_handler() -> ToolResponse:
     )
 
 
+def kernel_build_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    build_profile: str | None = None,
+    force_rebuild: bool = False,
+    provider: LocalKernelBuildProvider | None = None,
+) -> ToolResponse:
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    if force_rebuild:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            message="force_rebuild=true is not supported until rebuild cleanup policy is implemented",
+            run_id=run_id,
+        )
+    requested_profile = build_profile or manifest.request.build_profile
+    if requested_profile != manifest.request.build_profile:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            message="build_profile must match the immutable run manifest request",
+            run_id=run_id,
+            details={"requested_profile": requested_profile, "manifest_profile": manifest.request.build_profile},
+        )
+    existing = manifest.step_results.get("build")
+    if existing and existing.status == StepStatus.SUCCEEDED:
+        return ToolResponse.success(
+            summary=existing.summary,
+            run_id=run_id,
+            data=existing.details,
+            artifacts=existing.artifacts,
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+    if existing and existing.status == StepStatus.RUNNING:
+        try:
+            with store.build_lock(run_id):
+                return ToolResponse.failure(
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    message=RUNNING_BUILD_MESSAGE,
+                    run_id=run_id,
+                    details=existing.details,
+                    suggested_next_actions=["artifacts.get_manifest"],
+                )
+        except ManifestStateError as exc:
+            return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    try:
+        source_path = validate_source_path(Path(manifest.request.source_path))
+        store = ArtifactStore(artifact_root, source_paths=[source_path], create_root=False)
+        profile = _build_profile_from_manifest(requested_profile)
+        provider = provider or LocalKernelBuildProvider()
+        run_dir = store.run_dir(run_id)
+        plan = provider.plan_build(source_path=source_path, output_path=run_dir / "build", profile=profile)
+    except (PathSafetyError, ValueError, ManifestStateError) as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            message=str(exc),
+            run_id=run_id,
+        )
+    log_path = store.run_dir(run_id) / "logs" / "build.log"
+    summary_path = store.run_dir(run_id) / "summaries" / "build-summary.json"
+    try:
+        with store.build_lock(run_id):
+            locked_manifest = store.load_manifest(run_id)
+            existing = locked_manifest.step_results.get("build")
+            if existing and existing.status == StepStatus.SUCCEEDED:
+                return ToolResponse.success(
+                    summary=existing.summary,
+                    run_id=run_id,
+                    data=existing.details,
+                    artifacts=existing.artifacts,
+                    suggested_next_actions=["artifacts.get_manifest"],
+                )
+            if existing and existing.status == StepStatus.RUNNING:
+                return ToolResponse.failure(
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    message=RUNNING_BUILD_MESSAGE,
+                    run_id=run_id,
+                    details=existing.details,
+                    suggested_next_actions=["artifacts.get_manifest"],
+                )
+            running = StepResult(
+                step_name="build",
+                status=StepStatus.RUNNING,
+                summary="kernel build running",
+                details={"argv": plan.argv, "log_path": str(log_path), "provider": provider.name},
+                artifacts=[ArtifactRef(path=str(log_path), kind="build-log")],
+            )
+            store.record_step_result(run_id, running)
+            try:
+                execution = provider.execute_build(plan=plan, log_path=log_path, summary_path=summary_path)
+            except Exception as exc:
+                result = StepResult(
+                    step_name="build",
+                    status=StepStatus.FAILED,
+                    summary="unexpected build provider failure",
+                    artifacts=[ArtifactRef(path=str(log_path), kind="build-log")],
+                    details={
+                        "argv": plan.argv,
+                        "log_path": str(log_path),
+                        "provider": provider.name,
+                        "exception_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
+                _record_terminal_build_result(store, run_id, result)
+                return ToolResponse.failure(
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    message=result.summary,
+                    run_id=run_id,
+                    details=result.details,
+                    suggested_next_actions=["artifacts.get_manifest"],
+                )
+            result = StepResult(
+                step_name="build",
+                status=execution.status,
+                summary=execution.summary,
+                artifacts=execution.artifacts,
+                details=execution.details,
+            )
+            _record_terminal_build_result(store, run_id, result)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    if execution.status == StepStatus.SUCCEEDED:
+        return ToolResponse.success(
+            summary=execution.summary,
+            run_id=run_id,
+            data=execution.details,
+            artifacts=execution.artifacts,
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+    return ToolResponse.failure(
+        category=execution.error_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
+        message=execution.summary,
+        run_id=run_id,
+        details={**execution.details, "diagnostic": execution.diagnostic},
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
 def not_implemented_handler(tool_name: str, *, run_id: str | None = None) -> ToolResponse:
     sprint_by_prefix = {
         "kernel.build": "Sprint 1",
@@ -175,6 +354,20 @@ def create_app() -> FastMCP:
     def artifacts_get_manifest(run_id: str, artifact_root: str = str(DEFAULT_ARTIFACT_ROOT)) -> dict[str, Any]:
         return get_manifest_handler(artifact_root=Path(artifact_root), run_id=run_id).model_dump(mode="json")
 
+    @app.tool(name="kernel.build")
+    def kernel_build(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        build_profile: str | None = None,
+        force_rebuild: bool = False,
+    ) -> dict[str, Any]:
+        return kernel_build_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            build_profile=build_profile,
+            force_rebuild=force_rebuild,
+        ).model_dump(mode="json")
+
     def make_stub(bound_tool_name: str):
         def stub(run_id: str | None = None) -> dict[str, Any]:
             return not_implemented_handler(bound_tool_name, run_id=run_id).model_dump(mode="json")
@@ -182,7 +375,6 @@ def create_app() -> FastMCP:
         return stub
 
     for tool_name in [
-        "kernel.build",
         "target.boot",
         "target.run_tests",
         "artifacts.collect",
