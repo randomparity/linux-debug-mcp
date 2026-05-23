@@ -898,6 +898,22 @@ def create_app() -> FastMCP:
             force_reboot=force_reboot,
         ).model_dump(mode="json")
 
+    @app.tool(name="target.run_tests")
+    def target_run_tests(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        test_suite: str | None = None,
+        commands: list[list[str]] | None = None,
+        force_rerun: bool = False,
+    ) -> dict[str, Any]:
+        return target_run_tests_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            test_suite=test_suite,
+            commands=commands,
+            force_rerun=force_rerun,
+        ).model_dump(mode="json")
+
     def make_stub(bound_tool_name: str):
         def stub(run_id: str | None = None) -> dict[str, Any]:
             return not_implemented_handler(bound_tool_name, run_id=run_id).model_dump(mode="json")
@@ -905,7 +921,6 @@ def create_app() -> FastMCP:
         return stub
 
     for tool_name in [
-        "target.run_tests",
         "artifacts.collect",
         "workflow.build_boot_test",
         "workflow.build_boot_debug",
