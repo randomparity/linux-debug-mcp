@@ -49,6 +49,21 @@ class MismatchedBannerGdbRunner(FakeGdbRunner):
         return GdbCommandResult(exit_status=0, stdout='$1 = "Linux version 6.8.0-other (builder)\\n"', stderr="")
 
 
+class OverlappingBannerGdbRunner(FakeGdbRunner):
+    def run_batch(
+        self,
+        argv: list[str],
+        commands: list[str],
+        *,
+        timeout: int,
+        transcript_path: Path,
+    ) -> GdbCommandResult:
+        self.batches.append((argv, commands, timeout, transcript_path))
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        transcript_path.write_text("\n".join(commands), encoding="utf-8")
+        return GdbCommandResult(exit_status=0, stdout='$1 = "Linux version 6.9.0-other (builder)\\n"', stderr="")
+
+
 class ExplodingGdbRunner(FakeGdbRunner):
     def run_batch(
         self,
@@ -160,6 +175,7 @@ def test_start_session_fails_when_same_run_linkage_is_missing(tmp_path: Path) ->
         )
 
     assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+    assert exc_info.value.details["symbol_identity_validation"]["same_run_artifact_linkage"] is False
 
 
 def test_start_session_fails_when_live_banner_mismatches(tmp_path: Path) -> None:
@@ -191,6 +207,32 @@ def test_start_session_fails_when_live_banner_mismatches(tmp_path: Path) -> None
     assert {"debug-transcript", "debug-command-metadata", "debug-summary", "debug-session"} <= artifact_kinds
     for artifact in exc_info.value.artifacts:
         assert Path(artifact.path).is_file()
+
+
+def test_start_session_requires_exact_live_banner_release(tmp_path: Path) -> None:
+    vmlinux = write_vmlinux(tmp_path)
+    provider = QemuGdbstubProvider(runner=OverlappingBannerGdbRunner())
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider.start_session(
+            run_id="run-debug",
+            run_dir=tmp_path,
+            vmlinux_path=vmlinux,
+            gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
+            debug_profile=DebugProfile(name="qemu-gdbstub-default"),
+            build_metadata={
+                "kernel_release": "6.9.0",
+                "kernel_image_path": str(tmp_path / "build" / "bzImage"),
+                "vmlinux_path": str(vmlinux),
+            },
+            boot_metadata={
+                "debug_boot": True,
+                "kernel_image_path": str(tmp_path / "build" / "bzImage"),
+            },
+        )
+
+    assert exc_info.value.category == ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc_info.value.details["symbol_identity_validation"]["live_banner_match"] is False
 
 
 def test_start_session_converts_artifact_write_failure_to_provider_error(tmp_path: Path) -> None:

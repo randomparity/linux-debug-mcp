@@ -927,6 +927,7 @@ def debug_start_session_handler(
         with store.debug_lock(run_id):
             locked_manifest = store.load_manifest(run_id)
             existing = locked_manifest.step_results.get("debug")
+            replace_existing_debug = new_session
             if existing and not new_session:
                 active_session = _active_debug_session_from_result(existing)
                 if active_session is not None:
@@ -937,6 +938,7 @@ def debug_start_session_handler(
                         artifacts=_redacted_artifacts(existing.artifacts, redactor),
                         suggested_next_actions=["debug.interrupt", "debug.read_registers", "artifacts.get_manifest"],
                     )
+                replace_existing_debug = existing.status == StepStatus.SUCCEEDED
             try:
                 result = provider.start_session(
                     run_id=run_id,
@@ -953,9 +955,9 @@ def debug_start_session_handler(
                     status=StepStatus.FAILED,
                     summary=str(exc),
                     artifacts=exc.artifacts,
-                    details=exc.details,
+                    details=redactor.redact_value(exc.details),
                 )
-                store.record_step_result(run_id, failed, replace_succeeded=new_session)
+                store.record_step_result(run_id, failed, replace_succeeded=replace_existing_debug)
                 return ToolResponse.failure(
                     category=exc.category,
                     message=redactor.redact_text(str(exc)),
@@ -981,7 +983,7 @@ def debug_start_session_handler(
                 artifacts=result.artifacts,
                 details=details,
             )
-            store.record_step_result(run_id, terminal, replace_succeeded=new_session)
+            store.record_step_result(run_id, terminal, replace_succeeded=replace_existing_debug)
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
 

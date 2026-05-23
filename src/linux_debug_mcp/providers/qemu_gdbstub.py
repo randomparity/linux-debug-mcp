@@ -20,6 +20,7 @@ MAX_MEMORY_READ_BYTES = 4096
 MAX_RESPONSE_SNIPPET = 4096
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$]*$")
 REGISTER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+LINUX_BANNER_RELEASE_PATTERN = re.compile(r"Linux version\s+([^\s]+)")
 
 
 class DebugSession(BaseModel):
@@ -224,6 +225,7 @@ class QemuGdbstubProvider:
             raise ProviderDebugError(
                 "strict symbol identity requires same-run artifact linkage",
                 category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"symbol_identity_validation": identity},
             )
 
         endpoint = self._validated_endpoint(gdbstub_endpoint)
@@ -279,7 +281,7 @@ class QemuGdbstubProvider:
         status = StepStatus.SUCCEEDED if result.exit_status == 0 and not result.timed_out else StepStatus.FAILED
         kernel_release = identity["build_kernel_release"]
         if isinstance(kernel_release, str) and kernel_release:
-            identity["live_banner_match"] = kernel_release in self._snippet(result.stdout)
+            identity["live_banner_match"] = self._linux_banner_release(result.stdout) == kernel_release
         strict_identity_failure = debug_profile.symbol_identity_required and (
             status != StepStatus.SUCCEEDED or identity["live_banner_match"] is not True
         )
@@ -354,7 +356,7 @@ class QemuGdbstubProvider:
                 category=ErrorCategory.DEBUG_ATTACH_FAILURE,
                 details={
                     **details,
-                    "diagnostic": self._snippet(result.stderr or result.stdout),
+                    "diagnostic": self.redactor.redact_text(self._snippet(result.stderr or result.stdout)),
                 },
                 artifacts=existing_artifacts,
             )
@@ -440,6 +442,12 @@ class QemuGdbstubProvider:
             return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
         except (OSError, TypeError, ValueError):
             return False
+
+    def _linux_banner_release(self, output: str) -> str | None:
+        match = LINUX_BANNER_RELEASE_PATTERN.search(self._snippet(output))
+        if match is None:
+            return None
+        return match.group(1)
 
     def _next_attempt_dir(self, run_dir: Path) -> Path:
         debug_dir = run_dir / "debug"

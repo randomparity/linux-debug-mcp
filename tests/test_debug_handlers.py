@@ -2,8 +2,8 @@ from pathlib import Path
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import DebugProfile
-from linux_debug_mcp.domain import ArtifactRef, RunRequest, StepResult, StepStatus
-from linux_debug_mcp.providers.qemu_gdbstub import DebugProviderResult, DebugSession
+from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
+from linux_debug_mcp.providers.qemu_gdbstub import DebugProviderResult, DebugSession, ProviderDebugError
 from linux_debug_mcp.server import debug_start_session_handler
 
 
@@ -51,6 +51,17 @@ class FakeDebugProvider:
                 ArtifactRef(path=str(summary_path), kind="debug-summary"),
             ],
             details={"debug_session_id": "debug-1"},
+        )
+
+
+class FailingDebugProvider:
+    name = "local-qemu-gdbstub"
+
+    def start_session(self, **kwargs):
+        raise ProviderDebugError(
+            "strict symbol identity live target check failed",
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            details={"diagnostic": "token=secret", "symbol_identity_validation": {"live_banner_match": False}},
         )
 
 
@@ -158,3 +169,54 @@ def test_debug_start_session_is_idempotent_for_active_session(tmp_path: Path) ->
     assert first.ok is True
     assert second.ok is True
     assert provider.calls == 1
+
+
+def test_debug_start_session_redacts_provider_error_details_before_recording(tmp_path: Path) -> None:
+    artifact_root, run_id = create_debug_ready_run(tmp_path)
+
+    response = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=FailingDebugProvider(),
+        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.details["diagnostic"] == "token=[REDACTED]"
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest(run_id)
+    assert manifest.step_results["debug"].details["diagnostic"] == "token=[REDACTED]"
+
+
+def test_debug_start_session_replaces_ended_session_without_new_session_flag(tmp_path: Path) -> None:
+    artifact_root, run_id = create_debug_ready_run(tmp_path)
+    provider = FakeDebugProvider()
+
+    first = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=provider,
+        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
+    )
+    assert first.ok is True
+    store = ArtifactStore(artifact_root, create_root=False)
+    ended = StepResult(
+        step_name="debug",
+        status=StepStatus.SUCCEEDED,
+        summary="debug session ended",
+        artifacts=store.load_manifest(run_id).step_results["debug"].artifacts,
+        details={**first.data, "current_execution_state": "ended"},
+    )
+    store.record_step_result(run_id, ended, replace_succeeded=True)
+
+    second = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=provider,
+        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
+    )
+
+    assert second.ok is True
+    assert provider.calls == 2
+    manifest = store.load_manifest(run_id)
+    assert manifest.step_results["debug"].details["current_execution_state"] == "stopped"
