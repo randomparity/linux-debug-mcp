@@ -16,12 +16,14 @@ The current implementation provides:
 - manifest readback
 - provider capability listing
 - a narrow local libvirt/QEMU `target.boot` pilot path
-- structured `not_implemented` responses for test, artifact collection,
-  workflow, and debug tools
+- SSH-first `target.run_tests` smoke execution
+- artifact bundle indexing with `artifacts.collect`
+- `workflow.build_boot_test` orchestration
+- structured `not_implemented` responses for debug tools
 
-The pilot boot path does not create root filesystems, run SSH commands, run
-guest test suites, attach gdb, use remote builders, generate kernel configs, or
-apply config fragments automatically.
+The pilot paths do not create root filesystems, install SSH packages or keys,
+discover guest addresses, attach gdb, use remote builders, generate kernel
+configs, or apply config fragments automatically.
 
 ## Local Kernel Builds
 
@@ -63,9 +65,75 @@ At a high level, a real-host run needs:
 - A Linux source tree with a built `arch/x86/boot/bzImage`.
 - A disk-image rootfs that prints the configured readiness marker on `ttyS0`.
 
-The pilot boot path does not create root filesystems, run SSH commands, run
-guest test suites, attach gdb, use remote builders, generate kernel configs, or
-apply config fragments automatically.
+The pilot boot path does not create root filesystems, attach gdb, use remote
+builders, generate kernel configs, or apply config fragments automatically.
+
+### Run SSH Smoke Tests
+
+Sprint 3 expects the selected rootfs profile to already allow SSH login from
+the MCP server. The tool does not install packages, create users, copy SSH keys,
+discover guest addresses, or mutate the rootfs to enable login.
+
+The default suite is `smoke-basic`:
+
+- `uname -a`
+- `test -r /proc/version`
+- `cat /proc/cmdline`
+
+After `kernel.build` and `target.boot` succeed:
+
+```json
+{
+  "tool": "target.run_tests",
+  "arguments": {
+    "run_id": "run-abc123",
+    "test_suite": "smoke-basic"
+  }
+}
+```
+
+Ad hoc commands are argv lists and run after the named suite:
+
+```json
+{
+  "tool": "target.run_tests",
+  "arguments": {
+    "run_id": "run-abc123",
+    "commands": [["sh", "-lc", "cat /proc/cmdline | tr ' ' '\\n'"]]
+  }
+}
+```
+
+Collect the artifact bundle:
+
+```json
+{
+  "tool": "artifacts.collect",
+  "arguments": {
+    "run_id": "run-abc123"
+  }
+}
+```
+
+Run the full pilot workflow:
+
+```json
+{
+  "tool": "workflow.build_boot_test",
+  "arguments": {
+    "source_path": "/home/dave/src/linux",
+    "build_profile": "x86_64-default",
+    "target_profile": "local-qemu",
+    "rootfs_profile": "minimal",
+    "test_suite": "smoke-basic"
+  }
+}
+```
+
+Smoke output is written under
+`.linux-debug-mcp/runs/<run-id>/tests/attempt-NNN/`, dmesg under the same
+attempt directory, serial console logs under `logs/`, and the bundle index at
+`summaries/artifact-bundle.json`.
 
 ## Install
 
