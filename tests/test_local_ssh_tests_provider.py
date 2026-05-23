@@ -5,7 +5,7 @@ import pytest
 
 from linux_debug_mcp.config import RootfsProfile, TestCommand, TestSuiteProfile
 from linux_debug_mcp.domain import ErrorCategory, StepStatus
-from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider, SshCommandResult
+from linux_debug_mcp.providers.local_ssh_tests import _SNIPPET_LIMIT, LocalSshTestProvider, SshCommandResult
 
 
 @dataclass
@@ -120,6 +120,36 @@ def test_execute_success_writes_per_command_artifacts_and_summary(tmp_path: Path
     assert (tmp_path / "tests" / "attempt-001" / "001-uname" / "command.json").is_file()
     assert (tmp_path / "summaries" / "test-summary.json").is_file()
     assert any(artifact.kind == "test-summary" for artifact in result.artifacts)
+
+
+def test_execute_truncates_snippets_but_preserves_full_stdout_artifact(tmp_path: Path) -> None:
+    long_stdout = "x" * (_SNIPPET_LIMIT + 25)
+    runner = FakeSshRunner(
+        results=[
+            SshCommandResult(
+                exit_status=0,
+                stdout=long_stdout,
+                stderr="",
+                stdout_snippet="x" * _SNIPPET_LIMIT,
+                stderr_snippet="",
+            )
+        ]
+    )
+    provider = LocalSshTestProvider(runner=runner)
+    plan = provider.plan_tests(
+        run_id="run-abc123",
+        run_dir=tmp_path,
+        rootfs_profile=rootfs(),
+        suite=suite(collect_dmesg=False),
+        adhoc_commands=[],
+        attempt=1,
+    )
+
+    result = provider.execute_tests(plan)
+
+    stdout_path = tmp_path / "tests" / "attempt-001" / "001-uname" / "stdout.txt"
+    assert stdout_path.read_text(encoding="utf-8") == long_stdout
+    assert result.details["commands"][0]["stdout_snippet"] == "x" * _SNIPPET_LIMIT
 
 
 def test_execute_missing_ssh_writes_failed_summary(tmp_path: Path) -> None:

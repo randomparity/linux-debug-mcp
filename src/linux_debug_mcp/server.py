@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import time
-import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -125,10 +124,11 @@ def _recorded_boot_success_response(*, run_id: str, result: StepResult) -> ToolR
 
 
 def _recorded_test_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
+    redactor = Redactor()
     return ToolResponse.success(
-        summary=Redactor().redact_text(result.summary),
+        summary=redactor.redact_text(result.summary),
         run_id=run_id,
-        data=Redactor().redact_value(result.details),
+        data=redactor.redact_value(result.details),
         artifacts=result.artifacts,
         suggested_next_actions=["artifacts.collect"],
     )
@@ -139,6 +139,17 @@ def _redacted_artifacts(artifacts: list[ArtifactRef], redactor: Redactor | None 
     return [
         ArtifactRef.model_validate(redactor.redact_value(artifact.model_dump(mode="json"))) for artifact in artifacts
     ]
+
+
+def _recorded_collect_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
+    redactor = Redactor()
+    return ToolResponse.success(
+        summary=redactor.redact_text(result.summary),
+        run_id=run_id,
+        data=redactor.redact_value(result.details),
+        artifacts=_redacted_artifacts(result.artifacts, redactor),
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
 
 
 def _running_boot_response(*, run_id: str, result: StepResult, message: str = RUNNING_BOOT_MESSAGE) -> ToolResponse:
@@ -194,11 +205,6 @@ def _next_test_attempt(run_dir: Path) -> int:
 def _validate_adhoc_commands(commands: list[list[str]] | None) -> list[TestCommand]:
     validated: list[TestCommand] = []
     for index, argv in enumerate(commands or [], start=1):
-        for item in argv:
-            if not item or any(unicodedata.category(char) == "Cc" for char in item):
-                raise ValueError(
-                    "ad hoc command argv entries must be non-empty and must not contain control characters"
-                )
         validated.append(TestCommand(name=f"adhoc-{index:03d}", argv=argv, required=True))
     return validated
 
@@ -699,16 +705,6 @@ def target_run_tests_handler(
             run_id=run_id,
             message=f"unknown rootfs profile: {manifest.request.rootfs_profile}",
         )
-    if resolved_rootfs_profile.access_method not in {"ssh", "ssh_and_serial"}:
-        return _configuration_failure(
-            run_id=run_id,
-            message="rootfs profile requires SSH access for test execution",
-        )
-    if not resolved_rootfs_profile.ssh_host or not resolved_rootfs_profile.ssh_user:
-        return _configuration_failure(
-            run_id=run_id,
-            message="rootfs profile requires ssh_host and ssh_user for SSH test execution",
-        )
     try:
         suite_profile = test_suites[requested_suite] if requested_suite is not None else None
     except KeyError:
@@ -903,27 +899,13 @@ def artifacts_collect_handler(
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
     existing = manifest.step_results.get("collect_artifacts")
     if existing and existing.status == StepStatus.SUCCEEDED and not force_recollect:
-        redactor = Redactor()
-        return ToolResponse.success(
-            summary=redactor.redact_text(existing.summary),
-            run_id=run_id,
-            data=redactor.redact_value(existing.details),
-            artifacts=_redacted_artifacts(existing.artifacts, redactor),
-            suggested_next_actions=["artifacts.get_manifest"],
-        )
+        return _recorded_collect_success_response(run_id=run_id, result=existing)
     try:
         with store.collect_lock(run_id):
             locked_manifest = store.load_manifest(run_id)
             existing = locked_manifest.step_results.get("collect_artifacts")
             if existing and existing.status == StepStatus.SUCCEEDED and not force_recollect:
-                redactor = Redactor()
-                return ToolResponse.success(
-                    summary=redactor.redact_text(existing.summary),
-                    run_id=run_id,
-                    data=redactor.redact_value(existing.details),
-                    artifacts=_redacted_artifacts(existing.artifacts, redactor),
-                    suggested_next_actions=["artifacts.get_manifest"],
-                )
+                return _recorded_collect_success_response(run_id=run_id, result=existing)
             bundle_path = store.run_dir(run_id) / "summaries" / "artifact-bundle.json"
             bundle, artifacts, missing_required, missing_optional = _bundle_for_manifest(
                 manifest=locked_manifest,

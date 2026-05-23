@@ -56,6 +56,8 @@ class SshCommandResult:
     exit_status: int
     stdout: str = ""
     stderr: str = ""
+    stdout_snippet: str = ""
+    stderr_snippet: str = ""
     timed_out: bool = False
 
 
@@ -100,13 +102,22 @@ class SubprocessSshRunner:
                 )
             return SshCommandResult(
                 exit_status=completed.returncode,
-                stdout=stdout_path.read_text(encoding="utf-8", errors="replace"),
-                stderr=stderr_path.read_text(encoding="utf-8", errors="replace"),
+                stdout_snippet=self._read_snippet(stdout_path),
+                stderr_snippet=self._read_snippet(stderr_path),
             )
         except subprocess.TimeoutExpired:
-            stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
-            stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
-            return SshCommandResult(exit_status=-1, stdout=stdout_text, stderr=stderr_text, timed_out=True)
+            return SshCommandResult(
+                exit_status=-1,
+                stdout_snippet=self._read_snippet(stdout_path),
+                stderr_snippet=self._read_snippet(stderr_path),
+                timed_out=True,
+            )
+
+    def _read_snippet(self, path: Path) -> str:
+        if not path.exists():
+            return ""
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            return handle.read(_SNIPPET_LIMIT)
 
 
 class LocalSshTestProvider:
@@ -412,8 +423,8 @@ class LocalSshTestProvider:
             "elapsed_seconds": round(elapsed_seconds, 6),
             "stdout_path": str(command.stdout_path),
             "stderr_path": str(command.stderr_path),
-            "stdout_snippet": self._snippet(result.stdout),
-            "stderr_snippet": self._snippet(result.stderr),
+            "stdout_snippet": result.stdout_snippet or self._snippet(result.stdout),
+            "stderr_snippet": result.stderr_snippet or self._snippet(result.stderr),
         }
         return redactor.redact_value(metadata)
 

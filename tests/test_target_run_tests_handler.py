@@ -3,7 +3,7 @@ from pathlib import Path
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import RootfsProfile, TestCommand, TestSuiteProfile
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
-from linux_debug_mcp.providers.local_ssh_tests import TestExecutionResult
+from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider, TestExecutionResult
 from linux_debug_mcp.server import create_run_handler, target_run_tests_handler
 
 
@@ -242,12 +242,11 @@ def test_run_tests_maps_provider_failure_to_test_failure(tmp_path: Path) -> None
 
 def test_run_tests_rejects_rootfs_missing_ssh_endpoint_as_configuration_error(tmp_path: Path) -> None:
     artifact_root = create_booted_run(tmp_path)
-    provider = FakeTestProvider()
 
     response = target_run_tests_handler(
         artifact_root=artifact_root,
         run_id="run-abc123",
-        provider=provider,
+        provider=LocalSshTestProvider(),
         rootfs_profiles={"minimal": rootfs(tmp_path).model_copy(update={"ssh_host": None})},
         test_suites=suites(),
     )
@@ -256,8 +255,24 @@ def test_run_tests_rejects_rootfs_missing_ssh_endpoint_as_configuration_error(tm
     assert response.error is not None
     assert response.error.category == "configuration_error"
     assert "ssh_host and ssh_user" in response.error.message
-    assert provider.plans == []
-    assert provider.executions == 0
+
+
+def test_run_tests_rejects_empty_adhoc_argv_entry(tmp_path: Path) -> None:
+    artifact_root = create_booted_run(tmp_path)
+
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        commands=[[""]],
+        provider=FakeTestProvider(),
+        rootfs_profiles={"minimal": rootfs(tmp_path)},
+        test_suites=suites(),
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert "test command argv entries" in response.error.message
 
 
 def test_run_tests_maps_provider_planning_value_error_to_configuration_error(tmp_path: Path) -> None:
