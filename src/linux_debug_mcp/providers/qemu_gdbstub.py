@@ -1042,6 +1042,8 @@ class QemuGdbstubProvider:
             return "exited"
         if not self._controller_identity_matches(session):
             return "alive_unverified"
+        if not self._pid_looks_like_controller(pid):
+            return "alive_not_controller"
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
