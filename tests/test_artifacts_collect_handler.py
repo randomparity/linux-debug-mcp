@@ -132,3 +132,25 @@ def test_collect_artifacts_force_recollect_rewrites_bundle(tmp_path: Path) -> No
     assert bundle_path.read_text(encoding="utf-8") == old_text or "collected_at" in bundle_path.read_text(
         encoding="utf-8"
     )
+
+
+def test_collect_artifacts_redacts_sensitive_artifact_paths_in_response(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    sensitive_log = artifact_root / "run-abc123" / "sensitive" / "serial.log"
+    sensitive_log.write_text("token=secret-token-value\n", encoding="utf-8")
+    ArtifactStore(artifact_root, create_root=False).record_step_result(
+        "run-abc123",
+        StepResult(
+            step_name="debug",
+            status=StepStatus.FAILED,
+            summary="debug failed",
+            artifacts=[ArtifactRef(path=str(sensitive_log), kind="serial-log", sensitive=True)],
+        ),
+    )
+
+    response = artifacts_collect_handler(artifact_root=artifact_root, run_id="run-abc123")
+
+    payload = response.model_dump(mode="json")
+    assert response.ok is True
+    assert str(sensitive_log) not in str(payload)
+    assert "[REDACTED]" in str(payload)

@@ -134,6 +134,13 @@ def _recorded_test_success_response(*, run_id: str, result: StepResult) -> ToolR
     )
 
 
+def _redacted_artifacts(artifacts: list[ArtifactRef], redactor: Redactor | None = None) -> list[ArtifactRef]:
+    redactor = redactor or Redactor()
+    return [
+        ArtifactRef.model_validate(redactor.redact_value(artifact.model_dump(mode="json"))) for artifact in artifacts
+    ]
+
+
 def _running_boot_response(*, run_id: str, result: StepResult, message: str = RUNNING_BOOT_MESSAGE) -> ToolResponse:
     return ToolResponse.failure(
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -764,10 +771,7 @@ def target_run_tests_handler(
             safe_details = redactor.redact_value(execution.details)
             safe_summary = redactor.redact_text(execution.summary)
             safe_diagnostic = redactor.redact_text(execution.diagnostic or "")
-            safe_artifacts = [
-                ArtifactRef.model_validate(redactor.redact_value(artifact.model_dump(mode="json")))
-                for artifact in execution.artifacts
-            ]
+            safe_artifacts = _redacted_artifacts(execution.artifacts, redactor)
             terminal = StepResult(
                 step_name="run_tests",
                 status=execution.status,
@@ -891,11 +895,12 @@ def artifacts_collect_handler(
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
     existing = manifest.step_results.get("collect_artifacts")
     if existing and existing.status == StepStatus.SUCCEEDED and not force_recollect:
+        redactor = Redactor()
         return ToolResponse.success(
-            summary=existing.summary,
+            summary=redactor.redact_text(existing.summary),
             run_id=run_id,
-            data=existing.details,
-            artifacts=existing.artifacts,
+            data=redactor.redact_value(existing.details),
+            artifacts=_redacted_artifacts(existing.artifacts, redactor),
             suggested_next_actions=["artifacts.get_manifest"],
         )
     try:
@@ -903,11 +908,12 @@ def artifacts_collect_handler(
             locked_manifest = store.load_manifest(run_id)
             existing = locked_manifest.step_results.get("collect_artifacts")
             if existing and existing.status == StepStatus.SUCCEEDED and not force_recollect:
+                redactor = Redactor()
                 return ToolResponse.success(
-                    summary=existing.summary,
+                    summary=redactor.redact_text(existing.summary),
                     run_id=run_id,
-                    data=existing.details,
-                    artifacts=existing.artifacts,
+                    data=redactor.redact_value(existing.details),
+                    artifacts=_redacted_artifacts(existing.artifacts, redactor),
                     suggested_next_actions=["artifacts.get_manifest"],
                 )
             bundle_path = store.run_dir(run_id) / "summaries" / "artifact-bundle.json"
@@ -936,25 +942,28 @@ def artifacts_collect_handler(
             store.record_step_result(run_id, result, replace_succeeded=force_recollect)
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    redactor = Redactor()
+    safe_bundle = redactor.redact_value(bundle)
+    safe_artifacts = _redacted_artifacts(artifacts, redactor)
     if missing_required:
         return ToolResponse.failure(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            message=result.summary,
+            message=redactor.redact_text(result.summary),
             run_id=run_id,
             details={
-                "bundle": bundle,
-                "rollup": bundle["rollup"],
-                "missing_required": missing_required,
-                "missing_optional": missing_optional,
+                "bundle": safe_bundle,
+                "rollup": safe_bundle["rollup"],
+                "missing_required": redactor.redact_value(missing_required),
+                "missing_optional": redactor.redact_value(missing_optional),
             },
-            artifacts=artifacts,
+            artifacts=safe_artifacts,
             suggested_next_actions=["artifacts.get_manifest"],
         )
     return ToolResponse.success(
-        summary=result.summary,
+        summary=redactor.redact_text(result.summary),
         run_id=run_id,
-        data=result.details,
-        artifacts=artifacts,
+        data={"bundle": safe_bundle, "rollup": safe_bundle["rollup"]},
+        artifacts=safe_artifacts,
         suggested_next_actions=["artifacts.get_manifest"],
     )
 
