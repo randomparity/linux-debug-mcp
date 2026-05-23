@@ -10,7 +10,8 @@ REDACTION = "[REDACTED]"
 class Redactor:
     def __init__(self, secret_values: list[str] | None = None) -> None:
         self._secret_values = [value for value in secret_values or [] if value]
-        self._key_value_pattern = re.compile(r"(?i)\b(password|passwd|token|api[_-]?key|secret)(\s*[=:]\s*)([^\s]+)")
+        secret_name = r"[A-Za-z0-9_-]*(?:password|passwd|token|api[_-]?key|secret)[A-Za-z0-9_-]*"
+        self._key_value_pattern = re.compile(rf"(?i)\b({secret_name})(\s*[=:]\s*)([^\s]+)")
         self._secret_key_pattern = re.compile(r"(?i)(password|passwd|token|api[_-]?key|secret)")
 
     def redact_text(self, text: str) -> str:
