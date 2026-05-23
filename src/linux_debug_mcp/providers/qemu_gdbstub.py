@@ -211,9 +211,10 @@ class QemuGdbstubProvider:
                 "boot metadata does not indicate a debug gdbstub boot",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
-        same_run_artifact_linkage = build_metadata.get("kernel_image_path") == boot_metadata.get(
-            "kernel_image_path"
-        ) and str(vmlinux_path) == str(build_metadata.get("vmlinux_path"))
+        same_run_artifact_linkage = self._same_path(
+            build_metadata.get("kernel_image_path"),
+            boot_metadata.get("kernel_image_path"),
+        ) and self._same_path(resolved_vmlinux, build_metadata.get("vmlinux_path"))
         identity = {
             "same_run_artifact_linkage": same_run_artifact_linkage,
             "live_banner_match": None,
@@ -260,25 +261,29 @@ class QemuGdbstubProvider:
                 exit_status=-1,
                 stderr=f"{type(exc).__name__}: {exc}",
             )
-            self._write_failure_transcript(
-                transcript_path=transcript_path,
-                argv=argv,
-                commands=commands,
-                timeout=30,
-                result=result,
-            )
+            try:
+                self._write_failure_transcript(
+                    transcript_path=transcript_path,
+                    argv=argv,
+                    commands=commands,
+                    timeout=30,
+                    result=result,
+                )
+            except OSError as write_exc:
+                raise ProviderDebugError(
+                    "failed to write debug transcript",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={"path": str(transcript_path), "error": str(write_exc)},
+                ) from write_exc
         ended_at = datetime.now(UTC)
         status = StepStatus.SUCCEEDED if result.exit_status == 0 and not result.timed_out else StepStatus.FAILED
         kernel_release = identity["build_kernel_release"]
         if isinstance(kernel_release, str) and kernel_release:
             identity["live_banner_match"] = kernel_release in self._snippet(result.stdout)
-        if debug_profile.symbol_identity_required and (
+        strict_identity_failure = debug_profile.symbol_identity_required and (
             status != StepStatus.SUCCEEDED or identity["live_banner_match"] is not True
-        ):
-            raise ProviderDebugError(
-                "strict symbol identity live target check failed",
-                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-            )
+        )
+        effective_status = StepStatus.FAILED if strict_identity_failure else status
         session = DebugSession(
             session_id=session_id,
             run_id=run_id,
@@ -286,10 +291,10 @@ class QemuGdbstubProvider:
             gdbstub_endpoint=endpoint,
             vmlinux_path=str(resolved_vmlinux),
             selected_debug_profile=debug_profile.name,
-            attach_status="attached" if status == StepStatus.SUCCEEDED else "failed",
+            attach_status="attached" if effective_status == StepStatus.SUCCEEDED else "failed",
             started_at=started_at.isoformat(),
-            ended_at=ended_at.isoformat() if status == StepStatus.FAILED else None,
-            current_execution_state="stopped" if status == StepStatus.SUCCEEDED else "unknown",
+            ended_at=ended_at.isoformat() if effective_status == StepStatus.FAILED else None,
+            current_execution_state="stopped" if effective_status == StepStatus.SUCCEEDED else "unknown",
             transcript_path=str(transcript_path),
             command_metadata_path=str(command_metadata_path),
             latest_summary_path=str(latest_summary_path),
@@ -310,12 +315,17 @@ class QemuGdbstubProvider:
             timeout=30,
             transcript_path=transcript_path,
         )
-        self._append_jsonl(command_metadata_path, command_record)
-        self._write_json(session_path, session.model_dump(mode="json"))
+        details = {
+            "session_path": str(session_path),
+            "gdbstub_endpoint": endpoint,
+            "exit_status": result.exit_status,
+            "timed_out": result.timed_out,
+            "symbol_identity_validation": identity,
+        }
         summary_payload = {
             "run_id": run_id,
             "provider": self.name,
-            "status": status,
+            "status": effective_status,
             "started_at": started_at.isoformat(),
             "ended_at": ended_at.isoformat(),
             "session_path": str(session_path),
@@ -325,21 +335,42 @@ class QemuGdbstubProvider:
             "artifacts": [artifact.model_dump(mode="json") for artifact in artifacts],
             "command": command_record,
         }
-        self._write_json(latest_summary_path, self.redactor.redact_value(summary_payload))
+        try:
+            self._append_jsonl(command_metadata_path, command_record)
+            self._write_json(session_path, session.model_dump(mode="json"))
+            self._write_json(latest_summary_path, self.redactor.redact_value(summary_payload))
+        except OSError as exc:
+            existing_artifacts = [artifact for artifact in artifacts if Path(artifact.path).is_file()]
+            raise ProviderDebugError(
+                "failed to write debug session artifacts",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={**details, "error": str(exc)},
+                artifacts=existing_artifacts,
+            ) from exc
+        existing_artifacts = [artifact for artifact in artifacts if Path(artifact.path).is_file()]
+        if strict_identity_failure:
+            raise ProviderDebugError(
+                "strict symbol identity live target check failed",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={
+                    **details,
+                    "diagnostic": self._snippet(result.stderr or result.stdout),
+                },
+                artifacts=existing_artifacts,
+            )
         return DebugProviderResult(
-            status=status,
-            summary="qemu gdbstub session started" if status == StepStatus.SUCCEEDED else "qemu gdbstub attach failed",
+            status=effective_status,
+            summary=(
+                "qemu gdbstub session started"
+                if effective_status == StepStatus.SUCCEEDED
+                else "qemu gdbstub attach failed"
+            ),
             session=session,
-            artifacts=[artifact for artifact in artifacts if Path(artifact.path).is_file()],
-            details={
-                "session_path": str(session_path),
-                "gdbstub_endpoint": endpoint,
-                "exit_status": result.exit_status,
-                "timed_out": result.timed_out,
-            },
+            artifacts=existing_artifacts,
+            details=details,
             error_category=runner_error_category
-            or (ErrorCategory.DEBUG_ATTACH_FAILURE if status == StepStatus.FAILED else None),
-            diagnostic=self._snippet(result.stderr or result.stdout) if status == StepStatus.FAILED else None,
+            or (ErrorCategory.DEBUG_ATTACH_FAILURE if effective_status == StepStatus.FAILED else None),
+            diagnostic=self._snippet(result.stderr or result.stdout) if effective_status == StepStatus.FAILED else None,
         )
 
     def validate_symbol_name(self, symbol: str) -> str:
@@ -401,6 +432,14 @@ class QemuGdbstubProvider:
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
         return text.replace("\\", "\\\\").replace(" ", "\\ ")
+
+    def _same_path(self, left: object, right: object) -> bool:
+        if left is None or right is None:
+            return False
+        try:
+            return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+        except (OSError, TypeError, ValueError):
+            return False
 
     def _next_attempt_dir(self, run_dir: Path) -> Path:
         debug_dir = run_dir / "debug"

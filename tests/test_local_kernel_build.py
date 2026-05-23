@@ -178,6 +178,8 @@ def test_execute_success_records_artifacts_and_summary(tmp_path: Path) -> None:
     (output / "arch" / "x86" / "boot").mkdir(parents=True)
     (output / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
     (output / "vmlinux").write_text("symbols", encoding="utf-8")
+    (output / "include" / "config").mkdir(parents=True)
+    (output / "include" / "config" / "kernel.release").write_text("6.9.0-test\n", encoding="utf-8")
     provider = LocalKernelBuildProvider(runner=FakeRunner(output="ok\n"))
     profile = BuildProfile(name="x86_64-default", architecture="x86_64")
     plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
@@ -187,6 +189,7 @@ def test_execute_success_records_artifacts_and_summary(tmp_path: Path) -> None:
     )
 
     assert result.status == "succeeded"
+    assert result.details["kernel_release"] == "6.9.0-test"
     assert {artifact.kind for artifact in result.artifacts} == {
         "build-log",
         "kernel-config",
@@ -200,6 +203,7 @@ def test_execute_success_records_artifacts_and_summary(tmp_path: Path) -> None:
         "mode": "sanitized",
         "passed_keys": sorted(plan.environment),
     }
+    assert summary["kernel_release"] == "6.9.0-test"
     assert (summaries / "build-summary.json").exists()
 
 

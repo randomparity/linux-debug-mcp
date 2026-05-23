@@ -185,6 +185,38 @@ def test_start_session_fails_when_live_banner_mismatches(tmp_path: Path) -> None
         )
 
     assert exc_info.value.category == ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc_info.value.details["symbol_identity_validation"]["live_banner_match"] is False
+    assert "6.8.0-other" in exc_info.value.details["diagnostic"]
+    artifact_kinds = {artifact.kind for artifact in exc_info.value.artifacts}
+    assert {"debug-transcript", "debug-command-metadata", "debug-summary", "debug-session"} <= artifact_kinds
+    for artifact in exc_info.value.artifacts:
+        assert Path(artifact.path).is_file()
+
+
+def test_start_session_converts_artifact_write_failure_to_provider_error(tmp_path: Path) -> None:
+    vmlinux = write_vmlinux(tmp_path)
+    (tmp_path / "debug").write_text("not a directory", encoding="utf-8")
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+
+    with pytest.raises(ProviderDebugError) as exc_info:
+        provider.start_session(
+            run_id="run-debug",
+            run_dir=tmp_path,
+            vmlinux_path=vmlinux,
+            gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
+            debug_profile=DebugProfile(name="qemu-gdbstub-default"),
+            build_metadata={
+                "kernel_release": "6.9.0-test",
+                "kernel_image_path": str(tmp_path / "build" / "bzImage"),
+                "vmlinux_path": str(vmlinux),
+            },
+            boot_metadata={
+                "debug_boot": True,
+                "kernel_image_path": str(tmp_path / "build" / "bzImage"),
+            },
+        )
+
+    assert exc_info.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_start_session_escapes_spaces_in_gdb_file_command(tmp_path: Path) -> None:
