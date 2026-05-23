@@ -3,6 +3,7 @@ from pathlib import Path
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.domain import ArtifactRef, StepResult, StepStatus
 from linux_debug_mcp.server import (
+    DEFAULT_TEST_SUITES,
     create_app,
     create_run_handler,
     get_manifest_handler,
@@ -33,6 +34,10 @@ def create_test_run(tmp_path: Path, run_id: str = "run-abc123") -> tuple[Path, P
         run_id=run_id,
     )
     return source, artifact_root
+
+
+def tool_names() -> set[str]:
+    return set(create_app()._tool_manager._tools)
 
 
 def test_create_run_handler_creates_manifest(tmp_path: Path) -> None:
@@ -194,8 +199,22 @@ def test_list_providers_handler_returns_default_capabilities() -> None:
         "local-kernel-build",
         "local-libvirt-qemu",
         "local-prereqs",
+        "local-ssh-tests",
         "stub-workflows",
     }
+
+
+def test_default_smoke_basic_suite_matches_sprint_3_contract() -> None:
+    suite = DEFAULT_TEST_SUITES["smoke-basic"]
+
+    assert [command.argv for command in suite.commands] == [
+        ["uname", "-a"],
+        ["test", "-r", "/proc/version"],
+        ["cat", "/proc/cmdline"],
+    ]
+    assert suite.timeout_seconds == 30
+    assert suite.stop_on_failure is True
+    assert suite.collect_dmesg is True
 
 
 def test_not_implemented_handler_returns_structured_error() -> None:
@@ -209,3 +228,45 @@ def test_not_implemented_handler_returns_structured_error() -> None:
 
 def test_create_app_constructs_fastmcp_server() -> None:
     assert type(create_app()).__name__ == "FastMCP"
+
+
+def test_target_run_tests_tool_is_registered_with_full_arguments() -> None:
+    app = create_app()
+    tool = app._tool_manager._tools["target.run_tests"]
+
+    assert "target.run_tests" in tool_names()
+    assert "force_rerun" in tool.parameters["properties"]
+    assert "commands" in tool.parameters["properties"]
+    assert tool.fn.__name__ == "target_run_tests"
+
+
+def test_target_run_tests_handler_response_serializes(tmp_path: Path) -> None:
+    source, artifact_root = create_test_run(tmp_path)
+    store = ArtifactStore(artifact_root, source_paths=[source])
+    store.record_step_result(
+        "run-abc123",
+        StepResult(step_name="boot", status=StepStatus.SUCCEEDED, summary="boot ok"),
+    )
+
+    response = get_manifest_handler(artifact_root=artifact_root, run_id="run-abc123")
+
+    assert response.model_dump(mode="json")["run_id"] == "run-abc123"
+
+
+def test_artifacts_collect_tool_is_registered_with_force_recollect() -> None:
+    app = create_app()
+    tool = app._tool_manager._tools["artifacts.collect"]
+
+    assert "artifacts.collect" in tool_names()
+    assert "force_recollect" in tool.parameters["properties"]
+    assert tool.fn.__name__ == "artifacts_collect"
+
+
+def test_workflow_build_boot_test_tool_is_registered_with_force_flags() -> None:
+    app = create_app()
+    tool = app._tool_manager._tools["workflow.build_boot_test"]
+
+    assert "workflow.build_boot_test" in tool_names()
+    assert "force_rerun_tests" in tool.parameters["properties"]
+    assert "force_recollect" in tool.parameters["properties"]
+    assert tool.fn.__name__ == "workflow_build_boot_test"

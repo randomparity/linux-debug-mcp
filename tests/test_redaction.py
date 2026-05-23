@@ -13,6 +13,12 @@ def test_redacts_common_key_value_secret_patterns() -> None:
     assert redactor.redact_text("password=hunter2 token: abc123") == "password=[REDACTED] token: [REDACTED]"
 
 
+def test_redacts_prefixed_token_key_value_patterns() -> None:
+    redactor = Redactor()
+
+    assert redactor.redact_text("API_TOKEN=secret-token-value") == "API_TOKEN=[REDACTED]"
+
+
 def test_redacts_environment_mapping() -> None:
     redactor = Redactor(secret_values=["topsecret"])
 

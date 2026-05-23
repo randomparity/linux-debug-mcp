@@ -9,6 +9,18 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 
 from linux_debug_mcp.safety.secrets import SecretReference
 
+_SAFE_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_ALLOWED_SSH_OPTIONS = {
+    "ConnectTimeout": {"validator": "timeout"},
+    "IdentitiesOnly": {"values": {"yes", "no"}},
+    "LogLevel": {"values": {"ERROR", "QUIET", "VERBOSE"}},
+    "StrictHostKeyChecking": {"values": {"accept-new", "yes"}},
+}
+
+
+def _has_control_character(value: str) -> bool:
+    return any(unicodedata.category(char) == "Cc" for char in value)
+
 
 class ConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
@@ -57,6 +69,45 @@ class BuildProfile(ConfigModel):
         return value
 
 
+class TestCommand(ConfigModel):
+    name: str
+    argv: list[str] = Field(min_length=1)
+    timeout_seconds: int | None = Field(default=None, ge=1)
+    required: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not _SAFE_LABEL_PATTERN.match(value):
+            raise ValueError("test command name must be filesystem safe")
+        return value
+
+    @field_validator("argv")
+    @classmethod
+    def validate_argv(cls, value: list[str]) -> list[str]:
+        for item in value:
+            if not item:
+                raise ValueError("test command argv entries must be non-empty")
+            if _has_control_character(item):
+                raise ValueError("test command argv entries must not contain control characters")
+        return value
+
+
+class TestSuiteProfile(ConfigModel):
+    name: str
+    commands: list[TestCommand] = Field(min_length=1)
+    timeout_seconds: int = Field(default=30, ge=1)
+    stop_on_failure: bool = True
+    collect_dmesg: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not _SAFE_LABEL_PATTERN.match(value):
+            raise ValueError("test suite name must be filesystem safe")
+        return value
+
+
 class RootfsProfile(ConfigModel):
     name: str
     source: str
@@ -66,6 +117,40 @@ class RootfsProfile(ConfigModel):
     credential_refs: list[SecretReference] = Field(default_factory=list)
     readiness_marker: str | None = None
     guest_writable_paths: list[str] = Field(default_factory=list)
+    ssh_host: str | None = None
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    ssh_user: str | None = None
+    ssh_key_ref: str | None = None
+    ssh_options: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("ssh_host", "ssh_user", "ssh_key_ref")
+    @classmethod
+    def validate_optional_ssh_text(cls, value: str | None) -> str | None:
+        if value is not None and (not value or _has_control_character(value)):
+            raise ValueError("SSH profile fields must be non-empty and must not contain control characters")
+        return value
+
+    @field_validator("ssh_options")
+    @classmethod
+    def validate_ssh_options(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, item in value.items():
+            if key not in _ALLOWED_SSH_OPTIONS:
+                raise ValueError(f"unsupported SSH option: {key}")
+            if not key or any(char.isspace() or unicodedata.category(char) == "Cc" for char in key):
+                raise ValueError("SSH option names must be simple names")
+            if not item or _has_control_character(item):
+                raise ValueError(f"invalid SSH option value for {key}")
+            rule = _ALLOWED_SSH_OPTIONS[key]
+            if rule.get("validator") == "timeout":
+                try:
+                    parsed = int(item)
+                except ValueError as exc:
+                    raise ValueError("ConnectTimeout must be an integer") from exc
+                if parsed < 1 or parsed > 3600:
+                    raise ValueError("ConnectTimeout must be between 1 and 3600 seconds")
+            elif item not in rule["values"]:
+                raise ValueError(f"invalid SSH option value for {key}")
+        return value
 
 
 class TargetProfile(ConfigModel):
@@ -104,11 +189,12 @@ class ServerConfig(ConfigModel):
     rootfs_profiles: dict[str, RootfsProfile] = Field(default_factory=dict)
     target_profiles: dict[str, TargetProfile] = Field(default_factory=dict)
     debug_profiles: dict[str, DebugProfile] = Field(default_factory=dict)
+    test_suites: dict[str, TestSuiteProfile] = Field(default_factory=dict)
     artifact_policy: ArtifactPolicy = Field(default_factory=ArtifactPolicy)
     logging_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     sensitive_paths: list[Path] = Field(default_factory=list)
 
-    @field_validator("build_profiles", "rootfs_profiles", "target_profiles", "debug_profiles")
+    @field_validator("build_profiles", "rootfs_profiles", "target_profiles", "debug_profiles", "test_suites")
     @classmethod
     def profile_keys_match_names(cls, value: dict[str, ConfigModel], info: ValidationInfo) -> dict[str, ConfigModel]:
         for key, profile in value.items():

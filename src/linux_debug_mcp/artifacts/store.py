@@ -115,6 +115,26 @@ class ArtifactStore:
             yield
 
     @contextmanager
+    def tests_lock(self, run_id: str) -> Iterator[None]:
+        run_dir = self._run_dir(run_id)
+        with self._file_lock(
+            run_dir / ".tests.lock",
+            locked_message="tests are locked",
+            failure_prefix="failed to lock tests",
+        ):
+            yield
+
+    @contextmanager
+    def collect_lock(self, run_id: str) -> Iterator[None]:
+        run_dir = self._run_dir(run_id)
+        with self._file_lock(
+            run_dir / ".collect.lock",
+            locked_message="artifact collection is locked",
+            failure_prefix="failed to lock artifact collection",
+        ):
+            yield
+
+    @contextmanager
     def target_lock(self, target_ref: str) -> Iterator[None]:
         lock_dir = self._target_lock_dir()
         lock_name = self._safe_lock_name(target_ref)

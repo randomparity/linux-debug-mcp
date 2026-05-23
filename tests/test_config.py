@@ -10,6 +10,8 @@ from linux_debug_mcp.config import (
     RootfsProfile,
     ServerConfig,
     TargetProfile,
+    TestCommand,
+    TestSuiteProfile,
 )
 from linux_debug_mcp.safety.secrets import SecretReference, SecretReferenceKind
 
@@ -99,6 +101,81 @@ def test_sprint_2_profiles_accept_libvirt_boot_fields(tmp_path: Path) -> None:
     assert rootfs.source_type == "disk_image"
     assert target.libvirt_uri == "qemu:///system"
     assert target.managed_domain is True
+
+
+def test_sprint_3_rootfs_profile_accepts_ssh_access_fields() -> None:
+    profile = RootfsProfile(
+        name="minimal",
+        source="/var/lib/linux-debug/rootfs.qcow2",
+        access_method="ssh_and_serial",
+        ssh_host="127.0.0.1",
+        ssh_port=2222,
+        ssh_user="root",
+        ssh_key_ref="/tmp/id_ed25519",
+        ssh_options={
+            "ConnectTimeout": "5",
+            "IdentitiesOnly": "yes",
+            "LogLevel": "ERROR",
+            "StrictHostKeyChecking": "accept-new",
+        },
+    )
+
+    assert profile.ssh_host == "127.0.0.1"
+    assert profile.ssh_port == 2222
+    assert profile.ssh_user == "root"
+    assert profile.ssh_options["ConnectTimeout"] == "5"
+
+
+def test_test_suite_profile_accepts_ordered_commands() -> None:
+    suite = TestSuiteProfile(
+        name="smoke-basic",
+        timeout_seconds=30,
+        stop_on_failure=True,
+        collect_dmesg=True,
+        commands=[
+            TestCommand(name="uname", argv=["uname", "-a"]),
+            TestCommand(name="proc-version", argv=["test", "-r", "/proc/version"]),
+        ],
+    )
+
+    assert [command.name for command in suite.commands] == ["uname", "proc-version"]
+    assert suite.commands[0].required is True
+
+
+@pytest.mark.parametrize("name", ["", "../bad", "bad/name", "bad name", "bad\nname"])
+def test_test_command_rejects_non_filesystem_safe_names(name: str) -> None:
+    with pytest.raises(ValidationError):
+        TestCommand(name=name, argv=["uname"])
+
+
+@pytest.mark.parametrize("argv", [[], [""], ["bad\narg"], ["bad\0arg"]])
+def test_test_command_rejects_empty_or_control_character_argv(argv: list[str]) -> None:
+    with pytest.raises(ValidationError):
+        TestCommand(name="bad", argv=argv)
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("ProxyCommand", "nc bad 22"),
+        ("ConnectTimeout", "0"),
+        ("ConnectTimeout", "999999"),
+        ("IdentitiesOnly", "maybe"),
+        ("LogLevel", "DEBUG"),
+        ("StrictHostKeyChecking", "no"),
+        ("Bad Option", "yes"),
+        ("Bad\nOption", "yes"),
+    ],
+)
+def test_rootfs_profile_rejects_invalid_ssh_options(option: str, value: str) -> None:
+    with pytest.raises(ValidationError):
+        RootfsProfile(
+            name="minimal",
+            source="/var/lib/linux-debug/rootfs.qcow2",
+            ssh_host="127.0.0.1",
+            ssh_user="root",
+            ssh_options={option: value},
+        )
 
 
 @pytest.mark.parametrize("cleanup_policy", ["preserve_all", "preserve_failed", "stop_failed", "remove_temporary"])

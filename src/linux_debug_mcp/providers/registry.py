@@ -4,6 +4,7 @@ from linux_debug_mcp.domain import ProviderCapability
 from linux_debug_mcp.providers.base import sprint0_capability
 from linux_debug_mcp.providers.libvirt_qemu import local_libvirt_qemu_capability
 from linux_debug_mcp.providers.local_kernel_build import local_kernel_build_capability
+from linux_debug_mcp.providers.local_ssh_tests import local_ssh_tests_capability
 
 
 class ProviderRegistry:
@@ -42,13 +43,11 @@ class ProviderRegistry:
         )
         registry.register(local_kernel_build_capability())
         registry.register(local_libvirt_qemu_capability())
+        registry.register(local_ssh_tests_capability())
         registry.register(
             sprint0_capability(
                 name="stub-workflows",
                 operations=[
-                    "target.run_tests",
-                    "artifacts.collect",
-                    "workflow.build_boot_test",
                     "workflow.build_boot_debug",
                     "debug.start_session",
                     "debug.interrupt",

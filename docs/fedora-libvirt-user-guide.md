@@ -10,9 +10,9 @@ This guide walks through preparing a Fedora host and running the current
   `mcp-linux-debug-`.
 
 The current pilot boots an x86_64 kernel with direct kernel boot, attaches a
-disk-image rootfs as `/dev/vda`, and waits for a serial readiness marker on
-`ttyS0`. It does not create rootfs images, configure SSH, run guest tests,
-attach gdb, or manage production VMs.
+disk-image rootfs as `/dev/vda`, waits for a serial readiness marker on
+`ttyS0`, and can run SSH smoke tests after boot. It does not create rootfs
+images, configure SSH, attach gdb, or manage production VMs.
 
 ## 1. Install Fedora Host Packages
 
@@ -279,6 +279,18 @@ sudo restorecon -Rv /var/lib/linux-debug-mcp/rootfs
 This rootfs recipe is a development smoke image, not a production guest. The
 MCP server still does not create rootfs images automatically; the commands above
 are a host preparation step you run manually.
+
+## SSH Requirements For Smoke Tests
+
+The Fedora rootfs must boot far enough for sshd to accept key-based or otherwise
+noninteractive login. The MCP server uses `ssh` with `BatchMode=yes`, a
+run-local `known_hosts` file, and bounded connection timeouts.
+
+Sprint 3 does not install SSH keys, edit `sshd_config`, create host port
+forwards, parse DHCP leases, or discover guest IP addresses. Configure the
+`RootfsProfile` with `ssh_host`, `ssh_port`, `ssh_user`, optional `ssh_key_ref`,
+and the allowed SSH options before running `target.run_tests` or
+`workflow.build_boot_test`.
 
 ## 6. Run The Opt-In Libvirt Integration Test
 

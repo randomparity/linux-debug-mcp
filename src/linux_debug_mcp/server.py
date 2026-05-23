@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import json
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from linux_debug_mcp.artifacts.manifest import RunManifest
 from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
-from linux_debug_mcp.config import BuildProfile, RootfsProfile, TargetProfile
+from linux_debug_mcp.config import BuildProfile, RootfsProfile, TargetProfile, TestCommand, TestSuiteProfile
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
+from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider
 from linux_debug_mcp.providers.registry import ProviderRegistry
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_source_path
 from linux_debug_mcp.safety.redaction import Redactor
@@ -37,12 +41,29 @@ DEFAULT_ROOTFS_PROFILES = {
         source="/var/lib/linux-debug-mcp/rootfs/minimal.qcow2",
         mutability="read_only",
         readiness_marker="linux-debug-mcp-ready",
+        ssh_host="127.0.0.1",
+        ssh_port=22,
+        ssh_user="root",
     ),
+}
+DEFAULT_TEST_SUITES = {
+    "smoke-basic": TestSuiteProfile(
+        name="smoke-basic",
+        timeout_seconds=30,
+        stop_on_failure=True,
+        collect_dmesg=True,
+        commands=[
+            TestCommand(name="uname", argv=["uname", "-a"]),
+            TestCommand(name="proc-version", argv=["test", "-r", "/proc/version"]),
+            TestCommand(name="proc-cmdline", argv=["cat", "/proc/cmdline"]),
+        ],
+    )
 }
 RUNNING_BUILD_MESSAGE = (
     "previous build is still recorded as running; inspect logs and create a new run or manually clean stale build state"
 )
 RUNNING_BOOT_MESSAGE = "previous boot is still recorded as running"
+RUNNING_TESTS_MESSAGE = "previous test run is still recorded as running"
 
 
 def _recorded_build_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
@@ -102,12 +123,52 @@ def _recorded_boot_success_response(*, run_id: str, result: StepResult) -> ToolR
     )
 
 
+def _recorded_test_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
+    redactor = Redactor()
+    return ToolResponse.success(
+        summary=redactor.redact_text(result.summary),
+        run_id=run_id,
+        data=redactor.redact_value(result.details),
+        artifacts=result.artifacts,
+        suggested_next_actions=["artifacts.collect"],
+    )
+
+
+def _redacted_artifacts(artifacts: list[ArtifactRef], redactor: Redactor | None = None) -> list[ArtifactRef]:
+    redactor = redactor or Redactor()
+    return [
+        ArtifactRef.model_validate(redactor.redact_value(artifact.model_dump(mode="json"))) for artifact in artifacts
+    ]
+
+
+def _recorded_collect_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
+    redactor = Redactor()
+    return ToolResponse.success(
+        summary=redactor.redact_text(result.summary),
+        run_id=run_id,
+        data=redactor.redact_value(result.details),
+        artifacts=_redacted_artifacts(result.artifacts, redactor),
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
 def _running_boot_response(*, run_id: str, result: StepResult, message: str = RUNNING_BOOT_MESSAGE) -> ToolResponse:
     return ToolResponse.failure(
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         message=message,
         run_id=run_id,
         details=result.details,
+        artifacts=result.artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
+def _running_tests_response(*, run_id: str, result: StepResult) -> ToolResponse:
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        message=RUNNING_TESTS_MESSAGE,
+        run_id=run_id,
+        details=Redactor().redact_value(result.details),
         artifacts=result.artifacts,
         suggested_next_actions=["artifacts.get_manifest"],
     )
@@ -127,6 +188,25 @@ def _find_kernel_image(build_result: StepResult) -> ArtifactRef | None:
         if artifact.kind == "kernel-image":
             return artifact
     return None
+
+
+def _next_test_attempt(run_dir: Path) -> int:
+    attempts = []
+    tests_dir = run_dir / "tests"
+    if tests_dir.exists():
+        for path in tests_dir.glob("attempt-*"):
+            try:
+                attempts.append(int(path.name.removeprefix("attempt-")))
+            except ValueError:
+                continue
+    return max(attempts, default=0) + 1
+
+
+def _validate_adhoc_commands(commands: list[list[str]] | None) -> list[TestCommand]:
+    validated: list[TestCommand] = []
+    for index, argv in enumerate(commands or [], start=1):
+        validated.append(TestCommand(name=f"adhoc-{index:03d}", argv=argv, required=True))
+    return validated
 
 
 def create_run_handler(
@@ -577,6 +657,502 @@ def target_boot_handler(
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
 
 
+def target_run_tests_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    test_suite: str | None = None,
+    commands: list[list[str]] | None = None,
+    force_rerun: bool = False,
+    provider: LocalSshTestProvider | None = None,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    test_suites: dict[str, TestSuiteProfile] | None = None,
+) -> ToolResponse:
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        manifest_path = store.run_dir(run_id) / "manifest.json"
+        if not manifest_path.is_file():
+            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    boot_result = manifest.step_results.get("boot")
+    if boot_result is None or boot_result.status != StepStatus.SUCCEEDED:
+        return _configuration_failure(run_id=run_id, message="target run tests requires a succeeded boot")
+
+    try:
+        adhoc_commands = _validate_adhoc_commands(commands)
+    except ValueError as exc:
+        return _configuration_failure(run_id=run_id, message=str(exc))
+
+    requested_suite = test_suite or manifest.request.test_suite
+    if manifest.request.test_suite is not None and requested_suite != manifest.request.test_suite:
+        return _configuration_failure(
+            run_id=run_id,
+            message="test_suite must match the immutable run manifest request",
+            details={"requested_suite": requested_suite, "manifest_suite": manifest.request.test_suite},
+        )
+    if requested_suite is None and not adhoc_commands:
+        requested_suite = "smoke-basic"
+
+    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    test_suites = test_suites if test_suites is not None else DEFAULT_TEST_SUITES
+    try:
+        resolved_rootfs_profile = rootfs_profiles[manifest.request.rootfs_profile]
+    except KeyError:
+        return _configuration_failure(
+            run_id=run_id,
+            message=f"unknown rootfs profile: {manifest.request.rootfs_profile}",
+        )
+    try:
+        suite_profile = test_suites[requested_suite] if requested_suite is not None else None
+    except KeyError:
+        return _configuration_failure(run_id=run_id, message=f"unknown test suite: {requested_suite}")
+
+    existing = manifest.step_results.get("run_tests")
+    if existing and existing.status == StepStatus.SUCCEEDED and not force_rerun:
+        return _recorded_test_success_response(run_id=run_id, result=existing)
+
+    provider = provider or LocalSshTestProvider()
+    try:
+        with store.tests_lock(run_id):
+            locked_manifest = store.load_manifest(run_id)
+            existing = locked_manifest.step_results.get("run_tests")
+            if existing and existing.status == StepStatus.SUCCEEDED and not force_rerun:
+                return _recorded_test_success_response(run_id=run_id, result=existing)
+            if existing and existing.status == StepStatus.RUNNING:
+                stale_failed = StepResult(
+                    step_name="run_tests",
+                    status=StepStatus.FAILED,
+                    summary=existing.summary,
+                    artifacts=existing.artifacts,
+                    details={**existing.details, "stale_running_recovered": True},
+                )
+                store.record_step_result(run_id, stale_failed)
+
+            attempt = _next_test_attempt(store.run_dir(run_id))
+            try:
+                plan = provider.plan_tests(
+                    run_id=run_id,
+                    run_dir=store.run_dir(run_id),
+                    rootfs_profile=resolved_rootfs_profile,
+                    suite=suite_profile,
+                    adhoc_commands=adhoc_commands,
+                    attempt=attempt,
+                )
+            except ValueError as exc:
+                return _configuration_failure(run_id=run_id, message=str(exc))
+            running = StepResult(
+                step_name="run_tests",
+                status=StepStatus.RUNNING,
+                summary="target tests running",
+                details={
+                    "provider": provider.name,
+                    "suite": suite_profile.name if suite_profile is not None else "adhoc",
+                    "attempt": attempt,
+                },
+            )
+            store.record_step_result(run_id, running, replace_succeeded=force_rerun)
+            try:
+                execution = provider.execute_tests(plan)
+            except Exception as exc:
+                terminal = StepResult(
+                    step_name="run_tests",
+                    status=StepStatus.FAILED,
+                    summary="unexpected test provider failure",
+                    details={"provider": provider.name, "exception_type": type(exc).__name__, "error": str(exc)},
+                )
+                store.record_step_result(run_id, terminal, replace_succeeded=force_rerun)
+                return ToolResponse.failure(
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    message=terminal.summary,
+                    run_id=run_id,
+                    details=Redactor().redact_value(terminal.details),
+                    suggested_next_actions=["artifacts.collect"],
+                )
+            redactor = Redactor()
+            safe_details = redactor.redact_value(execution.details)
+            safe_summary = redactor.redact_text(execution.summary)
+            safe_diagnostic = redactor.redact_text(execution.diagnostic or "")
+            safe_artifacts = _redacted_artifacts(execution.artifacts, redactor)
+            terminal = StepResult(
+                step_name="run_tests",
+                status=execution.status,
+                summary=safe_summary,
+                artifacts=safe_artifacts,
+                details=safe_details,
+            )
+            store.record_step_result(run_id, terminal, replace_succeeded=force_rerun)
+    except ManifestStateError as exc:
+        if "tests are locked" in str(exc):
+            try:
+                refreshed = store.load_manifest(run_id).step_results.get("run_tests")
+            except ManifestStateError:
+                refreshed = None
+            if refreshed and refreshed.status == StepStatus.RUNNING:
+                return _running_tests_response(run_id=run_id, result=refreshed)
+            if existing and existing.status == StepStatus.RUNNING:
+                return _running_tests_response(run_id=run_id, result=existing)
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    if execution.status == StepStatus.SUCCEEDED:
+        return ToolResponse.success(
+            summary=safe_summary,
+            run_id=run_id,
+            data=safe_details,
+            artifacts=safe_artifacts,
+            suggested_next_actions=["artifacts.collect"],
+        )
+    return ToolResponse.failure(
+        category=execution.error_category or ErrorCategory.TEST_FAILURE,
+        message=safe_summary,
+        run_id=run_id,
+        details={
+            **safe_details,
+            "diagnostic": safe_diagnostic,
+        },
+        artifacts=safe_artifacts,
+        suggested_next_actions=["artifacts.collect"],
+    )
+
+
+def _bundle_for_manifest(
+    *,
+    manifest: RunManifest,
+    run_dir: Path,
+    bundle_path: Path,
+) -> tuple[dict[str, Any], list[ArtifactRef], list[dict[str, Any]], list[dict[str, Any]]]:
+    required_kinds_by_step = {
+        "build": {"build-log", "kernel-config", "kernel-image"},
+        "boot": {"domain-xml", "boot-plan", "console-log", "boot-log"},
+        "run_tests": {"test-summary"},
+    }
+    optional_kinds_by_step = {"build": {"vmlinux"}}
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    missing_required: list[dict[str, Any]] = []
+    missing_optional: list[dict[str, Any]] = []
+    collected_refs: list[ArtifactRef] = []
+    for step in manifest.steps:
+        result = manifest.step_results.get(step.name)
+        grouped[step.name] = []
+        if result is None:
+            continue
+        present_kinds = {artifact.kind for artifact in result.artifacts}
+        if result.status == StepStatus.SUCCEEDED:
+            for kind in sorted(required_kinds_by_step.get(step.name, set()) - present_kinds):
+                missing_required.append(
+                    {"step": step.name, "kind": kind, "reason": "required artifact kind was not recorded"}
+                )
+            for kind in sorted(optional_kinds_by_step.get(step.name, set()) - present_kinds):
+                missing_optional.append(
+                    {"step": step.name, "kind": kind, "reason": "optional artifact kind was not recorded"}
+                )
+        for artifact in result.artifacts:
+            exists = Path(artifact.path).is_file()
+            item = {**artifact.model_dump(mode="json"), "exists": exists}
+            grouped[step.name].append(item)
+            if exists:
+                collected_refs.append(artifact)
+            elif result.status == StepStatus.SUCCEEDED and artifact.kind not in optional_kinds_by_step.get(
+                step.name, set()
+            ):
+                missing_required.append({"step": step.name, "artifact": artifact.model_dump(mode="json")})
+            else:
+                missing_optional.append({"step": step.name, "artifact": artifact.model_dump(mode="json")})
+    bundle_ref = ArtifactRef(path=str(bundle_path), kind="artifact-bundle")
+    bundle = {
+        "run_id": manifest.run_id,
+        "run_dir": str(run_dir),
+        "collected_at": datetime.now(UTC).isoformat(),
+        "selected_profiles": manifest.request.model_dump(mode="json"),
+        "steps": {step.name: step.status for step in manifest.steps},
+        "summaries": {
+            name: {"status": result.status, "summary": result.summary} for name, result in manifest.step_results.items()
+        },
+        "artifacts_by_step": grouped,
+        "missing_expected_artifacts": missing_required,
+        "missing_optional_artifacts": missing_optional,
+        "cleanup_state": manifest.cleanup_state,
+        "rollup": {
+            "ok": not missing_required,
+            "missing_required": len(missing_required),
+            "missing_optional": len(missing_optional),
+        },
+    }
+    return bundle, [*collected_refs, bundle_ref], missing_required, missing_optional
+
+
+def artifacts_collect_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    force_recollect: bool = False,
+) -> ToolResponse:
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        manifest_path = store.run_dir(run_id) / "manifest.json"
+        if not manifest_path.is_file():
+            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    existing = manifest.step_results.get("collect_artifacts")
+    if existing and existing.status == StepStatus.SUCCEEDED and not force_recollect:
+        return _recorded_collect_success_response(run_id=run_id, result=existing)
+    try:
+        with store.collect_lock(run_id):
+            locked_manifest = store.load_manifest(run_id)
+            existing = locked_manifest.step_results.get("collect_artifacts")
+            if existing and existing.status == StepStatus.SUCCEEDED and not force_recollect:
+                return _recorded_collect_success_response(run_id=run_id, result=existing)
+            bundle_path = store.run_dir(run_id) / "summaries" / "artifact-bundle.json"
+            bundle, artifacts, missing_required, missing_optional = _bundle_for_manifest(
+                manifest=locked_manifest,
+                run_dir=store.run_dir(run_id),
+                bundle_path=bundle_path,
+            )
+            bundle_path.parent.mkdir(parents=True, exist_ok=True)
+            bundle_path.write_text(
+                json.dumps(Redactor().redact_value(bundle), indent=2, default=str),
+                encoding="utf-8",
+            )
+            status = StepStatus.FAILED if missing_required else StepStatus.SUCCEEDED
+            result = StepResult(
+                step_name="collect_artifacts",
+                status=status,
+                summary=(
+                    "artifact collection succeeded"
+                    if status == StepStatus.SUCCEEDED
+                    else "artifact collection found missing required artifacts"
+                ),
+                artifacts=artifacts,
+                details={"bundle": bundle, "rollup": bundle["rollup"]},
+            )
+            store.record_step_result(run_id, result, replace_succeeded=force_recollect)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    redactor = Redactor()
+    safe_bundle = redactor.redact_value(bundle)
+    safe_artifacts = _redacted_artifacts(artifacts, redactor)
+    if missing_required:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            message=redactor.redact_text(result.summary),
+            run_id=run_id,
+            details={
+                "bundle": safe_bundle,
+                "rollup": safe_bundle["rollup"],
+                "missing_required": redactor.redact_value(missing_required),
+                "missing_optional": redactor.redact_value(missing_optional),
+            },
+            artifacts=safe_artifacts,
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+    return ToolResponse.success(
+        summary=redactor.redact_text(result.summary),
+        run_id=run_id,
+        data={"bundle": safe_bundle, "rollup": safe_bundle["rollup"]},
+        artifacts=safe_artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
+def _workflow_failure_response(
+    *,
+    run_id: str | None,
+    failing_step: str,
+    latest_successful_step: str | None,
+    response: ToolResponse,
+    collect_response: ToolResponse | None,
+) -> ToolResponse:
+    details = {
+        "failing_step": failing_step,
+        "latest_successful_step": latest_successful_step,
+        "failed_response": response.model_dump(mode="json"),
+        "collect_response": collect_response.model_dump(mode="json") if collect_response else None,
+    }
+    category = response.error.category if response.error else ErrorCategory.INFRASTRUCTURE_FAILURE
+    message = response.error.message if response.error else response.summary or f"{failing_step} failed"
+    return ToolResponse.failure(
+        category=category,
+        message=message,
+        run_id=run_id,
+        details=details,
+        artifacts=[*(response.artifacts or []), *((collect_response.artifacts if collect_response else []) or [])],
+        suggested_next_actions=["artifacts.get_manifest", "Inspect artifact bundle"],
+    )
+
+
+def workflow_build_boot_test_handler(
+    *,
+    artifact_root: Path,
+    source_path: str,
+    build_profile: str,
+    target_profile: str,
+    rootfs_profile: str,
+    run_id: str | None = None,
+    test_suite: str | None = None,
+    commands: list[list[str]] | None = None,
+    force_rebuild: bool = False,
+    force_reboot: bool = False,
+    force_rerun_tests: bool = False,
+    force_recollect: bool = False,
+) -> ToolResponse:
+    if run_id is not None:
+        try:
+            store = ArtifactStore(artifact_root, create_root=False)
+            manifest_path = store.run_dir(run_id) / "manifest.json"
+            if manifest_path.is_file():
+                manifest = store.load_manifest(run_id)
+                resolved_test_suite = test_suite if test_suite is not None else manifest.request.test_suite
+                try:
+                    resolved_source_path = str(validate_source_path(Path(source_path)))
+                except PathSafetyError as exc:
+                    return ToolResponse.failure(
+                        category=ErrorCategory.CONFIGURATION_ERROR,
+                        message=str(exc),
+                        run_id=run_id,
+                        details={"source_path": source_path},
+                    )
+                expected = {
+                    "source_path": resolved_source_path,
+                    "build_profile": build_profile,
+                    "target_profile": target_profile,
+                    "rootfs_profile": rootfs_profile,
+                    "test_suite": resolved_test_suite,
+                }
+                actual = {
+                    "source_path": manifest.request.source_path,
+                    "build_profile": manifest.request.build_profile,
+                    "target_profile": manifest.request.target_profile,
+                    "rootfs_profile": manifest.request.rootfs_profile,
+                    "test_suite": manifest.request.test_suite,
+                }
+                mismatches = {
+                    key: {"requested": expected[key], "manifest": actual[key]}
+                    for key in expected
+                    if expected[key] != actual[key]
+                }
+                if mismatches:
+                    return ToolResponse.failure(
+                        category=ErrorCategory.CONFIGURATION_ERROR,
+                        message="immutable run manifest request mismatch",
+                        run_id=run_id,
+                        details={"mismatches": mismatches},
+                    )
+                test_suite = resolved_test_suite
+        except ManifestStateError as exc:
+            return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    if run_id is None or not (artifact_root / run_id / "manifest.json").is_file():
+        create_response = create_run_handler(
+            artifact_root=artifact_root,
+            source_path=source_path,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            run_id=run_id,
+            test_suite=test_suite,
+        )
+        if not create_response.ok:
+            return create_response
+        run_id = create_response.run_id
+
+    build_response = kernel_build_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        build_profile=build_profile,
+        force_rebuild=force_rebuild,
+    )
+    if not build_response.ok:
+        collect_response = artifacts_collect_handler(
+            artifact_root=artifact_root,
+            run_id=run_id,
+            force_recollect=force_recollect,
+        )
+        return _workflow_failure_response(
+            run_id=run_id,
+            failing_step="build",
+            latest_successful_step=None,
+            response=build_response,
+            collect_response=collect_response,
+        )
+
+    boot_response = target_boot_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        target_profile=target_profile,
+        rootfs_profile=rootfs_profile,
+        force_reboot=force_reboot,
+    )
+    if not boot_response.ok:
+        collect_response = artifacts_collect_handler(
+            artifact_root=artifact_root,
+            run_id=run_id,
+            force_recollect=force_recollect,
+        )
+        return _workflow_failure_response(
+            run_id=run_id,
+            failing_step="boot",
+            latest_successful_step="build",
+            response=boot_response,
+            collect_response=collect_response,
+        )
+
+    test_response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        test_suite=test_suite,
+        commands=commands,
+        force_rerun=force_rerun_tests,
+    )
+    collect_response = artifacts_collect_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        force_recollect=force_recollect,
+    )
+    if not test_response.ok:
+        return _workflow_failure_response(
+            run_id=run_id,
+            failing_step="run_tests",
+            latest_successful_step="boot",
+            response=test_response,
+            collect_response=collect_response,
+        )
+    if not collect_response.ok:
+        return _workflow_failure_response(
+            run_id=run_id,
+            failing_step="collect_artifacts",
+            latest_successful_step="run_tests",
+            response=collect_response,
+            collect_response=collect_response,
+        )
+    return ToolResponse.success(
+        summary="build, boot, test workflow succeeded",
+        run_id=run_id,
+        data={
+            "steps": {
+                "build": build_response.model_dump(mode="json"),
+                "boot": boot_response.model_dump(mode="json"),
+                "run_tests": test_response.model_dump(mode="json"),
+                "collect_artifacts": collect_response.model_dump(mode="json"),
+            },
+            "latest_successful_step": "collect_artifacts",
+            "artifact_bundle": next(
+                (
+                    artifact.model_dump(mode="json")
+                    for artifact in collect_response.artifacts
+                    if artifact.kind == "artifact-bundle"
+                ),
+                None,
+            ),
+        },
+        artifacts=collect_response.artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
 def not_implemented_handler(tool_name: str, *, run_id: str | None = None) -> ToolResponse:
     sprint_by_prefix = {
         "kernel.build": "Sprint 1",
@@ -676,6 +1252,64 @@ def create_app() -> FastMCP:
             force_reboot=force_reboot,
         ).model_dump(mode="json")
 
+    @app.tool(name="target.run_tests")
+    def target_run_tests(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        test_suite: str | None = None,
+        commands: list[list[str]] | None = None,
+        force_rerun: bool = False,
+    ) -> dict[str, Any]:
+        return target_run_tests_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            test_suite=test_suite,
+            commands=commands,
+            force_rerun=force_rerun,
+        ).model_dump(mode="json")
+
+    @app.tool(name="artifacts.collect")
+    def artifacts_collect(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        force_recollect: bool = False,
+    ) -> dict[str, Any]:
+        return artifacts_collect_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            force_recollect=force_recollect,
+        ).model_dump(mode="json")
+
+    @app.tool(name="workflow.build_boot_test")
+    def workflow_build_boot_test(
+        source_path: str,
+        build_profile: str,
+        target_profile: str,
+        rootfs_profile: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        run_id: str | None = None,
+        test_suite: str | None = None,
+        commands: list[list[str]] | None = None,
+        force_rebuild: bool = False,
+        force_reboot: bool = False,
+        force_rerun_tests: bool = False,
+        force_recollect: bool = False,
+    ) -> dict[str, Any]:
+        return workflow_build_boot_test_handler(
+            artifact_root=Path(artifact_root),
+            source_path=source_path,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            run_id=run_id,
+            test_suite=test_suite,
+            commands=commands,
+            force_rebuild=force_rebuild,
+            force_reboot=force_reboot,
+            force_rerun_tests=force_rerun_tests,
+            force_recollect=force_recollect,
+        ).model_dump(mode="json")
+
     def make_stub(bound_tool_name: str):
         def stub(run_id: str | None = None) -> dict[str, Any]:
             return not_implemented_handler(bound_tool_name, run_id=run_id).model_dump(mode="json")
@@ -683,9 +1317,6 @@ def create_app() -> FastMCP:
         return stub
 
     for tool_name in [
-        "target.run_tests",
-        "artifacts.collect",
-        "workflow.build_boot_test",
         "workflow.build_boot_debug",
         "debug.start_session",
         "debug.interrupt",
