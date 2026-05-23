@@ -87,4 +87,7 @@ def test_registry_advertises_local_qemu_gdbstub_and_removes_sprint_4_stubs() -> 
     debug_provider = providers["local-qemu-gdbstub"]
     assert "debug.start_session" in debug_provider.operations
     assert "workflow.build_boot_debug" in debug_provider.operations
+    assert debug_provider.semantics.destructive is True
+    assert debug_provider.semantics.cancelable is True
+    assert debug_provider.semantics.concurrent_safe is False
     assert "stub-workflows" not in providers or "debug.start_session" not in providers["stub-workflows"].operations

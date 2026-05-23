@@ -66,7 +66,7 @@ def local_qemu_gdbstub_capability() -> ProviderCapability:
             idempotent=False,
             retryable=True,
             destructive=True,
-            cancelable=False,
+            cancelable=True,
             concurrent_safe=False,
         ),
     )
