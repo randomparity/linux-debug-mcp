@@ -1,5 +1,6 @@
 import subprocess
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from linux_debug_mcp.config import DebugProfile
 from linux_debug_mcp.domain import ErrorCategory, StepStatus
 from linux_debug_mcp.providers.qemu_gdbstub import (
+    DebugSession,
     GdbCommandResult,
     ProviderDebugError,
     QemuGdbstubProvider,
@@ -76,6 +78,51 @@ class ExplodingGdbRunner(FakeGdbRunner):
         transcript_path: Path,
     ) -> GdbCommandResult:
         raise OSError("gdb exploded")
+
+
+def write_session_for_test(
+    provider: QemuGdbstubProvider,
+    run_dir: Path,
+    *,
+    state: str = "stopped",
+    controller_mode: str = "batch",
+    pid: int | None = None,
+) -> DebugSession:
+    debug_dir = run_dir / "debug"
+    session_id = "debug-test"
+    session_path = debug_dir / "sessions" / f"{session_id}.json"
+    transcript_path = debug_dir / "attempt-001" / "transcript.txt"
+    command_metadata_path = debug_dir / "attempt-001" / "commands.jsonl"
+    latest_summary_path = debug_dir / "attempt-001" / "debug-summary.json"
+    vmlinux_path = run_dir / "build" / "vmlinux"
+    vmlinux_path.parent.mkdir(parents=True, exist_ok=True)
+    vmlinux_path.write_text("fake vmlinux", encoding="utf-8")
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    transcript_path.write_text("", encoding="utf-8")
+    command_metadata_path.write_text("", encoding="utf-8")
+    latest_summary_path.write_text("{}", encoding="utf-8")
+    session = DebugSession(
+        session_id=session_id,
+        run_id="run-debug",
+        provider_name=provider.name,
+        gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
+        vmlinux_path=str(vmlinux_path),
+        selected_debug_profile="qemu-gdbstub-default",
+        attach_status="attached",
+        started_at=datetime.now(UTC).isoformat(),
+        current_execution_state=state,  # type: ignore[arg-type]
+        controller_mode=controller_mode,  # type: ignore[arg-type]
+        active_controller_pid=pid,
+        controller_last_observed_state="running" if pid is not None else "not_started",
+        active_controller_identity=provider._controller_identity(pid) if pid is not None else {},
+        transcript_path=str(transcript_path),
+        command_metadata_path=str(command_metadata_path),
+        latest_summary_path=str(latest_summary_path),
+        symbol_identity_validation={"same_run_artifact_linkage": True, "live_banner_match": True},
+    )
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    session_path.write_text(session.model_dump_json(indent=2), encoding="utf-8")
+    return session
 
 
 def write_vmlinux(tmp_path: Path) -> Path:
@@ -509,7 +556,7 @@ def test_read_registers_parses_fake_gdb_output(tmp_path: Path) -> None:
         stderr="",
     )
     provider = QemuGdbstubProvider(runner=runner)
-    session = provider.write_session_for_test(tmp_path, state="stopped")
+    session = write_session_for_test(provider, tmp_path, state="stopped")
 
     result = provider.read_registers(run_dir=tmp_path, session=session, registers=["rax", "rip"])
 
@@ -524,7 +571,7 @@ def test_read_registers_redacts_failure_diagnostic(tmp_path: Path) -> None:
         stderr="token=secret\n",
     )
     provider = QemuGdbstubProvider(runner=runner)
-    session = provider.write_session_for_test(tmp_path, state="stopped")
+    session = write_session_for_test(provider, tmp_path, state="stopped")
 
     result = provider.read_registers(run_dir=tmp_path, session=session, registers=["rax"])
 
@@ -545,7 +592,7 @@ def test_read_memory_parses_full_stdout_before_snippet_limit(tmp_path: Path) -> 
         stderr="",
     )
     provider = QemuGdbstubProvider(runner=runner)
-    session = provider.write_session_for_test(tmp_path, state="stopped")
+    session = write_session_for_test(provider, tmp_path, state="stopped")
 
     result = provider.read_memory(run_dir=tmp_path, session=session, address=0x1000, byte_count=byte_count)
 
@@ -560,7 +607,7 @@ def test_read_memory_fails_when_gdb_returns_partial_data(tmp_path: Path) -> None
         stderr="",
     )
     provider = QemuGdbstubProvider(runner=runner)
-    session = provider.write_session_for_test(tmp_path, state="stopped")
+    session = write_session_for_test(provider, tmp_path, state="stopped")
 
     with pytest.raises(ProviderDebugError) as exc_info:
         provider.read_memory(run_dir=tmp_path, session=session, address=0x1000, byte_count=2)
@@ -571,7 +618,7 @@ def test_read_memory_fails_when_gdb_returns_partial_data(tmp_path: Path) -> None
 
 def test_read_memory_enforces_4096_byte_limit(tmp_path: Path) -> None:
     provider = QemuGdbstubProvider(runner=FakeGdbRunner())
-    session = provider.write_session_for_test(tmp_path, state="stopped")
+    session = write_session_for_test(provider, tmp_path, state="stopped")
 
     with pytest.raises(ProviderDebugError) as exc_info:
         provider.read_memory(run_dir=tmp_path, session=session, address=0x1000, byte_count=4097)
@@ -581,7 +628,7 @@ def test_read_memory_enforces_4096_byte_limit(tmp_path: Path) -> None:
 
 def test_breakpoint_operations_require_attached_controller(tmp_path: Path) -> None:
     provider = QemuGdbstubProvider(runner=FakeGdbRunner())
-    session = provider.write_session_for_test(tmp_path, state="stopped", controller_mode="batch")
+    session = write_session_for_test(provider, tmp_path, state="stopped", controller_mode="batch")
 
     with pytest.raises(ProviderDebugError, match="attached controller"):
         provider.set_breakpoint(run_dir=tmp_path, session=session, symbol="start_kernel")
@@ -589,7 +636,8 @@ def test_breakpoint_operations_require_attached_controller(tmp_path: Path) -> No
 
 def test_end_session_is_idempotent_when_controller_already_exited(tmp_path: Path) -> None:
     provider = QemuGdbstubProvider(runner=FakeGdbRunner())
-    session = provider.write_session_for_test(
+    session = write_session_for_test(
+        provider,
         tmp_path,
         state="stopped",
         controller_mode="attached",
@@ -606,7 +654,7 @@ def test_end_session_is_idempotent_when_controller_already_exited(tmp_path: Path
 
 def test_end_session_finalizes_batch_session_without_controller(tmp_path: Path) -> None:
     provider = QemuGdbstubProvider(runner=FakeGdbRunner())
-    session = provider.write_session_for_test(tmp_path, state="stopped", controller_mode="batch")
+    session = write_session_for_test(provider, tmp_path, state="stopped", controller_mode="batch")
 
     first = provider.end_session(run_dir=tmp_path, session=session)
     second = provider.end_session(run_dir=tmp_path, session=first.session)
@@ -620,7 +668,8 @@ def test_end_session_terminates_recorded_live_controller_pid(tmp_path: Path) -> 
     process = subprocess.Popen(["gdb-test-controller", "30"], executable="/bin/sleep")
     try:
         provider = QemuGdbstubProvider(runner=FakeGdbRunner())
-        session = provider.write_session_for_test(
+        session = write_session_for_test(
+            provider,
             tmp_path,
             state="stopped",
             controller_mode="attached",
@@ -646,7 +695,8 @@ def test_end_session_rejects_live_pid_that_is_not_controller_process(tmp_path: P
     process = subprocess.Popen(["sleep", "30"])
     try:
         provider = QemuGdbstubProvider(runner=FakeGdbRunner())
-        session = provider.write_session_for_test(
+        session = write_session_for_test(
+            provider,
             tmp_path,
             state="stopped",
             controller_mode="attached",
@@ -669,7 +719,8 @@ def test_end_session_rejects_live_pid_without_matching_identity(tmp_path: Path) 
     process = subprocess.Popen(["sleep", "30"])
     try:
         provider = QemuGdbstubProvider(runner=FakeGdbRunner())
-        session = provider.write_session_for_test(
+        session = write_session_for_test(
+            provider,
             tmp_path,
             state="stopped",
             controller_mode="attached",
@@ -690,7 +741,7 @@ def test_end_session_rejects_live_pid_without_matching_identity(tmp_path: Path) 
 
 def test_read_operation_transcript_write_failure_is_provider_error(tmp_path: Path) -> None:
     provider = QemuGdbstubProvider(runner=ExplodingGdbRunner())
-    session = provider.write_session_for_test(tmp_path, state="stopped")
+    session = write_session_for_test(provider, tmp_path, state="stopped")
     blocked_parent = tmp_path / "debug" / "blocked"
     blocked_parent.write_text("not a directory", encoding="utf-8")
     session = session.model_copy(
@@ -705,7 +756,7 @@ def test_read_operation_transcript_write_failure_is_provider_error(tmp_path: Pat
 
 def test_evaluate_rejects_unknown_inspector(tmp_path: Path) -> None:
     provider = QemuGdbstubProvider(runner=FakeGdbRunner())
-    session = provider.write_session_for_test(tmp_path, state="stopped")
+    session = write_session_for_test(provider, tmp_path, state="stopped")
 
     with pytest.raises(ProviderDebugError) as exc_info:
         provider.evaluate(run_dir=tmp_path, session=session, inspector="raw", arguments={})

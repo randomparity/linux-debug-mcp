@@ -189,7 +189,8 @@ def test_debug_boot_adds_gdbstub_endpoint_and_nokaslr(tmp_path: Path) -> None:
     root = ElementTree.fromstring(xml_text)
 
     assert plan.debug_gdbstub is True
-    assert plan.gdbstub_endpoint == {"host": "127.0.0.1", "port": 1234}
+    assert plan.gdbstub_endpoint is not None
+    assert plan.gdbstub_endpoint.as_dict() == {"host": "127.0.0.1", "port": 1234}
     assert plan.nokaslr_source == "provider_added"
     assert "nokaslr" in plan.kernel_args
     qemu_args = root.findall(".//{http://libvirt.org/schemas/domain/qemu/1.0}arg")

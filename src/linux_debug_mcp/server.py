@@ -237,14 +237,6 @@ def _find_artifact(result: StepResult, kind: str) -> ArtifactRef | None:
     return None
 
 
-def _active_debug_session_from_result(result: StepResult) -> dict[str, Any] | None:
-    if result.status != StepStatus.SUCCEEDED:
-        return None
-    if result.details.get("current_execution_state") == "ended":
-        return None
-    return result.details
-
-
 def _debug_session_details_from_result(result: StepResult, *, allow_ended: bool = False) -> dict[str, Any] | None:
     if result.status != StepStatus.SUCCEEDED:
         return None
@@ -1039,7 +1031,7 @@ def debug_start_session_handler(
             existing = locked_manifest.step_results.get("debug")
             replace_existing_debug = new_session
             if existing and not new_session:
-                active_session = _active_debug_session_from_result(existing)
+                active_session = _debug_session_details_from_result(existing)
                 if active_session is not None:
                     return ToolResponse.success(
                         summary=redactor.redact_text(existing.summary),
@@ -1183,7 +1175,7 @@ def _load_active_debug_session(
     return session
 
 
-def _debug_read_response(
+def _debug_operation_response(
     *,
     artifact_root: Path,
     run_id: str,
@@ -1191,6 +1183,8 @@ def _debug_read_response(
     provider: QemuGdbstubProvider | None,
     method_name: str,
     kwargs: dict[str, object],
+    persist_manifest: bool,
+    allow_ended: bool = False,
     debug_profiles: dict[str, DebugProfile] | None = None,
 ) -> ToolResponse:
     try:
@@ -1204,7 +1198,7 @@ def _debug_read_response(
     redactor = Redactor()
     try:
         with store.debug_lock(run_id):
-            session = _load_active_debug_session(store, run_id, debug_session_id)
+            session = _load_active_debug_session(store, run_id, debug_session_id, allow_ended=allow_ended)
             profile = _resolve_debug_profile(
                 profile_name=session.selected_debug_profile,
                 debug_profiles=debug_profiles,
@@ -1215,6 +1209,20 @@ def _debug_read_response(
                 session=session,
                 **kwargs,
             )
+            details = result.details
+            if persist_manifest:
+                details = {
+                    **_debug_session_manifest_details(store=store, run_id=run_id, session=result.session),
+                    **result.details,
+                }
+                terminal = StepResult(
+                    step_name="debug",
+                    status=result.status,
+                    summary=result.summary,
+                    artifacts=result.artifacts,
+                    details=details,
+                )
+                store.record_step_result(run_id, terminal, replace_succeeded=True)
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
     except ProviderDebugError as exc:
@@ -1248,6 +1256,28 @@ def _debug_read_response(
         },
         artifacts=safe_artifacts,
         suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+    )
+
+
+def _debug_read_response(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None,
+    provider: QemuGdbstubProvider | None,
+    method_name: str,
+    kwargs: dict[str, object],
+    debug_profiles: dict[str, DebugProfile] | None = None,
+) -> ToolResponse:
+    return _debug_operation_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name=method_name,
+        kwargs=kwargs,
+        persist_manifest=False,
+        debug_profiles=debug_profiles,
     )
 
 
@@ -1344,73 +1374,16 @@ def _debug_stateful_response(
     allow_ended: bool = False,
     debug_profiles: dict[str, DebugProfile] | None = None,
 ) -> ToolResponse:
-    try:
-        store = ArtifactStore(artifact_root, create_root=False)
-        manifest_path = store.run_dir(run_id) / "manifest.json"
-        if not manifest_path.is_file():
-            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
-    except ManifestStateError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-    provider = provider or QemuGdbstubProvider()
-    redactor = Redactor()
-    try:
-        with store.debug_lock(run_id):
-            session = _load_active_debug_session(store, run_id, debug_session_id, allow_ended=allow_ended)
-            profile = _resolve_debug_profile(
-                profile_name=session.selected_debug_profile,
-                debug_profiles=debug_profiles,
-            )
-            _ensure_debug_operation_enabled(profile, DEBUG_METHOD_OPERATIONS[method_name])
-            result: DebugProviderResult = getattr(provider, method_name)(
-                run_dir=store.run_dir(run_id),
-                session=session,
-                **kwargs,
-            )
-            details = {
-                **_debug_session_manifest_details(store=store, run_id=run_id, session=result.session),
-                **result.details,
-            }
-            terminal = StepResult(
-                step_name="debug",
-                status=result.status,
-                summary=result.summary,
-                artifacts=result.artifacts,
-                details=details,
-            )
-            store.record_step_result(run_id, terminal, replace_succeeded=True)
-    except ManifestStateError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-    except ProviderDebugError as exc:
-        return ToolResponse.failure(
-            category=exc.category,
-            message=redactor.redact_text(str(exc)),
-            run_id=run_id,
-            details=redactor.redact_value(exc.details),
-            artifacts=_redacted_artifacts(exc.artifacts, redactor),
-            suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
-        )
-
-    safe_details = redactor.redact_value(details)
-    safe_artifacts = _redacted_artifacts(result.artifacts, redactor)
-    safe_summary = redactor.redact_text(result.summary)
-    if result.status == StepStatus.SUCCEEDED:
-        return ToolResponse.success(
-            summary=safe_summary,
-            run_id=run_id,
-            data=safe_details,
-            artifacts=safe_artifacts,
-            suggested_next_actions=["artifacts.get_manifest"],
-        )
-    return ToolResponse.failure(
-        category=result.error_category or ErrorCategory.DEBUG_ATTACH_FAILURE,
-        message=safe_summary,
+    return _debug_operation_response(
+        artifact_root=artifact_root,
         run_id=run_id,
-        details={
-            **safe_details,
-            "diagnostic": redactor.redact_text(result.diagnostic or ""),
-        },
-        artifacts=safe_artifacts,
-        suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+        debug_session_id=debug_session_id,
+        provider=provider,
+        method_name=method_name,
+        kwargs=kwargs,
+        persist_manifest=True,
+        allow_ended=allow_ended,
+        debug_profiles=debug_profiles,
     )
 
 

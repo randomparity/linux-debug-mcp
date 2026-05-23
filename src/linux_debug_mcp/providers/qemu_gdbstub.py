@@ -16,7 +16,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from linux_debug_mcp.config import DebugProfile
+from linux_debug_mcp.config import SPRINT_4_DEBUG_OPERATIONS, DebugProfile
 from linux_debug_mcp.domain import (
     ArtifactRef,
     ErrorCategory,
@@ -32,20 +32,7 @@ MAX_RESPONSE_SNIPPET = 4096
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$]*$")
 REGISTER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 LINUX_BANNER_RELEASE_PATTERN = re.compile(r"Linux version\s+([^\s]+)")
-QEMU_GDBSTUB_OPERATIONS = [
-    "workflow.build_boot_debug",
-    "debug.start_session",
-    "debug.interrupt",
-    "debug.continue",
-    "debug.set_breakpoint",
-    "debug.clear_breakpoint",
-    "debug.list_breakpoints",
-    "debug.read_registers",
-    "debug.read_symbol",
-    "debug.read_memory",
-    "debug.evaluate",
-    "debug.end_session",
-]
+QEMU_GDBSTUB_OPERATIONS = ["workflow.build_boot_debug", *SPRINT_4_DEBUG_OPERATIONS]
 
 
 def local_qemu_gdbstub_capability() -> ProviderCapability:
@@ -233,50 +220,6 @@ class QemuGdbstubProvider:
         self.runner = runner or SubprocessGdbRunner()
         self.redactor = redactor or Redactor()
 
-    def write_session_for_test(
-        self,
-        run_dir: Path,
-        *,
-        state: str = "stopped",
-        controller_mode: Literal["batch", "attached"] = "batch",
-        pid: int | None = None,
-    ) -> DebugSession:
-        debug_dir = run_dir / "debug"
-        session_id = "debug-test"
-        session_path = debug_dir / "sessions" / f"{session_id}.json"
-        transcript_path = debug_dir / "attempt-001" / "transcript.txt"
-        command_metadata_path = debug_dir / "attempt-001" / "commands.jsonl"
-        latest_summary_path = debug_dir / "attempt-001" / "debug-summary.json"
-        vmlinux_path = run_dir / "build" / "vmlinux"
-        vmlinux_path.parent.mkdir(parents=True, exist_ok=True)
-        vmlinux_path.write_text("fake vmlinux", encoding="utf-8")
-        transcript_path.parent.mkdir(parents=True, exist_ok=True)
-        transcript_path.write_text("", encoding="utf-8")
-        command_metadata_path.write_text("", encoding="utf-8")
-        latest_summary_path.write_text("{}", encoding="utf-8")
-        session = DebugSession(
-            session_id=session_id,
-            run_id="run-debug",
-            provider_name=self.name,
-            gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
-            vmlinux_path=str(vmlinux_path),
-            selected_debug_profile="qemu-gdbstub-default",
-            attach_status="attached",
-            started_at=datetime.now(UTC).isoformat(),
-            current_execution_state=state,  # type: ignore[arg-type]
-            controller_mode=controller_mode,
-            active_controller_pid=pid,
-            controller_last_observed_state="running" if pid is not None else "not_started",
-            active_controller_identity=self._controller_identity(pid) if pid is not None else {},
-            transcript_path=str(transcript_path),
-            command_metadata_path=str(command_metadata_path),
-            latest_summary_path=str(latest_summary_path),
-            symbol_identity_validation={"same_run_artifact_linkage": True, "live_banner_match": True},
-        )
-        session_path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_json(session_path, session.model_dump(mode="json"))
-        return session
-
     def start_session(
         self,
         *,
@@ -358,12 +301,13 @@ class QemuGdbstubProvider:
                 stderr=f"{type(exc).__name__}: {exc}",
             )
             try:
-                self._write_failure_transcript(
+                self._record_failure_transcript(
                     transcript_path=transcript_path,
                     argv=argv,
                     commands=commands,
                     timeout=30,
                     result=result,
+                    mode="w",
                 )
             except OSError as write_exc:
                 raise ProviderDebugError(
@@ -443,7 +387,7 @@ class QemuGdbstubProvider:
                 details={**details, "error": str(exc)},
                 artifacts=existing_artifacts,
             ) from exc
-        existing_artifacts = [artifact for artifact in artifacts if Path(artifact.path).is_file()]
+        existing_artifacts = self._existing_artifacts(artifacts)
         if strict_identity_failure:
             raise ProviderDebugError(
                 "strict symbol identity live target check failed",
@@ -839,12 +783,13 @@ class QemuGdbstubProvider:
                 stderr=f"{type(exc).__name__}: {exc}",
             )
             try:
-                self._append_failure_transcript(
+                self._record_failure_transcript(
                     transcript_path=transcript_path,
                     argv=argv,
                     commands=commands,
                     timeout=30,
                     result=command_result,
+                    mode="a",
                 )
             except OSError as write_exc:
                 raise ProviderDebugError(
@@ -1275,7 +1220,7 @@ class QemuGdbstubProvider:
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         )
 
-    def _write_failure_transcript(
+    def _record_failure_transcript(
         self,
         *,
         transcript_path: Path,
@@ -1283,29 +1228,10 @@ class QemuGdbstubProvider:
         commands: list[str],
         timeout: int,
         result: GdbCommandResult,
+        mode: Literal["w", "a"],
     ) -> None:
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
-        with transcript_path.open("w", encoding="utf-8") as transcript:
-            transcript.write(f"$ {' '.join(argv)}\n")
-            transcript.write("commands:\n")
-            for command in commands:
-                transcript.write(f"  {command}\n")
-            transcript.write(f"timeout_seconds: {timeout}\n")
-            transcript.write(f"stderr: {self._snippet(result.stderr)}\n")
-            transcript.write(f"timed_out: {str(result.timed_out).lower()}\n")
-            transcript.write(f"exit_status: {result.exit_status}\n")
-
-    def _append_failure_transcript(
-        self,
-        *,
-        transcript_path: Path,
-        argv: list[str],
-        commands: list[str],
-        timeout: int,
-        result: GdbCommandResult,
-    ) -> None:
-        transcript_path.parent.mkdir(parents=True, exist_ok=True)
-        with transcript_path.open("a", encoding="utf-8") as transcript:
+        with transcript_path.open(mode, encoding="utf-8") as transcript:
             transcript.write(f"$ {' '.join(argv)}\n")
             transcript.write("commands:\n")
             for command in commands:

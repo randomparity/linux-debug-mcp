@@ -36,13 +36,6 @@ class GdbstubEndpoint:
     def as_dict(self) -> dict[str, object]:
         return {"host": self.host, "port": self.port}
 
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, dict):
-            return self.as_dict() == other
-        if isinstance(other, GdbstubEndpoint):
-            return (self.host, self.port) == (other.host, other.port)
-        return NotImplemented
-
 
 @dataclass(frozen=True)
 class BootPlan:
@@ -210,16 +203,24 @@ class SubprocessLibvirtRunner:
         status: Literal["ready", "timeout", "exited"] = "exited"
         matched_marker: str | None = None
         deadline = time.monotonic() + timeout
+        selector: selectors.BaseSelector | None = None
+        if process.stdout is not None:
+            try:
+                selector = selectors.DefaultSelector()
+                selector.register(process.stdout.fileno(), selectors.EVENT_READ)
+            except (AttributeError, OSError, ValueError):
+                if selector is not None:
+                    selector.close()
+                selector = None
         try:
             with output_path.open("w", encoding="utf-8") as output_file:
                 while True:
                     if time.monotonic() >= deadline:
                         status = "timeout"
                         break
-                    line = self._read_console_line(process=process, deadline=deadline)
+                    line = self._read_console_line(process=process, deadline=deadline, selector=selector)
                     if line:
                         output_file.write(line)
-                        output_file.flush()
                         snippet = self._bounded_snippet(snippet + line)
                         if readiness_marker in line or readiness_marker in snippet:
                             status = "ready"
@@ -231,6 +232,8 @@ class SubprocessLibvirtRunner:
                         break
                     time.sleep(0.05)
         finally:
+            if selector is not None:
+                selector.close()
             self._terminate_process(process)
         return ConsoleResult(
             status=status,
@@ -252,22 +255,29 @@ class SubprocessLibvirtRunner:
     def _bounded_snippet(self, text: str) -> str:
         return text[-self.snippet_limit :]
 
-    def _read_console_line(self, *, process: subprocess.Popen[str], deadline: float) -> str:
+    def _read_console_line(
+        self,
+        *,
+        process: subprocess.Popen[str],
+        deadline: float,
+        selector: selectors.BaseSelector | None,
+    ) -> str:
         if process.stdout is None:
             return ""
+        timeout = max(min(deadline - time.monotonic(), 0.05), 0)
+        if selector is not None:
+            if not selector.select(timeout):
+                return ""
+            return os.read(process.stdout.fileno(), 4096).decode("utf-8", errors="replace")
         try:
             file_number = process.stdout.fileno()
         except (AttributeError, OSError):
             return process.stdout.readline()
-        timeout = max(min(deadline - time.monotonic(), 0.05), 0)
-        selector = selectors.DefaultSelector()
-        try:
-            selector.register(file_number, selectors.EVENT_READ)
-            if not selector.select(timeout):
+        with selectors.DefaultSelector() as fallback_selector:
+            fallback_selector.register(file_number, selectors.EVENT_READ)
+            if not fallback_selector.select(timeout):
                 return ""
             return os.read(file_number, 4096).decode("utf-8", errors="replace")
-        finally:
-            selector.close()
 
     def _terminate_process(self, process: subprocess.Popen[str]) -> None:
         try:
