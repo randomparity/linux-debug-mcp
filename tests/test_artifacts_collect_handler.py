@@ -200,3 +200,39 @@ def test_collect_artifacts_includes_succeeded_debug_artifacts(tmp_path: Path) ->
     assert all(artifact["exists"] for artifact in debug_artifacts)
     assert str(transcript_path) not in bundle_path.read_text(encoding="utf-8")
     assert response.data["rollup"]["missing_required"] == 0
+
+
+def test_collect_artifacts_recollects_when_debug_artifacts_are_added_after_success(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    run_id = "run-abc123"
+    first = artifacts_collect_handler(artifact_root=artifact_root, run_id=run_id)
+    assert first.ok is True
+    run_dir = artifact_root / run_id
+    session_path = run_dir / "debug" / "sessions" / "debug-test.json"
+    transcript_path = run_dir / "debug" / "attempt-001" / "transcript.txt"
+    command_metadata_path = run_dir / "debug" / "attempt-001" / "commands.jsonl"
+    summary_path = run_dir / "debug" / "attempt-001" / "debug-summary.json"
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    for path in [session_path, transcript_path, command_metadata_path, summary_path]:
+        path.write_text("debug artifact\n", encoding="utf-8")
+    ArtifactStore(artifact_root, create_root=False).record_step_result(
+        run_id,
+        StepResult(
+            step_name="debug",
+            status=StepStatus.SUCCEEDED,
+            summary="debug ok",
+            artifacts=[
+                ArtifactRef(path=str(session_path), kind="debug-session"),
+                ArtifactRef(path=str(transcript_path), kind="debug-transcript", sensitive=True),
+                ArtifactRef(path=str(command_metadata_path), kind="debug-command-metadata"),
+                ArtifactRef(path=str(summary_path), kind="debug-summary"),
+            ],
+        ),
+    )
+
+    second = artifacts_collect_handler(artifact_root=artifact_root, run_id=run_id)
+
+    assert second.ok is True
+    kinds = {artifact.kind for artifact in second.artifacts}
+    assert {"debug-session", "debug-transcript", "debug-command-metadata", "debug-summary"} <= kinds

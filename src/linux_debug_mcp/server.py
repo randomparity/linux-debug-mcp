@@ -1521,6 +1521,19 @@ def _bundle_for_manifest(
     return bundle, [*collected_refs, bundle_ref], missing_required, missing_optional
 
 
+def _collection_covers_manifest(*, manifest: RunManifest, collect_result: StepResult) -> bool:
+    collected = {
+        (artifact.path, artifact.kind) for artifact in collect_result.artifacts if artifact.kind != "artifact-bundle"
+    }
+    current = {
+        (artifact.path, artifact.kind)
+        for step_name, result in manifest.step_results.items()
+        if step_name != "collect_artifacts"
+        for artifact in result.artifacts
+    }
+    return current.issubset(collected)
+
+
 def artifacts_collect_handler(
     *,
     artifact_root: Path,
@@ -1536,13 +1549,23 @@ def artifacts_collect_handler(
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
     existing = manifest.step_results.get("collect_artifacts")
-    if existing and existing.status == StepStatus.SUCCEEDED and not force_recollect:
+    if (
+        existing
+        and existing.status == StepStatus.SUCCEEDED
+        and not force_recollect
+        and _collection_covers_manifest(manifest=manifest, collect_result=existing)
+    ):
         return _recorded_collect_success_response(run_id=run_id, result=existing)
     try:
         with store.collect_lock(run_id):
             locked_manifest = store.load_manifest(run_id)
             existing = locked_manifest.step_results.get("collect_artifacts")
-            if existing and existing.status == StepStatus.SUCCEEDED and not force_recollect:
+            if (
+                existing
+                and existing.status == StepStatus.SUCCEEDED
+                and not force_recollect
+                and _collection_covers_manifest(manifest=locked_manifest, collect_result=existing)
+            ):
                 return _recorded_collect_success_response(run_id=run_id, result=existing)
             bundle_path = store.run_dir(run_id) / "summaries" / "artifact-bundle.json"
             bundle, artifacts, missing_required, missing_optional = _bundle_for_manifest(
