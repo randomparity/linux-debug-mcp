@@ -21,8 +21,7 @@ DEFAULT_BUILD_PROFILES = {
     "x86_64-default": BuildProfile(name="x86_64-default", architecture="x86_64"),
 }
 RUNNING_BUILD_MESSAGE = (
-    "previous build is still recorded as running; "
-    "inspect logs and create a new run or manually clean stale build state"
+    "previous build is still recorded as running; inspect logs and create a new run or manually clean stale build state"
 )
 
 
