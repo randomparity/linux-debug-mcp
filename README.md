@@ -5,7 +5,7 @@ development environments.
 
 ## Current Scope
 
-Sprint 1 provides:
+The current implementation provides:
 
 - host prerequisite checks
 - durable run workspace creation
@@ -15,12 +15,13 @@ Sprint 1 provides:
 - build summary capture at `<artifact-root>/<run-id>/summaries/build-summary.json`
 - manifest readback
 - provider capability listing
-- structured `not_implemented` responses for boot, test, artifact collection,
+- a narrow local libvirt/QEMU `target.boot` pilot path
+- structured `not_implemented` responses for test, artifact collection,
   workflow, and debug tools
 
-Sprint 1 does not boot kernels, create root filesystems, run SSH or serial
-commands, attach gdb, use remote builders, generate kernel configs, or apply
-config fragments automatically.
+The pilot boot path does not create root filesystems, run SSH commands, run
+guest test suites, attach gdb, use remote builders, generate kernel configs, or
+apply config fragments automatically.
 
 ## Local Kernel Builds
 
@@ -42,6 +43,29 @@ per-run build directory before `make` starts.
 
 On success, artifacts include the build log, `.config`, `arch/x86/boot/bzImage`,
 optional `vmlinux`, and `summaries/build-summary.json`.
+
+## Pilot Libvirt Boot Host
+
+`target.boot` supports a narrow pilot path for a dedicated local libvirt/QEMU
+domain. It boots an x86_64 kernel with direct kernel boot, attaches a disk-image
+rootfs as `/dev/vda`, captures serial console output, and waits for a configured
+readiness marker on `ttyS0`.
+
+For full Fedora host setup, libvirt authentication options, rootfs expectations,
+and the opt-in integration command, see
+[`docs/fedora-libvirt-user-guide.md`](docs/fedora-libvirt-user-guide.md).
+
+At a high level, a real-host run needs:
+
+- Fedora host packages for kernel builds, QEMU, and libvirt.
+- A working libvirt URI such as `qemu:///session` or `qemu:///system`.
+- A dedicated managed domain whose name starts with `mcp-linux-debug-`.
+- A Linux source tree with a built `arch/x86/boot/bzImage`.
+- A disk-image rootfs that prints the configured readiness marker on `ttyS0`.
+
+The pilot boot path does not create root filesystems, run SSH commands, run
+guest test suites, attach gdb, use remote builders, generate kernel configs, or
+apply config fragments automatically.
 
 ## Install
 
@@ -69,6 +93,7 @@ python -m pytest
 ```
 
 The unit tests do not require libvirt, QEMU, a Linux checkout, or gdb.
+The libvirt boot integration test is opt-in and is skipped by default.
 
 ## Start The Server
 
