@@ -1801,7 +1801,7 @@ def workflow_build_boot_debug_handler(
             manifest_path = store.run_dir(run_id) / "manifest.json"
             if manifest_path.is_file():
                 manifest = store.load_manifest(run_id)
-                resolved_debug_profile = debug_profile if debug_profile is not None else manifest.request.debug_profile
+                resolved_debug_profile = debug_profile if manifest.request.debug_profile is not None else None
                 try:
                     resolved_source_path = str(validate_source_path(Path(source_path)))
                 except PathSafetyError as exc:
@@ -1837,7 +1837,8 @@ def workflow_build_boot_debug_handler(
                         run_id=run_id,
                         details={"mismatches": mismatches},
                     )
-                debug_profile = resolved_debug_profile
+                if manifest.request.debug_profile is not None or debug_profile is None:
+                    debug_profile = resolved_debug_profile
         except ManifestStateError as exc:
             return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
 
