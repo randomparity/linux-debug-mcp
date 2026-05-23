@@ -92,3 +92,50 @@ def test_secret_reference_serializes_without_secret_value() -> None:
         "required": True,
     }
     assert "secret" not in ref.model_dump(mode="json")
+
+
+def test_build_profile_defaults_for_local_kernel_build() -> None:
+    profile = BuildProfile(name="x86_64-default", architecture="x86_64")
+
+    assert profile.provider_name == "local-kernel-build"
+    assert profile.output_policy == "per_run"
+    assert profile.targets == ["bzImage"]
+    assert profile.command_timeout_seconds == 3600
+    assert profile.required_tools == []
+    assert profile.effective_required_tools() == ["make"]
+    assert profile.jobs is None
+    assert profile.make_variables == {}
+    assert profile.config_fragments == []
+
+
+def test_build_profile_effective_required_tools_includes_make_once() -> None:
+    profile = BuildProfile(
+        name="clang",
+        architecture="x86_64",
+        required_tools=["clang", "make", "clang", "llvm-ar"],
+    )
+
+    assert profile.effective_required_tools() == ["make", "clang", "clang", "llvm-ar"]
+
+
+@pytest.mark.parametrize("key", ["O", "ARCH", "KBUILD_OUTPUT", "bad-key", "1BAD", "CC PATH"])
+def test_build_profile_rejects_reserved_or_invalid_make_variable_names(key: str) -> None:
+    with pytest.raises(ValidationError):
+        BuildProfile(name="bad", architecture="x86_64", make_variables={key: "1"})
+
+
+@pytest.mark.parametrize("value", ["bad\0value", "bad\nvalue", "bad\tvalue", "bad\x7fvalue", "bad\x85value"])
+def test_build_profile_rejects_control_characters_in_make_variable_values(value: str) -> None:
+    with pytest.raises(ValidationError):
+        BuildProfile(name="bad", architecture="x86_64", make_variables={"LLVM": value})
+
+
+def test_build_profile_rejects_invalid_jobs() -> None:
+    with pytest.raises(ValidationError):
+        BuildProfile(name="bad", architecture="x86_64", jobs=0)
+
+
+@pytest.mark.parametrize("target", ["", "O=/tmp/out", "ARCH=arm64", "--eval=$(shell id)", "-f", "bad target"])
+def test_build_profile_rejects_targets_that_can_change_make_policy(target: str) -> None:
+    with pytest.raises(ValidationError):
+        BuildProfile(name="bad", architecture="x86_64", targets=[target])

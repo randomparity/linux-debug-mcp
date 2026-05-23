@@ -40,6 +40,7 @@ def test_error_response_uses_nested_error_contract() -> None:
         message="kernel.build is implemented in Sprint 1",
         run_id="run-123",
         details={"tool": "kernel.build"},
+        artifacts=[ArtifactRef(path="/tmp/runs/run-123/logs/build.log", kind="build-log")],
         suggested_next_actions=["workflow.build_boot_test after Sprint 3"],
     )
 
@@ -52,6 +53,14 @@ def test_error_response_uses_nested_error_contract() -> None:
         "message": "kernel.build is implemented in Sprint 1",
         "details": {"tool": "kernel.build"},
     }
+    assert payload["artifacts"] == [
+        {
+            "path": "/tmp/runs/run-123/logs/build.log",
+            "kind": "build-log",
+            "sensitive": False,
+            "description": None,
+        }
+    ]
 
 
 def test_provider_capability_records_semantics() -> None:

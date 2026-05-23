@@ -151,3 +151,42 @@ def test_load_manifest_rejects_unsafe_run_id_as_state_error(tmp_path: Path) -> N
 
     with pytest.raises(ManifestStateError, match="unsafe"):
         store.load_manifest("../run-abc123")
+
+
+def test_run_dir_returns_validated_run_path(tmp_path: Path) -> None:
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
+    store.create_run(request(run_id="run-abc123"))
+
+    assert store.run_dir("run-abc123") == tmp_path / "runs" / "run-abc123"
+
+
+def test_build_lock_excludes_concurrent_builds(tmp_path: Path) -> None:
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
+    store.create_run(request(run_id="run-abc123"))
+
+    with (
+        store.build_lock("run-abc123"),
+        pytest.raises(ManifestStateError, match="build is locked"),
+        store.build_lock("run-abc123"),
+    ):
+        pass
+
+
+def test_running_build_result_can_be_replaced_by_success(tmp_path: Path) -> None:
+    source = make_source_tree(tmp_path)
+    store = ArtifactStore(tmp_path / "runs", source_paths=[source])
+    store.create_run(request(run_id="run-abc123"))
+
+    store.record_step_result(
+        "run-abc123",
+        StepResult(step_name="build", status=StepStatus.RUNNING, summary="build running"),
+    )
+    manifest = store.record_step_result(
+        "run-abc123",
+        StepResult(step_name="build", status=StepStatus.SUCCEEDED, summary="build succeeded"),
+    )
+
+    assert manifest.step_results["build"].summary == "build succeeded"
+    assert manifest.step_results["build"].status == StepStatus.SUCCEEDED
