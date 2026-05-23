@@ -353,17 +353,21 @@ Because the default gdbstub endpoint uses a fixed local port, only one debug
 boot can own `127.0.0.1:1234` at a time. If another process already listens on
 that port, the boot fails before mutating the domain and reports the collision
 as an infrastructure failure. Stop the other debug run or choose a different
-local endpoint for a custom target profile.
+local endpoint for a custom target profile. For the integration test, set
+`LINUX_DEBUG_MCP_GDBSTUB_ENDPOINT=127.0.0.1:<port>` to use a different local
+port. Keep the host as `127.0.0.1`.
 
 Run the live gdbstub integration test with a dedicated debug domain:
 
 ```bash
 cd ~/src/linux-debug-mcp
+export LINUX_DEBUG_MCP_DEBUG_DOMAIN=mcp-linux-debug-dev-debug
 LINUX_DEBUG_MCP_LIVE_GDBSTUB=1 \
 LINUX_DEBUG_MCP_SOURCE=~/src/linux \
 LINUX_DEBUG_MCP_ROOTFS="${LINUX_DEBUG_MCP_ROOTFS}" \
-LINUX_DEBUG_MCP_DOMAIN=mcp-linux-debug-dev-debug \
+LINUX_DEBUG_MCP_DOMAIN="${LINUX_DEBUG_MCP_DEBUG_DOMAIN}" \
 LINUX_DEBUG_MCP_LIBVIRT_URI="${LINUX_DEBUG_MCP_LIBVIRT_URI}" \
+LINUX_DEBUG_MCP_GDBSTUB_ENDPOINT=127.0.0.1:1234 \
 LINUX_DEBUG_MCP_READINESS_MARKER=linux-debug-mcp-ready \
 uv run pytest tests/test_qemu_gdbstub_integration.py -q
 ```
@@ -391,22 +395,23 @@ under:
 ```
 
 Successful integration runs may leave the dedicated domain running. Stop it
-manually when needed:
+manually when needed. Use the same domain variable you passed to the specific
+integration test:
 
 ```bash
-virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" destroy "${LINUX_DEBUG_MCP_DOMAIN}"
+virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" destroy "${LINUX_DEBUG_MCP_DEBUG_DOMAIN:-$LINUX_DEBUG_MCP_DOMAIN}"
 ```
 
 Inspect the domain XML if a run fails ownership validation:
 
 ```bash
-virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" dumpxml "${LINUX_DEBUG_MCP_DOMAIN}"
+virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" dumpxml "${LINUX_DEBUG_MCP_DEBUG_DOMAIN:-$LINUX_DEBUG_MCP_DOMAIN}"
 ```
 
 Remove the domain definition only if it is dedicated to this project:
 
 ```bash
-virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" undefine "${LINUX_DEBUG_MCP_DOMAIN}"
+virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" undefine "${LINUX_DEBUG_MCP_DEBUG_DOMAIN:-$LINUX_DEBUG_MCP_DOMAIN}"
 ```
 
 ## Troubleshooting
