@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
+from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider
 from linux_debug_mcp.providers.registry import ProviderRegistry
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_source_path
 from linux_debug_mcp.safety.redaction import Redactor
@@ -59,6 +61,7 @@ RUNNING_BUILD_MESSAGE = (
     "previous build is still recorded as running; inspect logs and create a new run or manually clean stale build state"
 )
 RUNNING_BOOT_MESSAGE = "previous boot is still recorded as running"
+RUNNING_TESTS_MESSAGE = "previous test run is still recorded as running"
 
 
 def _recorded_build_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
@@ -118,12 +121,33 @@ def _recorded_boot_success_response(*, run_id: str, result: StepResult) -> ToolR
     )
 
 
+def _recorded_test_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
+    return ToolResponse.success(
+        summary=Redactor().redact_text(result.summary),
+        run_id=run_id,
+        data=Redactor().redact_value(result.details),
+        artifacts=result.artifacts,
+        suggested_next_actions=["artifacts.collect"],
+    )
+
+
 def _running_boot_response(*, run_id: str, result: StepResult, message: str = RUNNING_BOOT_MESSAGE) -> ToolResponse:
     return ToolResponse.failure(
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         message=message,
         run_id=run_id,
         details=result.details,
+        artifacts=result.artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
+def _running_tests_response(*, run_id: str, result: StepResult) -> ToolResponse:
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        message=RUNNING_TESTS_MESSAGE,
+        run_id=run_id,
+        details=Redactor().redact_value(result.details),
         artifacts=result.artifacts,
         suggested_next_actions=["artifacts.get_manifest"],
     )
@@ -143,6 +167,30 @@ def _find_kernel_image(build_result: StepResult) -> ArtifactRef | None:
         if artifact.kind == "kernel-image":
             return artifact
     return None
+
+
+def _next_test_attempt(run_dir: Path) -> int:
+    attempts = []
+    tests_dir = run_dir / "tests"
+    if tests_dir.exists():
+        for path in tests_dir.glob("attempt-*"):
+            try:
+                attempts.append(int(path.name.removeprefix("attempt-")))
+            except ValueError:
+                continue
+    return max(attempts, default=0) + 1
+
+
+def _validate_adhoc_commands(commands: list[list[str]] | None) -> list[TestCommand]:
+    validated: list[TestCommand] = []
+    for index, argv in enumerate(commands or [], start=1):
+        for item in argv:
+            if not item or any(unicodedata.category(char) == "Cc" for char in item):
+                raise ValueError(
+                    "ad hoc command argv entries must be non-empty and must not contain control characters"
+                )
+        validated.append(TestCommand(name=f"adhoc-{index:03d}", argv=argv, required=True))
+    return validated
 
 
 def create_run_handler(
@@ -591,6 +639,164 @@ def target_boot_handler(
             if existing and existing.status == StepStatus.RUNNING:
                 return _running_boot_response(run_id=run_id, result=existing)
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+
+def target_run_tests_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    test_suite: str | None = None,
+    commands: list[list[str]] | None = None,
+    force_rerun: bool = False,
+    provider: LocalSshTestProvider | None = None,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    test_suites: dict[str, TestSuiteProfile] | None = None,
+) -> ToolResponse:
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        manifest_path = store.run_dir(run_id) / "manifest.json"
+        if not manifest_path.is_file():
+            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    boot_result = manifest.step_results.get("boot")
+    if boot_result is None or boot_result.status != StepStatus.SUCCEEDED:
+        return _configuration_failure(run_id=run_id, message="target run tests requires a succeeded boot")
+
+    try:
+        adhoc_commands = _validate_adhoc_commands(commands)
+    except ValueError as exc:
+        return _configuration_failure(run_id=run_id, message=str(exc))
+
+    requested_suite = test_suite or manifest.request.test_suite
+    if manifest.request.test_suite is not None and requested_suite != manifest.request.test_suite:
+        return _configuration_failure(
+            run_id=run_id,
+            message="test_suite must match the immutable run manifest request",
+            details={"requested_suite": requested_suite, "manifest_suite": manifest.request.test_suite},
+        )
+    if requested_suite is None and not adhoc_commands:
+        requested_suite = "smoke-basic"
+
+    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    test_suites = test_suites if test_suites is not None else DEFAULT_TEST_SUITES
+    try:
+        resolved_rootfs_profile = rootfs_profiles[manifest.request.rootfs_profile]
+    except KeyError:
+        return _configuration_failure(
+            run_id=run_id,
+            message=f"unknown rootfs profile: {manifest.request.rootfs_profile}",
+        )
+    if resolved_rootfs_profile.access_method not in {"ssh", "ssh_and_serial"}:
+        return _configuration_failure(
+            run_id=run_id,
+            message="rootfs profile requires SSH access for test execution",
+        )
+    try:
+        suite_profile = test_suites[requested_suite] if requested_suite is not None else None
+    except KeyError:
+        return _configuration_failure(run_id=run_id, message=f"unknown test suite: {requested_suite}")
+
+    existing = manifest.step_results.get("run_tests")
+    if existing and existing.status == StepStatus.SUCCEEDED and not force_rerun:
+        return _recorded_test_success_response(run_id=run_id, result=existing)
+
+    provider = provider or LocalSshTestProvider()
+    try:
+        with store.tests_lock(run_id):
+            locked_manifest = store.load_manifest(run_id)
+            existing = locked_manifest.step_results.get("run_tests")
+            if existing and existing.status == StepStatus.SUCCEEDED and not force_rerun:
+                return _recorded_test_success_response(run_id=run_id, result=existing)
+            if existing and existing.status == StepStatus.RUNNING:
+                stale_failed = StepResult(
+                    step_name="run_tests",
+                    status=StepStatus.FAILED,
+                    summary=existing.summary,
+                    artifacts=existing.artifacts,
+                    details={**existing.details, "stale_running_recovered": True},
+                )
+                store.record_step_result(run_id, stale_failed)
+
+            attempt = _next_test_attempt(store.run_dir(run_id))
+            running = StepResult(
+                step_name="run_tests",
+                status=StepStatus.RUNNING,
+                summary="target tests running",
+                details={
+                    "provider": provider.name,
+                    "suite": suite_profile.name if suite_profile is not None else "adhoc",
+                    "attempt": attempt,
+                },
+            )
+            store.record_step_result(run_id, running, replace_succeeded=force_rerun)
+            try:
+                plan = provider.plan_tests(
+                    run_id=run_id,
+                    run_dir=store.run_dir(run_id),
+                    rootfs_profile=resolved_rootfs_profile,
+                    suite=suite_profile,
+                    adhoc_commands=adhoc_commands,
+                    attempt=attempt,
+                )
+                execution = provider.execute_tests(plan)
+            except Exception as exc:
+                terminal = StepResult(
+                    step_name="run_tests",
+                    status=StepStatus.FAILED,
+                    summary="unexpected test provider failure",
+                    details={"provider": provider.name, "exception_type": type(exc).__name__, "error": str(exc)},
+                )
+                store.record_step_result(run_id, terminal, replace_succeeded=force_rerun)
+                return ToolResponse.failure(
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    message=terminal.summary,
+                    run_id=run_id,
+                    details=Redactor().redact_value(terminal.details),
+                    suggested_next_actions=["artifacts.collect"],
+                )
+            redacted_details = Redactor().redact_value(execution.details)
+            terminal = StepResult(
+                step_name="run_tests",
+                status=execution.status,
+                summary=Redactor().redact_text(execution.summary),
+                artifacts=execution.artifacts,
+                details=redacted_details,
+            )
+            store.record_step_result(run_id, terminal, replace_succeeded=force_rerun)
+    except ManifestStateError as exc:
+        if "tests are locked" in str(exc):
+            try:
+                refreshed = store.load_manifest(run_id).step_results.get("run_tests")
+            except ManifestStateError:
+                refreshed = None
+            if refreshed and refreshed.status == StepStatus.RUNNING:
+                return _running_tests_response(run_id=run_id, result=refreshed)
+            if existing and existing.status == StepStatus.RUNNING:
+                return _running_tests_response(run_id=run_id, result=existing)
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    if execution.status == StepStatus.SUCCEEDED:
+        return ToolResponse.success(
+            summary=Redactor().redact_text(execution.summary),
+            run_id=run_id,
+            data=Redactor().redact_value(execution.details),
+            artifacts=execution.artifacts,
+            suggested_next_actions=["artifacts.collect"],
+        )
+    return ToolResponse.failure(
+        category=execution.error_category or ErrorCategory.TEST_FAILURE,
+        message=Redactor().redact_text(execution.summary),
+        run_id=run_id,
+        details={
+            **Redactor().redact_value(execution.details),
+            "diagnostic": Redactor().redact_text(execution.diagnostic or ""),
+        },
+        artifacts=execution.artifacts,
+        suggested_next_actions=["artifacts.collect"],
+    )
 
 
 def not_implemented_handler(tool_name: str, *, run_id: str | None = None) -> ToolResponse:
