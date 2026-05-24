@@ -1,21 +1,21 @@
-# Sprint 4 Live Kernel Debug MVP Design
+# Phase 4 Live Kernel Debug MVP Design
 
 Date: 2026-05-23
 
 ## Purpose
 
-Sprint 4 adds the first live kernel debug workflow to the local x86_64 pilot.
+Phase 4 adds the first live kernel debug workflow to the local x86_64 pilot.
 It enables QEMU gdbstub boot, validates the matching `vmlinux`, starts a
 durable debug session, exposes constrained debug operations through MCP tools,
 and records debugger transcripts as run artifacts.
 
-This sprint proves that an agentic coding environment can move from a built and
+This phase proves that an agentic coding environment can move from a built and
 booted kernel to useful live-debug evidence without manually remembering QEMU,
 libvirt, and gdb command details.
 
 ## Scope
 
-Sprint 4 includes:
+Phase 4 includes:
 
 - QEMU gdbstub enablement in the local libvirt/QEMU target provider.
 - Debug profile validation for KASLR behavior, symbol identity requirements,
@@ -41,7 +41,7 @@ Sprint 4 includes:
 - Opt-in live integration coverage for hosts with libvirt, QEMU, gdbstub, and a
   matching debug kernel.
 
-Sprint 4 does not include:
+Phase 4 does not include:
 
 - A GDB/MI client or general interactive debugger UI.
 - Arbitrary gdb command execution.
@@ -57,7 +57,7 @@ Sprint 4 does not include:
 Use direct `gdb` subprocess control behind a narrow controller interface.
 
 The provider should execute bounded, scripted gdb command batches and parse only
-the stable outputs needed by the MVP. This keeps Sprint 4 dependency-light and
+the stable outputs needed by the MVP. This keeps Phase 4 dependency-light and
 matches the deterministic operations required by the architecture: attach,
 validate symbols, set/list/clear breakpoints, continue/interrupt, read
 registers, read symbols, and read memory.
@@ -68,7 +68,7 @@ tool names or handler behavior.
 
 ## Architecture
 
-Sprint 4 implements a local live-debug MVP, not a full debugger.
+Phase 4 implements a local live-debug MVP, not a full debugger.
 
 `LibvirtQemuProvider` should accept debug-enabled target profiles and render a
 QEMU/libvirt gdbstub endpoint owned by the target provider. The boot plan and
@@ -94,7 +94,7 @@ details.
 4. Wait for normal target readiness.
 5. Start a debug session against the run's recorded `vmlinux`.
 
-The workflow should not run the Sprint 3 smoke suite by default. Callers can use
+The workflow should not run the Phase 3 smoke suite by default. Callers can use
 `workflow.build_boot_test` or `target.run_tests` separately when they need guest
 command evidence before debugging.
 
@@ -121,7 +121,7 @@ metadata for later artifact collection. If the attached controller has already
 exited, `debug.end_session` should record the observed exit state and still
 finalize the session instead of failing cleanup.
 
-`debug.evaluate` should support predefined inspectors only in Sprint 4. Initial
+`debug.evaluate` should support predefined inspectors only in Phase 4. Initial
 inspectors should include:
 
 - `kernel_version`: execute a provider-owned `p linux_banner` command and parse
@@ -134,7 +134,7 @@ and raw gdb command strings.
 
 All read-style operations must enforce provider-owned bounds before command
 planning. `debug.read_memory` should require an explicit byte count with a
-Sprint 4 maximum of 4096 bytes per call. `debug.read_symbol` should return
+Phase 4 maximum of 4096 bytes per call. `debug.read_symbol` should return
 scalar values or bounded byte/string previews only, not unbounded aggregate
 dumps. Register and inspector responses should be normalized into structured
 fields and should cap returned transcript snippets through the same redaction
@@ -143,13 +143,13 @@ and truncation path used for artifacts.
 ## Profile Model
 
 The existing `DebugProfile` model is sufficient for the initial surface but
-needs stricter Sprint 4 defaults and validation in handlers/providers:
+needs stricter Phase 4 defaults and validation in handlers/providers:
 
 - Default profile name: `qemu-gdbstub-default`.
 - `kaslr_policy`: `disabled`.
 - `symbol_identity_required`: `true`.
 - `evaluation_mode`: `predefined_inspectors`.
-- `enabled_operations`: the Sprint 4 debug operation names.
+- `enabled_operations`: the Phase 4 debug operation names.
 
 A debug boot should require deterministic symbol addresses. The default profile
 should add `nokaslr` when the debug profile is selected and the target profile
@@ -163,7 +163,7 @@ handling.
 ## Gdbstub Boot
 
 `TargetProfile.debug_gdbstub` should become supported for the local libvirt/QEMU
-provider. Sprint 4 should add `TargetProfile.gdbstub_endpoint` with a default
+provider. Phase 4 should add `TargetProfile.gdbstub_endpoint` with a default
 of `127.0.0.1:1234` for the local pilot. The provider should:
 
 - Render a local-only gdbstub endpoint.
@@ -237,7 +237,7 @@ non-interactive gdb options such as pagination off and confirmation off.
 
 The implementation should favor short-lived, transcript-backed gdb invocations
 for stateless operations where possible. Operations that depend on debugger
-continuity must use an attached controller for the session. In Sprint 4 this
+continuity must use an attached controller for the session. In Phase 4 this
 means `debug.continue`, `debug.interrupt`, and breakpoint operations must either
 run through the same attached controller or fail with `configuration_error`
 instead of pretending batch invocations can preserve debugger state. A session
@@ -269,7 +269,7 @@ addresses outside the unsigned 64-bit range before invoking gdb.
 - a compatible debug profile
 
 The provider must verify that symbol-backed operations use the same kernel that
-was booted. When `symbol_identity_required=true`, Sprint 4 should require both:
+was booted. When `symbol_identity_required=true`, Phase 4 should require both:
 
 - Same-run artifact linkage from the manifest: the booted target must reference
   the build step's `vmlinux` artifact and kernel image from the same run.
@@ -331,16 +331,16 @@ redaction path.
 
 ## Provider Registry
 
-Sprint 4 should add a `local-qemu-gdbstub` provider capability with operations
+Phase 4 should add a `local-qemu-gdbstub` provider capability with operations
 for the implemented `debug.*` tools and `workflow.build_boot_debug`.
 
-The registry should remove Sprint 4 operations from `stub-workflows` as they
+The registry should remove Phase 4 operations from `stub-workflows` as they
 become implemented. Remaining future debug operations, if any, should continue
 to return structured `not_implemented` responses rather than fake success.
 
 ## Testing Strategy
 
-Most Sprint 4 coverage should be unit tests with fake runners. Live
+Most Phase 4 coverage should be unit tests with fake runners. Live
 libvirt/gdbstub tests should be opt-in like the existing boot integration test.
 
 Required tests:
@@ -376,12 +376,12 @@ Required tests:
   smoke tests.
 - Artifact collection includes debug transcripts and summaries when present.
 - Provider registry advertises the new debug provider capability and no longer
-  lists implemented Sprint 4 tools under `stub-workflows`.
+  lists implemented Phase 4 tools under `stub-workflows`.
 
 ## Main Risk
 
-True long-lived debugger process management can become flaky if Sprint 4 tries
-to behave like a full debugger. The sprint should avoid that trap by using
+True long-lived debugger process management can become flaky if Phase 4 tries
+to behave like a full debugger. The phase should avoid that trap by using
 short-lived, transcript-backed gdb invocations where possible and keeping only
 enough durable session state to make MCP tools coherent.
 

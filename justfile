@@ -36,3 +36,6 @@ format: sync-dev
 
 test: sync-dev
     uv run python -m pytest
+
+check-docs:
+    ! rg -n "sprin[t]|Sprin[t]|SPRIN[T]" README.md docs

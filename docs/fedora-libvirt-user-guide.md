@@ -14,6 +14,11 @@ disk-image rootfs as `/dev/vda`, waits for a serial readiness marker on
 `ttyS0`, and can run SSH smoke tests after boot. It does not create rootfs
 images, configure SSH, attach gdb, or manage production VMs.
 
+For Python package installation, server smoke checks, and MCP client
+registration, see [Installation](installation.md) and
+[Client Setup](client-setup.md). For the implemented MCP tool surface and
+workflow request examples, see [Tool Reference](tool-reference.md).
+
 ## 1. Install Fedora Host Packages
 
 Install the host tools used by the server, the kernel build, and the libvirt
@@ -288,7 +293,7 @@ The Fedora rootfs must boot far enough for sshd to accept key-based or otherwise
 noninteractive login. The MCP server uses `ssh` with `BatchMode=yes`, a
 run-local `known_hosts` file, and bounded connection timeouts.
 
-Sprint 3 does not install SSH keys, edit `sshd_config`, create host port
+The MCP server does not install SSH keys, edit `sshd_config`, create host port
 forwards, parse DHCP leases, or discover guest IP addresses. Configure the
 `RootfsProfile` with `ssh_host`, `ssh_port`, `ssh_user`, optional `ssh_key_ref`,
 and the allowed SSH options before running `target.run_tests` or
@@ -344,10 +349,10 @@ Expected skipped output:
 
 ## 7. Run The Live QEMU Gdbstub Debug Pilot
 
-The Sprint 4 debug workflow uses the same host, kernel, rootfs, and readiness
-setup, plus `gdb` and a debug-enabled target profile. The default local debug
-profile exposes QEMU's gdbstub on `127.0.0.1:1234` only. It must not be exposed
-on a non-local interface.
+The debug workflow uses the same host, kernel, rootfs, and readiness setup,
+plus `gdb` and a debug-enabled target profile. The default local debug profile
+exposes QEMU's gdbstub on `127.0.0.1:1234` only. It must not be exposed on a
+non-local interface.
 
 Because the default gdbstub endpoint uses a fixed local port, only one debug
 boot can own `127.0.0.1:1234` at a time. If another process already listens on

@@ -1,22 +1,22 @@
-# Sprint 3 Smoke Tests And Artifacts Design
+# Phase 3 Smoke Tests And Artifacts Design
 
 Date: 2026-05-23
 
 ## Purpose
 
-Sprint 3 completes the first non-debug pilot workflow after boot: run smoke
+Phase 3 completes the first non-debug pilot workflow after boot: run smoke
 tests inside a booted guest, collect the important evidence from the run
 workspace and guest, and expose a single `workflow.build_boot_test` tool that
 performs the build, boot, test, and collection sequence.
 
-The sprint is SSH-first. Guest command execution uses SSH. Serial remains a
-boot-readiness and evidence source in this sprint, not an interactive command
+The phase is SSH-first. Guest command execution uses SSH. Serial remains a
+boot-readiness and evidence source in this phase, not an interactive command
 transport. This avoids brittle serial login automation while still preserving
 console output and readiness evidence for debugging failed runs.
 
 ## Scope
 
-Sprint 3 includes:
+Phase 3 includes:
 
 - `TestSuiteProfile` configuration for named smoke suites.
 - SSH access fields on `RootfsProfile` needed for guest command execution.
@@ -38,7 +38,7 @@ Sprint 3 includes:
 - Unit tests using fake SSH runners and existing fake providers.
 - README/demo documentation for the pilot flow.
 
-Sprint 3 does not include:
+Phase 3 does not include:
 
 - Serial command execution or serial login automation.
 - Rootfs creation, package injection, or SSH key installation.
@@ -55,18 +55,18 @@ Use a small SSH test provider and keep orchestration in handlers.
 The `target.run_tests` handler should own run validation, immutable profile and
 suite checks, idempotency, locking, and MCP response shaping. The SSH provider
 should own guest command planning, SSH argv construction, timeout handling,
-output capture, and test summary writing. This follows the Sprint 1 and Sprint
+output capture, and test summary writing. This follows the Phase 1 and Phase
 2 pattern: handlers coordinate durable run state, providers perform one concrete
 operation behind fakeable boundaries.
 
 `artifacts.collect` should not recrawl arbitrary host paths. It should collect
 from known run subdirectories and from artifact references already recorded in
-manifest step results. Guest-side collection in Sprint 3 is limited to `dmesg`,
+manifest step results. Guest-side collection in Phase 3 is limited to `dmesg`,
 captured by the SSH test provider as part of `target.run_tests`.
 
 ## Profile Model
 
-Sprint 3 should add a small `TestSuiteProfile` model and a command model.
+Phase 3 should add a small `TestSuiteProfile` model and a command model.
 
 `TestCommand` should support:
 
@@ -109,12 +109,12 @@ pipes or redirection, it must use an explicit command such as
 The provider should reject SSH test execution when the selected rootfs profile
 does not declare `access_method` as `ssh` or `ssh_and_serial`.
 
-Sprint 3 uses statically configured SSH reachability. It does not discover guest
+Phase 3 uses statically configured SSH reachability. It does not discover guest
 IP addresses from libvirt leases, parse console output for addresses, or create
 host port forwards. If `ssh_host` is absent, the provider fails with
 `configuration_error` and points the caller to the rootfs profile.
 
-Sprint 3 should allow only these profile-owned SSH options:
+Phase 3 should allow only these profile-owned SSH options:
 
 - `ConnectTimeout`
 - `IdentitiesOnly`
@@ -140,7 +140,7 @@ The provider should always set these provider-owned options:
 These defaults prevent password prompts, bound connection setup, avoid writing
 to the developer's personal `known_hosts`, and still detect changed host keys
 after the first connection for a run. `BatchMode` and `UserKnownHostsFile` are
-not profile-overridable in Sprint 3. Unknown options, invalid option values,
+not profile-overridable in Phase 3. Unknown options, invalid option values,
 empty option names, and option names containing whitespace or control characters
 are `configuration_error`.
 
@@ -185,7 +185,7 @@ may include a key file path in argv only after redaction has a chance to mask it
 from returned snippets and summaries. Raw key contents must never be read into
 the manifest, summaries, or MCP responses.
 
-`dmesg` collection is diagnostic, not a smoke-test assertion, in Sprint 3. If
+`dmesg` collection is diagnostic, not a smoke-test assertion, in Phase 3. If
 the configured suite has `collect_dmesg=true` and `dmesg` exits nonzero because
 of guest permissions or kernel restrictions, `target.run_tests` should still use
 the required smoke command results to decide pass/fail. The dmesg failure should
@@ -234,12 +234,12 @@ may fail and be reported in the summary without failing the step.
 The artifact store should add a `tests_lock(run_id)` that follows the existing
 build and boot lock pattern. Stale recorded `running` test steps may be converted
 to failed only after the caller acquires the tests lock, because lock ownership
-is the only Sprint 3 evidence that no other local process is still writing test
+is the only Phase 3 evidence that no other local process is still writing test
 artifacts.
 
 ## Artifact Layout
 
-Sprint 3 should write test and collection artifacts under the existing run
+Phase 3 should write test and collection artifacts under the existing run
 layout:
 
 ```text
@@ -288,7 +288,7 @@ Expected collection artifact kinds:
 - cleanup state
 - concise pass/fail rollup
 
-It should not copy large artifacts in Sprint 3. The bundle is an index over the
+It should not copy large artifacts in Phase 3. The bundle is an index over the
 durable run workspace and manifest references.
 
 Required artifact checks are step-aware. For each step that has a recorded
@@ -383,7 +383,7 @@ pass/fail rollup. Long logs remain on disk.
 
 ## Safety And Redaction
 
-Sprint 3 must preserve the existing safety posture:
+Phase 3 must preserve the existing safety posture:
 
 - local SSH argv lists are planned without shell expansion
 - remote SSH commands are POSIX-quoted from argv lists before crossing the
@@ -394,7 +394,7 @@ Sprint 3 must preserve the existing safety posture:
 - returned snippets are redacted before entering MCP responses
 - summaries avoid raw secret-bearing values
 - full stdout/stderr artifacts are treated as normal artifacts unless a profile
-  marks them sensitive in a later sprint
+  marks them sensitive in a later phase
 
 The first redaction tests should include fake SSH key paths, fake tokens in
 command output, and environment-like strings in stdout/stderr.
@@ -436,5 +436,5 @@ The README and Fedora user guide should document:
   calls
 - where to find test output, dmesg, console logs, and bundle summaries
 
-The docs should state clearly that Sprint 3 does not install SSH keys or mutate
+The docs should state clearly that Phase 3 does not install SSH keys or mutate
 the rootfs to enable login.

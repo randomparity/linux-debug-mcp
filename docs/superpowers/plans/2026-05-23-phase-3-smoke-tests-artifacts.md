@@ -1,4 +1,4 @@
-# Sprint 3 Smoke Tests Artifacts Implementation Plan
+# Phase 3 Smoke Tests Artifacts Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -12,11 +12,11 @@
 
 ## Current-Code Constraints To Resolve First
 
-- `RootfsProfile` has no SSH reachability fields beyond `access_method` and credential references; Sprint 3 needs explicit host, port, user, key reference, and validated SSH options.
+- `RootfsProfile` has no SSH reachability fields beyond `access_method` and credential references; Phase 3 needs explicit host, port, user, key reference, and validated SSH options.
 - There is no `TestCommand` or `TestSuiteProfile` model, and `ServerConfig` has no `test_suites` map.
-- `ArtifactStore` exposes build, boot, and target locks only. Sprint 3 needs `tests_lock(run_id)` and `collect_lock(run_id)`.
+- `ArtifactStore` exposes build, boot, and target locks only. Phase 3 needs `tests_lock(run_id)` and `collect_lock(run_id)`.
 - `server.py` still registers `target.run_tests`, `artifacts.collect`, and `workflow.build_boot_test` as stubs.
-- The default provider registry still groups Sprint 3 operations under `stub-workflows`; registering `local-ssh-tests` and narrowing the stub operation list must happen with the tool wiring.
+- The default provider registry still groups Phase 3 operations under `stub-workflows`; registering `local-ssh-tests` and narrowing the stub operation list must happen with the tool wiring.
 - `Redactor` handles common key-value secrets, but snippets also need explicit redaction of configured SSH key references and output examples such as fake token strings.
 - Existing tests rely on default `minimal` rootfs profile. After adding SSH fields, defaults must remain valid for boot tests while becoming suitable for smoke tests.
 
@@ -25,7 +25,7 @@
 - Modify: `src/linux_debug_mcp/config.py` for `TestCommand`, `TestSuiteProfile`, rootfs SSH fields, validators, and `ServerConfig.test_suites`.
 - Modify: `src/linux_debug_mcp/artifacts/store.py` for `tests_lock()` and `collect_lock()`.
 - Create: `src/linux_debug_mcp/providers/local_ssh_tests.py` for SSH test planning, runner protocol, subprocess runner, command execution, artifact writing, dmesg capture, summaries, and provider capability.
-- Modify: `src/linux_debug_mcp/providers/registry.py` to register `local-ssh-tests` and remove implemented Sprint 3 operations from stubs.
+- Modify: `src/linux_debug_mcp/providers/registry.py` to register `local-ssh-tests` and remove implemented Phase 3 operations from stubs.
 - Modify: `src/linux_debug_mcp/server.py` for default smoke suite/profile data, `target_run_tests_handler()`, `artifacts_collect_handler()`, `workflow_build_boot_test_handler()`, and MCP tool wiring.
 - Modify: `src/linux_debug_mcp/safety/redaction.py` only if provider-level configured secret redaction needs a reusable helper.
 - Create: `tests/test_local_ssh_tests_provider.py` for provider validation, argv planning, fake runner execution, timeouts, dmesg, layout, and redaction.
@@ -33,7 +33,7 @@
 - Create: `tests/test_artifacts_collect_handler.py` for bundle contents, missing reference rules, idempotency, and locking.
 - Create: `tests/test_workflow_build_boot_test_handler.py` for workflow success and build, boot, test, and collect failure boundaries.
 - Modify: `tests/test_config.py`, `tests/test_artifacts.py`, `tests/test_providers.py`, `tests/test_server.py`, and `tests/test_redaction.py` for new profile fields, locks, providers, tool registration, and snippet redaction.
-- Modify: `README.md` and `docs/fedora-libvirt-user-guide.md` for the Sprint 3 pilot flow and SSH expectations.
+- Modify: `README.md` and `docs/fedora-libvirt-user-guide.md` for the Phase 3 pilot flow and SSH expectations.
 
 ## Task 1: Add Smoke Test Profile Models
 
@@ -49,7 +49,7 @@ Add these tests to `tests/test_config.py`:
 from linux_debug_mcp.config import TestCommand, TestSuiteProfile
 
 
-def test_sprint_3_rootfs_profile_accepts_ssh_access_fields() -> None:
+def test_phase_3_rootfs_profile_accepts_ssh_access_fields() -> None:
     profile = RootfsProfile(
         name="minimal",
         source="/var/lib/linux-debug/rootfs.qcow2",
@@ -919,7 +919,7 @@ Add:
 from linux_debug_mcp.server import DEFAULT_TEST_SUITES
 
 
-def test_default_smoke_basic_suite_matches_sprint_3_contract() -> None:
+def test_default_smoke_basic_suite_matches_phase_3_contract() -> None:
     suite = DEFAULT_TEST_SUITES["smoke-basic"]
 
     assert [command.argv for command in suite.commands] == [
@@ -970,7 +970,7 @@ DEFAULT_TEST_SUITES = {
 }
 ```
 
-Extend `DEFAULT_ROOTFS_PROFILES["minimal"]` so Sprint 3 smoke tests have explicit SSH fields:
+Extend `DEFAULT_ROOTFS_PROFILES["minimal"]` so Phase 3 smoke tests have explicit SSH fields:
 
 ```python
 ssh_host="127.0.0.1",
@@ -2276,12 +2276,12 @@ git commit -m "test: cover run tests response redaction"
 
 - [ ] **Step 1: Update README pilot flow**
 
-Add a Sprint 3 section with these concrete examples:
+Add a Phase 3 section with these concrete examples:
 
 ```markdown
 ### Run SSH smoke tests
 
-Sprint 3 expects the selected rootfs profile to already allow SSH login from the MCP server. The tool does not install packages, create users, copy SSH keys, discover guest addresses, or mutate the rootfs to enable login.
+Phase 3 expects the selected rootfs profile to already allow SSH login from the MCP server. The tool does not install packages, create users, copy SSH keys, discover guest addresses, or mutate the rootfs to enable login.
 
 The default suite is `smoke-basic`:
 
@@ -2351,7 +2351,7 @@ Add a section that states:
 
 The Fedora rootfs must boot far enough for sshd to accept key-based or otherwise noninteractive login. The MCP server uses `ssh` with `BatchMode=yes`, a run-local `known_hosts` file, and bounded connection timeouts.
 
-Sprint 3 does not install SSH keys, edit `sshd_config`, create host port forwards, parse DHCP leases, or discover guest IP addresses. Configure the `RootfsProfile` with `ssh_host`, `ssh_port`, `ssh_user`, optional `ssh_key_ref`, and the allowed SSH options before running `target.run_tests` or `workflow.build_boot_test`.
+Phase 3 does not install SSH keys, edit `sshd_config`, create host port forwards, parse DHCP leases, or discover guest IP addresses. Configure the `RootfsProfile` with `ssh_host`, `ssh_port`, `ssh_user`, optional `ssh_key_ref`, and the allowed SSH options before running `target.run_tests` or `workflow.build_boot_test`.
 ```
 
 - [ ] **Step 3: Run documentation grep checks**
@@ -2376,7 +2376,7 @@ git commit -m "docs: document SSH smoke test pilot flow"
 **Files:**
 - Source files should not change in this task unless verification exposes a defect.
 
-- [ ] **Step 1: Run focused Sprint 3 tests**
+- [ ] **Step 1: Run focused Phase 3 tests**
 
 Run:
 
@@ -2431,4 +2431,4 @@ Expected: supported commands pass. If a command is absent, record that it was no
 - Spec coverage: Tasks cover `TestSuiteProfile`, SSH rootfs fields, `target.run_tests`, local SSH provider, stdout/stderr/status/timing/timeout capture, dmesg, redacted snippets, `artifacts.collect`, bundle summaries, `workflow.build_boot_test`, manifest updates, idempotency, locks, tests, and docs.
 - Scope control: No task adds serial command execution, rootfs mutation, IP discovery, package/key installation, parallel tests, debug integration, or real guest requirements.
 - Type consistency: `run_tests`, `collect_artifacts`, `TestCommand`, `TestSuiteProfile`, `LocalSshTestProvider`, and `TestExecutionResult` names are used consistently across provider, handlers, tests, and registry.
-- Verification: The plan ends with focused Sprint 3 tests, full `pytest`, and available repo quality commands.
+- Verification: The plan ends with focused Phase 3 tests, full `pytest`, and available repo quality commands.

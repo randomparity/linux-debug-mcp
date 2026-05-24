@@ -1,8 +1,8 @@
-# Sprint 4 Live Kernel Debug MVP Implementation Plan
+# Phase 4 Live Kernel Debug MVP Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement the Sprint 4 local QEMU gdbstub debug workflow, including QEMU gdbstub enablement, constrained `debug.*` tools, debug artifacts, and `workflow.build_boot_debug`.
+**Goal:** Implement the Phase 4 local QEMU gdbstub debug workflow, including QEMU gdbstub enablement, constrained `debug.*` tools, debug artifacts, and `workflow.build_boot_debug`.
 
 **Architecture:** Keep MCP handlers in `server.py` responsible for manifest validation, idempotency, locks, and response shaping. Extend `LibvirtQemuProvider` only for debug-enabled boot planning and XML rendering, and put all gdb command planning, session files, transcript writing, parsing, and state transitions behind a new fakeable `QemuGdbstubProvider`.
 
@@ -12,14 +12,14 @@
 
 ## Current-Code Constraints
 
-- `TargetProfile` has `debug_gdbstub` but no `gdbstub_endpoint`; `DebugProfile.gdbstub_endpoint` exists but the Sprint 4 design puts the endpoint on `TargetProfile`.
+- `TargetProfile` has `debug_gdbstub` but no `gdbstub_endpoint`; `DebugProfile.gdbstub_endpoint` exists but the Phase 4 design puts the endpoint on `TargetProfile`.
 - `LibvirtQemuProvider._validate_profiles()` currently rejects `debug_gdbstub=True`.
 - `BootPlan`, `target/boot-plan.json`, and `summaries/boot-summary.json` do not record debug boot state, gdbstub endpoint details, or whether `nokaslr` was provider-added.
 - `ArtifactStore` has build, boot, target, tests, and collect locks, but no `debug_lock(run_id)`.
 - `RunManifest` already has a `debug` step, but no code records debug step results.
 - `server.py` currently registers every `debug.*` tool and `workflow.build_boot_debug` as stubs.
 - `artifacts.collect` only treats build, boot, and run_tests artifact kinds as expected; debug artifacts are merely incidental if a step records them.
-- `ProviderRegistry.with_defaults()` still lists Sprint 4 operations under `stub-workflows`.
+- `ProviderRegistry.with_defaults()` still lists Phase 4 operations under `stub-workflows`.
 
 ## Files
 
@@ -27,8 +27,8 @@
 - Modify: `src/linux_debug_mcp/artifacts/store.py` for `debug_lock(run_id)`.
 - Modify: `src/linux_debug_mcp/providers/libvirt_qemu.py` for debug gdbstub boot planning, endpoint parsing, port availability checks, `nokaslr`, XML rendering, summaries, and capability operations.
 - Create: `src/linux_debug_mcp/providers/qemu_gdbstub.py` for the gdb controller boundary, command validators, session model, transcript artifacts, identity validation, read operations, stateful operations, and provider capability.
-- Modify: `src/linux_debug_mcp/providers/registry.py` to register `local-qemu-gdbstub` and remove implemented Sprint 4 operations from stubs.
-- Modify: `src/linux_debug_mcp/server.py` for default debug profile data, debug helper functions, `debug.*` handlers, `workflow.build_boot_debug_handler()`, MCP tool wiring, and removal of Sprint 4 stubs.
+- Modify: `src/linux_debug_mcp/providers/registry.py` to register `local-qemu-gdbstub` and remove implemented Phase 4 operations from stubs.
+- Modify: `src/linux_debug_mcp/server.py` for default debug profile data, debug helper functions, `debug.*` handlers, `workflow.build_boot_debug_handler()`, MCP tool wiring, and removal of Phase 4 stubs.
 - Modify: `src/linux_debug_mcp/artifacts/manifest.py` only if debug step ordering needs a status default adjustment; the current `debug` step can be reused.
 - Modify: `src/linux_debug_mcp/safety/redaction.py` only if transcript redaction needs a reusable helper beyond `Redactor.redact_text()` and `Redactor.redact_value()`.
 - Create: `tests/test_qemu_gdbstub_provider.py` for provider command planning, validation, fake runner execution, session artifacts, parsing, identity checks, and lifecycle behavior.
@@ -73,7 +73,7 @@ def test_target_profile_accepts_local_gdbstub_endpoint() -> None:
     assert profile.gdbstub_endpoint == "127.0.0.1:1234"
 
 
-def test_default_debug_profile_matches_sprint_4_policy() -> None:
+def test_default_debug_profile_matches_phase_4_policy() -> None:
     profile = DebugProfile(name="qemu-gdbstub-default")
 
     assert profile.kaslr_policy == "disabled"
@@ -94,7 +94,7 @@ def test_default_debug_profile_matches_sprint_4_policy() -> None:
     ]
 
 
-def test_debug_profile_rejects_unsupported_sprint_4_policy() -> None:
+def test_debug_profile_rejects_unsupported_phase_4_policy() -> None:
     with pytest.raises(ValidationError):
         DebugProfile(name="bad", kaslr_policy="known")
 
@@ -133,14 +133,14 @@ Run:
 pytest tests/test_config.py tests/test_artifacts.py -q
 ```
 
-Expected: FAIL because `TargetProfile.gdbstub_endpoint`, strict Sprint 4 `DebugProfile` validation, and `ArtifactStore.debug_lock()` do not exist.
+Expected: FAIL because `TargetProfile.gdbstub_endpoint`, strict Phase 4 `DebugProfile` validation, and `ArtifactStore.debug_lock()` do not exist.
 
 - [ ] **Step 4: Implement config and lock changes**
 
 In `src/linux_debug_mcp/config.py`, define the operation list near the other module-level constants:
 
 ```python
-SPRINT_4_DEBUG_OPERATIONS = [
+PHASE_4_DEBUG_OPERATIONS = [
     "debug.start_session",
     "debug.interrupt",
     "debug.continue",
@@ -173,12 +173,12 @@ class TargetProfile(ConfigModel):
     managed_domain_prefix: str | None = None
 ```
 
-Change `DebugProfile` to Sprint 4-only policies:
+Change `DebugProfile` to Phase 4-only policies:
 
 ```python
 class DebugProfile(ConfigModel):
     name: str
-    enabled_operations: list[str] = Field(default_factory=lambda: list(SPRINT_4_DEBUG_OPERATIONS))
+    enabled_operations: list[str] = Field(default_factory=lambda: list(PHASE_4_DEBUG_OPERATIONS))
     kaslr_policy: Literal["disabled"] = "disabled"
     symbol_identity_required: bool = True
     evaluation_mode: Literal["predefined_inspectors"] = "predefined_inspectors"
@@ -212,7 +212,7 @@ Expected: PASS.
 
 ```bash
 git add src/linux_debug_mcp/config.py src/linux_debug_mcp/artifacts/store.py tests/test_config.py tests/test_artifacts.py
-git commit -m "feat: add sprint 4 debug profile state"
+git commit -m "feat: add phase 4 debug profile state"
 ```
 
 ## Task 2: Enable Debug Gdbstub Boot In Libvirt Provider
@@ -1319,7 +1319,7 @@ In `QemuGdbstubProvider`, implement:
 - `interrupt(run_dir, session, timeout_seconds)`;
 - `end_session(run_dir, session)`.
 
-Sprint 4 may fail stateful operations with `configuration_error` unless the session is already `controller_mode="attached"`. When an attached controller is present, update session JSON and summary JSON for:
+Phase 4 may fail stateful operations with `configuration_error` unless the session is already `controller_mode="attached"`. When an attached controller is present, update session JSON and summary JSON for:
 - breakpoint IDs and symbol metadata;
 - `current_execution_state="running"` after continue;
 - `current_execution_state="stopped"` after interrupt;
@@ -1491,7 +1491,7 @@ git commit -m "feat: add build boot debug workflow"
 Add to `tests/test_providers.py`:
 
 ```python
-def test_registry_advertises_local_qemu_gdbstub_and_removes_sprint_4_stubs() -> None:
+def test_registry_advertises_local_qemu_gdbstub_and_removes_phase_4_stubs() -> None:
     registry = ProviderRegistry.with_defaults()
     providers = {provider.provider_name: provider for provider in registry.list_capabilities()}
 
@@ -1504,7 +1504,7 @@ def test_registry_advertises_local_qemu_gdbstub_and_removes_sprint_4_stubs() -> 
 Add to `tests/test_server.py`:
 
 ```python
-def test_create_app_registers_sprint_4_tools_as_real_handlers() -> None:
+def test_create_app_registers_phase_4_tools_as_real_handlers() -> None:
     app = create_app()
     tool_names = {tool.name for tool in app._tool_manager.list_tools()}
 
@@ -1602,11 +1602,11 @@ def local_qemu_gdbstub_capability() -> ProviderCapability:
     )
 ```
 
-In `registry.py`, import and register `local_qemu_gdbstub_capability()`, and remove Sprint 4 operations from `stub-workflows`. If `stub-workflows` has no remaining operations, remove the stub provider registration.
+In `registry.py`, import and register `local_qemu_gdbstub_capability()`, and remove Phase 4 operations from `stub-workflows`. If `stub-workflows` has no remaining operations, remove the stub provider registration.
 
 - [ ] **Step 5: Wire MCP tools**
 
-In `create_app()`, replace the Sprint 4 stub loop with explicit tool functions for:
+In `create_app()`, replace the Phase 4 stub loop with explicit tool functions for:
 - `workflow.build_boot_debug`;
 - `debug.start_session`;
 - `debug.interrupt`;
@@ -1652,7 +1652,7 @@ Expected: PASS.
 
 ```bash
 git add src/linux_debug_mcp/server.py src/linux_debug_mcp/providers/registry.py src/linux_debug_mcp/providers/qemu_gdbstub.py tests/test_server.py tests/test_providers.py tests/test_artifacts_collect_handler.py
-git commit -m "feat: wire sprint 4 debug tools"
+git commit -m "feat: wire phase 4 debug tools"
 ```
 
 ## Task 9: Add Opt-In Live Coverage And Documentation
@@ -1701,9 +1701,9 @@ def test_live_build_boot_debug_workflow() -> None:
 
 - [ ] **Step 2: Document local debug workflow**
 
-In `README.md`, add a concise Sprint 4 section with:
+In `README.md`, add a concise Phase 4 section with:
 - host prerequisites: `virsh`, QEMU/libvirt, and `gdb`;
-- rootfs readiness still comes from Sprint 2;
+- rootfs readiness still comes from Phase 2;
 - `workflow.build_boot_debug` runs create, build, debug-enabled boot, readiness wait, and debug attach;
 - `target.run_tests` is not part of this workflow;
 - `debug.read_memory` is capped at 4096 bytes;
@@ -1725,7 +1725,7 @@ Expected without `LINUX_DEBUG_MCP_LIVE_GDBSTUB=1`: SKIPPED.
 
 ```bash
 git add tests/test_qemu_gdbstub_integration.py README.md docs/fedora-libvirt-user-guide.md
-git commit -m "docs: describe sprint 4 live debug workflow"
+git commit -m "docs: describe phase 4 live debug workflow"
 ```
 
 ## Task 10: Final Verification
@@ -1767,7 +1767,7 @@ print(providers.get("stub-workflows"))
 PY
 ```
 
-Expected: output includes `debug.start_session`, `debug.end_session`, and `workflow.build_boot_debug` under `local-qemu-gdbstub`; `stub-workflows` is either absent or contains no Sprint 4 operations.
+Expected: output includes `debug.start_session`, `debug.end_session`, and `workflow.build_boot_debug` under `local-qemu-gdbstub`; `stub-workflows` is either absent or contains no Phase 4 operations.
 
 - [ ] **Step 4: Review final diff**
 

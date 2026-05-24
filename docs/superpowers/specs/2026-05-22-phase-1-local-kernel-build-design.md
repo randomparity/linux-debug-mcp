@@ -1,22 +1,22 @@
-# Sprint 1 Local Kernel Build Design
+# Phase 1 Local Kernel Build Design
 
 Date: 2026-05-22
 
 ## Purpose
 
-Sprint 1 implements the first real workflow operation for the Linux Debug MCP
-server: `kernel.build`. The sprint adds a local x86_64 kernel build provider
+Phase 1 implements the first real workflow operation for the Linux Debug MCP
+server: `kernel.build`. The phase adds a local x86_64 kernel build provider
 that builds a developer-prepared Linux checkout into the run workspace, records
 the resulting build artifacts, and returns a concise MCP response that points to
 the durable logs and outputs.
 
-The sprint keeps kernel configuration developer-owned. The build provider
+The phase keeps kernel configuration developer-owned. The build provider
 chooses how to execute and record the build; it does not silently choose kernel
 features, run default configuration targets, or mutate configuration policy.
 
 ## Scope
 
-Sprint 1 includes:
+Phase 1 includes:
 
 - A local kernel build provider for x86_64.
 - `kernel.build` handler and MCP tool implementation.
@@ -30,9 +30,9 @@ Sprint 1 includes:
 - Manifest updates for the `build` step.
 - Provider capability updates for the new local build operation.
 - Unit tests and subprocess-fake tests that do not require a real kernel build.
-- README updates for Sprint 1 behavior and expected developer setup.
+- README updates for Phase 1 behavior and expected developer setup.
 
-Sprint 1 does not include:
+Phase 1 does not include:
 
 - Libvirt or QEMU boot.
 - Root filesystem provisioning.
@@ -77,7 +77,7 @@ build artifact of record for the run.
 
 ## Build Profiles
 
-Sprint 0 already has a `BuildProfile` model. Sprint 1 should extend it only as
+Phase 0 already has a `BuildProfile` model. Phase 1 should extend it only as
 needed for local build planning while keeping the model future-compatible with
 remote providers.
 
@@ -117,7 +117,7 @@ make -C <source> O=<run>/build ARCH=x86_64 <targets>
 ```
 
 If `jobs` is configured, the provider adds `-j<jobs>`. If no `jobs` value is
-configured, Sprint 1 omits `-j`. Automatic CPU-count parallelism should be
+configured, Phase 1 omits `-j`. Automatic CPU-count parallelism should be
 explicit in the profile design, not hidden in the provider.
 
 `make_variables` may add validated make variable assignments such as
@@ -145,7 +145,7 @@ reason in the build summary rather than inventing a version string.
 
 ## Artifact Layout
 
-Sprint 1 writes build artifacts under the existing run layout:
+Phase 1 writes build artifacts under the existing run layout:
 
 ```text
 <artifact-root>/<run-id>/
@@ -171,7 +171,7 @@ successful build. The expected initial artifact kinds are:
 Missing optional outputs should not make a successful build fail unless the
 selected profile declares them required. For the x86_64 pilot profile, `bzImage`
 and `.config` should be required. `vmlinux` should be recorded when present and
-should become required before Sprint 4 live debug workflows depend on it.
+should become required before Phase 4 live debug workflows depend on it.
 
 ## MCP Tool Behavior
 
@@ -182,12 +182,12 @@ should become required before Sprint 4 live debug workflows depend on it.
 - optional `build_profile`, defaulting to the run manifest request profile
 - optional `force_rebuild`, default `false`
 
-Sprint 1 should implement `force_rebuild=false` behavior fully. If the manifest
+Phase 1 should implement `force_rebuild=false` behavior fully. If the manifest
 already contains a succeeded `build` result and `force_rebuild` is false, the
 handler returns the recorded result without rerunning `make`.
 
 If a `build_profile` argument is supplied, it must match the build profile stored
-in the immutable run manifest request. Sprint 1 should reject attempts to switch
+in the immutable run manifest request. Phase 1 should reject attempts to switch
 profiles for an existing run with `configuration_error`; callers that need a
 different build profile should create a new run.
 
@@ -199,7 +199,7 @@ Handler validation order matters:
 4. Return an existing succeeded `build` result when `force_rebuild=false`.
 5. Plan and execute a new build only when no succeeded build result exists.
 
-If `force_rebuild=true`, Sprint 1 returns `configuration_error` with a clear
+If `force_rebuild=true`, Phase 1 returns `configuration_error` with a clear
 message that rebuild cleanup policy is not implemented yet. The design leaves
 room for a later explicit policy such as cleaning the per-run build directory,
 preserving the prior build under a numbered output path, or requiring a new run.
@@ -214,7 +214,7 @@ On success, the MCP response includes:
 - structured data with profile, architecture, targets, output path, source
   revision, and elapsed time
 - suggested next action: `artifacts.get_manifest`. `target.boot` remains a
-  later-sprint action until Sprint 2 implements boot support.
+  later-phase action until Phase 2 implements boot support.
 
 On failure, the MCP response includes:
 
@@ -244,7 +244,7 @@ as artifacts.
 
 ## Provider Boundary
 
-Sprint 1 should introduce a concrete local provider module rather than putting
+Phase 1 should introduce a concrete local provider module rather than putting
 build execution directly in the MCP handler. The handler should coordinate:
 
 1. Load manifest.
@@ -259,12 +259,12 @@ build execution directly in the MCP handler. The handler should coordinate:
 9. Return a `ToolResponse`.
 
 The provider interface should make future remote implementations possible. It
-does not need plugin loading in Sprint 1, but the operation should be expressed
+does not need plugin loading in Phase 1, but the operation should be expressed
 as "build this run with this profile" instead of "run this local shell command."
 
 ## Idempotency And State
 
-The `build` step follows the Sprint 0 manifest idempotency rule.
+The `build` step follows the Phase 0 manifest idempotency rule.
 
 - A succeeded build result is not overwritten on repeat calls.
 - Failed build results may be replaced by a later successful retry.
@@ -275,7 +275,7 @@ The `build` step follows the Sprint 0 manifest idempotency rule.
   subprocess.
 - If another build already holds the build lock for the same run, return a
   structured failure without invoking `make`.
-- Running build state should not be auto-recovered in Sprint 1. If a previous
+- Running build state should not be auto-recovered in Phase 1. If a previous
   process died after writing `status: running`, the next call should fail clearly
   and tell the operator to inspect the log and create a new run or manually clean
   the stale build lock.
@@ -286,7 +286,7 @@ step result.
 
 ## Testing Strategy
 
-Sprint 1 tests should avoid requiring a real Linux kernel build in the default
+Phase 1 tests should avoid requiring a real Linux kernel build in the default
 unit test suite.
 
 Required tests:
@@ -325,16 +325,16 @@ in. They must not run in the default test suite.
 
 README updates should explain:
 
-- Sprint 1 can build a prepared local Linux checkout.
+- Phase 1 can build a prepared local Linux checkout.
 - The developer must provide `.config` in the source tree or pre-populate the
   run build directory.
 - The default output is `<artifact-root>/<run-id>/build`.
 - The build log and summary locations.
-- The tool still does not boot or debug kernels until later sprints.
+- The tool still does not boot or debug kernels until later phases.
 
 ## Acceptance Criteria
 
-Sprint 1 is complete when:
+Phase 1 is complete when:
 
 1. `kernel.create_run` followed by `kernel.build` can run against a prepared
    local Linux checkout using the per-run `O=` directory.

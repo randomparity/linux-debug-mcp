@@ -1,23 +1,23 @@
-# Sprint 2 Libvirt Boot Design
+# Phase 2 Libvirt Boot Design
 
 Date: 2026-05-23
 
 ## Purpose
 
-Sprint 2 implements the first real target operation for the Linux Debug MCP
-server: `target.boot`. The sprint boots a successfully built x86_64 kernel on a
+Phase 2 implements the first real target operation for the Linux Debug MCP
+server: `target.boot`. The phase boots a successfully built x86_64 kernel on a
 configured local libvirt/QEMU development VM, captures serial console output,
 waits for a configured readiness marker, records boot artifacts, and returns a
 concise MCP response.
 
 The implementation should be real enough for a configured pilot host to boot a
-kernel through libvirt in this sprint. It should also remain testable without
+kernel through libvirt in this phase. It should also remain testable without
 libvirt by putting host command execution and console streaming behind fakeable
 provider boundaries.
 
 ## Scope
 
-Sprint 2 includes:
+Phase 2 includes:
 
 - Rootfs and target profile fields needed for local libvirt boot.
 - `target.boot` handler and MCP tool implementation.
@@ -25,7 +25,7 @@ Sprint 2 includes:
 - A host command runner abstraction whose default implementation uses real
   local tools such as `virsh`.
 - Domain XML planning for a dedicated MCP-managed development domain.
-- Kernel direct boot using the Sprint 1 `kernel-image` artifact.
+- Kernel direct boot using the Phase 1 `kernel-image` artifact.
 - Rootfs validation and attachment according to `RootfsProfile`.
 - Kernel command-line construction from `TargetProfile`.
 - Serial console capture into the run workspace.
@@ -36,7 +36,7 @@ Sprint 2 includes:
 - Unit tests with fake runners and fake console streams.
 - Gated local integration test documentation for real libvirt verification.
 
-Sprint 2 does not include:
+Phase 2 does not include:
 
 - SSH readiness.
 - Guest command execution or smoke test suites.
@@ -55,24 +55,24 @@ The `LibvirtQemuProvider` should plan and execute the local libvirt workflow,
 but all host effects should go through narrow interfaces that tests can replace:
 host tool lookup, command execution, domain lifecycle commands, and serial
 console streaming. The default runner should use real local tools, initially
-`virsh`, so Sprint 2 is not merely a planning exercise.
+`virsh`, so Phase 2 is not merely a planning exercise.
 
 This approach keeps the default test suite deterministic while still delivering
-a working pilot path on a configured host. It also matches the Sprint 1 provider
+a working pilot path on a configured host. It also matches the Phase 1 provider
 pattern: handlers coordinate manifest state and idempotency, while providers own
 operation-specific planning and execution.
 
 ## Profile Model
 
-Sprint 0 already introduced `RootfsProfile` and `TargetProfile`. Sprint 2 should
+Phase 0 already introduced `RootfsProfile` and `TargetProfile`. Phase 2 should
 extend those models only where concrete boot behavior needs explicit policy.
 
 `RootfsProfile` should support:
 
 - `name`: stable profile key.
 - `source`: host path to an existing root filesystem image or directory.
-- `source_type`: `disk_image` for Sprint 2. Directory sources are rejected by
-  the local libvirt provider until a later sprint defines a virtiofs, 9p, or
+- `source_type`: `disk_image` for Phase 2. Directory sources are rejected by
+  the local libvirt provider until a later phase defines a virtiofs, 9p, or
   initramfs-backed attachment contract.
 - `mutability`: `read_only`, `copy_on_write`, or `mutable`.
 - `access_method`: retained for future SSH/serial test execution.
@@ -81,11 +81,11 @@ extend those models only where concrete boot behavior needs explicit policy.
   state.
 - `guest_writable_paths`: retained for later smoke tests.
 
-Sprint 2 should validate that the rootfs source exists and that the selected
+Phase 2 should validate that the rootfs source exists and that the selected
 mutability policy is supported by the local provider. The provider should
 support `read_only` and `mutable` existing `disk_image` sources. It should
 reject directory sources and `copy_on_write` with `configuration_error` until a
-later sprint implements the required attachment mode or temporary overlay
+later phase implements the required attachment mode or temporary overlay
 creation. The provider should not build root filesystems or mutate a read-only
 source in place.
 
@@ -104,7 +104,7 @@ profile kernel args already specify a conflicting `root=` value.
 - `timeout_seconds`: maximum time to wait for readiness.
 - `cleanup_policy`: `preserve_on_failure` or `stop_on_failure`; controls the
   domain lifecycle after a failed boot attempt.
-- `debug_gdbstub`: retained for Sprint 4 and rejected if enabled in Sprint 2.
+- `debug_gdbstub`: retained for Phase 4 and rejected if enabled in Phase 2.
 - `libvirt_uri`: optional URI for the local libvirt connection. The boot plan
   must resolve this to either the profile value or an explicit server default
   before running host commands.
@@ -121,7 +121,7 @@ domains outside that explicit profile.
 
 ### MCP Handler
 
-`target.boot` should follow the Sprint 1 handler pattern:
+`target.boot` should follow the Phase 1 handler pattern:
 
 1. Validate `run_id` and load the manifest.
 2. Validate that the manifest has a succeeded `build` step.
@@ -190,7 +190,7 @@ runner should call real local tools.
 
 ### Artifact Layout
 
-Sprint 2 should write boot artifacts under the existing run layout:
+Phase 2 should write boot artifacts under the existing run layout:
 
 ```text
 <artifact-root>/<run-id>/
@@ -218,7 +218,7 @@ Full console logs stay on disk as artifacts.
 
 ## Data Flow
 
-The normal Sprint 2 flow is:
+The normal Phase 2 flow is:
 
 ```text
 run manifest
@@ -253,7 +253,7 @@ On success, the MCP response includes:
 - structured data with domain name, provider name, rootfs profile, target
   profile, kernel image path, readiness marker, timeout, started and ended
   timestamps, and elapsed time
-- suggested next action: `artifacts.get_manifest` until Sprint 3 implements
+- suggested next action: `artifacts.get_manifest` until Phase 3 implements
   `target.run_tests`
 
 On failure, the MCP response includes:
@@ -266,8 +266,8 @@ On failure, the MCP response includes:
 
 ## Idempotency And State
 
-The `boot` step follows the durable run-state model from Sprint 0, with one
-important addition: `force_reboot=true` should be supported in Sprint 2.
+The `boot` step follows the durable run-state model from Phase 0, with one
+important addition: `force_reboot=true` should be supported in Phase 2.
 
 Behavior:
 
@@ -297,7 +297,7 @@ Failure cleanup must follow `cleanup_policy`. `preserve_on_failure` leaves a
 started managed domain available for manual inspection and records that state in
 the boot summary. `stop_on_failure` stops or destroys only the managed domain
 after evidence collection. Successful boots should leave the domain running
-unless a later sprint adds an explicit shutdown operation.
+unless a later phase adds an explicit shutdown operation.
 
 ## Safety
 
@@ -310,7 +310,7 @@ The provider must require:
 - matching MCP ownership metadata before mutating an existing domain
 - a resolved libvirt connection URI from the target profile or server default
 - a rootfs source that passes path validation
-- a Sprint 2-supported rootfs source type
+- a Phase 2-supported rootfs source type
 - a supported rootfs mutability policy
 - a supported cleanup policy
 - matching build and target architectures
@@ -324,7 +324,7 @@ The provider must not:
 - mutate an existing domain that lacks matching MCP ownership metadata
 - delete rootfs sources
 - mutate read-only rootfs profiles in place
-- enable gdbstub behavior in Sprint 2
+- enable gdbstub behavior in Phase 2
 - return unbounded console output through MCP responses
 
 Command metadata, environment captures, and console snippets should pass through
@@ -355,7 +355,7 @@ timeout values, timestamps, and selected profile names.
 
 ## Provider Capability
 
-Sprint 2 should add a concrete provider capability such as
+Phase 2 should add a concrete provider capability such as
 `local-libvirt-qemu`.
 
 The capability should advertise:
@@ -371,7 +371,7 @@ The capability should advertise:
   for the configured managed domain, not concurrent safe
 
 The registry should replace `target.boot` in the stub provider listing with the
-real local libvirt provider while leaving later-sprint tools as stubs.
+real local libvirt provider while leaving later-phase tools as stubs.
 
 ## Testing Strategy
 
@@ -381,7 +381,7 @@ build. They should use fake runners and fake console streams.
 Required tests:
 
 - Rootfs profile validation for existing paths and supported mutability.
-- Directory rootfs sources return `configuration_error` in Sprint 2.
+- Directory rootfs sources return `configuration_error` in Phase 2.
 - `copy_on_write` rootfs policy returns `configuration_error`.
 - Target profile validation for managed domain requirements.
 - Existing domains without matching MCP ownership metadata are rejected before
@@ -392,7 +392,7 @@ Required tests:
 - Failure when the run has no succeeded build result.
 - Failure when the build result has no `kernel-image` artifact.
 - Failure when build and target architectures do not match.
-- Failure when `debug_gdbstub=true` is requested in Sprint 2.
+- Failure when `debug_gdbstub=true` is requested in Phase 2.
 - Boot plan generation with kernel image path, rootfs path, domain name, kernel
   args, root block device, serial device, resolved libvirt URI, XML path,
   console log path, timeout, readiness marker, and ownership metadata.
@@ -433,14 +433,14 @@ default test suite.
 
 README updates should explain:
 
-- Sprint 2 can boot a built x86_64 kernel on a configured local libvirt host.
+- Phase 2 can boot a built x86_64 kernel on a configured local libvirt host.
 - The developer must provide a known-good rootfs and a dedicated managed domain
-  profile, including the Sprint 2-supported rootfs disk image format.
+  profile, including the Phase 2-supported rootfs disk image format.
 - The server only manages the explicitly configured domain.
 - Existing domains are only reused when their MCP ownership metadata matches the
   configured provider and run context.
-- Readiness is serial-marker based in Sprint 2.
-- SSH, smoke tests, artifact collection, and debug support remain later-sprint
+- Readiness is serial-marker based in Phase 2.
+- SSH, smoke tests, artifact collection, and debug support remain later-phase
   features.
 - How to run the gated libvirt verification path.
 - Required environment variables and profile fields for the gated integration
@@ -449,7 +449,7 @@ README updates should explain:
 
 ## Acceptance Criteria
 
-Sprint 2 is complete when:
+Phase 2 is complete when:
 
 1. `kernel.create_run`, `kernel.build`, then `target.boot` can boot the built
    x86_64 kernel on a configured local libvirt host.

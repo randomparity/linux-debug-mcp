@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Apply the lowest-risk simplification recommendations from the `main..HEAD` review while preserving Sprint 3 smoke-test and artifact behavior.
+**Goal:** Apply the lowest-risk simplification recommendations from the `main..HEAD` review while preserving Phase 3 smoke-test and artifact behavior.
 
 **Architecture:** Keep provider-specific SSH validation in `LocalSshTestProvider`, keep response redaction in server helpers, and avoid loading full SSH command output into memory when artifacts already contain complete logs. Defer larger workflow-loop and artifact-bundling module moves because they touch broader observable control flow and can be handled in a separate refactor.
 

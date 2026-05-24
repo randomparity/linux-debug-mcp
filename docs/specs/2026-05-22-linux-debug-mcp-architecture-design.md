@@ -353,9 +353,9 @@ Testing should scale from pure unit tests to gated local integration tests.
 - Keep demo workflows reproducible with sample configs and documented host
   prerequisites.
 
-## Sprint Plan
+## Capability Roadmap
 
-### Sprint 0: Project Foundation
+### Project Foundation
 
 - Create the Python package and MCP server skeleton.
 - Define configuration models and domain models.
@@ -366,7 +366,7 @@ Testing should scale from pure unit tests to gated local integration tests.
 - Add prerequisite checks for the pilot host.
 - Add structured logging and initial docs.
 
-### Sprint 1: Local Kernel Build
+### Local Kernel Build
 
 - Implement x86_64 build profiles.
 - Support `O=...` output directories and config fragment application.
@@ -374,7 +374,7 @@ Testing should scale from pure unit tests to gated local integration tests.
 - Capture build logs and register build artifacts.
 - Return concise build summaries through MCP tools.
 
-### Sprint 2: Libvirt Boot
+### Libvirt Boot
 
 - Define rootfs and target profiles.
 - Validate rootfs access, credentials, readiness marker, and mutability policy.
@@ -383,7 +383,7 @@ Testing should scale from pure unit tests to gated local integration tests.
 - Capture serial console output.
 - Implement boot timeout and readiness detection.
 
-### Sprint 3: Smoke Tests And Artifacts
+### Smoke Tests And Artifacts
 
 - Implement SSH and serial test execution.
 - Add named smoke test suites and ad hoc command support.
@@ -391,7 +391,7 @@ Testing should scale from pure unit tests to gated local integration tests.
 - Implement `workflow.build_boot_test`.
 - Write demo documentation for the pilot flow.
 
-### Sprint 4: Live Kernel Debug MVP
+### Live Kernel Debug MVP
 
 - Enable QEMU gdbstub through the target provider.
 - Discover and validate `vmlinux`.
@@ -403,7 +403,7 @@ Testing should scale from pure unit tests to gated local integration tests.
 - Record gdb transcripts as artifacts.
 - Implement `workflow.build_boot_debug`.
 
-### Sprint 5: Provider Extensibility
+### Provider Extensibility
 
 - Add provider capability declarations.
 - Add plugin loading mechanics.
@@ -412,7 +412,7 @@ Testing should scale from pure unit tests to gated local integration tests.
 - Define interfaces for host reservation, NIM/PXE provisioning, HMC/IPMI/serial
   access, and real-hardware boot.
 
-### Sprint 6: Pilot Hardening
+### Pilot Hardening
 
 - Add dependency checks and clearer error messages.
 - Improve recovery and cleanup paths.
