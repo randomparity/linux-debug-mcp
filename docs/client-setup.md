@@ -44,7 +44,10 @@ Inside Claude Code, inspect connected MCP servers with:
 
 ## Codex CLI
 
-Add the server through the Codex MCP CLI:
+Add the server through the Codex MCP CLI. This registers the server in Codex
+configuration loaded from `~/.codex/config.toml`, so enable it only when you
+intend the server to be available to Codex sessions that use that user
+configuration:
 
 ```bash
 codex mcp add linux-debug-mcp -- \
@@ -60,7 +63,8 @@ codex mcp get linux-debug-mcp
 
 ## Codex TOML Configuration
 
-You can also configure the server directly in `~/.codex/config.toml`:
+You can also configure the server directly in `~/.codex/config.toml` with the
+same cross-workspace availability:
 
 ```toml
 [mcp_servers.linux-debug-mcp]
