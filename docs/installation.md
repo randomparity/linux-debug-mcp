@@ -77,13 +77,16 @@ just setup
 installs editable `dev` and `test` dependencies, runs host checks, refreshes the
 secrets baseline, installs pre-commit hooks, and runs hooks once.
 
-The direct equivalent is:
+To run the core `uv` environment setup and host check directly:
 
 ```bash
 uv venv --allow-existing
 uv pip install -e '.[test,dev]'
 uv run python -m linux_debug_mcp.dev_setup check-host
 ```
+
+This direct sequence does not refresh the secrets baseline, install pre-commit
+hooks, or run hooks once. Use `just setup` for the full contributor setup.
 
 Run the test suite with:
 
