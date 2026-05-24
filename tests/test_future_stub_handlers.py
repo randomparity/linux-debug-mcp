@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import socket
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from linux_debug_mcp.artifacts.store import ArtifactStore
+from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider
+from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
+from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider
+from linux_debug_mcp.providers.qemu_gdbstub import QemuGdbstubProvider
 from linux_debug_mcp.providers.registry import ProviderRegistry
 from linux_debug_mcp.providers.stubs import remote_build_stub_capability
 from linux_debug_mcp.server import (
@@ -249,21 +255,36 @@ def test_console_write_validation_does_not_echo_payload_or_credential_refs() -> 
     assert "credential-ref-1" not in dumped
 
 
-def test_future_stub_handlers_do_not_create_run_workspace_or_call_subprocess(
+@pytest.mark.parametrize(("handler", "payload", "provider_name", "operation"), VALID_CALLS)
+def test_future_stub_handlers_do_not_create_run_workspace_or_touch_forbidden_dependencies(
+    handler,
+    payload,
+    provider_name: str,
+    operation: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fail_subprocess(*args: object, **kwargs: object) -> object:
-        raise AssertionError("future stubs must not call subprocess")
+    def fail_forbidden_dependency(*args: object, **kwargs: object) -> object:
+        raise AssertionError("future stubs must not touch forbidden dependencies")
 
-    monkeypatch.setattr(subprocess, "run", fail_subprocess)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subprocess, "run", fail_forbidden_dependency)
+    monkeypatch.setattr(subprocess, "Popen", fail_forbidden_dependency)
+    monkeypatch.setattr(socket, "socket", fail_forbidden_dependency)
+    monkeypatch.setattr(socket, "create_connection", fail_forbidden_dependency)
+    monkeypatch.setattr(Path, "read_text", fail_forbidden_dependency)
+    monkeypatch.setattr(Path, "read_bytes", fail_forbidden_dependency)
+    monkeypatch.setattr(ArtifactStore, "create_run", fail_forbidden_dependency)
+    monkeypatch.setattr(ArtifactStore, "record_step_result", fail_forbidden_dependency)
+    monkeypatch.setattr(LocalKernelBuildProvider, "plan_build", fail_forbidden_dependency)
+    monkeypatch.setattr(LocalSshTestProvider, "plan_tests", fail_forbidden_dependency)
+    monkeypatch.setattr(LibvirtQemuProvider, "plan_boot", fail_forbidden_dependency)
+    monkeypatch.setattr(QemuGdbstubProvider, "start_session", fail_forbidden_dependency)
 
-    response = remote_build_kernel_handler(
-        architecture="ppc64le",
-        source_ref="linux-src",
-        build_profile="defconfig",
-    )
+    response = handler(**payload)
 
     assert response.error is not None
     assert response.error.category == "not_implemented"
+    assert response.error.details["provider_name"] == provider_name
+    assert response.error.details["operation"] == operation
     assert not (tmp_path / ".linux-debug-mcp" / "runs").exists()
