@@ -6,6 +6,9 @@ is executable today. The implemented end-to-end workflow remains the local
 x86_64 build, libvirt/QEMU boot, SSH smoke-test, artifact, and QEMU gdbstub
 path.
 
+For the implemented MCP tool surface and future-provider stub list, see
+[Tool Reference](tool-reference.md).
+
 The purpose of this spike is to record the ppc64le shape expected by future
 provider work so agents can understand why ppc64le appears in stub metadata
 without assuming it can run.

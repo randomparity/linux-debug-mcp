@@ -1,1 +1,188 @@
 # Tool Reference
+
+Linux Debug MCP exposes local kernel build, boot, smoke-test, artifact, and
+QEMU gdbstub debug tools over stdio MCP. The default artifact root is
+`.linux-debug-mcp/runs`.
+
+Use `providers.list` and `host.check_prerequisites` before choosing a workflow.
+Client setup is covered in [Client Setup](client-setup.md), and Fedora
+libvirt/QEMU host preparation is covered in the
+[Fedora Libvirt User Guide](fedora-libvirt-user-guide.md).
+
+## Discovery Tools
+
+### `providers.list`
+
+Returns provider capability declarations for implemented local providers and
+future-provider stubs. Use it to check provider families, implementation state,
+advertised operations, limitations, and documentation paths.
+
+### `host.check_prerequisites`
+
+Checks local Python, host tools, artifact root writability, optional Linux
+source markers, and optional non-destructive libvirt visibility.
+
+```json
+{
+  "tool": "host.check_prerequisites",
+  "arguments": {
+    "artifact_root": ".linux-debug-mcp/runs",
+    "source_path": "/home/dave/src/linux",
+    "enable_libvirt_check": true
+  }
+}
+```
+
+### `artifacts.get_manifest`
+
+Returns the redacted manifest for an existing run. Use it to inspect run inputs,
+step results, artifacts, cleanup state, and suggested next actions.
+
+```json
+{
+  "tool": "artifacts.get_manifest",
+  "arguments": {
+    "run_id": "run-abc123"
+  }
+}
+```
+
+## Local Build, Boot, And Test Tools
+
+The implemented local workflow expects:
+
+- a Linux source tree with `Kconfig`, `Makefile`, and a usable `.config`
+- `make` for x86_64 kernel builds
+- a prepared rootfs profile for local libvirt/QEMU boot
+- SSH access from the MCP server when running guest smoke tests
+
+Implemented tools:
+
+- `kernel.create_run`
+- `kernel.build`
+- `target.boot`
+- `target.run_tests`
+- `artifacts.collect`
+- `workflow.build_boot_test`
+
+Run the local build, boot, SSH smoke-test, and artifact workflow with:
+
+```json
+{
+  "tool": "workflow.build_boot_test",
+  "arguments": {
+    "source_path": "/home/dave/src/linux",
+    "build_profile": "x86_64-default",
+    "target_profile": "local-qemu",
+    "rootfs_profile": "minimal",
+    "test_suite": "smoke-basic"
+  }
+}
+```
+
+The default `smoke-basic` suite runs:
+
+- `uname -a`
+- `test -r /proc/version`
+- `cat /proc/cmdline`
+
+The local providers do not create root filesystems, install SSH packages or
+keys, discover guest addresses, generate kernel configs, or apply config
+fragments automatically.
+
+## Local Debug Tools
+
+The implemented debug path attaches local `gdb` to a localhost-only QEMU
+gdbstub for a dedicated libvirt/QEMU domain. It requires a built kernel image
+and matching unstripped `vmlinux`.
+
+Implemented debug tools:
+
+- `workflow.build_boot_debug`
+- `debug.start_session`
+- `debug.interrupt`
+- `debug.continue`
+- `debug.set_breakpoint`
+- `debug.clear_breakpoint`
+- `debug.list_breakpoints`
+- `debug.read_registers`
+- `debug.read_symbol`
+- `debug.read_memory`
+- `debug.evaluate`
+- `debug.end_session`
+
+Run the local build, boot, and debug attach workflow with:
+
+```json
+{
+  "tool": "workflow.build_boot_debug",
+  "arguments": {
+    "source_path": "/home/dave/src/linux",
+    "build_profile": "x86_64-default",
+    "target_profile": "local-qemu-debug",
+    "rootfs_profile": "minimal",
+    "debug_profile": "qemu-gdbstub-default"
+  }
+}
+```
+
+After the session is attached, use the constrained `debug.*` tools for
+inspection. `debug.read_memory` is capped at 4096 bytes per call. Raw gdb
+transcripts are artifact-only; response snippets and manifest views are
+redacted.
+
+`workflow.build_boot_debug` does not run `target.run_tests`. Run SSH smoke tests
+separately when guest command coverage is needed.
+
+## Artifact Layout
+
+Each run is stored under `<artifact-root>/<run-id>/`. With the default artifact
+root, that is `.linux-debug-mcp/runs/<run-id>/`.
+
+Important paths include:
+
+- build logs under `<artifact-root>/<run-id>/logs/build.log`
+- build summaries under
+  `<artifact-root>/<run-id>/summaries/build-summary.json`
+- serial and boot logs under `<artifact-root>/<run-id>/logs/`
+- smoke output under `<artifact-root>/<run-id>/tests/attempt-NNN/`
+- debug artifacts under `<artifact-root>/<run-id>/debug/`
+- bundle index under
+  `<artifact-root>/<run-id>/summaries/artifact-bundle.json`
+
+Use `artifacts.collect` after a run to refresh the artifact bundle index:
+
+```json
+{
+  "tool": "artifacts.collect",
+  "arguments": {
+    "run_id": "run-abc123"
+  }
+}
+```
+
+## Future-Provider Stubs
+
+Future-provider tools are discoverable for planning and contract validation
+only:
+
+- `remote.build_kernel`
+- `remote.sync_artifacts`
+- `reservation.request_host`
+- `reservation.release_host`
+- `provision.prepare_target`
+- `hardware.power_control`
+- `hardware.boot_kernel`
+- `console.open_session`
+- `console.read`
+- `console.write`
+- `workflow.reserve_provision_boot`
+
+Valid future-provider requests return `not_implemented`. Malformed requests
+return `configuration_error`. These stubs do not contact remote hosts, open
+consoles, provision targets, control hardware, or create real-boot side
+effects.
+
+ppc64le appears only in future-provider metadata and contracts today. See the
+[ppc64le Provider Spike](ppc64le-provider-spike.md) for design notes and
+current boundaries.

@@ -14,6 +14,11 @@ disk-image rootfs as `/dev/vda`, waits for a serial readiness marker on
 `ttyS0`, and can run SSH smoke tests after boot. It does not create rootfs
 images, configure SSH, attach gdb, or manage production VMs.
 
+For Python package installation, server smoke checks, and MCP client
+registration, see [Installation](installation.md) and
+[Client Setup](client-setup.md). For the implemented MCP tool surface and
+workflow request examples, see [Tool Reference](tool-reference.md).
+
 ## 1. Install Fedora Host Packages
 
 Install the host tools used by the server, the kernel build, and the libvirt
