@@ -35,6 +35,10 @@ def _validate_safe_label(value: str, *, field_name: str) -> str:
     return value
 
 
+def _safe_fields(base: frozenset[str], *field_names: str) -> frozenset[str]:
+    return base | frozenset(field_names)
+
+
 def _reject_raw_secret_fields(data: Any) -> Any:
     if not isinstance(data, dict):
         return data
@@ -111,8 +115,11 @@ class RemoteBuildRequest(ProviderRequest):
     build_profile: str
     output_artifact_ref: str | None = None
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderRequest._safe_label_fields | frozenset(
-        {"source_ref", "build_profile", "output_artifact_ref"}
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderRequest._safe_label_fields,
+        "source_ref",
+        "build_profile",
+        "output_artifact_ref",
     )
 
 
@@ -121,8 +128,11 @@ class RemoteBuildResult(ProviderResult):
     kernel_artifact_ref: str | None = None
     log_artifact_ref: str | None = None
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderResult._safe_label_fields | frozenset(
-        {"build_id", "kernel_artifact_ref", "log_artifact_ref"}
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderResult._safe_label_fields,
+        "build_id",
+        "kernel_artifact_ref",
+        "log_artifact_ref",
     )
 
 
@@ -130,8 +140,10 @@ class RemoteArtifactSyncRequest(ProviderRequest):
     external_artifact_ref: str
     destination_artifact_ref: str | None = None
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderRequest._safe_label_fields | frozenset(
-        {"external_artifact_ref", "destination_artifact_ref"}
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderRequest._safe_label_fields,
+        "external_artifact_ref",
+        "destination_artifact_ref",
     )
 
 
@@ -140,8 +152,10 @@ class RemoteArtifactSyncResult(ProviderResult):
     artifact_ref: str | None = None
     byte_count: int | None = Field(default=None, ge=0)
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderResult._safe_label_fields | frozenset(
-        {"sync_id", "artifact_ref"}
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderResult._safe_label_fields,
+        "sync_id",
+        "artifact_ref",
     )
 
 
@@ -149,15 +163,17 @@ class ReservationRequest(ProviderRequest):
     reservation_pool: str
     reservation_token_ref: str | None = None
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderRequest._safe_label_fields | frozenset(
-        {"reservation_pool", "reservation_token_ref"}
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderRequest._safe_label_fields,
+        "reservation_pool",
+        "reservation_token_ref",
     )
 
 
 class ReservationReleaseRequest(ProviderRequest):
     reservation_id: str
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderRequest._safe_label_fields | frozenset({"reservation_id"})
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(ProviderRequest._safe_label_fields, "reservation_id")
 
 
 class ReservationResult(ProviderResult):
@@ -165,8 +181,10 @@ class ReservationResult(ProviderResult):
     target_name: str | None = None
     expires_at: str | None = None
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderResult._safe_label_fields | frozenset(
-        {"reservation_id", "target_name"}
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderResult._safe_label_fields,
+        "reservation_id",
+        "target_name",
     )
 
 
@@ -176,8 +194,12 @@ class ProvisioningRequest(ProviderRequest):
     reservation_id: str | None = None
     credential_ref: str | None = None
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderRequest._safe_label_fields | frozenset(
-        {"target_name", "provisioning_profile", "reservation_id", "credential_ref"}
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderRequest._safe_label_fields,
+        "target_name",
+        "provisioning_profile",
+        "reservation_id",
+        "credential_ref",
     )
 
 
@@ -186,8 +208,11 @@ class ProvisioningResult(ProviderResult):
     target_name: str | None = None
     image_artifact_ref: str | None = None
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderResult._safe_label_fields | frozenset(
-        {"provisioning_id", "target_name", "image_artifact_ref"}
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderResult._safe_label_fields,
+        "provisioning_id",
+        "target_name",
+        "image_artifact_ref",
     )
 
 
@@ -196,8 +221,10 @@ class HardwareControlRequest(ProviderRequest):
     action: str
     bmc_credential_ref: str | None = None
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderRequest._safe_label_fields | frozenset(
-        {"target_name", "bmc_credential_ref"}
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderRequest._safe_label_fields,
+        "target_name",
+        "bmc_credential_ref",
     )
 
     @field_validator("action")
@@ -214,8 +241,12 @@ class HardwareControlResult(ProviderResult):
     power_state: str | None = None
     external_task_id: str | None = None
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderResult._safe_label_fields | frozenset(
-        {"target_name", "action", "power_state", "external_task_id"}
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderResult._safe_label_fields,
+        "target_name",
+        "action",
+        "power_state",
+        "external_task_id",
     )
 
 
@@ -224,8 +255,11 @@ class ConsoleSessionRequest(ProviderRequest):
     access_method: str
     credential_ref: str | None = None
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderRequest._safe_label_fields | frozenset(
-        {"target_name", "access_method", "credential_ref"}
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderRequest._safe_label_fields,
+        "target_name",
+        "access_method",
+        "credential_ref",
     )
 
     @field_validator("access_method")
@@ -238,42 +272,33 @@ class ConsoleSessionRequest(ProviderRequest):
 
 class ConsoleReadRequest(ProviderRequest):
     console_session_id: str
-    max_bytes: int = Field(default=4096)
+    max_bytes: int = Field(default=4096, ge=1, le=MAX_CONSOLE_READ_BYTES)
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderRequest._safe_label_fields | frozenset(
-        {"console_session_id"}
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderRequest._safe_label_fields,
+        "console_session_id",
     )
-
-    @field_validator("max_bytes")
-    @classmethod
-    def validate_max_bytes(cls, value: int) -> int:
-        if value < 1 or value > MAX_CONSOLE_READ_BYTES:
-            raise ValueError("max_bytes must be within the allowed range")
-        return value
 
 
 class ConsoleReadResult(ProviderResult):
     console_session_id: str
     data: str = ""
-    byte_count: int = Field(default=0)
+    byte_count: int = Field(default=0, ge=0, le=MAX_CONSOLE_READ_BYTES)
     truncated: bool = False
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderResult._safe_label_fields | frozenset({"console_session_id"})
-
-    @field_validator("byte_count")
-    @classmethod
-    def validate_byte_count(cls, value: int) -> int:
-        if value < 0 or value > MAX_CONSOLE_READ_BYTES:
-            raise ValueError("byte_count must be within the allowed range")
-        return value
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderResult._safe_label_fields,
+        "console_session_id",
+    )
 
 
 class ConsoleWriteRequest(ProviderRequest):
     console_session_id: str
     data: str
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderRequest._safe_label_fields | frozenset(
-        {"console_session_id"}
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderRequest._safe_label_fields,
+        "console_session_id",
     )
 
     @field_validator("data")
@@ -287,16 +312,12 @@ class ConsoleWriteRequest(ProviderRequest):
 
 class ConsoleWriteResult(ProviderResult):
     console_session_id: str
-    byte_count: int = Field(default=0)
+    byte_count: int = Field(default=0, ge=0, le=MAX_CONSOLE_WRITE_BYTES)
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderResult._safe_label_fields | frozenset({"console_session_id"})
-
-    @field_validator("byte_count")
-    @classmethod
-    def validate_byte_count(cls, value: int) -> int:
-        if value < 0 or value > MAX_CONSOLE_WRITE_BYTES:
-            raise ValueError("byte_count must be within the allowed range")
-        return value
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderResult._safe_label_fields,
+        "console_session_id",
+    )
 
 
 class RealBootRequest(ProviderRequest):
@@ -305,8 +326,12 @@ class RealBootRequest(ProviderRequest):
     boot_profile: str | None = None
     reservation_id: str | None = None
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderRequest._safe_label_fields | frozenset(
-        {"target_name", "kernel_artifact_ref", "boot_profile", "reservation_id"}
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderRequest._safe_label_fields,
+        "target_name",
+        "kernel_artifact_ref",
+        "boot_profile",
+        "reservation_id",
     )
 
 
@@ -315,8 +340,11 @@ class RealBootResult(ProviderResult):
     target_name: str | None = None
     console_session_id: str | None = None
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderResult._safe_label_fields | frozenset(
-        {"boot_id", "target_name", "console_session_id"}
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderResult._safe_label_fields,
+        "boot_id",
+        "target_name",
+        "console_session_id",
     )
 
 
@@ -329,14 +357,13 @@ class ReserveProvisionBootRequest(ProviderRequest):
     credential_ref: str | None = None
     bmc_credential_ref: str | None = None
 
-    _safe_label_fields: ClassVar[frozenset[str]] = ProviderRequest._safe_label_fields | frozenset(
-        {
-            "reservation_pool",
-            "target_name",
-            "provisioning_profile",
-            "kernel_artifact_ref",
-            "reservation_token_ref",
-            "credential_ref",
-            "bmc_credential_ref",
-        }
+    _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
+        ProviderRequest._safe_label_fields,
+        "reservation_pool",
+        "target_name",
+        "provisioning_profile",
+        "kernel_artifact_ref",
+        "reservation_token_ref",
+        "credential_ref",
+        "bmc_credential_ref",
     )

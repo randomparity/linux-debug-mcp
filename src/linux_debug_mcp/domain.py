@@ -169,6 +169,8 @@ class ProviderCapability(Model):
         operation_names = [capability.operation for capability in self.operation_capabilities]
         if operation_names != self.operations:
             raise ValueError("operations must match operation_capabilities in order")
+        if all(capability.implementation_state is not None for capability in self.operation_capabilities):
+            return self
         object.__setattr__(
             self,
             "operation_capabilities",

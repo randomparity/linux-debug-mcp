@@ -242,35 +242,35 @@ def select_future_provider(
     operation: str,
     architecture: str,
     provider_name: str | None = None,
-) -> tuple[ProviderCapability | None, ToolResponse | None]:
+) -> ProviderCapability | ToolResponse:
     if provider_name is not None:
         try:
             provider = registry.get(provider_name)
         except KeyError:
-            return None, future_configuration_error_response(
+            return future_configuration_error_response(
                 "unknown provider",
                 {"provider_name": provider_name, "operation": operation, "architecture": architecture},
             )
         if operation not in provider.operations:
-            return None, future_configuration_error_response(
+            return future_configuration_error_response(
                 "provider does not advertise requested operation",
                 {"provider_name": provider_name, "operation": operation, "architecture": architecture},
             )
         if architecture not in provider.architectures:
-            return None, future_configuration_error_response(
+            return future_configuration_error_response(
                 "provider does not advertise requested architecture",
                 {"provider_name": provider_name, "operation": operation, "architecture": architecture},
             )
-        return provider, None
+        return provider
 
     candidates = registry.find_by_operation_and_architecture(operation=operation, architecture=architecture)
     if not candidates:
-        return None, future_configuration_error_response(
+        return future_configuration_error_response(
             "no provider advertises requested operation and architecture",
             {"operation": operation, "architecture": architecture},
         )
     if len(candidates) > 1:
-        return None, future_configuration_error_response(
+        return future_configuration_error_response(
             "multiple providers advertise requested operation and architecture",
             {
                 "operation": operation,
@@ -278,7 +278,7 @@ def select_future_provider(
                 "candidate_provider_names": [candidate.provider_name for candidate in candidates],
             },
         )
-    return candidates[0], None
+    return candidates[0]
 
 
 def future_not_implemented_response(
@@ -300,13 +300,4 @@ def future_not_implemented_response(
             "side_effects": "none",
         },
         suggested_next_actions=["providers.list"],
-    )
-
-
-def stub_not_implemented_response(*, provider_name: str, operation: str) -> ToolResponse:
-    return ToolResponse.failure(
-        category=ErrorCategory.NOT_IMPLEMENTED,
-        message=f"{provider_name} advertises future operation {operation} but is a Sprint 5 stub",
-        details={"provider": provider_name, "operation": operation, "side_effects": "none"},
-        suggested_next_actions=["Use an implemented local provider or add a real external provider plugin."],
     )

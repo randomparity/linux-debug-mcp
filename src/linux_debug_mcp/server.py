@@ -498,20 +498,15 @@ def _future_stub_handler(
         )
 
     registry = registry or ProviderRegistry.with_defaults()
-    provider, error_response = select_future_provider(
+    provider = select_future_provider(
         registry,
         operation=operation,
         architecture=request.architecture,
         provider_name=request.provider_name,
     )
-    if error_response is not None:
-        return ToolResponse.failure(
-            category=error_response.error.category if error_response.error else ErrorCategory.CONFIGURATION_ERROR,
-            message=error_response.error.message if error_response.error else "provider selection failed",
-            details=redactor.redact_value(error_response.error.details if error_response.error else {}),
-            suggested_next_actions=error_response.suggested_next_actions,
-        )
-    assert provider is not None
+    if isinstance(provider, ToolResponse):
+        return provider
+
     plugin_metadata = registry.provider_plugin_metadata(provider.provider_name)
     documentation_paths = (
         list(plugin_metadata.documentation_paths) if plugin_metadata is not None else list(provider.documentation_paths)

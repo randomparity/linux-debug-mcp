@@ -50,7 +50,7 @@ class ProviderRegistry:
         return sorted(
             (
                 provider
-                for provider in self.list_capabilities()
+                for provider in self._providers.values()
                 if operation in provider.operations and architecture in provider.architectures
             ),
             key=lambda provider: provider.provider_name,
