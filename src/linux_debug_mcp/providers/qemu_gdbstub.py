@@ -39,8 +39,10 @@ def local_qemu_gdbstub_capability() -> ProviderCapability:
     return ProviderCapability(
         provider_name="local-qemu-gdbstub",
         provider_version="0.1.0",
+        provider_family="debug",
         architectures=["x86_64"],
         target_kinds=[TargetKind.VIRTUAL],
+        transports=["tcp", "gdb-remote", "filesystem"],
         operations=QEMU_GDBSTUB_OPERATIONS,
         required_host_tools=["gdb"],
         destructive_permissions=[

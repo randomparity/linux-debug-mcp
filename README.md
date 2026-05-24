@@ -26,6 +26,34 @@ The pilot paths do not create root filesystems, install SSH packages or keys,
 discover guest addresses, use remote builders, generate kernel configs, or
 apply config fragments automatically.
 
+## Provider Extensibility Status
+
+Sprint 5 adds a contract-first provider discovery surface for future remote,
+provisioning, hardware-control, console, and real-boot workflows. The local
+x86_64 path remains the only implemented end-to-end workflow.
+
+Future providers are discoverable as safe stubs. They advertise planned
+operations, architectures, transports, limitations, and documentation paths, but
+valid requests return `not_implemented` until a later sprint adds real provider
+implementations.
+
+Provider implementation states are:
+
+- `implemented`: the provider has executable local behavior.
+- `stub`: the provider is discoverable for planning and contract validation
+  only; it must not create run workspaces or contact external systems.
+- `external_reserved`: the provider name or capability is reserved for a future
+  external integration.
+
+Use `providers.list` as the primary discovery tool before selecting a provider.
+It reports implemented local providers and Sprint 5 stubs with their operation
+capabilities and implementation states.
+
+ppc64le may appear in stub provider metadata and future-facing request
+contracts, but it is not executable in Sprint 5. See
+[`docs/ppc64le-provider-spike.md`](docs/ppc64le-provider-spike.md) for the
+current ppc64le design notes and boundaries.
+
 ## Local Kernel Builds
 
 `kernel.build` builds a developer-prepared local Linux checkout. The source tree
@@ -215,7 +243,10 @@ durable `manifest.json`.
 
 `artifacts.get_manifest` returns a redacted manifest view.
 
-`providers.list` returns provider capability declarations.
+`providers.list` returns provider capability declarations, including provider
+family, implementation state, advertised operations, operation-level metadata,
+limitations, and documentation paths when available. Treat `stub` providers as
+non-executable planning metadata.
 
 ## Artifact Layout
 

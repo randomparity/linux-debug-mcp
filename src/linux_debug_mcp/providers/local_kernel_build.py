@@ -321,8 +321,10 @@ def local_kernel_build_capability() -> ProviderCapability:
     return ProviderCapability(
         provider_name="local-kernel-build",
         provider_version="0.1.0",
+        provider_family="build",
         architectures=["x86_64"],
         target_kinds=[TargetKind.LOCAL],
+        transports=["subprocess", "filesystem"],
         operations=["kernel.build"],
         required_host_tools=["make"],
         destructive_permissions=[],

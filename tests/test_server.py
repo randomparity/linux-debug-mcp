@@ -194,14 +194,28 @@ def test_list_providers_handler_returns_default_capabilities() -> None:
     response = list_providers_handler()
 
     assert response.ok is True
-    assert {provider["provider_name"] for provider in response.data["providers"]} == {
+    providers = {provider["provider_name"]: provider for provider in response.data["providers"]}
+    assert {
         "local-artifacts",
         "local-kernel-build",
         "local-libvirt-qemu",
         "local-qemu-gdbstub",
         "local-prereqs",
         "local-ssh-tests",
-    }
+    }.issubset(providers)
+    assert {
+        "remote-build-stub",
+        "remote-artifact-sync-stub",
+        "reservation-stub",
+        "provisioning-stub",
+        "hardware-control-stub",
+        "console-access-stub",
+        "real-boot-stub",
+    }.issubset(providers)
+    assert providers["local-kernel-build"]["implementation_state"] == "implemented"
+    assert providers["remote-build-stub"]["implementation_state"] == "stub"
+    assert providers["remote-build-stub"]["documentation_paths"] == ["docs/ppc64le-provider-spike.md"]
+    assert "operation_capabilities" in providers["remote-build-stub"]
 
 
 def test_default_smoke_basic_suite_matches_sprint_3_contract() -> None:
@@ -250,6 +264,36 @@ def test_create_app_registers_sprint_4_tools_as_real_handlers() -> None:
     assert "byte_count" in tools["debug.read_memory"].parameters["properties"]
     assert tools["debug.end_session"].fn.__name__ == "debug_end_session"
     assert "debug_session_id" in tools["debug.end_session"].parameters["properties"]
+
+
+def test_create_app_registers_future_provider_tools() -> None:
+    app = create_app()
+    tools = app._tool_manager._tools
+    expected_fields = {
+        "remote.build_kernel": {"architecture", "source_ref", "build_profile"},
+        "remote.sync_artifacts": {"architecture", "external_artifact_ref"},
+        "reservation.request_host": {"architecture", "reservation_pool"},
+        "reservation.release_host": {"architecture", "reservation_id"},
+        "provision.prepare_target": {"architecture", "target_name", "provisioning_profile"},
+        "hardware.power_control": {"architecture", "target_name", "action"},
+        "hardware.boot_kernel": {"architecture", "target_name", "kernel_artifact_ref"},
+        "console.open_session": {"architecture", "target_name", "access_method"},
+        "console.read": {"architecture", "console_session_id", "max_bytes"},
+        "console.write": {"architecture", "console_session_id", "data"},
+        "workflow.reserve_provision_boot": {
+            "architecture",
+            "reservation_pool",
+            "target_name",
+            "provisioning_profile",
+            "kernel_artifact_ref",
+        },
+    }
+
+    assert set(expected_fields).issubset(tools)
+    for tool_name, fields in expected_fields.items():
+        properties = tools[tool_name].parameters["properties"]
+        assert fields.issubset(properties)
+        assert {"provider_name", "timeout_seconds", "operation_label"}.issubset(properties)
 
 
 def test_target_run_tests_tool_is_registered_with_full_arguments() -> None:

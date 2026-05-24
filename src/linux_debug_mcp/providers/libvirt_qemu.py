@@ -805,8 +805,10 @@ def local_libvirt_qemu_capability() -> ProviderCapability:
     return ProviderCapability(
         provider_name="local-libvirt-qemu",
         provider_version="0.1.0",
+        provider_family="boot",
         architectures=["x86_64"],
         target_kinds=[TargetKind.VIRTUAL],
+        transports=["libvirt", "serial-console", "filesystem"],
         operations=["target.boot"],
         required_host_tools=["virsh"],
         destructive_permissions=[
