@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Reduce low-risk duplication and test-only surface introduced by the Sprint 4 debug branch while preserving behavior.
+**Goal:** Reduce low-risk duplication and test-only surface introduced by the Phase 4 debug branch while preserving behavior.
 
 **Architecture:** Keep the cleanup local to the existing provider and server modules. Consolidate only repeated helpers with identical behavior, remove test fixture code from production, and keep larger workflow orchestration extraction deferred because it crosses build, boot, test, and debug behavior.
 
@@ -22,7 +22,7 @@ Subagent review passes:
 ## Files
 
 - Modify: `src/linux_debug_mcp/providers/qemu_gdbstub.py`
-  - Derive provider operation list from `SPRINT_4_DEBUG_OPERATIONS`.
+  - Derive provider operation list from `PHASE_4_DEBUG_OPERATIONS`.
   - Remove `write_session_for_test()` from production code.
   - Collapse failure transcript write/append helpers into one helper with explicit file mode.
   - Avoid repeated existing-artifact scans where practical.
@@ -69,10 +69,10 @@ Delete `QemuGdbstubProvider.write_session_for_test()` from `src/linux_debug_mcp/
 
 - [ ] **Step 4: Derive operation constants**
 
-Import `SPRINT_4_DEBUG_OPERATIONS` from `linux_debug_mcp.config` and set:
+Import `PHASE_4_DEBUG_OPERATIONS` from `linux_debug_mcp.config` and set:
 
 ```python
-QEMU_GDBSTUB_OPERATIONS = ["workflow.build_boot_debug", *SPRINT_4_DEBUG_OPERATIONS]
+QEMU_GDBSTUB_OPERATIONS = ["workflow.build_boot_debug", *PHASE_4_DEBUG_OPERATIONS]
 ```
 
 - [ ] **Step 5: Verify provider tests**

@@ -1,7 +1,7 @@
-# Sprint 5 Simplification Review Fixes
+# Phase 5 Simplification Review Fixes
 
 **Goal:** Apply low-risk simplification recommendations from the `main..HEAD`
-subagent review while preserving the Sprint 5 future-provider contract surface
+subagent review while preserving the Phase 5 future-provider contract surface
 and FastMCP schemas.
 
 ## Review Inputs
@@ -30,9 +30,9 @@ and FastMCP schemas.
 
 - Keep explicit FastMCP future-tool wrappers. Dynamic wrapper generation could
   change tool schemas, and schema stability is more important than removing this
-  duplication in Sprint 5.
+  duplication in Phase 5.
 - Keep future result models. They are part of the planned contract surface in
-  the Sprint 5 plan, even though runtime handlers currently return
+  the Phase 5 plan, even though runtime handlers currently return
   `ToolResponse`.
 - Do not add a shared default-registry singleton yet. `ProviderRegistry` is
   mutable, so caching a live registry risks cross-test or cross-call mutation.

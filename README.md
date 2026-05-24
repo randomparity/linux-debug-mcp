@@ -28,14 +28,14 @@ apply config fragments automatically.
 
 ## Provider Extensibility Status
 
-Sprint 5 adds a contract-first provider discovery surface for future remote,
-provisioning, hardware-control, console, and real-boot workflows. The local
-x86_64 path remains the only implemented end-to-end workflow.
+The server exposes a contract-first provider discovery surface for future
+remote, provisioning, hardware-control, console, and real-boot workflows. The
+local x86_64 path remains the only implemented end-to-end workflow.
 
 Future providers are discoverable as safe stubs. They advertise planned
 operations, architectures, transports, limitations, and documentation paths, but
-valid requests return `not_implemented` until a later sprint adds real provider
-implementations.
+valid requests return `not_implemented` until real provider implementations are
+added.
 
 Provider implementation states are:
 
@@ -46,11 +46,11 @@ Provider implementation states are:
   external integration.
 
 Use `providers.list` as the primary discovery tool before selecting a provider.
-It reports implemented local providers and Sprint 5 stubs with their operation
-capabilities and implementation states.
+It reports implemented local providers and future-provider stubs with their
+operation capabilities and implementation states.
 
 ppc64le may appear in stub provider metadata and future-facing request
-contracts, but it is not executable in Sprint 5. See
+contracts, but it is not executable today. See
 [`docs/ppc64le-provider-spike.md`](docs/ppc64le-provider-spike.md) for the
 current ppc64le design notes and boundaries.
 
@@ -61,7 +61,7 @@ must contain `Kconfig` and `Makefile`, and the developer must provide a kernel
 configuration either at `<source>/.config` or by pre-populating
 `<artifact-root>/<run-id>/build/.config`.
 
-The default Sprint 1 command shape is:
+The default local build command shape is:
 
 ```bash
 make -C <source> O=<artifact-root>/<run-id>/build ARCH=x86_64 bzImage
@@ -99,10 +99,10 @@ generate kernel configs, or apply config fragments automatically.
 
 ## Live Kernel Debug
 
-Sprint 4 adds a local QEMU gdbstub debug workflow for dedicated libvirt/QEMU
-domains. The host must provide `virsh`, QEMU/libvirt, `gdb`, a built Linux
-source tree with matching `arch/x86/boot/bzImage` and `vmlinux`, and the same
-Sprint 2 rootfs readiness behavior described in the Fedora guide.
+The server provides a local QEMU gdbstub debug workflow for dedicated
+libvirt/QEMU domains. The host must provide `virsh`, QEMU/libvirt, `gdb`, a
+built Linux source tree with matching `arch/x86/boot/bzImage` and `vmlinux`,
+and the rootfs readiness behavior described in the Fedora guide.
 
 `workflow.build_boot_debug` creates or reuses a run, builds the kernel, boots
 the target with a localhost-only QEMU gdbstub, waits for serial readiness, and
@@ -130,9 +130,9 @@ artifact-only; response snippets and manifest views are redacted.
 
 ### Run SSH Smoke Tests
 
-Sprint 3 expects the selected rootfs profile to already allow SSH login from
-the MCP server. The tool does not install packages, create users, copy SSH keys,
-discover guest addresses, or mutate the rootfs to enable login.
+The selected rootfs profile must already allow SSH login from the MCP server.
+The tool does not install packages, create users, copy SSH keys, discover guest
+addresses, or mutate the rootfs to enable login.
 
 The default suite is `smoke-basic`:
 

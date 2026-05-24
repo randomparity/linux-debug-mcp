@@ -1,4 +1,4 @@
-# Sprint 2 Libvirt Boot Implementation Plan
+# Phase 2 Libvirt Boot Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -13,18 +13,18 @@
 ## Current-Code Constraints To Resolve First
 
 - `RunManifest.with_step_result()` currently refuses to replace any succeeded step, so `force_reboot=true` cannot overwrite a succeeded `boot` result until the manifest API supports explicit replacement for selected calls.
-- `RootfsProfile` does not have `source_type`; `TargetProfile` does not have `libvirt_uri`, `managed_domain`, or `managed_domain_prefix`; `cleanup_policy` values currently differ from the Sprint 2 design.
-- There is no runtime config loader for `ServerConfig`; handlers currently use module-level default build profiles only. Sprint 2 needs either explicit profile maps injected into `target_boot_handler()` or a config-loading task before the public MCP tool can resolve real target/rootfs profiles.
-- `ArtifactStore` only exposes `build_lock()`. Sprint 2 needs `boot_lock()` with the same nonblocking file-lock pattern and a host-wide domain-scoped lock so two runs cannot mutate the same libvirt domain concurrently, even if callers use different artifact roots.
-- `StepResult` has no heartbeat field. Sprint 2 must implement a minimal stale-running rule based on acquiring the boot lock, or the handler will leave crashed `boot` attempts permanently unretryable.
+- `RootfsProfile` does not have `source_type`; `TargetProfile` does not have `libvirt_uri`, `managed_domain`, or `managed_domain_prefix`; `cleanup_policy` values currently differ from the Phase 2 design.
+- There is no runtime config loader for `ServerConfig`; handlers currently use module-level default build profiles only. Phase 2 needs either explicit profile maps injected into `target_boot_handler()` or a config-loading task before the public MCP tool can resolve real target/rootfs profiles.
+- `ArtifactStore` only exposes `build_lock()`. Phase 2 needs `boot_lock()` with the same nonblocking file-lock pattern and a host-wide domain-scoped lock so two runs cannot mutate the same libvirt domain concurrently, even if callers use different artifact roots.
+- `StepResult` has no heartbeat field. Phase 2 must implement a minimal stale-running rule based on acquiring the boot lock, or the handler will leave crashed `boot` attempts permanently unretryable.
 - `virsh dumpxml <domain>` returns a nonzero exit when the domain does not exist. The provider must distinguish "domain not found" from real command failure so first boot can define the dedicated managed domain.
 - Libvirt disk XML must enforce rootfs mutability. A `read_only` profile attached as a writable disk can corrupt the configured golden image.
-- The runner protocol is not enough for the pilot-host path. Sprint 2 must include a default subprocess-backed runner with bounded command execution and console streaming.
+- The runner protocol is not enough for the pilot-host path. Phase 2 must include a default subprocess-backed runner with bounded command execution and console streaming.
 - A failed boot using `preserve_on_failure` can leave the managed domain running. A later retry must stop the matching managed domain before `start`, otherwise retries can fail with an already-active domain instead of replacing the failed boot result.
 
 ## Files
 
-- Modify: `src/linux_debug_mcp/config.py` for Sprint 2 profile fields and validators.
+- Modify: `src/linux_debug_mcp/config.py` for Phase 2 profile fields and validators.
 - Modify: `src/linux_debug_mcp/artifacts/manifest.py` for controlled step-result replacement.
 - Modify: `src/linux_debug_mcp/artifacts/store.py` for `boot_lock()` and host-wide domain-scoped locking.
 - Create: `src/linux_debug_mcp/providers/libvirt_qemu.py` for boot plan, runner protocol, execution result, provider implementation, XML helpers, and capability.
@@ -36,7 +36,7 @@
 - Create: `tests/test_libvirt_boot_integration.py` as an opt-in real-host integration test.
 - Modify: `README.md` for pilot-host configuration and gated verification.
 
-## Task 1: Align Sprint 2 Profile Models
+## Task 1: Align Phase 2 Profile Models
 
 **Files:**
 - Modify: `src/linux_debug_mcp/config.py`
@@ -44,10 +44,10 @@
 
 - [ ] **Step 1: Write failing config tests**
 
-Add tests that prove the Sprint 2 profile shape is accepted and invalid policy is rejected:
+Add tests that prove the Phase 2 profile shape is accepted and invalid policy is rejected:
 
 ```python
-def test_sprint_2_profiles_accept_libvirt_boot_fields(tmp_path: Path) -> None:
+def test_phase_2_profiles_accept_libvirt_boot_fields(tmp_path: Path) -> None:
     rootfs = RootfsProfile(
         name="minimal",
         source=str(tmp_path / "rootfs.qcow2"),
@@ -76,7 +76,7 @@ def test_sprint_2_profiles_accept_libvirt_boot_fields(tmp_path: Path) -> None:
 
 ```python
 @pytest.mark.parametrize("cleanup_policy", ["preserve_all", "preserve_failed", "stop_failed", "remove_temporary"])
-def test_sprint_2_target_profile_rejects_old_cleanup_policy_values(cleanup_policy: str) -> None:
+def test_phase_2_target_profile_rejects_old_cleanup_policy_values(cleanup_policy: str) -> None:
     with pytest.raises(ValidationError):
         TargetProfile(
             name="local-qemu",
@@ -94,7 +94,7 @@ Run:
 pytest tests/test_config.py -q
 ```
 
-Expected: FAIL because `source_type`, `libvirt_uri`, `managed_domain`, `managed_domain_prefix`, and Sprint 2 cleanup policy values are not implemented.
+Expected: FAIL because `source_type`, `libvirt_uri`, `managed_domain`, `managed_domain_prefix`, and Phase 2 cleanup policy values are not implemented.
 
 - [ ] **Step 3: Update models**
 
@@ -498,7 +498,7 @@ Run:
 pytest tests/test_target_boot_handler.py tests/test_server.py -q
 ```
 
-Expected: PASS after updating the `target.boot` not-implemented test to a later-sprint tool.
+Expected: PASS after updating the `target.boot` not-implemented test to a later-phase tool.
 
 ## Task 7: Register Provider Capability
 
@@ -536,7 +536,7 @@ Use `pytest.skip()` unless `LINUX_DEBUG_MCP_LIBVIRT_TEST=1`, `LINUX_DEBUG_MCP_RO
 
 - [ ] **Step 2: Document pilot-host setup**
 
-Document the dedicated managed domain requirement, disk-image rootfs support, explicit libvirt URI, required serial readiness marker, opt-in integration command, and later-sprint exclusions.
+Document the dedicated managed domain requirement, disk-image rootfs support, explicit libvirt URI, required serial readiness marker, opt-in integration command, and later-phase exclusions.
 
 - [ ] **Step 3: Run docs/integration smoke checks**
 

@@ -1,22 +1,22 @@
-# Sprint 0 Foundation Design
+# Phase 0 Foundation Design
 
 Date: 2026-05-22
 
 ## Purpose
 
-Sprint 0 establishes the Python project foundation for the Linux Debug MCP
+Phase 0 establishes the Python project foundation for the Linux Debug MCP
 server. It creates testable contracts and a runnable, non-destructive MCP
 skeleton before local kernel build, libvirt boot, smoke test, and live debug
-providers are implemented in later sprints.
+providers are implemented in later phases.
 
-The sprint should make future work predictable: runs have durable state,
+The phase should make future work predictable: runs have durable state,
 artifacts have a stable layout, providers register capabilities through a small
 interface, host checks report actionable dependency gaps, and MCP responses use
 the same structured shapes that later workflow tools will return.
 
 ## Scope
 
-Sprint 0 includes:
+Phase 0 includes:
 
 - Python package and test harness.
 - `pyproject.toml` with package metadata, console entry points, runtime
@@ -33,7 +33,7 @@ Sprint 0 includes:
 - Structured logging setup.
 - Initial developer and user-facing docs for the foundation.
 
-Sprint 0 does not include:
+Phase 0 does not include:
 
 - Running kernel builds.
 - Applying kernel config fragments.
@@ -43,14 +43,14 @@ Sprint 0 does not include:
 - Attaching gdb to a QEMU gdbstub.
 - Collecting real VM artifacts.
 
-Later-sprint MCP tools may exist as explicit stubs, but they must return stable
+Later-phase MCP tools may exist as explicit stubs, but they must return stable
 `not_implemented` errors rather than fake success.
 
 ## Recommended Approach
 
 Use a foundation library with MCP tool stubs.
 
-This approach keeps Sprint 0 useful without overstating functionality. The MCP
+This approach keeps Phase 0 useful without overstating functionality. The MCP
 server can start, create run workspaces, inspect host prerequisites, and expose
 the public tool names, while implementation-sensitive operations return typed
 errors until their providers exist. Domain, manifest, provider, safety, and
@@ -60,7 +60,7 @@ artifact contracts are tested as real behavior from the beginning.
 
 ### Technology Choices
 
-Sprint 0 should make enough dependency choices for the implementation plan to be
+Phase 0 should make enough dependency choices for the implementation plan to be
 directly executable:
 
 - Python 3.11 or newer.
@@ -69,7 +69,7 @@ directly executable:
 - The Python MCP SDK package imported as `mcp` for the server implementation.
 - `pytest` for unit tests.
 - Standard-library `logging` with JSON-friendly structured fields; no external
-  logging dependency in Sprint 0.
+  logging dependency in Phase 0.
 
 Dependency versions should be pinned with lower bounds in `pyproject.toml` and
 kept narrow enough that a fresh editable install exercises the same dependency
@@ -209,7 +209,7 @@ references or short redacted snippets.
 
 ### Provider Registry
 
-Sprint 0 implements a static registry with named providers and declared
+Phase 0 implements a static registry with named providers and declared
 capabilities. Providers do not need to build, boot, test, or debug yet. They do
 need to advertise enough metadata for validation and future selection.
 
@@ -249,16 +249,16 @@ Every run gets a durable directory under the configured artifact root:
 inputs, selected profiles, provider choices, step state, command metadata,
 produced artifacts, cleanup state, and summary paths.
 
-Sprint 0 only needs to create the layout, persist the manifest, reload it, and
+Phase 0 only needs to create the layout, persist the manifest, reload it, and
 record step results. The idempotency rule is:
 
 - Retrying a completed step returns the recorded result.
 - Retrying a failed or canceled step requires an explicit retry policy in later
   orchestration code.
 - Retrying a `running` step returns the recorded in-progress state unless a
-  stale-lock policy proves that the prior writer is gone. Sprint 0 only records
+  stale-lock policy proves that the prior writer is gone. Phase 0 only records
   the state and must not auto-recover stale running steps.
-- Sprint 0 foundational tools must not silently overwrite a completed step
+- Phase 0 foundational tools must not silently overwrite a completed step
   result.
 
 Manifest writes must be safe under duplicate MCP calls from the same agentic
@@ -294,8 +294,8 @@ in the manifest.
 
 ### Path Safety
 
-Sprint 0 validates host and guest paths before a run is created. Validation is
-conservative because later sprints will execute commands and write artifacts
+Phase 0 validates host and guest paths before a run is created. Validation is
+conservative because later phases will execute commands and write artifacts
 based on these values.
 
 Host path rules:
@@ -308,7 +308,7 @@ Host path rules:
 - Create run directories only as direct children of the resolved artifact root.
 - Reject run IDs containing path separators, `..`, shell metacharacters, control
   characters, or leading dots.
-- Treat kernel source paths as read-only inputs in Sprint 0; `kernel.create_run`
+- Treat kernel source paths as read-only inputs in Phase 0; `kernel.create_run`
   may verify tree markers but must not write into the source checkout.
 - Validate file-based secret references for path shape and existence when
   requested, but never read or copy the secret value during prerequisite checks
@@ -319,7 +319,7 @@ Guest path rules:
 - Guest writable paths must be absolute POSIX paths.
 - Reject guest paths containing `..`, empty components, shell metacharacters, or
   control characters.
-- Guest paths are recorded as guest paths only; Sprint 0 must not map them to
+- Guest paths are recorded as guest paths only; Phase 0 must not map them to
   host paths.
 
 Path validation failures use `configuration_error` with the rejected path
@@ -327,7 +327,7 @@ redacted when it falls under a secret reference.
 
 ### Prerequisite Checks
 
-Sprint 0 includes host prerequisite checks for the pilot environment. Checks
+Phase 0 includes host prerequisite checks for the pilot environment. Checks
 report status and actionable details, but they do not install packages or modify
 the host.
 
@@ -352,7 +352,7 @@ Prerequisite results use statuses:
 
 Failures include a stable check ID, a concise message, and a suggested fix.
 
-### MCP Tool Surface For Sprint 0
+### MCP Tool Surface For Phase 0
 
 Implemented tools:
 
@@ -373,19 +373,19 @@ Stubbed tools:
 - `workflow.build_boot_debug`
 - All `debug.*` tools listed in the architecture specification.
 
-Stubbed tools return a structured `not_implemented` error with the sprint that
+Stubbed tools return a structured `not_implemented` error with the phase that
 will implement the tool when known.
 
 ### Logging
 
 Logging should be structured and suitable for both command-line development and
-MCP-server operation. Sprint 0 logs include run ID when available, tool name,
+MCP-server operation. Phase 0 logs include run ID when available, tool name,
 step name, provider name, status, and duration. Logs must pass through redaction
 before being written to normal artifacts or returned in MCP responses.
 
 ## Data Flow
 
-The Sprint 0 flow is:
+The Phase 0 flow is:
 
 ```text
 MCP request or CLI invocation
@@ -397,7 +397,7 @@ MCP request or CLI invocation
 ```
 
 `kernel.create_run` is the first durable workflow boundary. It creates a
-manifest with pending steps for later sprints but does not run those steps.
+manifest with pending steps for later phases but does not run those steps.
 
 ## Error Handling
 
@@ -418,7 +418,7 @@ No public response should include raw command output that may contain secrets.
 
 ## Testing Strategy
 
-Sprint 0 uses unit tests only. Integration tests that require libvirt, QEMU, a
+Phase 0 uses unit tests only. Integration tests that require libvirt, QEMU, a
 kernel checkout, or gdbstub access are deferred.
 
 Required tests:
@@ -443,7 +443,7 @@ Required tests:
 
 ## Acceptance Criteria
 
-Sprint 0 is complete when:
+Phase 0 is complete when:
 
 1. The project installs in editable mode.
 2. Unit tests pass without requiring libvirt, QEMU, a Linux checkout, or gdb.
@@ -453,13 +453,13 @@ Sprint 0 is complete when:
 5. `kernel.create_run` creates a durable run directory and manifest.
 6. Re-reading a run manifest returns a redacted view.
 7. Provider capabilities can be listed.
-8. Later-sprint tools return structured `not_implemented` errors.
+8. Later-phase tools return structured `not_implemented` errors.
 9. Docs explain how to run tests, start the server, create a run, inspect a
    manifest, and interpret prerequisite failures.
 
 ## Out Of Scope Decisions
 
-These decisions remain deferred to later sprint planning:
+These decisions remain deferred to later phase planning:
 
 - Exact kernel build commands and config-fragment application behavior.
 - Libvirt domain XML generation strategy.

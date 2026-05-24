@@ -1,10 +1,10 @@
 # ppc64le Provider Spike
 
-Sprint 5 treats ppc64le as provider metadata and contract surface only. No
+The current ppc64le support is provider metadata and contract surface only. No
 ppc64le build, provisioning, boot, console, hardware-control, or debug provider
-is executable in this sprint. The implemented end-to-end workflow remains the
-local x86_64 build, libvirt/QEMU boot, SSH smoke-test, artifact, and QEMU
-gdbstub path.
+is executable today. The implemented end-to-end workflow remains the local
+x86_64 build, libvirt/QEMU boot, SSH smoke-test, artifact, and QEMU gdbstub
+path.
 
 The purpose of this spike is to record the ppc64le shape expected by future
 provider work so agents can understand why ppc64le appears in stub metadata
@@ -47,7 +47,7 @@ Important unresolved design points:
 - artifact transfer, checksum, retention, and redaction rules
 - isolation between concurrent agent-requested builds
 
-Sprint 5 stubs may advertise `remote.build_kernel` and
+Future-provider stubs may advertise `remote.build_kernel` and
 `remote.sync_artifacts`, but they must not invoke build hosts, open network
 connections, read credentials, or write external artifact stores.
 
@@ -79,8 +79,8 @@ A real provisioning provider will need to state:
 - whether disks, firmware settings, or boot order may be changed
 - which destructive permissions are required
 
-Sprint 5 `provision.prepare_target` metadata is only a stub declaration. It
-does not prepare a target, alter boot services, or mutate external state.
+`provision.prepare_target` metadata is only a stub declaration. It does not
+prepare a target, alter boot services, or mutate external state.
 
 ## HMC, IPMI, And BMC Control
 
@@ -98,8 +98,8 @@ Provider contracts should separate:
 - firmware or management-console operations
 - audit evidence for who changed target state and when
 
-Sprint 5 `hardware.power_control` and `hardware.boot_kernel` stubs must fail
-before any management interface is contacted.
+`hardware.power_control` and `hardware.boot_kernel` stubs must fail before any
+management interface is contacted.
 
 ## Serial Console Expectations
 
@@ -125,8 +125,9 @@ physical console workflows are implemented.
 
 ## Debug Limitations
 
-The Sprint 4 debug path attaches local `gdb` to a localhost-only QEMU gdbstub
-for an x86_64 libvirt/QEMU domain. ppc64le debug has different constraints:
+The implemented debug path attaches local `gdb` to a localhost-only QEMU
+gdbstub for an x86_64 libvirt/QEMU domain. ppc64le debug has different
+constraints:
 
 - symbol architecture and ABI must match the running kernel
 - remote targets may not expose a gdbstub
@@ -139,9 +140,9 @@ for an x86_64 libvirt/QEMU domain. ppc64le debug has different constraints:
 Future debug providers must clearly identify which artifact supplies symbols
 and how that artifact is matched to the booted kernel.
 
-## Sprint 5 Boundary
+## Current Boundary
 
-For Sprint 5, ppc64le means:
+For the current implementation, ppc64le means:
 
 - it may appear in stub provider `architectures`
 - it may appear in typed future-provider request contracts

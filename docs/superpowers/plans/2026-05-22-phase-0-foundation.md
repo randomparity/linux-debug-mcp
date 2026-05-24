@@ -1,10 +1,10 @@
-# Sprint 0 Foundation Implementation Plan
+# Phase 0 Foundation Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the Sprint 0 Python foundation for the Linux Debug MCP server: installable package, domain/config contracts, artifact manifests, safety/redaction, prerequisite checks, and runnable MCP tool stubs.
+**Goal:** Build the Phase 0 Python foundation for the Linux Debug MCP server: installable package, domain/config contracts, artifact manifests, safety/redaction, prerequisite checks, and runnable MCP tool stubs.
 
-**Architecture:** Use a `src/` Python package with Pydantic v2 models as the stable contract across config, manifests, providers, and MCP responses. Keep behavior focused and unit-testable: no kernel builds, libvirt mutations, VM boots, SSH, serial, or gdb work in Sprint 0. Public MCP handlers call small service modules that validate paths, persist manifests atomically, redact sensitive values, and return one shared response envelope.
+**Architecture:** Use a `src/` Python package with Pydantic v2 models as the stable contract across config, manifests, providers, and MCP responses. Keep behavior focused and unit-testable: no kernel builds, libvirt mutations, VM boots, SSH, serial, or gdb work in Phase 0. Public MCP handlers call small service modules that validate paths, persist manifests atomically, redact sensitive values, and return one shared response envelope.
 
 **Tech Stack:** Python 3.11+, setuptools `pyproject.toml`, Pydantic v2, Python MCP SDK imported as `mcp`, pytest, standard-library logging/pathlib/json/subprocess.
 
@@ -42,7 +42,7 @@ Create these files:
 - `tests/test_server.py`: direct handler response-shape tests.
 - `README.md`: update with install, test, server, run, manifest, and prereq guidance.
 
-The initial package is intentionally small. Provider implementations for real build, boot, SSH, serial, and debug behavior are not created in Sprint 0.
+The initial package is intentionally small. Provider implementations for real build, boot, SSH, serial, and debug behavior are not created in Phase 0.
 
 ---
 
@@ -144,7 +144,7 @@ Expected: PASS.
 
 ```bash
 git add pyproject.toml src/linux_debug_mcp/__init__.py tests/test_domain.py
-git commit -m "feat: scaffold sprint 0 package"
+git commit -m "feat: scaffold phase 0 package"
 ```
 
 ---
@@ -201,10 +201,10 @@ def test_success_response_serializes_with_shared_envelope() -> None:
 def test_error_response_uses_nested_error_contract() -> None:
     response = ToolResponse.failure(
         category=ErrorCategory.NOT_IMPLEMENTED,
-        message="kernel.build is implemented in Sprint 1",
+        message="kernel.build is implemented in Phase 1",
         run_id="run-123",
         details={"tool": "kernel.build"},
-        suggested_next_actions=["workflow.build_boot_test after Sprint 3"],
+        suggested_next_actions=["workflow.build_boot_test after Phase 3"],
     )
 
     payload = response.model_dump(mode="json")
@@ -213,7 +213,7 @@ def test_error_response_uses_nested_error_contract() -> None:
     assert payload["status"] == "failed"
     assert payload["error"] == {
         "category": "not_implemented",
-        "message": "kernel.build is implemented in Sprint 1",
+        "message": "kernel.build is implemented in Phase 1",
         "details": {"tool": "kernel.build"},
     }
 
@@ -1093,7 +1093,7 @@ def test_registry_rejects_duplicate_names() -> None:
         registry.register(capability("local-artifacts"))
 
 
-def test_default_registry_exposes_sprint_0_providers() -> None:
+def test_default_registry_exposes_phase_0_providers() -> None:
     registry = ProviderRegistry.with_defaults()
 
     names = {provider.provider_name for provider in registry.list_capabilities()}
@@ -1127,7 +1127,7 @@ from __future__ import annotations
 from linux_debug_mcp.domain import OperationSemantics, ProviderCapability, TargetKind
 
 
-def sprint0_capability(
+def phase0_capability(
     *,
     name: str,
     operations: list[str],
@@ -1159,7 +1159,7 @@ Create `src/linux_debug_mcp/providers/registry.py`:
 from __future__ import annotations
 
 from linux_debug_mcp.domain import ProviderCapability
-from linux_debug_mcp.providers.base import sprint0_capability
+from linux_debug_mcp.providers.base import phase0_capability
 
 
 class ProviderRegistry:
@@ -1181,7 +1181,7 @@ class ProviderRegistry:
     def with_defaults(cls) -> "ProviderRegistry":
         registry = cls()
         registry.register(
-            sprint0_capability(
+            phase0_capability(
                 name="local-artifacts",
                 operations=["kernel.create_run", "artifacts.get_manifest"],
                 access_methods=["filesystem"],
@@ -1189,7 +1189,7 @@ class ProviderRegistry:
             )
         )
         registry.register(
-            sprint0_capability(
+            phase0_capability(
                 name="local-prereqs",
                 operations=["host.check_prerequisites"],
                 access_methods=["subprocess", "filesystem"],
@@ -1197,7 +1197,7 @@ class ProviderRegistry:
             )
         )
         registry.register(
-            sprint0_capability(
+            phase0_capability(
                 name="stub-workflows",
                 operations=[
                     "kernel.build",
@@ -2125,25 +2125,25 @@ def list_providers_handler() -> ToolResponse:
 
 
 def not_implemented_handler(tool_name: str, *, run_id: str | None = None) -> ToolResponse:
-    sprint_by_prefix = {
-        "kernel.build": "Sprint 1",
-        "target.boot": "Sprint 2",
-        "target.run_tests": "Sprint 3",
-        "artifacts.collect": "Sprint 3",
-        "workflow.build_boot_test": "Sprint 3",
-        "workflow.build_boot_debug": "Sprint 4",
-        "debug.": "Sprint 4",
+    phase_by_prefix = {
+        "kernel.build": "Phase 1",
+        "target.boot": "Phase 2",
+        "target.run_tests": "Phase 3",
+        "artifacts.collect": "Phase 3",
+        "workflow.build_boot_test": "Phase 3",
+        "workflow.build_boot_debug": "Phase 4",
+        "debug.": "Phase 4",
     }
-    sprint = "a later sprint"
-    for prefix, value in sprint_by_prefix.items():
+    phase = "a later phase"
+    for prefix, value in phase_by_prefix.items():
         if tool_name.startswith(prefix):
-            sprint = value
+            phase = value
             break
     return ToolResponse.failure(
         category=ErrorCategory.NOT_IMPLEMENTED,
-        message=f"{tool_name} is implemented in {sprint}",
+        message=f"{tool_name} is implemented in {phase}",
         run_id=run_id,
-        details={"tool": tool_name, "sprint": sprint},
+        details={"tool": tool_name, "phase": phase},
         suggested_next_actions=["Use host.check_prerequisites", "Use kernel.create_run"],
     )
 
@@ -2240,7 +2240,7 @@ Expected: PASS.
 
 ```bash
 git add src/linux_debug_mcp/logging.py src/linux_debug_mcp/server.py tests/test_server.py
-git commit -m "feat: add sprint 0 mcp handlers"
+git commit -m "feat: add phase 0 mcp handlers"
 ```
 
 ---
@@ -2250,7 +2250,7 @@ git commit -m "feat: add sprint 0 mcp handlers"
 **Files:**
 - Modify: `README.md`
 
-- [ ] **Step 1: Update README with Sprint 0 usage**
+- [ ] **Step 1: Update README with Phase 0 usage**
 
 Replace `README.md` with:
 
@@ -2260,9 +2260,9 @@ Replace `README.md` with:
 An MCP server foundation for Linux kernel development workflows in agentic
 development environments.
 
-## Sprint 0 Scope
+## Phase 0 Scope
 
-Sprint 0 provides a runnable Python MCP skeleton and local foundation services:
+Phase 0 provides a runnable Python MCP skeleton and local foundation services:
 
 - host prerequisite checks
 - durable run workspace creation
@@ -2271,7 +2271,7 @@ Sprint 0 provides a runnable Python MCP skeleton and local foundation services:
 - structured `not_implemented` responses for later build, boot, test, artifact,
   workflow, and debug tools
 
-Sprint 0 does not build kernels, modify libvirt domains, boot guests, run SSH or
+Phase 0 does not build kernels, modify libvirt domains, boot guests, run SSH or
 serial commands, attach gdb, or collect real VM artifacts.
 
 ## Install
@@ -2307,9 +2307,9 @@ durable `manifest.json`.
 
 `artifacts.get_manifest` returns a redacted manifest view.
 
-`providers.list` returns Sprint 0 provider capability declarations.
+`providers.list` returns Phase 0 provider capability declarations.
 
-Later-sprint tools return structured `not_implemented` responses.
+Later-phase tools return structured `not_implemented` responses.
 
 ## Artifact Layout
 
@@ -2334,7 +2334,7 @@ planned steps, step results, and cleanup state.
 ## Interpreting Prerequisite Failures
 
 Each prerequisite result includes a stable `check_id`, status, message, optional
-details, and suggested fix. Sprint 0 never installs packages or modifies the
+details, and suggested fix. Phase 0 never installs packages or modifies the
 host; apply fixes manually and rerun `host.check_prerequisites`.
 ```
 
@@ -2391,14 +2391,14 @@ Expected: no output and exit 0.
 
 ```bash
 git add README.md
-git commit -m "docs: document sprint 0 foundation"
+git commit -m "docs: document phase 0 foundation"
 ```
 
 ---
 
 ## Self-Review Checklist
 
-Before marking implementation complete, verify each Sprint 0 requirement:
+Before marking implementation complete, verify each Phase 0 requirement:
 
 - [ ] Python package installs in editable mode with `python -m pip install -e '.[test]'`.
 - [ ] Unit tests pass with `python -m pytest` and do not require libvirt, QEMU, a Linux checkout, or gdb.
@@ -2407,7 +2407,7 @@ Before marking implementation complete, verify each Sprint 0 requirement:
 - [ ] `host.check_prerequisites` handler returns structured checks and does not modify the host.
 - [ ] `kernel.create_run` handler creates the run directory and `manifest.json`.
 - [ ] `artifacts.get_manifest` returns a manifest through the shared response envelope.
-- [ ] `providers.list` returns the static Sprint 0 capabilities.
-- [ ] Stubbed later-sprint tools return `not_implemented`.
+- [ ] `providers.list` returns the static Phase 0 capabilities.
+- [ ] Stubbed later-phase tools return `not_implemented`.
 - [ ] README documents install, tests, server startup, run creation, manifest inspection, and prerequisite failures.
 - [ ] `git diff --check` exits 0.

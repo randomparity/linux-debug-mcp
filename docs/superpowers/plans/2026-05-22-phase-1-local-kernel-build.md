@@ -1,4 +1,4 @@
-# Sprint 1 Local Kernel Build Implementation Plan
+# Phase 1 Local Kernel Build Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -20,17 +20,17 @@ Create these files:
 
 Modify these files:
 
-- `src/linux_debug_mcp/config.py`: extend `BuildProfile` with Sprint 1 fields and validation for targets, jobs, provider name, make variables, and effective required tools.
+- `src/linux_debug_mcp/config.py`: extend `BuildProfile` with Phase 1 fields and validation for targets, jobs, provider name, make variables, and effective required tools.
 - `src/linux_debug_mcp/domain.py`: add any small structured models needed by the provider, only if a dict would obscure test assertions; keep `ToolResponse` unchanged.
 - `src/linux_debug_mcp/artifacts/store.py`: expose safe run paths and add a per-run build lock context manager beside the existing manifest lock.
-- `src/linux_debug_mcp/artifacts/manifest.py`: preserve the Sprint 0 succeeded-step idempotency rule while allowing a `running` build result to be recorded before execution.
+- `src/linux_debug_mcp/artifacts/manifest.py`: preserve the Phase 0 succeeded-step idempotency rule while allowing a `running` build result to be recorded before execution.
 - `src/linux_debug_mcp/providers/registry.py`: register the local kernel build provider and remove `kernel.build` from the stub-only provider.
-- `src/linux_debug_mcp/server.py`: add `kernel_build_handler`, wire the MCP `kernel.build` tool to it, and leave later-sprint tools stubbed.
-- `tests/test_config.py`: add BuildProfile validation tests for Sprint 1 fields.
+- `src/linux_debug_mcp/server.py`: add `kernel_build_handler`, wire the MCP `kernel.build` tool to it, and leave later-phase tools stubbed.
+- `tests/test_config.py`: add BuildProfile validation tests for Phase 1 fields.
 - `tests/test_artifacts.py`: add build lock and running-result manifest tests.
 - `tests/test_providers.py`: update default provider assertions for the local build provider.
-- `tests/test_server.py`: keep Sprint 0 handler tests intact and move build-specific tests into `tests/test_kernel_build_handler.py`.
-- `README.md`: document Sprint 1 local build behavior, developer-owned config, output layout, and remaining boot/debug limitations.
+- `tests/test_server.py`: keep Phase 0 handler tests intact and move build-specific tests into `tests/test_kernel_build_handler.py`.
+- `README.md`: document Phase 1 local build behavior, developer-owned config, output layout, and remaining boot/debug limitations.
 
 ---
 
@@ -412,7 +412,7 @@ class LocalKernelBuildProvider:
         if profile.output_policy != "per_run":
             raise ValueError(f"unsupported output policy: {profile.output_policy}")
         if profile.config_fragments:
-            raise ValueError("config fragments are not supported by the local Sprint 1 provider")
+            raise ValueError("config fragments are not supported by the local Phase 1 provider")
         argv = ["make", "-C", str(source_path), f"O={output_path}", "ARCH=x86_64"]
         if profile.jobs is not None:
             argv.append(f"-j{profile.jobs}")
@@ -1153,7 +1153,7 @@ Run:
 uv run python -m pytest tests/test_kernel_build_handler.py tests/test_server.py -v
 ```
 
-Expected: PASS after updating the old `not_implemented_handler("kernel.build")` test in `tests/test_server.py` to use a later-sprint tool such as `target.boot`.
+Expected: PASS after updating the old `not_implemented_handler("kernel.build")` test in `tests/test_server.py` to use a later-phase tool such as `target.boot`.
 
 - [ ] **Step 7: Commit**
 
@@ -1245,7 +1245,7 @@ def test_execute_summary_records_source_revision(tmp_path: Path) -> None:
 Update `tests/test_providers.py` default registry test:
 
 ```python
-def test_default_registry_exposes_sprint_1_providers() -> None:
+def test_default_registry_exposes_phase_1_providers() -> None:
     registry = ProviderRegistry.with_defaults()
 
     providers = {provider.provider_name: provider for provider in registry.list_capabilities()}
@@ -1434,14 +1434,14 @@ git commit -m "test: cover kernel build idempotency and lock failures"
 **Files:**
 - Modify: `README.md`
 
-- [ ] **Step 1: Update README for Sprint 1**
+- [ ] **Step 1: Update README for Phase 1**
 
-Replace the Sprint 0 scope section with a current scope section:
+Replace the Phase 0 scope section with a current scope section:
 
 ```markdown
 ## Current Scope
 
-Sprint 1 provides:
+Phase 1 provides:
 
 - host prerequisite checks
 - durable run workspace creation
@@ -1453,7 +1453,7 @@ Sprint 1 provides:
 - provider capability listing
 - structured `not_implemented` responses for boot, test, artifact collection, workflow, and debug tools
 
-Sprint 1 does not boot kernels, create root filesystems, run SSH or serial commands, attach gdb, use remote builders, generate kernel configs, or apply config fragments automatically.
+Phase 1 does not boot kernels, create root filesystems, run SSH or serial commands, attach gdb, use remote builders, generate kernel configs, or apply config fragments automatically.
 ```
 
 Add a `Local Kernel Builds` section:
@@ -1466,7 +1466,7 @@ must contain `Kconfig` and `Makefile`, and the developer must provide a kernel
 configuration either at `<source>/.config` or by pre-populating
 `<artifact-root>/<run-id>/build/.config`.
 
-The default Sprint 1 command shape is:
+The default Phase 1 command shape is:
 
 ```bash
 make -C <source> O=<artifact-root>/<run-id>/build ARCH=x86_64 bzImage
@@ -1516,7 +1516,7 @@ Expected: both commands exit 0.
 
 ```bash
 git add README.md
-git commit -m "docs: document sprint 1 local kernel builds"
+git commit -m "docs: document phase 1 local kernel builds"
 ```
 
 ---

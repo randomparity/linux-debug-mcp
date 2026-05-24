@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Reduce low-risk duplication and avoidable work found by the `main..HEAD` simplification review while preserving the Sprint 1 kernel build behavior.
+**Goal:** Reduce low-risk duplication and avoidable work found by the `main..HEAD` simplification review while preserving the Phase 1 kernel build behavior.
 
 **Architecture:** Keep public tool behavior and data shapes unchanged. Extract private helpers only where current code repeats the same mechanics: file locks, existing build responses, and terminal build finalization. Keep broader profile registry ownership and test fixture consolidation out of this commit because those introduce more design churn than this cleanup needs.
 

@@ -1,11 +1,11 @@
-# Sprint 5 Provider Extensibility Design
+# Phase 5 Provider Extensibility Design
 
 Date: 2026-05-23
 
 ## Purpose
 
-Sprint 5 turns the local x86_64 pilot into a project with explicit extension
-boundaries. The sprint should make future provider families visible and
+Phase 5 turns the local x86_64 pilot into a project with explicit extension
+boundaries. The phase should make future provider families visible and
 testable without implementing remote build systems, lab reservation services,
 PXE/NIM provisioning, HMC/IPMI control, serial hardware access, real hardware
 boot, or ppc64le execution.
@@ -16,7 +16,7 @@ stub providers that always fail before external side effects.
 
 ## Scope
 
-Sprint 5 includes:
+Phase 5 includes:
 
 - richer provider capability declarations
 - static in-repo plugin declaration mechanics for provider bundles
@@ -31,7 +31,7 @@ Sprint 5 includes:
 - ppc64le design spike documentation
 - unit tests proving stubs are callable, safe, and discoverable
 
-Sprint 5 does not include:
+Phase 5 does not include:
 
 - dynamic external plugin package loading
 - real remote build execution
@@ -42,7 +42,7 @@ Sprint 5 does not include:
 - real serial-device or terminal sessions
 - real hardware boot
 - ppc64le build, boot, test, or debug execution
-- refactoring the working Sprint 0-4 local providers behind a new runtime
+- refactoring the working Phase 0-4 local providers behind a new runtime
   dispatch system
 
 ## Recommended Approach
@@ -50,7 +50,7 @@ Sprint 5 does not include:
 Use a contract-first in-repo stub layer.
 
 The current local pilot paths should continue to use their existing concrete
-providers and handlers. Sprint 5 should not replace the working local
+providers and handlers. Phase 5 should not replace the working local
 build/boot/test/debug orchestration with a new plugin runtime. Instead, it
 should define the shapes that future providers must satisfy and expose those
 future operations through MCP tools that return explicit, structured failures.
@@ -61,12 +61,12 @@ and request validation before any real lab integration is added.
 
 ## Architecture
 
-The existing `ProviderRegistry` should remain small and static in Sprint 5, but
+The existing `ProviderRegistry` should remain small and static in Phase 5, but
 provider capabilities should describe more than a flat operation list.
 The current `operations` list and top-level `semantics` field should remain for
-backward compatibility with Sprint 0-4 tests and clients. Sprint 5 should add
+backward compatibility with Phase 0-4 tests and clients. Phase 5 should add
 the richer fields as backward-compatible model fields with defaults instead of
-forcing every local provider call site to move in the same sprint.
+forcing every local provider call site to move in the same phase.
 
 Capability metadata should support:
 
@@ -99,7 +99,7 @@ these fields:
 - `limitations`
 - `operation_capabilities`
 
-For Sprint 5, `operations` should be derived from or kept consistent with
+For Phase 5, `operations` should be derived from or kept consistent with
 `operation_capabilities`. Tests should fail if a provider advertises an
 operation in one field but not the other.
 
@@ -112,7 +112,7 @@ The registry should continue to list local implemented providers:
 - `local-ssh-tests`
 - `local-qemu-gdbstub`
 
-Sprint 5 should add in-repo stub providers for future families with these
+Phase 5 should add in-repo stub providers for future families with these
 provider names:
 
 - `remote-build-stub`
@@ -128,7 +128,7 @@ implementation state must clearly mark them as stubs.
 
 ## Plugin Loading Boundary
 
-The architecture spec calls for plugin loading mechanics. Sprint 5 should
+The architecture spec calls for plugin loading mechanics. Phase 5 should
 satisfy that requirement with a static in-repo declaration boundary, not dynamic
 external package loading.
 
@@ -146,14 +146,14 @@ from in-repo Python objects. It should not scan entry points, import modules by
 string from user config, read plugin manifests from arbitrary paths, or execute
 third-party package code.
 
-This creates a migration path for later dynamic plugins while keeping Sprint 5
+This creates a migration path for later dynamic plugins while keeping Phase 5
 safe and deterministic. Future dynamic loading can reuse the same declaration
 shape after adding trust, versioning, and compatibility checks.
 
 ## Provider Contracts
 
-Sprint 5 should add typed request and result models for future provider
-families in `src/linux_debug_mcp/providers/contracts.py`. If a later sprint
+Phase 5 should add typed request and result models for future provider
+families in `src/linux_debug_mcp/providers/contracts.py`. If a later phase
 adds real implementations and the module becomes too large, it can be split
 without changing the public MCP tool surface.
 
@@ -180,13 +180,13 @@ safe diagnostics:
 - safe operation label
 - optional run ID or artifact references where relevant
 
-Each result should allow future external IDs without requiring them in Sprint
+Each result should allow future external IDs without requiring them in Phase
 5. Examples include reservation IDs, remote build job IDs, provisioning task
 IDs, power operation IDs, console session IDs, and external artifact bundle
 IDs. Stub results should leave these unset.
 
 The contract models should be Pydantic models, consistent with existing domain
-and configuration models. Sprint 5 should accept `x86_64` and `ppc64le` as
+and configuration models. Phase 5 should accept `x86_64` and `ppc64le` as
 known architecture labels for future-facing contracts, while implemented local
 workflows continue to support only their current x86_64 paths. The models
 should reject empty provider names, unknown architecture strings, invalid
@@ -203,15 +203,15 @@ Provider selection should be deterministic:
    candidate provider names when any exist.
 4. Never fall back from an explicitly selected provider to a different provider.
 
-Sprint 5 should not add future provider profile models to the main server
+Phase 5 should not add future provider profile models to the main server
 configuration. The future-facing contracts should carry only request-scoped
 profile labels such as `profile_name`, `target_name`, or `reservation_pool`.
 Those labels are validated as safe identifiers but are not resolved to real
-external systems until a later sprint adds real providers.
+external systems until a later phase adds real providers.
 
 ## MCP Tool Surface
 
-Sprint 5 should add these callable MCP tools:
+Phase 5 should add these callable MCP tools:
 
 - `remote.build_kernel`
 - `remote.sync_artifacts`
@@ -340,7 +340,7 @@ write manifests, collect artifacts, or mutate target state.
 
 ## ppc64le Design Spike
 
-Sprint 5 should add a ppc64le design spike document under `docs/`. The spike
+Phase 5 should add a ppc64le design spike document under `docs/`. The spike
 should not promise implementation. It should identify the contract and
 capability gaps that real ppc64le support will need.
 
@@ -361,7 +361,7 @@ can understand why ppc64le appears in stub metadata but is not executable.
 
 ## Error Handling
 
-Sprint 5 should use existing error categories:
+Phase 5 should use existing error categories:
 
 - `configuration_error` for malformed inputs, unknown profiles, unknown
   providers, unsupported request combinations, or unsafe values
@@ -382,7 +382,7 @@ is relevant, responses should also include the documentation path.
 
 Tests should focus on contract and safety behavior:
 
-- provider capability metadata includes implemented local providers and Sprint
+- provider capability metadata includes implemented local providers and Phase
   5 stub providers
 - `providers.list` exposes implementation state and future operation metadata
 - all new MCP tools are registered
@@ -393,16 +393,16 @@ Tests should focus on contract and safety behavior:
   filesystem writes outside normal test fixtures
 - ppc64le appears only in future-facing metadata and documentation, not in
   implemented local workflow behavior
-- existing Sprint 0-4 tests continue to pass unchanged
+- existing Phase 0-4 tests continue to pass unchanged
 
 Unit tests should use direct handler calls where possible. Tool registration
-tests should verify FastMCP exposes the new names. No Sprint 5 test should
+tests should verify FastMCP exposes the new names. No Phase 5 test should
 require libvirt, QEMU, gdb, SSH, remote hosts, reservation services, serial
 devices, HMC, IPMI, BMC, PXE, or NIM.
 
 ## Documentation
 
-README updates should explain that Sprint 5 adds discoverable future provider
+README updates should explain that Phase 5 adds discoverable future provider
 surfaces, not operational remote or hardware support. The docs should make clear
 that the local x86_64 pilot remains the only implemented end-to-end path.
 
@@ -411,7 +411,7 @@ can distinguish safe local workflows from future stubs.
 
 ## Acceptance Criteria
 
-Sprint 5 is complete when:
+Phase 5 is complete when:
 
 1. `providers.list` shows implemented local providers and in-repo stub
    providers with clear implementation states.

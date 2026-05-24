@@ -1,10 +1,10 @@
-# Sprint 5 Provider Extensibility Implementation Plan
+# Phase 5 Provider Extensibility Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Add a contract-first provider extensibility layer with richer capability metadata, static in-repo provider plugin declarations, safe future-facing stub providers, callable future MCP tools, and ppc64le design documentation without changing the implemented local x86_64 workflows.
 
-**Architecture:** Keep Sprint 0-4 local handlers and concrete providers on their current paths. Extend provider metadata backward-compatibly, register built-in provider plugin specs from Python objects, and route only the new future-facing MCP tools through typed request validation, deterministic provider selection, and stub `not_implemented` responses. Stub operations must not create run workspaces, invoke subprocesses, open network or serial resources, read credentials, or mutate external systems.
+**Architecture:** Keep Phase 0-4 local handlers and concrete providers on their current paths. Extend provider metadata backward-compatibly, register built-in provider plugin specs from Python objects, and route only the new future-facing MCP tools through typed request validation, deterministic provider selection, and stub `not_implemented` responses. Stub operations must not create run workspaces, invoke subprocesses, open network or serial resources, read credentials, or mutate external systems.
 
 **Tech Stack:** Python 3.11+, Pydantic v2, pytest, existing `ToolResponse`, `ErrorCategory`, `ProviderRegistry`, `ProviderCapability`, `OperationSemantics`, `TargetKind`, and `Redactor`.
 
@@ -15,10 +15,10 @@
 - `ProviderCapability` only has flat provider-level metadata: `operations`, `semantics`, host tools, permissions, and access methods.
 - `ProviderRegistry.with_defaults()` directly registers local provider capabilities and has no plugin declaration boundary.
 - There is no `providers/contracts.py` module for future provider request/result models.
-- `server.py` currently has only implemented local Sprint 0-4 handlers plus the old generic `not_implemented_handler()`.
+- `server.py` currently has only implemented local Phase 0-4 handlers plus the old generic `not_implemented_handler()`.
 - `providers.list` returns raw capability dumps and currently only exposes the six implemented local providers.
 - Future provider families, ppc64le metadata, and future MCP tools are not discoverable.
-- Existing local workflows are x86_64-only and should not be refactored behind a new runtime dispatcher in this sprint.
+- Existing local workflows are x86_64-only and should not be refactored behind a new runtime dispatcher in this phase.
 
 ## Files
 
@@ -34,7 +34,7 @@
 - Create: `tests/test_provider_contracts.py` for contract validation and redaction-sensitive fields.
 - Create: `tests/test_future_stub_handlers.py` for future MCP handler behavior, provider selection, error categories, and no-workspace safety.
 - Modify: `tests/test_server.py` for `providers.list` payload shape and future tool registration.
-- Modify: `README.md` for Sprint 5 status, implementation states, and future provider discoverability.
+- Modify: `README.md` for Phase 5 status, implementation states, and future provider discoverability.
 - Create: `docs/ppc64le-provider-spike.md` for the non-implementation ppc64le design spike.
 
 ## Task 1: Extend Provider Capability Metadata
@@ -52,8 +52,8 @@ Add tests proving:
 
 - every default provider has `provider_family`, `implementation_state`, `transports`, `limitations`, and `operation_capabilities`
 - operation capabilities expose `required_host_tools`, `destructive_permissions`, and `limitations` with empty-list defaults
-- existing Sprint 0-4 providers have `implementation_state == "implemented"`
-- local provider top-level `semantics` remain present for Sprint 0-4 compatibility
+- existing Phase 0-4 providers have `implementation_state == "implemented"`
+- local provider top-level `semantics` remain present for Phase 0-4 compatibility
 - `operations` and `[cap.operation for cap in operation_capabilities]` contain the same operation names
 - each operation capability has operation-level `semantics`
 - `providers.list` includes the new metadata fields while preserving the existing provider names
@@ -84,7 +84,7 @@ Keep existing field names and defaults so current constructors continue to work.
 
 - [x] **Step 4: Populate local provider metadata**
 
-Update `sprint0_capability()` and local provider capability factories to set sensible family and transport fields:
+Update `phase0_capability()` and local provider capability factories to set sensible family and transport fields:
 
 - `local-artifacts`: family `artifacts`, transports `["filesystem"]`
 - `local-prereqs`: family `host`, transports `["subprocess", "filesystem"]`
@@ -174,7 +174,7 @@ For each stub, assert:
 - `architectures` is exactly `["x86_64", "ppc64le"]` unless a narrower operation-specific reason is documented
 - target kinds and transports match the family
 - advertised operations match operation capabilities exactly
-- advertised `required_host_tools` name future dependencies without requiring them to be installed in Sprint 5 tests
+- advertised `required_host_tools` name future dependencies without requiring them to be installed in Phase 5 tests
 - operation-level destructive permissions are present for future provisioning, power, boot, and reserve/provision/boot operations
 - limitations explain that no external side effects occur
 
@@ -406,7 +406,7 @@ Expected: PASS.
 
 - [x] **Step 1: Create ppc64le design spike**
 
-Document that ppc64le is metadata and contract-only in Sprint 5. Cover:
+Document that ppc64le is metadata and contract-only in Phase 5. Cover:
 
 - kernel image and build artifact differences
 - remote build needs
@@ -420,7 +420,7 @@ Document that ppc64le is metadata and contract-only in Sprint 5. Cover:
 
 - [x] **Step 2: Update README**
 
-Add a concise Sprint 5 section explaining:
+Add a concise Phase 5 section explaining:
 
 - local x86_64 remains the only implemented end-to-end workflow
 - future providers are discoverable stubs
@@ -453,7 +453,7 @@ Expected: PASS.
 pytest -q
 ```
 
-Expected: PASS. Existing Sprint 0-4 tests should pass unchanged or with only assertion updates for additive provider metadata and new provider names.
+Expected: PASS. Existing Phase 0-4 tests should pass unchanged or with only assertion updates for additive provider metadata and new provider names.
 
 - [x] **Step 3: Manual side-effect check**
 
@@ -471,7 +471,7 @@ Review the stub code and tests for forbidden behavior:
 
 Confirm:
 
-- `providers.list` shows local implemented providers and Sprint 5 stubs with clear implementation states
+- `providers.list` shows local implemented providers and Phase 5 stubs with clear implementation states
 - built-in provider plugin specs register local and stub capability factories without dynamic imports
 - all future-facing MCP tools are callable
 - valid future requests return stable `not_implemented`
