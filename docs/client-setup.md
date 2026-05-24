@@ -14,14 +14,16 @@ Replace that path with your local checkout path.
 
 ## Claude Code
 
-Add the server to the current project:
+Add the server to the current project. Project scope is the recommended default
+because this server exposes local build, libvirt, SSH, and gdb-related tools:
 
 ```bash
 claude mcp add --transport stdio --scope project linux-debug-mcp -- \
   uv --directory /home/dave/src/linux-debug-mcp run linux-debug-mcp
 ```
 
-Add the server to your user configuration instead:
+Add the server to your user configuration only when you intentionally want it
+available across Claude Code projects:
 
 ```bash
 claude mcp add --transport stdio --scope user linux-debug-mcp -- \
@@ -81,3 +83,6 @@ of running it through `uv`.
 This MCP server exposes constrained tools that can run local build, libvirt,
 SSH, and gdb-related commands. Connect it only in workspaces where you intend to
 make those workflows available to the agent.
+
+Prefer project-scoped client registration unless the broader exposure of a
+user-scoped registration is intentional.
