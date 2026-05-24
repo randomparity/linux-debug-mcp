@@ -23,6 +23,20 @@ from linux_debug_mcp.config import (
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
+from linux_debug_mcp.providers.contracts import (
+    ConsoleReadRequest,
+    ConsoleSessionRequest,
+    ConsoleWriteRequest,
+    HardwareControlRequest,
+    ProviderRequest,
+    ProvisioningRequest,
+    RealBootRequest,
+    RemoteArtifactSyncRequest,
+    RemoteBuildRequest,
+    ReservationReleaseRequest,
+    ReservationRequest,
+    ReserveProvisionBootRequest,
+)
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
 from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider
@@ -33,6 +47,10 @@ from linux_debug_mcp.providers.qemu_gdbstub import (
     QemuGdbstubProvider,
 )
 from linux_debug_mcp.providers.registry import ProviderRegistry
+from linux_debug_mcp.providers.stubs import (
+    future_not_implemented_response,
+    select_future_provider,
+)
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_source_path
 from linux_debug_mcp.safety.redaction import Redactor
 
@@ -435,9 +453,173 @@ def prerequisites_handler(
 
 def list_providers_handler() -> ToolResponse:
     registry = ProviderRegistry.with_defaults()
+    providers = []
+    for provider in registry.list_capabilities():
+        provider_payload = provider.model_dump(mode="json")
+        plugin_metadata = registry.provider_plugin_metadata(provider.provider_name)
+        if plugin_metadata is not None:
+            provider_payload["plugin"] = plugin_metadata.model_dump(mode="json")
+            provider_payload["documentation_paths"] = list(plugin_metadata.documentation_paths)
+        providers.append(provider_payload)
     return ToolResponse.success(
         summary="listed provider capabilities",
-        data={"providers": [provider.model_dump(mode="json") for provider in registry.list_capabilities()]},
+        data={"providers": providers},
+    )
+
+
+def _validation_error_details(exc: ValidationError) -> dict[str, Any]:
+    return {
+        "validation_errors": [
+            {
+                "field": ".".join(str(part) for part in error.get("loc", ())),
+                "type": error.get("type", "validation_error"),
+            }
+            for error in exc.errors(include_input=False)
+        ]
+    }
+
+
+def _future_stub_handler(
+    *,
+    contract: type[ProviderRequest],
+    operation: str,
+    payload: dict[str, Any],
+    registry: ProviderRegistry | None = None,
+) -> ToolResponse:
+    redactor = Redactor()
+    try:
+        request = contract(**payload)
+    except ValidationError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            message="future provider request failed validation",
+            details=redactor.redact_value(_validation_error_details(exc)),
+            suggested_next_actions=["providers.list"],
+        )
+
+    registry = registry or ProviderRegistry.with_defaults()
+    provider, error_response = select_future_provider(
+        registry,
+        operation=operation,
+        architecture=request.architecture,
+        provider_name=request.provider_name,
+    )
+    if error_response is not None:
+        return ToolResponse.failure(
+            category=error_response.error.category if error_response.error else ErrorCategory.CONFIGURATION_ERROR,
+            message=error_response.error.message if error_response.error else "provider selection failed",
+            details=redactor.redact_value(error_response.error.details if error_response.error else {}),
+            suggested_next_actions=error_response.suggested_next_actions,
+        )
+    assert provider is not None
+    plugin_metadata = registry.provider_plugin_metadata(provider.provider_name)
+    documentation_paths = (
+        list(plugin_metadata.documentation_paths) if plugin_metadata is not None else list(provider.documentation_paths)
+    )
+    return future_not_implemented_response(
+        provider=provider,
+        operation=operation,
+        architecture=request.architecture,
+        documentation_paths=documentation_paths,
+    )
+
+
+def remote_build_kernel_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
+    return _future_stub_handler(
+        contract=RemoteBuildRequest,
+        operation="remote.build_kernel",
+        payload=kwargs,
+        registry=registry,
+    )
+
+
+def remote_sync_artifacts_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
+    return _future_stub_handler(
+        contract=RemoteArtifactSyncRequest,
+        operation="remote.sync_artifacts",
+        payload=kwargs,
+        registry=registry,
+    )
+
+
+def reservation_request_host_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
+    return _future_stub_handler(
+        contract=ReservationRequest,
+        operation="reservation.request_host",
+        payload=kwargs,
+        registry=registry,
+    )
+
+
+def reservation_release_host_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
+    return _future_stub_handler(
+        contract=ReservationReleaseRequest,
+        operation="reservation.release_host",
+        payload=kwargs,
+        registry=registry,
+    )
+
+
+def provision_prepare_target_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
+    return _future_stub_handler(
+        contract=ProvisioningRequest,
+        operation="provision.prepare_target",
+        payload=kwargs,
+        registry=registry,
+    )
+
+
+def hardware_power_control_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
+    return _future_stub_handler(
+        contract=HardwareControlRequest,
+        operation="hardware.power_control",
+        payload=kwargs,
+        registry=registry,
+    )
+
+
+def hardware_boot_kernel_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
+    return _future_stub_handler(
+        contract=RealBootRequest,
+        operation="hardware.boot_kernel",
+        payload=kwargs,
+        registry=registry,
+    )
+
+
+def console_open_session_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
+    return _future_stub_handler(
+        contract=ConsoleSessionRequest,
+        operation="console.open_session",
+        payload=kwargs,
+        registry=registry,
+    )
+
+
+def console_read_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
+    return _future_stub_handler(
+        contract=ConsoleReadRequest,
+        operation="console.read",
+        payload=kwargs,
+        registry=registry,
+    )
+
+
+def console_write_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
+    return _future_stub_handler(
+        contract=ConsoleWriteRequest,
+        operation="console.write",
+        payload=kwargs,
+        registry=registry,
+    )
+
+
+def workflow_reserve_provision_boot_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
+    return _future_stub_handler(
+        contract=ReserveProvisionBootRequest,
+        operation="workflow.reserve_provision_boot",
+        payload=kwargs,
+        registry=registry,
     )
 
 
@@ -2073,6 +2255,248 @@ def create_app() -> FastMCP:
     @app.tool(name="providers.list")
     def providers_list() -> dict[str, Any]:
         return list_providers_handler().model_dump(mode="json")
+
+    @app.tool(name="remote.build_kernel")
+    def remote_build_kernel(
+        architecture: str,
+        source_ref: str,
+        build_profile: str,
+        provider_name: str | None = None,
+        timeout_seconds: int = 300,
+        operation_label: str | None = None,
+        run_id: str | None = None,
+        output_artifact_ref: str | None = None,
+    ) -> dict[str, Any]:
+        return remote_build_kernel_handler(
+            architecture=architecture,
+            source_ref=source_ref,
+            build_profile=build_profile,
+            provider_name=provider_name,
+            timeout_seconds=timeout_seconds,
+            operation_label=operation_label,
+            run_id=run_id,
+            output_artifact_ref=output_artifact_ref,
+        ).model_dump(mode="json")
+
+    @app.tool(name="remote.sync_artifacts")
+    def remote_sync_artifacts(
+        architecture: str,
+        external_artifact_ref: str,
+        provider_name: str | None = None,
+        timeout_seconds: int = 300,
+        operation_label: str | None = None,
+        run_id: str | None = None,
+        destination_artifact_ref: str | None = None,
+    ) -> dict[str, Any]:
+        return remote_sync_artifacts_handler(
+            architecture=architecture,
+            external_artifact_ref=external_artifact_ref,
+            provider_name=provider_name,
+            timeout_seconds=timeout_seconds,
+            operation_label=operation_label,
+            run_id=run_id,
+            destination_artifact_ref=destination_artifact_ref,
+        ).model_dump(mode="json")
+
+    @app.tool(name="reservation.request_host")
+    def reservation_request_host(
+        architecture: str,
+        reservation_pool: str,
+        provider_name: str | None = None,
+        timeout_seconds: int = 300,
+        operation_label: str | None = None,
+        run_id: str | None = None,
+        reservation_token_ref: str | None = None,
+    ) -> dict[str, Any]:
+        return reservation_request_host_handler(
+            architecture=architecture,
+            reservation_pool=reservation_pool,
+            provider_name=provider_name,
+            timeout_seconds=timeout_seconds,
+            operation_label=operation_label,
+            run_id=run_id,
+            reservation_token_ref=reservation_token_ref,
+        ).model_dump(mode="json")
+
+    @app.tool(name="reservation.release_host")
+    def reservation_release_host(
+        architecture: str,
+        reservation_id: str,
+        provider_name: str | None = None,
+        timeout_seconds: int = 300,
+        operation_label: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        return reservation_release_host_handler(
+            architecture=architecture,
+            reservation_id=reservation_id,
+            provider_name=provider_name,
+            timeout_seconds=timeout_seconds,
+            operation_label=operation_label,
+            run_id=run_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="provision.prepare_target")
+    def provision_prepare_target(
+        architecture: str,
+        target_name: str,
+        provisioning_profile: str,
+        provider_name: str | None = None,
+        timeout_seconds: int = 300,
+        operation_label: str | None = None,
+        run_id: str | None = None,
+        reservation_id: str | None = None,
+        credential_ref: str | None = None,
+    ) -> dict[str, Any]:
+        return provision_prepare_target_handler(
+            architecture=architecture,
+            target_name=target_name,
+            provisioning_profile=provisioning_profile,
+            provider_name=provider_name,
+            timeout_seconds=timeout_seconds,
+            operation_label=operation_label,
+            run_id=run_id,
+            reservation_id=reservation_id,
+            credential_ref=credential_ref,
+        ).model_dump(mode="json")
+
+    @app.tool(name="hardware.power_control")
+    def hardware_power_control(
+        architecture: str,
+        target_name: str,
+        action: str,
+        provider_name: str | None = None,
+        timeout_seconds: int = 300,
+        operation_label: str | None = None,
+        run_id: str | None = None,
+        bmc_credential_ref: str | None = None,
+    ) -> dict[str, Any]:
+        return hardware_power_control_handler(
+            architecture=architecture,
+            target_name=target_name,
+            action=action,
+            provider_name=provider_name,
+            timeout_seconds=timeout_seconds,
+            operation_label=operation_label,
+            run_id=run_id,
+            bmc_credential_ref=bmc_credential_ref,
+        ).model_dump(mode="json")
+
+    @app.tool(name="hardware.boot_kernel")
+    def hardware_boot_kernel(
+        architecture: str,
+        target_name: str,
+        kernel_artifact_ref: str,
+        provider_name: str | None = None,
+        timeout_seconds: int = 300,
+        operation_label: str | None = None,
+        run_id: str | None = None,
+        boot_profile: str | None = None,
+        reservation_id: str | None = None,
+    ) -> dict[str, Any]:
+        return hardware_boot_kernel_handler(
+            architecture=architecture,
+            target_name=target_name,
+            kernel_artifact_ref=kernel_artifact_ref,
+            provider_name=provider_name,
+            timeout_seconds=timeout_seconds,
+            operation_label=operation_label,
+            run_id=run_id,
+            boot_profile=boot_profile,
+            reservation_id=reservation_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="console.open_session")
+    def console_open_session(
+        architecture: str,
+        target_name: str,
+        access_method: str,
+        provider_name: str | None = None,
+        timeout_seconds: int = 300,
+        operation_label: str | None = None,
+        run_id: str | None = None,
+        credential_ref: str | None = None,
+    ) -> dict[str, Any]:
+        return console_open_session_handler(
+            architecture=architecture,
+            target_name=target_name,
+            access_method=access_method,
+            provider_name=provider_name,
+            timeout_seconds=timeout_seconds,
+            operation_label=operation_label,
+            run_id=run_id,
+            credential_ref=credential_ref,
+        ).model_dump(mode="json")
+
+    @app.tool(name="console.read")
+    def console_read(
+        architecture: str,
+        console_session_id: str,
+        max_bytes: int = 4096,
+        provider_name: str | None = None,
+        timeout_seconds: int = 300,
+        operation_label: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        return console_read_handler(
+            architecture=architecture,
+            console_session_id=console_session_id,
+            max_bytes=max_bytes,
+            provider_name=provider_name,
+            timeout_seconds=timeout_seconds,
+            operation_label=operation_label,
+            run_id=run_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="console.write")
+    def console_write(
+        architecture: str,
+        console_session_id: str,
+        data: str,
+        provider_name: str | None = None,
+        timeout_seconds: int = 300,
+        operation_label: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        return console_write_handler(
+            architecture=architecture,
+            console_session_id=console_session_id,
+            data=data,
+            provider_name=provider_name,
+            timeout_seconds=timeout_seconds,
+            operation_label=operation_label,
+            run_id=run_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="workflow.reserve_provision_boot")
+    def workflow_reserve_provision_boot(
+        architecture: str,
+        reservation_pool: str,
+        target_name: str,
+        provisioning_profile: str,
+        kernel_artifact_ref: str,
+        provider_name: str | None = None,
+        timeout_seconds: int = 300,
+        operation_label: str | None = None,
+        run_id: str | None = None,
+        reservation_token_ref: str | None = None,
+        credential_ref: str | None = None,
+        bmc_credential_ref: str | None = None,
+    ) -> dict[str, Any]:
+        return workflow_reserve_provision_boot_handler(
+            architecture=architecture,
+            reservation_pool=reservation_pool,
+            target_name=target_name,
+            provisioning_profile=provisioning_profile,
+            kernel_artifact_ref=kernel_artifact_ref,
+            provider_name=provider_name,
+            timeout_seconds=timeout_seconds,
+            operation_label=operation_label,
+            run_id=run_id,
+            reservation_token_ref=reservation_token_ref,
+            credential_ref=credential_ref,
+            bmc_credential_ref=bmc_credential_ref,
+        ).model_dump(mode="json")
 
     @app.tool(name="artifacts.get_manifest")
     def artifacts_get_manifest(run_id: str, artifact_root: str = str(DEFAULT_ARTIFACT_ROOT)) -> dict[str, Any]:

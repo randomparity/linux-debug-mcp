@@ -1,6 +1,6 @@
 # Sprint 5 Provider Extensibility Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Add a contract-first provider extensibility layer with richer capability metadata, static in-repo provider plugin declarations, safe future-facing stub providers, callable future MCP tools, and ppc64le design documentation without changing the implemented local x86_64 workflows.
 
@@ -46,7 +46,7 @@
 - Modify: `tests/test_providers.py`
 - Modify: `tests/test_server.py`
 
-- [ ] **Step 1: Write failing provider metadata tests**
+- [x] **Step 1: Write failing provider metadata tests**
 
 Add tests proving:
 
@@ -58,7 +58,7 @@ Add tests proving:
 - each operation capability has operation-level `semantics`
 - `providers.list` includes the new metadata fields while preserving the existing provider names
 
-- [ ] **Step 2: Run focused tests and confirm failure**
+- [x] **Step 2: Run focused tests and confirm failure**
 
 ```bash
 pytest tests/test_providers.py tests/test_server.py -q
@@ -66,7 +66,7 @@ pytest tests/test_providers.py tests/test_server.py -q
 
 Expected: FAIL because the richer metadata model does not exist.
 
-- [ ] **Step 3: Add backward-compatible domain models**
+- [x] **Step 3: Add backward-compatible domain models**
 
 In `src/linux_debug_mcp/domain.py`:
 
@@ -82,7 +82,7 @@ In `src/linux_debug_mcp/domain.py`:
 
 Keep existing field names and defaults so current constructors continue to work.
 
-- [ ] **Step 4: Populate local provider metadata**
+- [x] **Step 4: Populate local provider metadata**
 
 Update `sprint0_capability()` and local provider capability factories to set sensible family and transport fields:
 
@@ -93,7 +93,7 @@ Update `sprint0_capability()` and local provider capability factories to set sen
 - `local-ssh-tests`: family `test`, transports `["ssh", "filesystem"]`
 - `local-qemu-gdbstub`: family `debug`, transports `["tcp", "gdb-remote", "filesystem"]`
 
-- [ ] **Step 5: Verify focused tests pass**
+- [x] **Step 5: Verify focused tests pass**
 
 ```bash
 pytest tests/test_providers.py tests/test_server.py -q
@@ -108,7 +108,7 @@ Expected: PASS.
 - Modify: `src/linux_debug_mcp/providers/registry.py`
 - Modify: `tests/test_providers.py`
 
-- [ ] **Step 1: Write failing plugin-boundary tests**
+- [x] **Step 1: Write failing plugin-boundary tests**
 
 Add tests proving:
 
@@ -119,7 +119,7 @@ Add tests proving:
 - no dynamic entry point, manifest path, or string import loading is required for defaults
 - duplicate provider names are still rejected
 
-- [ ] **Step 2: Implement `ProviderPluginSpec`**
+- [x] **Step 2: Implement `ProviderPluginSpec`**
 
 Create `providers/plugins.py` with a Pydantic model:
 
@@ -135,11 +135,11 @@ class ProviderPluginSpec(Model):
 
 Use validators to reject unsafe empty labels. Define functions such as `local_provider_plugin_specs()` and later `stub_provider_plugin_specs()` that return static Python objects.
 
-- [ ] **Step 3: Route registry defaults through plugin specs and keep plugin metadata**
+- [x] **Step 3: Route registry defaults through plugin specs and keep plugin metadata**
 
 Change `ProviderRegistry.with_defaults()` to iterate built-in specs and register every capability returned by every factory. Store the originating plugin name, plugin version, documentation paths, and plugin limitations in a private metadata map keyed by provider name. Keep `register()`, `get()`, and `list_capabilities()` behavior stable, and add a read-only accessor such as `provider_plugin_metadata(provider_name)`.
 
-- [ ] **Step 4: Verify focused tests pass**
+- [x] **Step 4: Verify focused tests pass**
 
 ```bash
 pytest tests/test_providers.py -q
@@ -156,7 +156,7 @@ Expected: PASS.
 - Modify: `tests/test_providers.py`
 - Modify: `tests/test_server.py`
 
-- [ ] **Step 1: Write failing stub discoverability tests**
+- [x] **Step 1: Write failing stub discoverability tests**
 
 Add tests proving default registry includes these stub provider names:
 
@@ -178,7 +178,7 @@ For each stub, assert:
 - operation-level destructive permissions are present for future provisioning, power, boot, and reserve/provision/boot operations
 - limitations explain that no external side effects occur
 
-- [ ] **Step 2: Implement stub capability factories**
+- [x] **Step 2: Implement stub capability factories**
 
 In `providers/stubs.py`, create one factory per stub provider. Advertise these operations:
 
@@ -192,11 +192,11 @@ In `providers/stubs.py`, create one factory per stub provider. Advertise these o
 
 Use operation-level semantics. Mark destructive operations such as power control, provisioning, real boot, and reserve/provision/boot as destructive in operation metadata even though the stub performs no side effects.
 
-- [ ] **Step 3: Add stub plugin specs**
+- [x] **Step 3: Add stub plugin specs**
 
 Expose the stub factories from `providers/plugins.py` as static built-in specs, including `docs/ppc64le-provider-spike.md` in `documentation_paths` for ppc64le-relevant specs. Ensure either `providers.list` or the registry metadata accessor can surface those documentation paths to clients; do not leave documentation paths only on private plugin objects.
 
-- [ ] **Step 4: Add registry selection helpers**
+- [x] **Step 4: Add registry selection helpers**
 
 Add a deterministic helper such as:
 
@@ -207,7 +207,7 @@ def find_by_operation_and_architecture(self, *, operation: str, architecture: st
 
 It should match providers advertising both the operation and architecture. Do not perform fallback from an explicit provider name.
 
-- [ ] **Step 5: Verify focused tests pass**
+- [x] **Step 5: Verify focused tests pass**
 
 ```bash
 pytest tests/test_providers.py tests/test_server.py -q
@@ -221,7 +221,7 @@ Expected: PASS.
 - Create: `src/linux_debug_mcp/providers/contracts.py`
 - Create: `tests/test_provider_contracts.py`
 
-- [ ] **Step 1: Write failing contract validation tests**
+- [x] **Step 1: Write failing contract validation tests**
 
 Cover valid minimal requests and malformed inputs for:
 
@@ -248,7 +248,7 @@ Tests should also prove every request model accepts the common safe selection an
 
 Tests should reject empty provider names, unknown architectures, invalid timeouts, unsafe labels, missing required common fields, invalid power actions, invalid byte counts, empty console session IDs, raw credential or token fields, and empty or oversized console write payloads.
 
-- [ ] **Step 2: Implement shared validators**
+- [x] **Step 2: Implement shared validators**
 
 In `providers/contracts.py`, define helpers for:
 
@@ -258,7 +258,7 @@ In `providers/contracts.py`, define helpers for:
 - no raw secret fields; allow only reference fields such as `credential_ref`, `ssh_key_ref`, `bmc_credential_ref`, and `reservation_token_ref`
 - redaction-safe validation errors that report field names and categories rather than raw rejected values
 
-- [ ] **Step 3: Implement request/result models**
+- [x] **Step 3: Implement request/result models**
 
 Keep models family-specific rather than one generic future operation request. Include fields required by the spec:
 
@@ -276,7 +276,7 @@ Keep models family-specific rather than one generic future operation request. In
 
 Add optional `provider_name`, `timeout_seconds`, `operation_label`, and relevant optional `run_id` or artifact reference fields to each request model. Add optional external ID fields on results but leave them unset by default.
 
-- [ ] **Step 4: Verify contract tests pass**
+- [x] **Step 4: Verify contract tests pass**
 
 ```bash
 pytest tests/test_provider_contracts.py -q
@@ -291,7 +291,7 @@ Expected: PASS.
 - Modify: `src/linux_debug_mcp/server.py`
 - Create: `tests/test_future_stub_handlers.py`
 
-- [ ] **Step 1: Write failing handler tests**
+- [x] **Step 1: Write failing handler tests**
 
 Use direct handler calls. Cover:
 
@@ -308,7 +308,7 @@ Use direct handler calls. Cover:
 - no stub handler creates `.linux-debug-mcp/runs` under a temp artifact root
 - monkeypatched guards prove stub handlers do not call `subprocess`, `socket`, credential file reads, serial device paths, libvirt providers, or artifact-store write APIs
 
-- [ ] **Step 2: Add provider selection and response helpers**
+- [x] **Step 2: Add provider selection and response helpers**
 
 In `providers/stubs.py`, implement helpers such as:
 
@@ -320,7 +320,7 @@ Keep details stable and machine-readable. Include documentation path details whe
 
 The selector should enforce the full explicit-provider rule: if `provider_name` is supplied, fetch exactly that provider, then verify that the same provider advertises the requested operation and architecture. Return `configuration_error` on any mismatch; never retry implicit selection.
 
-- [ ] **Step 3: Add server handler helpers**
+- [x] **Step 3: Add server handler helpers**
 
 In `server.py`, add a small common flow:
 
@@ -333,7 +333,7 @@ The helper should accept the contract class and operation name. It should not cr
 
 Validation failure responses should pass through `Redactor` and should not include `ValidationError.errors()` entries whose `input` values contain raw request payloads.
 
-- [ ] **Step 4: Add individual handlers**
+- [x] **Step 4: Add individual handlers**
 
 Add:
 
@@ -351,7 +351,7 @@ Add:
 
 `workflow_reserve_provision_boot_handler` should validate once and short-circuit to one `not_implemented` response. It must not call the individual reservation, provisioning, hardware, or boot handlers in sequence.
 
-- [ ] **Step 5: Verify focused tests pass**
+- [x] **Step 5: Verify focused tests pass**
 
 ```bash
 pytest tests/test_future_stub_handlers.py -q
@@ -365,7 +365,7 @@ Expected: PASS.
 - Modify: `src/linux_debug_mcp/server.py`
 - Modify: `tests/test_server.py`
 
-- [ ] **Step 1: Write failing tool registration tests**
+- [x] **Step 1: Write failing tool registration tests**
 
 Assert `create_app()` registers:
 
@@ -385,11 +385,11 @@ Also assert each tool exposes the minimum request fields from the spec.
 
 For tools with optional explicit selection, assert `provider_name`, `timeout_seconds`, and `operation_label` are also visible in the FastMCP schema.
 
-- [ ] **Step 2: Wire MCP tools**
+- [x] **Step 2: Wire MCP tools**
 
 Add `@app.tool(...)` wrappers that call the direct handlers and return `.model_dump(mode="json")`. Keep signatures explicit instead of accepting one untyped dict so FastMCP exposes useful schemas.
 
-- [ ] **Step 3: Verify registration tests pass**
+- [x] **Step 3: Verify registration tests pass**
 
 ```bash
 pytest tests/test_server.py -q
@@ -404,7 +404,7 @@ Expected: PASS.
 - Modify: `README.md`
 - Modify: `tests/test_providers.py` or `tests/test_server.py` if docs paths are asserted
 
-- [ ] **Step 1: Create ppc64le design spike**
+- [x] **Step 1: Create ppc64le design spike**
 
 Document that ppc64le is metadata and contract-only in Sprint 5. Cover:
 
@@ -418,7 +418,7 @@ Document that ppc64le is metadata and contract-only in Sprint 5. Cover:
 - debug limitations and differences from local x86_64 QEMU gdbstub
 - artifact identity requirements for matching kernel, config, and symbols
 
-- [ ] **Step 2: Update README**
+- [x] **Step 2: Update README**
 
 Add a concise Sprint 5 section explaining:
 
@@ -428,7 +428,7 @@ Add a concise Sprint 5 section explaining:
 - `providers.list` is the primary discovery tool
 - ppc64le appears in stub metadata but is not executable
 
-- [ ] **Step 3: Verify docs references**
+- [x] **Step 3: Verify docs references**
 
 Run any doc-path tests added earlier and ensure provider metadata references `docs/ppc64le-provider-spike.md` where expected.
 
@@ -439,7 +439,7 @@ Also verify `providers.list` or an equivalent registry-backed response includes 
 **Files:**
 - No planned edits unless tests reveal defects
 
-- [ ] **Step 1: Run focused future-provider suite**
+- [x] **Step 1: Run focused future-provider suite**
 
 ```bash
 pytest tests/test_provider_contracts.py tests/test_future_stub_handlers.py tests/test_providers.py tests/test_server.py -q
@@ -447,7 +447,7 @@ pytest tests/test_provider_contracts.py tests/test_future_stub_handlers.py tests
 
 Expected: PASS.
 
-- [ ] **Step 2: Run full test suite**
+- [x] **Step 2: Run full test suite**
 
 ```bash
 pytest -q
@@ -455,7 +455,7 @@ pytest -q
 
 Expected: PASS. Existing Sprint 0-4 tests should pass unchanged or with only assertion updates for additive provider metadata and new provider names.
 
-- [ ] **Step 3: Manual side-effect check**
+- [x] **Step 3: Manual side-effect check**
 
 Review the stub code and tests for forbidden behavior:
 
@@ -467,7 +467,7 @@ Review the stub code and tests for forbidden behavior:
 - no artifact or run workspace writes
 - no chaining workflow calls for `workflow.reserve_provision_boot`
 
-- [ ] **Step 4: Acceptance checklist**
+- [x] **Step 4: Acceptance checklist**
 
 Confirm:
 

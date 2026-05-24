@@ -468,8 +468,10 @@ def local_ssh_tests_capability() -> ProviderCapability:
     return ProviderCapability(
         provider_name="local-ssh-tests",
         provider_version="0.1.0",
+        provider_family="test",
         architectures=["x86_64"],
         target_kinds=[TargetKind.VIRTUAL],
+        transports=["ssh", "filesystem"],
         operations=["target.run_tests"],
         required_host_tools=["ssh"],
         destructive_permissions=[],
