@@ -77,16 +77,18 @@ def test_plan_build_rejects_wrong_provider_name(tmp_path: Path) -> None:
         provider.plan_build(source_path=tmp_path / "linux", output_path=tmp_path / "build", profile=profile)
 
 
-def test_plan_build_rejects_config_fragments_until_supported(tmp_path: Path) -> None:
+def test_plan_build_threads_config_lines_into_plan(tmp_path: Path) -> None:
     provider = LocalKernelBuildProvider()
     profile = BuildProfile(
-        name="fragments",
+        name="frag",
         architecture="x86_64",
-        config_fragments=[tmp_path / "debug.fragment"],
+        config_lines=["CONFIG_DEBUG_INFO=y"],
     )
 
-    with pytest.raises(ValueError, match="config fragments are not supported"):
-        provider.plan_build(source_path=tmp_path / "linux", output_path=tmp_path / "build", profile=profile)
+    plan = provider.plan_build(source_path=tmp_path / "linux", output_path=tmp_path / "build", profile=profile)
+
+    assert plan.config_lines == ["CONFIG_DEBUG_INFO=y"]
+    assert not any("CONFIG_DEBUG_INFO" in arg for arg in plan.argv)
 
 
 class FakeRunner:
@@ -96,13 +98,23 @@ class FakeRunner:
         self.output = output
         self.commands: list[list[str]] = []
         self.environments: list[dict[str, str]] = []
+        self.cwds: list[Path | None] = []
 
     def which(self, command: str) -> str | None:
         return self.tools.get(command)
 
-    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
         self.commands.append(argv)
         self.environments.append(env)
+        self.cwds.append(cwd)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text(self.output, encoding="utf-8")
         return self.returncode

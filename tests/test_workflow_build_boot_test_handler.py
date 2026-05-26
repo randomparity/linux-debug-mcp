@@ -260,7 +260,15 @@ class _NoopBuildRunner:
     def which(self, command: str) -> str | None:
         return f"/usr/bin/{command}"
 
-    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
         self.commands.append(argv)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("ok\n", encoding="utf-8")

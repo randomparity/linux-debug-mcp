@@ -32,13 +32,22 @@ class BuildPlan:
     timeout_seconds: int
     required_tools: list[str]
     environment: dict[str, str]
+    config_lines: list[str] = field(default_factory=list)
 
 
 class BuildRunner(Protocol):
     def which(self, command: str) -> str | None:
         raise NotImplementedError
 
-    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
         raise NotImplementedError
 
 
@@ -46,7 +55,15 @@ class SubprocessBuildRunner:
     def which(self, command: str) -> str | None:
         return shutil.which(command)
 
-    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
         with log_path.open("w", encoding="utf-8") as log_file:
             completed = subprocess.run(
                 argv,
@@ -56,6 +73,7 @@ class SubprocessBuildRunner:
                 env=env,
                 text=True,
                 timeout=timeout,
+                cwd=cwd,
             )
         return completed.returncode
 
@@ -85,8 +103,6 @@ class LocalKernelBuildProvider:
             raise ValueError(f"unsupported architecture: {profile.architecture}")
         if profile.output_policy != "per_run":
             raise ValueError(f"unsupported output policy: {profile.output_policy}")
-        if profile.config_fragments:
-            raise ValueError("config fragments are not supported by the local Sprint 1 provider")
         argv = ["make", "-C", str(source_path), f"O={output_path}", "ARCH=x86_64"]
         if profile.jobs is not None:
             argv.append(f"-j{profile.jobs}")
@@ -102,6 +118,7 @@ class LocalKernelBuildProvider:
             timeout_seconds=profile.command_timeout_seconds,
             required_tools=profile.effective_required_tools(),
             environment=self._sanitized_environment(),
+            config_lines=list(profile.config_lines),
         )
 
     def prepare_config(self, *, source_path: Path, output_path: Path) -> Path:

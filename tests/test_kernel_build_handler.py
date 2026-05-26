@@ -12,7 +12,15 @@ class NoopRunner:
     def which(self, command: str) -> str | None:
         return f"/usr/bin/{command}"
 
-    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
         self.commands.append(argv)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("ok\n", encoding="utf-8")
@@ -25,7 +33,15 @@ class BlockingRunner(NoopRunner):
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
         self.commands.append(argv)
         self.started.set()
         self.release.wait(timeout=5)
@@ -35,13 +51,29 @@ class BlockingRunner(NoopRunner):
 
 
 class RaisingRunner(NoopRunner):
-    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
         self.commands.append(argv)
         raise RuntimeError("boom")
 
 
 class FailingRunner(NoopRunner):
-    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
         self.commands.append(argv)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("build failed\n", encoding="utf-8")
@@ -49,8 +81,16 @@ class FailingRunner(NoopRunner):
 
 
 class TransientManifestLockRunner(NoopRunner):
-    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
-        result = super().run(argv, timeout=timeout, log_path=log_path, env=env)
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
+        result = super().run(argv, timeout=timeout, log_path=log_path, env=env, cwd=cwd)
         lock_path = log_path.parents[1] / ".manifest.lock"
         lock_path.write_text("transient", encoding="utf-8")
 
