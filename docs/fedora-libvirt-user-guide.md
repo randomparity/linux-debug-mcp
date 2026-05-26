@@ -167,8 +167,12 @@ make x86_64_defconfig
 make -j"$(nproc)" bzImage
 ```
 
-The current provider does not run `defconfig` or generate kernel configs for
-you. The source tree must already have whatever configuration you want to boot.
+The provider does not run `defconfig`: the source tree must already have a base
+`.config` (or one already staged in the run's build dir). It will, however,
+apply inline `config_lines` overrides on top of that base — the run writes them
+to `inputs/override.config` and merges them with `scripts/kconfig/merge_config.sh`
+followed by `make olddefconfig`. `config_lines` augment an existing base config;
+they cannot bootstrap one from nothing.
 
 Because the pilot uses direct kernel boot without an initramfs, the kernel
 configuration must include the root disk, filesystem, devtmpfs, and serial
