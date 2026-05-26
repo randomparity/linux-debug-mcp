@@ -166,7 +166,10 @@ def test_target_key_distinct_provisioners_do_not_collide():
 
 def test_target_key_recovery_key_is_canonical_hash():
     key = TargetKey(provisioner="local-qemu", target_id="run-1")
-    expected = hashlib.sha256(b"local-qemu\x00run-1").hexdigest()
+    p = b"local-qemu"
+    t = b"run-1"
+    payload = len(p).to_bytes(4, "big") + p + len(t).to_bytes(4, "big") + t
+    expected = hashlib.sha256(payload).hexdigest()
     assert key.recovery_key() == expected
 
 
@@ -289,9 +292,11 @@ class TargetKey(BaseModel):
     target_id: str
 
     def recovery_key(self) -> str:
-        """Canonical NUL-delimited sha256 of the key, for recovery-tombstone
+        """Canonical length-prefixed sha256 of the key, for recovery-tombstone
         filenames (spec §4.7). Opaque key parts are never used as path segments."""
-        payload = f"{self.provisioner}\x00{self.target_id}".encode()
+        p = self.provisioner.encode()
+        t = self.target_id.encode()
+        payload = len(p).to_bytes(4, "big") + p + len(t).to_bytes(4, "big") + t
         return hashlib.sha256(payload).hexdigest()
 
 
@@ -326,11 +331,13 @@ class LeaseInfo(Model):
     renewable: bool
 ```
 
-Note: the `recovery_key()` delimiter-confusion test passes because the raw bytes
-`a\x00(b\x00c)` and `(a\x00b)\x00c` differ — both contain two NULs but at different
-offsets — so their digests differ. The test documents that NUL-joining is not collision-free
-across *arbitrary* embedded NULs; real `TargetKey` parts never contain NUL, and the hash
-is only ever a filename, never re-parsed back into components.
+Note: `recovery_key()` uses **length-prefixed** encoding (`len(provisioner)||provisioner||
+len(target_id)||target_id`, 4-byte big-endian lengths) rather than NUL-joining. This is
+injective, so the delimiter-confusion test holds: `("a", "b\x00c")` and `("a\x00b", "c")`
+encode to distinct byte strings (`01 'a' 03 'b\x00c'` vs `03 'a\x00b' 01 'c'`) and therefore
+distinct digests. A plain NUL-join would collide here (`a\x00b\x00c` is identical under both
+splits), which is why length-prefixing is required. The hash is only ever a tombstone
+filename, never re-parsed back into components.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -363,7 +370,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from linux_debug_mcp.seams.target import ConsoleKind, LeaseInfo, PlatformMetadata, TargetKey
+from linux_debug_mcp.seams.target import ConsoleKind, PlatformMetadata, TargetKey
 from linux_debug_mcp.transport.base import (
     DEFAULT_MIN_LEASE_TTL_SECONDS,
     BreakMethod,
