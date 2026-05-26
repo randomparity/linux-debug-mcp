@@ -385,14 +385,10 @@ def _resolve_initial_profiles(
     source_path: Path,
     sensitive_paths: list[Path],
     build_profile: str,
-    target_profile: str,
-    rootfs_profile: str,
     build_overrides: BuildOverrides | None,
     boot_overrides: BootOverrides | None,
-) -> tuple[BuildProfile, TargetProfile, RootfsProfile]:
+) -> BuildProfile:
     base_build = DEFAULT_BUILD_PROFILES[build_profile]
-    base_target = DEFAULT_TARGET_PROFILES[target_profile]
-    base_rootfs = DEFAULT_ROOTFS_PROFILES[rootfs_profile]
 
     # model_copy(update=...) skips field validators, which is safe here: both base and
     # override values were validated at construction (BuildProfile/BootOverrides), and the
@@ -408,21 +404,14 @@ def _resolve_initial_profiles(
         if build_update:
             resolved_build = base_build.model_copy(update=build_update)
 
-    resolved_target = base_target
-    resolved_rootfs = base_rootfs
-    if boot_overrides is not None:
-        if boot_overrides.kernel_args:
-            resolved_target = base_target.model_copy(
-                update={"kernel_args": merge_kernel_args(base_target.kernel_args, boot_overrides.kernel_args)}
-            )
-        if boot_overrides.rootfs_source is not None:
-            validated = validate_rootfs_source(
-                Path(boot_overrides.rootfs_source),
-                source_paths=[source_path],
-                sensitive_paths=sensitive_paths,
-            )
-            resolved_rootfs = base_rootfs.model_copy(update={"source": str(validated)})
-    return resolved_build, resolved_target, resolved_rootfs
+    # Fail-fast on a bad rootfs override at run creation; the resolved rootfs is re-derived at boot.
+    if boot_overrides is not None and boot_overrides.rootfs_source is not None:
+        validate_rootfs_source(
+            Path(boot_overrides.rootfs_source),
+            source_paths=[source_path],
+            sensitive_paths=sensitive_paths,
+        )
+    return resolved_build
 
 
 def create_run_handler(
@@ -457,7 +446,7 @@ def create_run_handler(
                 message=f"unknown profile: {name}",
             )
     try:
-        resolved_build, _resolved_target, _resolved_rootfs = _resolve_initial_profiles(
+        resolved_build = _resolve_initial_profiles(
             source_path=Path(resolved_source_path),
             # No ServerConfig is loaded at runtime (out of scope; see the design doc's "Out of
             # scope"), so there are no operator-configured sensitive paths to enforce here. The
@@ -465,8 +454,6 @@ def create_run_handler(
             # overlap, shell/control chars, symlink-resolved) still apply.
             sensitive_paths=[],
             build_profile=build_profile,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
             build_overrides=build_overrides,
             boot_overrides=boot_overrides,
         )
