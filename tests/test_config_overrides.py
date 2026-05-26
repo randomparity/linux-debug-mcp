@@ -4,11 +4,13 @@ from linux_debug_mcp.config import (
     BootOverrides,
     BuildOverrides,
     BuildProfile,
+    RootfsOverrides,
     TargetProfile,
     merge_config_lines,
     merge_kernel_args,
     validate_config_line_tokens,
 )
+from linux_debug_mcp.safety.redaction import Redactor
 
 
 def test_kernel_args_accepts_safe_tokens():
@@ -95,6 +97,66 @@ def test_merge_kernel_args_dedups_quoted_value_by_key():
     base = ["console=ttyS0", "foo=old"]
     override = ['foo="new value"']
     assert merge_kernel_args(base, override) == ["console=ttyS0", 'foo="new value"']
+
+
+def test_rootfs_overrides_accepts_supported_fields():
+    overrides = RootfsOverrides(
+        mutability="mutable",
+        access_method="ssh_and_serial",
+        readiness_marker="ready-marker",
+        ssh_host="10.0.0.5",
+        ssh_port=2222,
+        ssh_user="debugger",
+        ssh_key_ref="vault://key",
+        ssh_options={"StrictHostKeyChecking": "yes"},
+    )
+    update = overrides.as_profile_update()
+    assert update["mutability"] == "mutable"
+    assert update["ssh_port"] == 2222
+    assert update["ssh_options"] == {"StrictHostKeyChecking": "yes"}
+
+
+def test_rootfs_overrides_as_update_excludes_unset_fields():
+    overrides = RootfsOverrides(ssh_user="debugger")
+    assert overrides.as_profile_update() == {"ssh_user": "debugger"}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"ssh_port": 0},
+        {"ssh_port": 70000},
+        {"ssh_user": "bad\nuser"},
+        {"ssh_user": ""},
+        {"readiness_marker": "marker\nbad"},
+        {"ssh_options": {"UnknownOption": "x"}},
+        {"ssh_options": {"StrictHostKeyChecking": "maybe"}},
+        {"ssh_options": {"ConnectTimeout": "0"}},
+        {"mutability": "wibble"},
+        {"access_method": "telepathy"},
+        # source/name are not overridable here: source must go through the path-safety-guarded
+        # rootfs_source, and extra="forbid" rejects unknown keys, so rootfs_overrides cannot
+        # bypass the guard.
+        {"source": "/etc/shadow"},
+        {"name": "evil"},
+    ],
+)
+def test_rootfs_overrides_rejects_invalid_fields(kwargs):
+    with pytest.raises(ValueError):
+        RootfsOverrides(**kwargs)
+
+
+def test_boot_overrides_has_rootfs_field_overrides():
+    assert BootOverrides().has_rootfs_field_overrides() is False
+    assert BootOverrides(rootfs=RootfsOverrides()).has_rootfs_field_overrides() is False
+    assert BootOverrides(rootfs=RootfsOverrides(ssh_user="x")).has_rootfs_field_overrides() is True
+
+
+def test_rootfs_overrides_are_redacted_by_registered_secret():
+    overrides = BootOverrides(rootfs=RootfsOverrides(ssh_user="topsecretuser"))
+    redacted = Redactor(secret_values=["topsecretuser"]).redact_value(overrides.model_dump(mode="json"))
+    assert "topsecretuser" not in str(redacted)
+    assert "[REDACTED]" in str(redacted)
 
 
 @pytest.mark.parametrize(
