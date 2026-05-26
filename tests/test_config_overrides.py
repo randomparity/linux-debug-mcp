@@ -3,6 +3,7 @@ import pytest
 from linux_debug_mcp.config import (
     BootOverrides,
     BuildOverrides,
+    BuildProfile,
     TargetProfile,
     merge_config_lines,
     merge_kernel_args,
@@ -99,3 +100,25 @@ def test_merge_config_lines_override_can_unset_base_symbol() -> None:
 def test_merge_config_lines_empty_override_returns_base() -> None:
     base = ["CONFIG_A=y"]
     assert merge_config_lines(base, []) == ["CONFIG_A=y"]
+
+
+def test_build_profile_has_config_lines_and_validates() -> None:
+    profile = BuildProfile(name="x", architecture="x86_64", config_lines=["CONFIG_A=y"])
+    assert profile.config_lines == ["CONFIG_A=y"]
+
+
+def test_build_profile_rejects_invalid_config_line() -> None:
+    with pytest.raises(ValueError, match="invalid kernel config line"):
+        BuildProfile(name="x", architecture="x86_64", config_lines=["CONFIG_A=y; evil"])
+
+
+def test_build_profile_no_longer_accepts_config_fragments() -> None:
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        BuildProfile(name="x", architecture="x86_64", config_fragments=["/tmp/frag"])
+
+
+def test_build_overrides_config_lines_validated() -> None:
+    overrides = BuildOverrides(config_lines=["# CONFIG_A is not set"])
+    assert overrides.config_lines == ["# CONFIG_A is not set"]
+    with pytest.raises(ValueError, match="invalid kernel config line"):
+        BuildOverrides(config_lines=["not a config line"])

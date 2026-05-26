@@ -269,7 +269,7 @@ def test_build_profile_defaults_for_local_kernel_build() -> None:
     assert profile.effective_required_tools() == ["make"]
     assert profile.jobs is None
     assert profile.make_variables == {}
-    assert profile.config_fragments == []
+    assert profile.config_lines == []
 
 
 def test_build_profile_effective_required_tools_includes_make_once() -> None:

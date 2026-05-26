@@ -110,7 +110,7 @@ class BuildProfile(ConfigModel):
     required_tools: list[str] = Field(default_factory=list)
     jobs: int | None = Field(default=None, ge=1)
     make_variables: dict[str, str] = Field(default_factory=dict)
-    config_fragments: list[Path] = Field(default_factory=list)
+    config_lines: list[str] = Field(default_factory=list)
 
     def effective_required_tools(self) -> list[str]:
         tools = ["make"]
@@ -132,6 +132,11 @@ class BuildProfile(ConfigModel):
     @classmethod
     def validate_make_variables(cls, value: dict[str, str]) -> dict[str, str]:
         return validate_make_variable_map(value)
+
+    @field_validator("config_lines")
+    @classmethod
+    def validate_config_lines(cls, value: list[str]) -> list[str]:
+        return validate_config_line_tokens(value)
 
 
 class TestCommand(ConfigModel):
@@ -240,11 +245,17 @@ class TargetProfile(ConfigModel):
 
 class BuildOverrides(ConfigModel):
     make_variables: dict[str, str] = Field(default_factory=dict)
+    config_lines: list[str] = Field(default_factory=list)
 
     @field_validator("make_variables")
     @classmethod
     def validate_make_variables(cls, value: dict[str, str]) -> dict[str, str]:
         return validate_make_variable_map(value)
+
+    @field_validator("config_lines")
+    @classmethod
+    def validate_config_lines(cls, value: list[str]) -> list[str]:
+        return validate_config_line_tokens(value)
 
 
 class BootOverrides(ConfigModel):
