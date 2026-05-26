@@ -11,12 +11,18 @@ from linux_debug_mcp.safety.secrets import SecretReference
 
 _SAFE_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _KERNEL_ARG_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:=,/-]*$")
+_MAKE_VAR_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def validate_kernel_arg_tokens(value: list[str]) -> list[str]:
+    seen_keys: set[str] = set()
     for token in value:
         if not _KERNEL_ARG_PATTERN.match(token):
             raise ValueError(f"unsafe kernel argument token: {token!r}")
+        key = token.split("=", 1)[0] if "=" in token else token
+        if key in seen_keys:
+            raise ValueError(f"duplicate kernel argument key: {key!r}")
+        seen_keys.add(key)
     return value
 
 
@@ -32,11 +38,10 @@ def merge_kernel_args(base: list[str], override: list[str]) -> list[str]:
 
 def validate_make_variable_map(value: dict[str, str]) -> dict[str, str]:
     reserved = {"O", "ARCH", "KBUILD_OUTPUT"}
-    name_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     for key, item in value.items():
         if key in reserved:
             raise ValueError(f"make variable {key} is provider-owned")
-        if not name_pattern.match(key):
+        if not _MAKE_VAR_NAME_PATTERN.match(key):
             raise ValueError(f"make variable {key} is not a simple make variable name")
         if any(unicodedata.category(char) == "Cc" for char in item):
             raise ValueError(f"make variable {key} contains a control character")
@@ -231,6 +236,7 @@ class BootOverrides(ConfigModel):
     @field_validator("rootfs_source")
     @classmethod
     def validate_rootfs_source(cls, value: str | None) -> str | None:
+        # Structural check only; path-safety (existence, overlap, metacharacters) is enforced at handler time.
         if value is not None and (not value or _has_control_character(value)):
             raise ValueError("rootfs_source must be non-empty and free of control characters")
         return value

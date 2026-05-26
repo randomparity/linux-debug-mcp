@@ -22,6 +22,11 @@ def test_kernel_args_rejects_unsafe_tokens(token):
         BootOverrides(kernel_args=[token])
 
 
+def test_kernel_args_rejects_duplicate_keys_in_same_list():
+    with pytest.raises(ValueError, match="duplicate kernel argument key"):
+        BootOverrides(kernel_args=["dhash_entries=1", "dhash_entries=2"])
+
+
 def test_target_profile_kernel_args_validated():
     with pytest.raises(ValueError):
         TargetProfile(name="t", architecture="x86_64", kernel_args=["bad;arg"])
