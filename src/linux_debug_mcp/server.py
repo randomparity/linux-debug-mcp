@@ -147,7 +147,10 @@ def _running_build_response(*, run_id: str, result: StepResult) -> ToolResponse:
     )
 
 
-def _build_profile_from_manifest(profile_name: str) -> BuildProfile:
+def _build_profile_from_manifest(manifest: RunManifest) -> BuildProfile:
+    if manifest.resolved_build_profile is not None:
+        return manifest.resolved_build_profile
+    profile_name = manifest.request.build_profile
     try:
         return DEFAULT_BUILD_PROFILES[profile_name]
     except KeyError as exc:
@@ -733,7 +736,7 @@ def kernel_build_handler(
     try:
         source_path = validate_source_path(Path(manifest.request.source_path))
         store = ArtifactStore(artifact_root, source_paths=[source_path], create_root=False)
-        profile = _build_profile_from_manifest(requested_profile)
+        profile = _build_profile_from_manifest(manifest)
         provider = provider or LocalKernelBuildProvider()
         run_dir = store.run_dir(run_id)
         plan = provider.plan_build(source_path=source_path, output_path=run_dir / "build", profile=profile)

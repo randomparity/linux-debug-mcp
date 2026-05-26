@@ -373,3 +373,38 @@ def test_create_run_rejects_unknown_base_profile(tmp_path):
     assert response.error.category.value == "configuration_error"
     # fail-fast: no run directory/manifest created on a bad base profile
     assert list((tmp_path / "runs").glob("*/manifest.json")) == []
+
+
+def test_build_reads_resolved_profile_not_global(tmp_path):
+    src = make_source_tree(tmp_path)
+    created = server.create_run_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=str(src),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        build_overrides=BuildOverrides(make_variables={"CC": "clang"}),
+    )
+    assert created.ok
+    run_id = created.run_id
+    store = server.ArtifactStore(tmp_path / "runs", create_root=False)
+    manifest = store.load_manifest(run_id)
+    resolved = server._build_profile_from_manifest(manifest)
+    assert resolved.make_variables == {"CC": "clang"}
+
+
+def test_build_profile_from_manifest_v1_fallback():
+    from linux_debug_mcp.artifacts.manifest import RunManifest
+    from linux_debug_mcp.domain import RunRequest
+
+    manifest = RunManifest.create(
+        run_id="r",
+        request=RunRequest(
+            source_path="/s",
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+        ),
+    )  # resolved_build_profile is None
+    resolved = server._build_profile_from_manifest(manifest)
+    assert resolved.name == "x86_64-default"
