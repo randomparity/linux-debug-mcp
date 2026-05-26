@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+from conftest import make_source_tree
 
 from linux_debug_mcp.config import BootOverrides, ServerConfig
 from linux_debug_mcp.server import (
@@ -10,14 +11,6 @@ from linux_debug_mcp.server import (
     create_run_handler,
     load_server_config,
 )
-
-
-def make_source_tree(tmp_path: Path) -> Path:
-    source = tmp_path / "linux"
-    source.mkdir()
-    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
-    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
-    return source
 
 
 def make_sensitive_rootfs(tmp_path: Path) -> tuple[Path, Path]:

@@ -1,19 +1,13 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from conftest import make_source_tree
+
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import RootfsProfile, TargetProfile
 from linux_debug_mcp.domain import ArtifactRef, StepResult, StepStatus
 from linux_debug_mcp.providers.libvirt_qemu import BootExecutionResult
 from linux_debug_mcp.server import create_run_handler, target_boot_handler
-
-
-def make_source_tree(tmp_path: Path) -> Path:
-    source = tmp_path / "linux"
-    source.mkdir()
-    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
-    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
-    return source
 
 
 def build_spec() -> dict[str, object]:

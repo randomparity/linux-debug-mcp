@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from conftest import make_source_tree
+
 from linux_debug_mcp import server
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import BootOverrides, BuildOverrides
@@ -17,14 +19,6 @@ from linux_debug_mcp.server import (
 
 def _get_tool_fn(app, name):
     return app._tool_manager._tools[name].fn
-
-
-def make_source_tree(tmp_path: Path) -> Path:
-    source = tmp_path / "linux"
-    source.mkdir()
-    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
-    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
-    return source
 
 
 def create_test_run(tmp_path: Path, run_id: str = "run-abc123") -> tuple[Path, Path]:

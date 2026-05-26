@@ -1,30 +1,11 @@
 import threading
 from pathlib import Path
 
+from conftest import NoopBuildRunner as NoopRunner
+from conftest import add_merge_config_script, make_source_tree
+
 from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
 from linux_debug_mcp.server import create_run_handler, kernel_build_handler
-
-
-class NoopRunner:
-    def __init__(self) -> None:
-        self.commands: list[list[str]] = []
-
-    def which(self, command: str) -> str | None:
-        return f"/usr/bin/{command}"
-
-    def run(
-        self,
-        argv: list[str],
-        *,
-        timeout: int,
-        log_path: Path,
-        env: dict[str, str],
-        cwd: Path | None = None,
-    ) -> int:
-        self.commands.append(argv)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text("ok\n", encoding="utf-8")
-        return 0
 
 
 class BlockingRunner(NoopRunner):
@@ -101,17 +82,8 @@ class TransientManifestLockRunner(NoopRunner):
         return result
 
 
-def make_source_tree(tmp_path: Path) -> Path:
-    source = tmp_path / "linux"
-    source.mkdir()
-    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
-    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
-    (source / ".config").write_text("CONFIG_TEST=y\n", encoding="utf-8")
-    return source
-
-
 def create_run(tmp_path: Path, *, build_profile: str = "x86_64-default") -> tuple[Path, Path]:
-    source = make_source_tree(tmp_path)
+    source = make_source_tree(tmp_path, with_config=True)
     artifact_root = tmp_path / "runs"
     create_run_handler(
         artifact_root=artifact_root,
@@ -157,7 +129,7 @@ def test_kernel_build_rejects_missing_manifest_profile(tmp_path: Path) -> None:
     from linux_debug_mcp.artifacts.store import ArtifactStore
     from linux_debug_mcp.domain import RunRequest
 
-    source = make_source_tree(tmp_path)
+    source = make_source_tree(tmp_path, with_config=True)
     artifact_root = tmp_path / "runs"
     store = ArtifactStore(artifact_root, source_paths=[source])
     store.create_run(
@@ -218,7 +190,7 @@ def test_kernel_build_failure_response_includes_artifacts(tmp_path: Path) -> Non
 def test_kernel_build_response_redacts_secret_make_variable(tmp_path: Path) -> None:
     from linux_debug_mcp.config import BuildOverrides
 
-    source = make_source_tree(tmp_path)
+    source = make_source_tree(tmp_path, with_config=True)
     artifact_root = tmp_path / "runs"
     created = create_run_handler(
         artifact_root=artifact_root,
@@ -372,9 +344,8 @@ def test_kernel_build_retries_terminal_result_write_after_transient_manifest_loc
 def test_build_applies_config_lines_before_main_make(tmp_path: Path) -> None:
     from linux_debug_mcp.config import BuildOverrides
 
-    source = make_source_tree(tmp_path)
-    (source / "scripts" / "kconfig").mkdir(parents=True)
-    (source / "scripts" / "kconfig" / "merge_config.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    source = make_source_tree(tmp_path, with_config=True)
+    add_merge_config_script(source)
     artifact_root = tmp_path / "runs"
     created = create_run_handler(
         artifact_root=artifact_root,

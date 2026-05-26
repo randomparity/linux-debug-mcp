@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import pytest
+from conftest import make_source_tree
 
 from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
 from linux_debug_mcp.domain import RunRequest, StepResult, StepStatus
@@ -15,14 +16,6 @@ def request(run_id: str | None = None) -> RunRequest:
         rootfs_profile="minimal",
         run_id=run_id,
     )
-
-
-def make_source_tree(tmp_path: Path) -> Path:
-    source = tmp_path / "linux"
-    source.mkdir()
-    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
-    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
-    return source
 
 
 def test_create_run_workspace_and_manifest(tmp_path: Path) -> None:

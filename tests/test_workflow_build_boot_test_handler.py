@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from conftest import NoopBuildRunner as _NoopBuildRunner
+from conftest import make_source_tree
+
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import (
     BootOverrides,
@@ -251,30 +254,6 @@ def test_workflow_creates_missing_supplied_run_id_exactly(tmp_path: Path, monkey
 # ---------------------------------------------------------------------------
 
 
-class _NoopBuildRunner:
-    """Fake subprocess runner that records invocations and creates the log."""
-
-    def __init__(self) -> None:
-        self.commands: list[list[str]] = []
-
-    def which(self, command: str) -> str | None:
-        return f"/usr/bin/{command}"
-
-    def run(
-        self,
-        argv: list[str],
-        *,
-        timeout: int,
-        log_path: Path,
-        env: dict[str, str],
-        cwd: Path | None = None,
-    ) -> int:
-        self.commands.append(argv)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text("ok\n", encoding="utf-8")
-        return 0
-
-
 @dataclass
 class _FakeBootPlan:
     run_id: str
@@ -359,16 +338,6 @@ class _FakeTestProvider:
         )
 
 
-def _make_e2e_source_tree(tmp_path: Path) -> Path:
-    """Build a minimal Linux source tree with a developer .config."""
-    source = tmp_path / "linux"
-    source.mkdir(parents=True)
-    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
-    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
-    (source / ".config").write_text("CONFIG_TEST=y\n", encoding="utf-8")
-    return source
-
-
 def _make_e2e_profiles(
     tmp_path: Path,
 ) -> tuple[
@@ -408,7 +377,7 @@ def _make_e2e_profiles(
 def test_override_flow_end_to_end(tmp_path: Path) -> None:
     """End-to-end: create_run overrides → attempt 1 → attempt 2 (no accumulation) → build reused → run_tests ok."""
     run_id = "run-override-e2e"
-    source = _make_e2e_source_tree(tmp_path)
+    source = make_source_tree(tmp_path, with_config=True)
     artifact_root = tmp_path / "runs"
     target_profiles, rootfs_profiles, test_suites = _make_e2e_profiles(tmp_path)
 
