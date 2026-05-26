@@ -4,7 +4,9 @@ from linux_debug_mcp.config import (
     BootOverrides,
     BuildOverrides,
     TargetProfile,
+    merge_config_lines,
     merge_kernel_args,
+    validate_config_line_tokens,
 )
 
 
@@ -46,3 +48,54 @@ def test_merge_kernel_args_dedups_by_key():
 
 def test_merge_kernel_args_dedups_bare_flag():
     assert merge_kernel_args(["nokaslr", "ro"], ["nokaslr"]) == ["ro", "nokaslr"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "CONFIG_DEBUG_INFO=y",
+        "CONFIG_FOO=m",
+        "# CONFIG_BAR is not set",
+        "CONFIG_NR_CPUS=8",
+        "CONFIG_DELAY=-1",
+        "CONFIG_BASE=0x1000",
+        'CONFIG_CMDLINE="console=ttyS0 nokaslr"',
+    ],
+)
+def test_validate_config_line_accepts_valid_grammar(line: str) -> None:
+    assert validate_config_line_tokens([line]) == [line]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "CONFIG_FOO",  # no value
+        "CONFIG_FOO=maybe",  # not y/m/n/int/hex/string
+        "CONFIG_foo=y",  # lowercase symbol
+        "CONFIG_FOO=y; rm -rf /",  # shell injection
+        "rm -rf /",  # not a config line
+        "# CONFIG_FOO is unset",  # wrong "is not set" phrasing
+        'CONFIG_X="bad\nnewline"',  # embedded newline
+        "CONFIG_FOO=y\nCONFIG_BAR=y",  # multi-line single token
+    ],
+)
+def test_validate_config_line_rejects_invalid_grammar(line: str) -> None:
+    with pytest.raises(ValueError, match="invalid kernel config line"):
+        validate_config_line_tokens([line])
+
+
+def test_merge_config_lines_last_wins_by_symbol() -> None:
+    base = ["CONFIG_A=y", "CONFIG_B=m"]
+    override = ["CONFIG_B=n", "CONFIG_C=y"]
+    assert merge_config_lines(base, override) == ["CONFIG_A=y", "CONFIG_B=n", "CONFIG_C=y"]
+
+
+def test_merge_config_lines_override_can_unset_base_symbol() -> None:
+    base = ["CONFIG_A=y"]
+    override = ["# CONFIG_A is not set"]
+    assert merge_config_lines(base, override) == ["# CONFIG_A is not set"]
+
+
+def test_merge_config_lines_empty_override_returns_base() -> None:
+    base = ["CONFIG_A=y"]
+    assert merge_config_lines(base, []) == ["CONFIG_A=y"]

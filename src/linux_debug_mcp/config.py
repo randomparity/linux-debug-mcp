@@ -12,6 +12,9 @@ from linux_debug_mcp.safety.secrets import SecretReference
 _SAFE_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _KERNEL_ARG_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:=,/-]*$")
 _MAKE_VAR_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_CONFIG_LINE_PATTERN = re.compile(
+    r'^(?:CONFIG_[A-Z0-9_]+=(?:[ymn]|-?\d+|0x[0-9A-Fa-f]+|"[^"\n]*")|# CONFIG_[A-Z0-9_]+ is not set)$'
+)
 
 
 def validate_kernel_arg_tokens(value: list[str]) -> list[str]:
@@ -32,6 +35,26 @@ def merge_kernel_args(base: list[str], override: list[str]) -> list[str]:
 
     override_keys = {key_of(token) for token in override}
     merged = [token for token in base if key_of(token) not in override_keys]
+    merged.extend(override)
+    return merged
+
+
+def validate_config_line_tokens(value: list[str]) -> list[str]:
+    for line in value:
+        if not _CONFIG_LINE_PATTERN.match(line):
+            raise ValueError(f"invalid kernel config line: {line!r}")
+    return value
+
+
+def _config_symbol(line: str) -> str:
+    if line.startswith("# CONFIG_"):
+        return line[len("# ") :].split(" ", 1)[0]
+    return line.split("=", 1)[0]
+
+
+def merge_config_lines(base: list[str], override: list[str]) -> list[str]:
+    override_symbols = {_config_symbol(line) for line in override}
+    merged = [line for line in base if _config_symbol(line) not in override_symbols]
     merged.extend(override)
     return merged
 
