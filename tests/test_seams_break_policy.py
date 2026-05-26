@@ -1,0 +1,100 @@
+import pytest
+
+from linux_debug_mcp.seams.break_policy import BreakPlanError, ReferenceBreakPolicy
+from linux_debug_mcp.seams.target import ConsoleKind, PlatformMetadata
+from linux_debug_mcp.transport.base import BreakMethod, LineRole, TransportRef
+
+
+def _platform(*, ssh: bool, console: ConsoleKind = ConsoleKind.UART) -> PlatformMetadata:
+    return PlatformMetadata(
+        console_kind=console,
+        console_count=1,
+        dedicated_debug_line=False,
+        ssh_reachable=ssh,
+    )
+
+
+def _channel(role: LineRole, caps: list[str]) -> TransportRef:
+    return TransportRef(provider="p", channel_id=f"{role}-0", line_role=role, caps=caps)
+
+
+def test_rsp_channel_yields_gdbstub_native():
+    policy = ReferenceBreakPolicy()
+    plan = policy.plan(
+        channel=_channel(LineRole.RSP, ["provides_rsp"]),
+        platform=_platform(ssh=False),
+    )
+    assert plan.method is BreakMethod.GDBSTUB_NATIVE
+    assert plan.channel_id == "rsp-0"
+
+
+def test_dedicated_debug_uart_break():
+    policy = ReferenceBreakPolicy()
+    plan = policy.plan(
+        channel=_channel(LineRole.DEDICATED_DEBUG, ["provides_console", "supports_uart_break"]),
+        platform=_platform(ssh=False),
+    )
+    assert plan.method is BreakMethod.UART_BREAK
+
+
+def test_shared_console_with_uart_break_and_no_ssh_admits_agent_proxy_break():
+    # Contract §4.1 boundary case: this MUST be admitted via agent_proxy_break.
+    policy = ReferenceBreakPolicy()
+    plan = policy.plan(
+        channel=_channel(LineRole.SHARED_CONSOLE, ["provides_console", "supports_uart_break"]),
+        platform=_platform(ssh=False),
+    )
+    assert plan.method is BreakMethod.AGENT_PROXY_BREAK
+
+
+def test_shared_console_without_uart_break_and_no_ssh_has_no_plan():
+    # Contract §4.1: no predicate holds -> no_break_plan (NOT break_disproved).
+    policy = ReferenceBreakPolicy()
+    with pytest.raises(BreakPlanError) as excinfo:
+        policy.plan(
+            channel=_channel(LineRole.SHARED_CONSOLE, ["provides_console"]),
+            platform=_platform(ssh=False),
+        )
+    assert excinfo.value.code == "no_break_plan"
+
+
+def test_line_native_preferred_over_ssh_fallback():
+    # dedicated_debug + uart_break AND ssh_reachable -> uart_break wins over sysrq_g.
+    policy = ReferenceBreakPolicy()
+    plan = policy.plan(
+        channel=_channel(LineRole.DEDICATED_DEBUG, ["provides_console", "supports_uart_break"]),
+        platform=_platform(ssh=True),
+    )
+    assert plan.method is BreakMethod.UART_BREAK
+
+
+def test_disproof_falls_back_to_next_candidate():
+    # gdbstub_native disproved (RSP unreachable) but ssh present -> sysrq_g.
+    policy = ReferenceBreakPolicy()
+    plan = policy.plan(
+        channel=_channel(LineRole.RSP, ["provides_rsp"]),
+        platform=_platform(ssh=True),
+        disproved={BreakMethod.GDBSTUB_NATIVE},
+    )
+    assert plan.method is BreakMethod.SYSRQ_G
+
+
+def test_every_candidate_disproved_is_break_disproved():
+    # Sole candidate sysrq_g, positively disproved -> break_disproved (NOT no_break_plan).
+    policy = ReferenceBreakPolicy()
+    with pytest.raises(BreakPlanError) as excinfo:
+        policy.plan(
+            channel=_channel(LineRole.SHARED_CONSOLE, ["provides_console"]),
+            platform=_platform(ssh=True),
+            disproved={BreakMethod.SYSRQ_G},
+        )
+    assert excinfo.value.code == "break_disproved"
+
+
+def test_hvc_console_with_ssh_uses_sysrq_g():
+    policy = ReferenceBreakPolicy()
+    plan = policy.plan(
+        channel=_channel(LineRole.SHARED_CONSOLE, ["provides_console"]),
+        platform=_platform(ssh=True, console=ConsoleKind.HVC),
+    )
+    assert plan.method is BreakMethod.SYSRQ_G
