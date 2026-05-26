@@ -459,6 +459,10 @@ def create_run_handler(
     try:
         resolved_build, _resolved_target, _resolved_rootfs = _resolve_initial_profiles(
             source_path=Path(resolved_source_path),
+            # No ServerConfig is loaded at runtime (out of scope; see the design doc's "Out of
+            # scope"), so there are no operator-configured sensitive paths to enforce here. The
+            # built-in validate_rootfs_source guards (reject /, $HOME, non-file, source-tree
+            # overlap, shell/control chars, symlink-resolved) still apply.
             sensitive_paths=[],
             build_profile=build_profile,
             target_profile=target_profile,
@@ -908,6 +912,8 @@ def target_boot_handler(
                 validated = validate_rootfs_source(
                     Path(effective_boot_overrides.rootfs_source),
                     source_paths=[Path(manifest.request.source_path)],
+                    # No ServerConfig is loaded (see create_run_handler), so there are no
+                    # operator-configured sensitive paths; the built-in guards still apply.
                     sensitive_paths=[],
                 )
                 resolved_rootfs_profile = resolved_rootfs_profile.model_copy(update={"source": str(validated)})

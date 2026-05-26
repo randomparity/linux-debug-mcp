@@ -18,7 +18,7 @@ def test_kernel_args_accepts_safe_tokens():
 
 @pytest.mark.parametrize(
     "token",
-    ["foo; rm -rf /", "a b", "x=$(id)", 'quote="bad"', "tab\tval", "pipe|x"],
+    ["foo; rm -rf /", "a b", "x=$(id)", 'quote="bad"', "tab\tval", "pipe|x", "nokaslr\n", "console=ttyS0\r"],
 )
 def test_kernel_args_rejects_unsafe_tokens(token):
     with pytest.raises(ValueError):
@@ -39,6 +39,11 @@ def test_build_overrides_make_variables_reuse_existing_rules():
     BuildOverrides(make_variables={"CC": "clang"})
     with pytest.raises(ValueError):
         BuildOverrides(make_variables={"O": "x"})  # reserved, provider-owned
+
+
+def test_make_variable_name_rejects_trailing_newline():
+    with pytest.raises(ValueError):
+        BuildOverrides(make_variables={"CC\n": "clang"})
 
 
 def test_merge_kernel_args_dedups_by_key():
@@ -79,11 +84,22 @@ def test_validate_config_line_accepts_valid_grammar(line: str) -> None:
         'CONFIG_X="bad\nnewline"',  # embedded newline
         'CONFIG_X="bad\rcarriage"',  # embedded carriage return
         "CONFIG_FOO=y\nCONFIG_BAR=y",  # multi-line single token
+        "CONFIG_FOO=y\n",  # trailing newline (must not slip past the anchor)
     ],
 )
 def test_validate_config_line_rejects_invalid_grammar(line: str) -> None:
     with pytest.raises(ValueError, match="invalid kernel config line"):
         validate_config_line_tokens([line])
+
+
+def test_validate_config_line_rejects_duplicate_symbol() -> None:
+    with pytest.raises(ValueError, match="duplicate kernel config symbol"):
+        validate_config_line_tokens(["CONFIG_A=y", "CONFIG_A=n"])
+
+
+def test_validate_config_line_rejects_duplicate_unset_symbol() -> None:
+    with pytest.raises(ValueError, match="duplicate kernel config symbol"):
+        validate_config_line_tokens(["CONFIG_A=y", "# CONFIG_A is not set"])
 
 
 def test_merge_config_lines_last_wins_by_symbol() -> None:

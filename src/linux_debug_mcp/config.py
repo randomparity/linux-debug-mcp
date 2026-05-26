@@ -9,11 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 
 from linux_debug_mcp.safety.secrets import SecretReference
 
-_SAFE_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_KERNEL_ARG_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:=,/-]*$")
-_MAKE_VAR_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SAFE_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+_KERNEL_ARG_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:=,/-]*\Z")
+_MAKE_VAR_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 _CONFIG_LINE_PATTERN = re.compile(
-    r'^(?:CONFIG_[A-Z0-9_]+=(?:[ymn]|-?\d+|0x[0-9A-Fa-f]+|"[^"\n\r]*")|# CONFIG_[A-Z0-9_]+ is not set)$'
+    r'^(?:CONFIG_[A-Z0-9_]+=(?:[ymn]|-?\d+|0x[0-9A-Fa-f]+|"[^"\n\r]*")|# CONFIG_[A-Z0-9_]+ is not set)\Z'
 )
 
 
@@ -40,9 +40,14 @@ def merge_kernel_args(base: list[str], override: list[str]) -> list[str]:
 
 
 def validate_config_line_tokens(value: list[str]) -> list[str]:
+    seen_symbols: set[str] = set()
     for line in value:
         if not _CONFIG_LINE_PATTERN.match(line):
             raise ValueError(f"invalid kernel config line: {line!r}")
+        symbol = _config_symbol(line)
+        if symbol in seen_symbols:
+            raise ValueError(f"duplicate kernel config symbol: {symbol!r}")
+        seen_symbols.add(symbol)
     return value
 
 
