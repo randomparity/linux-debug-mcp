@@ -405,3 +405,114 @@ def test_run_tests_uses_boot_attempt_rootfs_profile(tmp_path: Path) -> None:
     assert response.ok is True
     assert provider.planned_rootfs is not None
     assert provider.planned_rootfs.source == "/alt/rootfs.qcow2"
+
+
+def _record_two_succeeded_attempts(artifact_root: Path, run_id: str) -> None:
+    """Record attempt 1 (source /first) then attempt 2 (source /second), both succeeded."""
+    store = ArtifactStore(artifact_root, create_root=False)
+    for index, source in ((1, "/first/rootfs.qcow2"), (2, "/second/rootfs.qcow2")):
+        store.record_boot_attempt(
+            run_id,
+            attempt=BootAttempt(
+                attempt=index,
+                resolved_target_profile=TargetProfile(name="local-qemu", architecture="x86_64"),
+                resolved_rootfs_profile=RootfsProfile(
+                    name="minimal", source=source, ssh_host="127.0.0.1", ssh_user="root"
+                ),
+                status=StepStatus.SUCCEEDED,
+            ),
+            boot_result=StepResult(step_name="boot", status=StepStatus.SUCCEEDED, summary="booted"),
+        )
+
+
+def test_run_tests_attempt_selector_binds_to_chosen_attempt(tmp_path: Path) -> None:
+    artifact_root = create_booted_run(tmp_path)
+    _record_two_succeeded_attempts(artifact_root, "run-abc123")
+    provider = FakeTestProvider()
+
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=provider,
+        attempt=1,
+        rootfs_profiles={"minimal": rootfs(tmp_path)},
+        test_suites=suites(),
+    )
+
+    assert response.ok is True
+    assert provider.planned_rootfs is not None
+    assert provider.planned_rootfs.source == "/first/rootfs.qcow2"
+
+
+def test_run_tests_attempt_omitted_binds_to_latest(tmp_path: Path) -> None:
+    artifact_root = create_booted_run(tmp_path)
+    _record_two_succeeded_attempts(artifact_root, "run-abc123")
+    provider = FakeTestProvider()
+
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=provider,
+        rootfs_profiles={"minimal": rootfs(tmp_path)},
+        test_suites=suites(),
+    )
+
+    assert response.ok is True
+    assert provider.planned_rootfs is not None
+    assert provider.planned_rootfs.source == "/second/rootfs.qcow2"
+
+
+def test_run_tests_rejects_nonexistent_attempt(tmp_path: Path) -> None:
+    artifact_root = create_booted_run(tmp_path)
+    _record_two_succeeded_attempts(artifact_root, "run-abc123")
+    provider = FakeTestProvider()
+
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=provider,
+        attempt=99,
+        rootfs_profiles={"minimal": rootfs(tmp_path)},
+        test_suites=suites(),
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert provider.executions == 0
+
+
+def test_run_tests_rejects_non_succeeded_attempt(tmp_path: Path) -> None:
+    artifact_root = create_booted_run(tmp_path)
+    run_id = "run-abc123"
+    store = ArtifactStore(artifact_root, create_root=False)
+    # Attempt 1 failed, attempt 2 succeeded: the boot step is SUCCEEDED (latest), but
+    # selecting the failed attempt 1 must be rejected.
+    for index, status in ((1, StepStatus.FAILED), (2, StepStatus.SUCCEEDED)):
+        store.record_boot_attempt(
+            run_id,
+            attempt=BootAttempt(
+                attempt=index,
+                resolved_target_profile=TargetProfile(name="local-qemu", architecture="x86_64"),
+                resolved_rootfs_profile=RootfsProfile(
+                    name="minimal", source=f"/r{index}.qcow2", ssh_host="127.0.0.1", ssh_user="root"
+                ),
+                status=status,
+            ),
+            boot_result=StepResult(step_name="boot", status=status, summary="boot"),
+        )
+    provider = FakeTestProvider()
+
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=provider,
+        attempt=1,
+        rootfs_profiles={"minimal": rootfs(tmp_path)},
+        test_suites=suites(),
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert provider.executions == 0

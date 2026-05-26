@@ -380,6 +380,22 @@ def _validate_adhoc_commands(commands: list[list[str]] | None) -> list[TestComma
     return validated
 
 
+def _select_boot_attempt(boot_attempts: list[BootAttempt], attempt: int | None) -> BootAttempt:
+    """Return the boot attempt tests should bind to (default: the latest recorded attempt).
+
+    Raises ValueError if an explicitly requested attempt does not exist or did not succeed.
+    """
+    if attempt is None:
+        return boot_attempts[-1]
+    selected = next((record for record in boot_attempts if record.attempt == attempt), None)
+    if selected is None:
+        available = sorted(record.attempt for record in boot_attempts)
+        raise ValueError(f"boot attempt {attempt} not found; recorded attempts: {available}")
+    if selected.status != StepStatus.SUCCEEDED:
+        raise ValueError(f"boot attempt {attempt} did not succeed (status: {selected.status})")
+    return selected
+
+
 def _resolve_initial_profiles(
     *,
     source_path: Path,
@@ -1122,6 +1138,7 @@ def target_run_tests_handler(
     test_suite: str | None = None,
     commands: list[list[str]] | None = None,
     force_rerun: bool = False,
+    attempt: int | None = None,
     provider: LocalSshTestProvider | None = None,
     rootfs_profiles: dict[str, RootfsProfile] | None = None,
     test_suites: dict[str, TestSuiteProfile] | None = None,
@@ -1157,7 +1174,14 @@ def target_run_tests_handler(
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
     test_suites = test_suites if test_suites is not None else DEFAULT_TEST_SUITES
     if manifest.boot_attempts:
-        resolved_rootfs_profile = manifest.boot_attempts[-1].resolved_rootfs_profile
+        try:
+            resolved_rootfs_profile = _select_boot_attempt(manifest.boot_attempts, attempt).resolved_rootfs_profile
+        except ValueError as exc:
+            return _configuration_failure(run_id=run_id, message=str(exc))
+    elif attempt is not None:
+        return _configuration_failure(
+            run_id=run_id, message=f"boot attempt {attempt} not found: no boot attempts recorded for this run"
+        )
     else:
         try:
             resolved_rootfs_profile = rootfs_profiles[manifest.request.rootfs_profile]
@@ -2718,6 +2742,7 @@ def create_app() -> FastMCP:
         test_suite: str | None = None,
         commands: list[list[str]] | None = None,
         force_rerun: bool = False,
+        attempt: int | None = None,
     ) -> dict[str, Any]:
         return target_run_tests_handler(
             artifact_root=Path(artifact_root),
@@ -2725,6 +2750,7 @@ def create_app() -> FastMCP:
             test_suite=test_suite,
             commands=commands,
             force_rerun=force_rerun,
+            attempt=attempt,
         ).model_dump(mode="json")
 
     @app.tool(name="artifacts.collect")
