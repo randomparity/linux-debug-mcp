@@ -13,6 +13,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from linux_debug_mcp.artifacts.manifest import BootAttempt, RunManifest
+from linux_debug_mcp.config import BuildProfile
 from linux_debug_mcp.domain import ErrorCategory, RunRequest, StepResult
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_artifact_root, validate_run_id
 
@@ -52,8 +53,7 @@ class ArtifactStore:
         self,
         request: RunRequest,
         *,
-        resolved_build_profile: object | None = None,
-        boot_attempts: list[BootAttempt] | None = None,
+        resolved_build_profile: BuildProfile | None = None,
     ) -> RunManifest:
         run_id = self._validate_run_id(request.run_id or self._generate_run_id())
         run_dir = self._run_dir(run_id)
@@ -71,7 +71,6 @@ class ArtifactStore:
                 run_id=run_id,
                 request=request.model_copy(update={"run_id": run_id}),
                 resolved_build_profile=resolved_build_profile,
-                boot_attempts=boot_attempts,
             )
             self._write_manifest(run_dir, manifest)
         except FileExistsError as exc:

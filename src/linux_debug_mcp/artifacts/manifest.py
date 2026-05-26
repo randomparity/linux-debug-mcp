@@ -36,13 +36,11 @@ class RunManifest(Model):
         run_id: str,
         request: RunRequest,
         resolved_build_profile: BuildProfile | None = None,
-        boot_attempts: list[BootAttempt] | None = None,
     ) -> RunManifest:
         return cls(
             run_id=run_id,
             request=request,
             resolved_build_profile=resolved_build_profile,
-            boot_attempts=boot_attempts or [],
             steps=[
                 RunStep(name="create_run", status=StepStatus.SUCCEEDED, provider="local-artifacts"),
                 RunStep(name="build", status=StepStatus.PENDING),
