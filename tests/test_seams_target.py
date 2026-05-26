@@ -85,8 +85,6 @@ def test_enums_have_contract_values():
 
 
 def test_kernel_provenance_optional_refs_default_none():
-    prov = KernelProvenance(
-        build_id="bid", release="6.9.0", vmlinux_ref="ref", cmdline="ro"
-    )
+    prov = KernelProvenance(build_id="bid", release="6.9.0", vmlinux_ref="ref", cmdline="ro")
     assert prov.modules_ref is None
     assert prov.config_ref is None

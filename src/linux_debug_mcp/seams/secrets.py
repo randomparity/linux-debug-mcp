@@ -47,9 +47,7 @@ class EnvSecretsResolver:
             value = os.environ.get(definition.reference)
             if value is None:
                 if definition.required:
-                    raise SecretsResolutionError(
-                        f"required env secret not set: {definition.reference}"
-                    )
+                    raise SecretsResolutionError(f"required env secret not set: {definition.reference}")
                 continue
             resolved[ref] = value
         return resolved

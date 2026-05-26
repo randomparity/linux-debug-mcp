@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from linux_debug_mcp.seams.target import ConsoleKind, LeaseInfo, PlatformMetadata, TargetKey
+from linux_debug_mcp.seams.target import ConsoleKind, PlatformMetadata, TargetKey
 from linux_debug_mcp.transport.base import (
     DEFAULT_MIN_LEASE_TTL_SECONDS,
     BreakMethod,

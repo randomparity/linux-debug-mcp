@@ -67,8 +67,6 @@ def test_missing_required_env_raises():
 
 def test_missing_optional_env_is_skipped(monkeypatch):
     monkeypatch.delenv("OPT_VAR", raising=False)
-    ref = SecretReference(
-        kind=SecretReferenceKind.ENV, label="opt", reference="OPT_VAR", required=False
-    )
+    ref = SecretReference(kind=SecretReferenceKind.ENV, label="opt", reference="OPT_VAR", required=False)
     resolver = EnvSecretsResolver([ref])
     assert resolver.resolve(["OPT_VAR"]) == {}
