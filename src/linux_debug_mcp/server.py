@@ -9,7 +9,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
-from linux_debug_mcp.artifacts.manifest import RunManifest
+from linux_debug_mcp.artifacts.manifest import BootAttempt, RunManifest
 from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
 from linux_debug_mcp.config import (
     SPRINT_4_DEBUG_OPERATIONS,
@@ -177,11 +177,15 @@ def _record_terminal_build_result(
             delay_seconds *= 2
 
 
+def _redacted_boot_data(data: dict[str, Any]) -> dict[str, Any]:
+    return Redactor().redact_value(data)
+
+
 def _recorded_boot_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
     return ToolResponse.success(
         summary=result.summary,
         run_id=run_id,
-        data=result.details,
+        data=_redacted_boot_data(result.details),
         artifacts=result.artifacts,
         suggested_next_actions=["artifacts.get_manifest"],
     )
@@ -221,7 +225,7 @@ def _running_boot_response(*, run_id: str, result: StepResult, message: str = RU
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         message=message,
         run_id=run_id,
-        details=result.details,
+        details=_redacted_boot_data(result.details),
         artifacts=result.artifacts,
         suggested_next_actions=["artifacts.get_manifest"],
     )
@@ -828,6 +832,7 @@ def target_boot_handler(
     target_profiles: dict[str, TargetProfile] | None = None,
     rootfs_profiles: dict[str, RootfsProfile] | None = None,
     default_libvirt_uri: str | None = None,
+    boot_overrides: BootOverrides | None = None,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -874,6 +879,29 @@ def target_boot_handler(
     if resolved_target_profile.target_ref is None:
         return _configuration_failure(run_id=run_id, message="target profile target_ref is required")
 
+    effective_boot_overrides = boot_overrides
+    if effective_boot_overrides is None and not manifest.boot_attempts:
+        effective_boot_overrides = manifest.request.boot_overrides
+    if effective_boot_overrides is not None:
+        try:
+            if effective_boot_overrides.kernel_args:
+                resolved_target_profile = resolved_target_profile.model_copy(
+                    update={
+                        "kernel_args": merge_kernel_args(
+                            resolved_target_profile.kernel_args, effective_boot_overrides.kernel_args
+                        )
+                    }
+                )
+            if effective_boot_overrides.rootfs_source is not None:
+                validated = validate_rootfs_source(
+                    Path(effective_boot_overrides.rootfs_source),
+                    source_paths=[Path(manifest.request.source_path)],
+                    sensitive_paths=[],
+                )
+                resolved_rootfs_profile = resolved_rootfs_profile.model_copy(update={"source": str(validated)})
+        except (PathSafetyError, ValueError) as exc:
+            return _configuration_failure(run_id=run_id, message=str(exc))
+
     build_result = manifest.step_results.get("build")
     if build_result is None or build_result.status != StepStatus.SUCCEEDED:
         return _configuration_failure(run_id=run_id, message="target boot requires a succeeded build")
@@ -891,13 +919,17 @@ def target_boot_handler(
             },
         )
 
+    has_new_boot_overrides = boot_overrides is not None and (
+        bool(boot_overrides.kernel_args) or boot_overrides.rootfs_source is not None
+    )
+
     existing = manifest.step_results.get("boot")
-    if existing and existing.status == StepStatus.SUCCEEDED and not force_reboot:
+    if existing and existing.status == StepStatus.SUCCEEDED and not force_reboot and not has_new_boot_overrides:
         return _recorded_boot_success_response(run_id=run_id, result=existing)
 
     provider = provider or LibvirtQemuProvider()
 
-    def execute_boot(*, plan: Any, retrying_after_failure: bool, replace_succeeded: bool) -> ToolResponse:
+    def execute_boot(*, plan: Any, retrying_after_failure: bool, replace_succeeded: bool, attempt: int) -> ToolResponse:
         plan_gdbstub_endpoint = getattr(plan, "gdbstub_endpoint", None)
         if plan_gdbstub_endpoint is not None and hasattr(plan_gdbstub_endpoint, "as_dict"):
             plan_gdbstub_endpoint = plan_gdbstub_endpoint.as_dict()
@@ -939,7 +971,7 @@ def target_boot_handler(
                 category=exc.category,
                 message=str(exc),
                 run_id=run_id,
-                details=exc.details,
+                details=_redacted_boot_data(exc.details),
                 artifacts=exc.artifacts,
                 suggested_next_actions=["artifacts.get_manifest"],
             )
@@ -961,7 +993,7 @@ def target_boot_handler(
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 message=failed.summary,
                 run_id=run_id,
-                details=failed.details,
+                details=_redacted_boot_data(failed.details),
                 artifacts=failed.artifacts,
                 suggested_next_actions=["artifacts.get_manifest"],
             )
@@ -972,12 +1004,18 @@ def target_boot_handler(
             artifacts=execution.artifacts,
             details={**execution.details, "kernel_image_path": str(kernel_image.path)},
         )
-        store.record_step_result(run_id, terminal, replace_succeeded=replace_succeeded)
+        attempt_record = BootAttempt(
+            attempt=attempt,
+            resolved_target_profile=resolved_target_profile,
+            resolved_rootfs_profile=resolved_rootfs_profile,
+            status=execution.status,
+        )
+        store.record_boot_attempt(run_id, attempt=attempt_record, boot_result=terminal)
         if execution.status == StepStatus.SUCCEEDED:
             return ToolResponse.success(
                 summary=execution.summary,
                 run_id=run_id,
-                data=terminal.details,
+                data=_redacted_boot_data(terminal.details),
                 artifacts=execution.artifacts,
                 suggested_next_actions=["artifacts.get_manifest"],
             )
@@ -985,7 +1023,7 @@ def target_boot_handler(
             category=execution.error_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
             message=execution.summary,
             run_id=run_id,
-            details={**execution.details, "diagnostic": execution.diagnostic},
+            details=_redacted_boot_data({**execution.details, "diagnostic": execution.diagnostic}),
             artifacts=execution.artifacts,
             suggested_next_actions=["artifacts.get_manifest"],
         )
@@ -994,10 +1032,18 @@ def target_boot_handler(
         with store.boot_lock(run_id):
             locked_manifest = store.load_manifest(run_id)
             locked_existing = locked_manifest.step_results.get("boot")
-            if locked_existing and locked_existing.status == StepStatus.SUCCEEDED and not force_reboot:
+            if (
+                locked_existing
+                and locked_existing.status == StepStatus.SUCCEEDED
+                and not force_reboot
+                and not has_new_boot_overrides
+            ):
                 return _recorded_boot_success_response(run_id=run_id, result=locked_existing)
+            next_attempt = len(locked_manifest.boot_attempts) + 1
             retrying_after_failure = bool(locked_existing and locked_existing.status == StepStatus.FAILED)
-            replace_succeeded = bool(locked_existing and locked_existing.status == StepStatus.SUCCEEDED)
+            replace_succeeded = (
+                bool(locked_existing and locked_existing.status == StepStatus.SUCCEEDED) or has_new_boot_overrides
+            )
             with store.target_lock(resolved_target_profile.target_ref):
                 if locked_existing and locked_existing.status == StepStatus.RUNNING:
                     stale_failed = StepResult(
@@ -1016,6 +1062,7 @@ def target_boot_handler(
                         kernel_image_path=Path(kernel_image.path),
                         target_profile=resolved_target_profile,
                         rootfs_profile=resolved_rootfs_profile,
+                        attempt=next_attempt,
                     )
                 except ProviderBootError as exc:
                     failed = StepResult(
@@ -1030,7 +1077,7 @@ def target_boot_handler(
                         category=exc.category,
                         message=str(exc),
                         run_id=run_id,
-                        details=exc.details,
+                        details=_redacted_boot_data(exc.details),
                         artifacts=exc.artifacts,
                         suggested_next_actions=["artifacts.get_manifest"],
                     )
@@ -1040,6 +1087,7 @@ def target_boot_handler(
                     plan=plan,
                     retrying_after_failure=retrying_after_failure,
                     replace_succeeded=replace_succeeded or force_reboot,
+                    attempt=next_attempt,
                 )
     except ManifestStateError as exc:
         if "boot is locked" in str(exc):
