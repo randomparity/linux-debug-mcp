@@ -67,23 +67,21 @@ class ReferenceBreakPolicy:
 
     def _candidates(self, channel: TransportRef, platform: PlatformMetadata) -> list[BreakMethod]:
         # Insertion order is preference order: line-native first, ssh fallback last.
-        # UART-style breaks (uart_break / agent_proxy_break) send a serial BREAK and are
-        # only executable on a real UART console; hvc/virtio consoles have different BREAK
-        # semantics (contract §4.1: console_kind=hvc → sysrq_g), so they are gated out.
-        uart_break_executable = platform.console_kind is ConsoleKind.UART
+        # `line_role` classifies the *selected* physical line; `console_kind` describes
+        # the target's *primary* console. A dedicated_debug line is a separate reserved
+        # UART, so its uart_break is per-channel and independent of console_kind. The
+        # shared_console line *is* the primary console, so agent_proxy_break (a serial
+        # BREAK on it) is only executable when that console is a UART — hvc/virtio have
+        # different BREAK semantics (contract §4.1: console_kind=hvc → sysrq_g).
         candidates: list[BreakMethod] = []
         if channel.line_role is LineRole.RSP and _PROVIDES_RSP in channel.caps:
             candidates.append(BreakMethod.GDBSTUB_NATIVE)
-        if (
-            uart_break_executable
-            and channel.line_role is LineRole.DEDICATED_DEBUG
-            and _SUPPORTS_UART_BREAK in channel.caps
-        ):
+        if channel.line_role is LineRole.DEDICATED_DEBUG and _SUPPORTS_UART_BREAK in channel.caps:
             candidates.append(BreakMethod.UART_BREAK)
         if (
-            uart_break_executable
-            and channel.line_role is LineRole.SHARED_CONSOLE
+            channel.line_role is LineRole.SHARED_CONSOLE
             and _SUPPORTS_UART_BREAK in channel.caps
+            and platform.console_kind is ConsoleKind.UART
         ):
             candidates.append(BreakMethod.AGENT_PROXY_BREAK)
         if platform.ssh_reachable:

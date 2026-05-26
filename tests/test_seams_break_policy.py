@@ -112,12 +112,13 @@ def test_hvc_shared_console_with_uart_break_still_uses_sysrq_g():
     assert plan.method is BreakMethod.SYSRQ_G
 
 
-def test_hvc_dedicated_debug_with_uart_break_and_no_ssh_has_no_plan():
-    # On HVC, uart_break is not executable and there is no ssh fallback → no_break_plan.
+def test_hvc_primary_console_still_allows_dedicated_uart_debug_line():
+    # console_kind describes the *primary* console; a separate dedicated_debug UART line
+    # can still break even when the primary console is HVC and ssh is unavailable. The
+    # console_kind gate must not leak onto the per-channel dedicated-debug predicate.
     policy = ReferenceBreakPolicy()
-    with pytest.raises(BreakPlanError) as excinfo:
-        policy.plan(
-            channel=_channel(LineRole.DEDICATED_DEBUG, ["provides_console", "supports_uart_break"]),
-            platform=_platform(ssh=False, console=ConsoleKind.HVC),
-        )
-    assert excinfo.value.code == "no_break_plan"
+    plan = policy.plan(
+        channel=_channel(LineRole.DEDICATED_DEBUG, ["provides_console", "supports_uart_break"]),
+        platform=_platform(ssh=False, console=ConsoleKind.HVC),
+    )
+    assert plan.method is BreakMethod.UART_BREAK
