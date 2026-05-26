@@ -1143,13 +1143,16 @@ def target_run_tests_handler(
 
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
     test_suites = test_suites if test_suites is not None else DEFAULT_TEST_SUITES
-    try:
-        resolved_rootfs_profile = rootfs_profiles[manifest.request.rootfs_profile]
-    except KeyError:
-        return _configuration_failure(
-            run_id=run_id,
-            message=f"unknown rootfs profile: {manifest.request.rootfs_profile}",
-        )
+    if manifest.boot_attempts:
+        resolved_rootfs_profile = manifest.boot_attempts[-1].resolved_rootfs_profile
+    else:
+        try:
+            resolved_rootfs_profile = rootfs_profiles[manifest.request.rootfs_profile]
+        except KeyError:
+            return _configuration_failure(
+                run_id=run_id,
+                message=f"unknown rootfs profile: {manifest.request.rootfs_profile}",
+            )
     try:
         suite_profile = test_suites[requested_suite] if requested_suite is not None else None
     except KeyError:
