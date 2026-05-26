@@ -21,6 +21,7 @@ from linux_debug_mcp.config import (
     TargetProfile,
     TestCommand,
     TestSuiteProfile,
+    merge_config_lines,
     merge_kernel_args,
 )
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
@@ -395,12 +396,17 @@ def _resolve_initial_profiles(
 
     # model_copy(update=...) skips field validators, which is safe here: both base and
     # override values were validated at construction (BuildProfile/BootOverrides), and the
-    # merges only union dicts or de-dup pre-validated tokens, so the result stays valid.
+    # merges only union dicts, de-dup kernel-arg tokens by key, or merge config_lines by
+    # symbol (last wins) over already-validated values, so the result stays valid.
     resolved_build = base_build
-    if build_overrides is not None and build_overrides.make_variables:
-        resolved_build = base_build.model_copy(
-            update={"make_variables": {**base_build.make_variables, **build_overrides.make_variables}}
-        )
+    if build_overrides is not None:
+        build_update: dict[str, object] = {}
+        if build_overrides.make_variables:
+            build_update["make_variables"] = {**base_build.make_variables, **build_overrides.make_variables}
+        if build_overrides.config_lines:
+            build_update["config_lines"] = merge_config_lines(base_build.config_lines, build_overrides.config_lines)
+        if build_update:
+            resolved_build = base_build.model_copy(update=build_update)
 
     resolved_target = base_target
     resolved_rootfs = base_rootfs

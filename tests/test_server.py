@@ -395,6 +395,24 @@ def test_create_run_rejects_unknown_base_profile(tmp_path):
     assert list((tmp_path / "runs").glob("*/manifest.json")) == []
 
 
+def test_create_run_freezes_merged_config_lines(tmp_path):
+    source = make_source_tree(tmp_path)
+    response = server.create_run_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        build_overrides=BuildOverrides(config_lines=["CONFIG_DEBUG_INFO=y"]),
+    )
+    assert response.ok
+    run_id = response.run_id
+    store = server.ArtifactStore(tmp_path / "runs", create_root=False)
+    manifest = store.load_manifest(run_id)
+    assert manifest.resolved_build_profile is not None
+    assert manifest.resolved_build_profile.config_lines == ["CONFIG_DEBUG_INFO=y"]
+
+
 def test_build_reads_resolved_profile_not_global(tmp_path):
     src = make_source_tree(tmp_path)
     created = server.create_run_handler(
