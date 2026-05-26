@@ -452,13 +452,35 @@ def test_overrides_from_tool_args_builds_models():
     from linux_debug_mcp.config import BootOverrides, BuildOverrides
 
     build, boot = server._overrides_from_tool_args(
-        kernel_args=["dhash_entries=1"], rootfs_source=None, make_variables={"CC": "clang"}
+        kernel_args=["dhash_entries=1"], rootfs_source=None, make_variables={"CC": "clang"}, config_lines=None
     )
     assert isinstance(build, BuildOverrides) and build.make_variables == {"CC": "clang"}
+    assert build.config_lines == []
     assert isinstance(boot, BootOverrides) and boot.kernel_args == ["dhash_entries=1"]
 
-    none_build, none_boot = server._overrides_from_tool_args(kernel_args=None, rootfs_source=None, make_variables=None)
+    none_build, none_boot = server._overrides_from_tool_args(
+        kernel_args=None, rootfs_source=None, make_variables=None, config_lines=None
+    )
     assert none_build is None and none_boot is None
+
+
+def test_overrides_from_tool_args_builds_config_lines():
+    build_overrides, boot_overrides = server._overrides_from_tool_args(
+        kernel_args=None,
+        rootfs_source=None,
+        make_variables=None,
+        config_lines=["CONFIG_DEBUG_INFO=y"],
+    )
+    assert build_overrides is not None
+    assert build_overrides.config_lines == ["CONFIG_DEBUG_INFO=y"]
+    assert boot_overrides is None
+
+
+def test_overrides_from_tool_args_none_when_no_build_overrides():
+    build_overrides, _ = server._overrides_from_tool_args(
+        kernel_args=["nokaslr"], rootfs_source=None, make_variables=None, config_lines=None
+    )
+    assert build_overrides is None
 
 
 def test_create_run_tool_accepts_overrides_and_rejects_bad_args(tmp_path: Path):
@@ -474,8 +496,12 @@ def test_create_run_tool_accepts_overrides_and_rejects_bad_args(tmp_path: Path):
         artifact_root=str(tmp_path / "runs"),
         kernel_args=["dhash_entries=1"],
         make_variables={"CC": "clang"},
+        config_lines=["CONFIG_DEBUG_INFO=y"],
     )
     assert ok["ok"] is True
+    run_id = ok["run_id"]
+    manifest = server.ArtifactStore(tmp_path / "runs", create_root=False).load_manifest(run_id)
+    assert manifest.resolved_build_profile.config_lines == ["CONFIG_DEBUG_INFO=y"]
 
     bad = tool_fn(
         source_path=str(src),

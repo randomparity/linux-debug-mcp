@@ -2358,8 +2358,13 @@ def _overrides_from_tool_args(
     kernel_args: list[str] | None,
     rootfs_source: str | None,
     make_variables: dict[str, str] | None,
+    config_lines: list[str] | None,
 ) -> tuple[BuildOverrides | None, BootOverrides | None]:
-    build_overrides = BuildOverrides(make_variables=make_variables) if make_variables else None
+    build_overrides = (
+        BuildOverrides(make_variables=make_variables or {}, config_lines=config_lines or [])
+        if (make_variables or config_lines)
+        else None
+    )
     boot_overrides = (
         BootOverrides(kernel_args=kernel_args or [], rootfs_source=rootfs_source)
         if (kernel_args or rootfs_source)
@@ -2396,10 +2401,14 @@ def create_app() -> FastMCP:
         kernel_args: list[str] | None = None,
         rootfs_source: str | None = None,
         make_variables: dict[str, str] | None = None,
+        config_lines: list[str] | None = None,
     ) -> dict[str, Any]:
         try:
             build_overrides, boot_overrides = _overrides_from_tool_args(
-                kernel_args=kernel_args, rootfs_source=rootfs_source, make_variables=make_variables
+                kernel_args=kernel_args,
+                rootfs_source=rootfs_source,
+                make_variables=make_variables,
+                config_lines=config_lines,
             )
         except ValueError as exc:
             return ToolResponse.failure(category=ErrorCategory.CONFIGURATION_ERROR, message=str(exc)).model_dump(
@@ -2694,7 +2703,7 @@ def create_app() -> FastMCP:
     ) -> dict[str, Any]:
         try:
             _build_overrides, boot_overrides = _overrides_from_tool_args(
-                kernel_args=kernel_args, rootfs_source=rootfs_source, make_variables=None
+                kernel_args=kernel_args, rootfs_source=rootfs_source, make_variables=None, config_lines=None
             )
         except ValueError as exc:
             return ToolResponse.failure(category=ErrorCategory.CONFIGURATION_ERROR, message=str(exc)).model_dump(
