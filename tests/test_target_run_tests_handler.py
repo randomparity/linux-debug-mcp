@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from conftest import make_source_tree
+
 from linux_debug_mcp.artifacts.manifest import BootAttempt
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import RootfsProfile, TargetProfile, TestCommand, TestSuiteProfile
@@ -36,14 +38,6 @@ class PlanRejectingProvider(FakeTestProvider):
     def plan_tests(self, **kwargs: object) -> object:
         self.plans.append(kwargs)
         raise ValueError("ConnectTimeout cannot exceed command timeout")
-
-
-def make_source_tree(tmp_path: Path) -> Path:
-    source = tmp_path / "linux"
-    source.mkdir(parents=True)
-    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
-    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
-    return source
 
 
 def create_booted_run(tmp_path: Path, *, run_id: str = "run-abc123", test_suite: str | None = None) -> Path:

@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from conftest import add_merge_config_script
 
 from linux_debug_mcp.config import BuildProfile
 from linux_debug_mcp.domain import ErrorCategory
@@ -406,8 +407,7 @@ def test_source_revision_for_git_tree_records_commit_and_dirty_state(tmp_path: P
 
 def _make_run_dir(tmp_path: Path) -> tuple[Path, Path]:
     source = tmp_path / "linux"
-    (source / "scripts" / "kconfig").mkdir(parents=True)
-    (source / "scripts" / "kconfig" / "merge_config.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    add_merge_config_script(source)
     (source / ".config").write_text("CONFIG_BASE=y\n", encoding="utf-8")
     run_dir = tmp_path / "runs" / "run-1"
     output = run_dir / "build"

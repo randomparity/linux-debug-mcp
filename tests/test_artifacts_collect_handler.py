@@ -1,17 +1,11 @@
 import json
 from pathlib import Path
 
+from conftest import make_source_tree
+
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.domain import ArtifactRef, StepResult, StepStatus
 from linux_debug_mcp.server import artifacts_collect_handler, create_run_handler
-
-
-def make_source_tree(tmp_path: Path) -> Path:
-    source = tmp_path / "linux"
-    source.mkdir(parents=True)
-    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
-    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
-    return source
 
 
 def create_run(tmp_path: Path) -> Path:
