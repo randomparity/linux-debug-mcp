@@ -456,7 +456,10 @@ def test_subprocess_runner_transcript_records_non_timeout_status(tmp_path: Path)
     assert "timed out after 30s" not in transcript
 
 
-@pytest.mark.parametrize("symbol", ["", "bad-name", "bad;name", "bad name", "bad/name"])
+@pytest.mark.parametrize(
+    "symbol",
+    ["", "bad-name", "bad;name", "bad name", "bad/name", "foo\n", "foo\r", "foo\nbar", "foo\x00", "foo\t"],
+)
 def test_symbol_validation_rejects_unsafe_names(tmp_path: Path, symbol: str) -> None:
     provider = QemuGdbstubProvider(runner=FakeGdbRunner())
 
@@ -464,6 +467,13 @@ def test_symbol_validation_rejects_unsafe_names(tmp_path: Path, symbol: str) -> 
         provider.validate_symbol_name(symbol)
 
     assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+@pytest.mark.parametrize("symbol", ["task_struct", "per_cpu_start", "foo$bar", "ns.field"])
+def test_symbol_validation_accepts_safe_names(tmp_path: Path, symbol: str) -> None:
+    provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+
+    assert provider.validate_symbol_name(symbol) == symbol
 
 
 @pytest.mark.parametrize("symbol", [None, 1234, True])
@@ -482,7 +492,7 @@ def test_register_validation_accepts_safe_name(tmp_path: Path) -> None:
     assert provider.validate_register_name("rax") == "rax"
 
 
-@pytest.mark.parametrize("register", ["", "bad-name", "bad name", "bad/name"])
+@pytest.mark.parametrize("register", ["", "bad-name", "bad name", "bad/name", "rax\n", "rax\r", "rax\nrbx", "rax\x00"])
 def test_register_validation_rejects_unsafe_names(tmp_path: Path, register: str) -> None:
     provider = QemuGdbstubProvider(runner=FakeGdbRunner())
 

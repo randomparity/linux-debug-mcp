@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -29,10 +30,14 @@ from linux_debug_mcp.safety.redaction import Redactor
 
 MAX_MEMORY_READ_BYTES = 4096
 MAX_RESPONSE_SNIPPET = 4096
-SYMBOL_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$]*$")
-REGISTER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+SYMBOL_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$]*\Z")
+REGISTER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*\Z")
 LINUX_BANNER_RELEASE_PATTERN = re.compile(r"Linux version\s+([^\s]+)")
 QEMU_GDBSTUB_OPERATIONS = ["workflow.build_boot_debug", *SPRINT_4_DEBUG_OPERATIONS]
+
+
+def _has_control_character(value: str) -> bool:
+    return any(unicodedata.category(char) == "Cc" for char in value)
 
 
 def local_qemu_gdbstub_capability() -> ProviderCapability:
@@ -1140,14 +1145,14 @@ class QemuGdbstubProvider:
     def validate_symbol_name(self, symbol: str) -> str:
         if type(symbol) is not str:
             raise ProviderDebugError("invalid symbol name", category=ErrorCategory.CONFIGURATION_ERROR)
-        if not SYMBOL_PATTERN.match(symbol):
+        if _has_control_character(symbol) or not SYMBOL_PATTERN.match(symbol):
             raise ProviderDebugError("invalid symbol name", category=ErrorCategory.CONFIGURATION_ERROR)
         return symbol
 
     def validate_register_name(self, register: str) -> str:
         if type(register) is not str:
             raise ProviderDebugError("invalid register name", category=ErrorCategory.CONFIGURATION_ERROR)
-        if not REGISTER_PATTERN.match(register):
+        if _has_control_character(register) or not REGISTER_PATTERN.match(register):
             raise ProviderDebugError("invalid register name", category=ErrorCategory.CONFIGURATION_ERROR)
         return register
 
