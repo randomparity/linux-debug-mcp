@@ -142,10 +142,11 @@ choices made here are called out.
   target_ref: dict, opts: dict, secret_refs: list[str]`. `(provider, channel_id)` is
   the channel key; `channel_id` is unique within a target's `transports[]`. This
   issue does **not** add a field to the contract's `TransportRef`. The model is frozen
-  and `caps`/`secret_refs` are represented as immutable tuples (wire shape unchanged —
-  still JSON arrays): these are authority-bearing (`caps` drives break-plan candidate
-  selection §4.1, `secret_refs` drives secret resolution §3.4), so a retained ref must
-  not be mutable in place after the snapshot/authority check. The §8.4
+  and deeply immutable (wire shape unchanged — `caps`/`secret_refs` are JSON arrays,
+  `target_ref`/`opts` JSON objects): every field is authority-bearing — `caps` drives
+  break-plan candidate selection (§4.1), `secret_refs` drives secret resolution (§3.4),
+  and `target_ref` is the attach-routing/path-safety input admission re-binds from the
+  snapshot — so a retained ref cannot be mutated in place after the authority check. The §8.4
   endpoint-safety input (`endpoint_exposure`) is **not** a per-channel provisioning
   fact — it is a property of the *transport provider*, so it lives on the **01-owned
   `TransportCapability`** (below) and the gate derives it by looking up the selected

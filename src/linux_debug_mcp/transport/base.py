@@ -4,15 +4,17 @@ import ipaddress
 import threading
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Annotated, Any, Literal
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from linux_debug_mcp.domain import ArtifactRef, Model
 from linux_debug_mcp.seams.target import (
+    Arch,
     KernelProvenance,
     LeaseInfo,
     PlatformMetadata,
@@ -22,6 +24,25 @@ from linux_debug_mcp.seams.target import (
 )
 
 DEFAULT_MIN_LEASE_TTL_SECONDS = 300
+
+
+def _deep_freeze(value: Any) -> Any:
+    """Recursively convert mappings to read-only views and sequences to tuples so a
+    validated structure cannot be mutated in place."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(item) for item in value)
+    return value
+
+
+def _deep_thaw(value: Any) -> Any:
+    """Inverse of `_deep_freeze` for serialization back to plain JSON containers."""
+    if isinstance(value, Mapping):
+        return {key: _deep_thaw(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_deep_thaw(item) for item in value]
+    return value
 
 
 class LineRole(StrEnum):
@@ -118,12 +139,14 @@ class TransportRef(Model):
     """The settled-contract channel descriptor (contract §3.2). Shape is frozen —
     this layer adds no field.
 
-    Frozen, with `caps`/`secret_refs` as tuples, because these are authority-bearing:
-    `caps` drives break-plan candidate selection (§4.1) and `secret_refs` drives secret
-    resolution (§3.4). A caller or provider that retains a validated ref must not be
-    able to mutate it in place to add a break candidate or a secret ref after the
-    snapshot/authority check. `target_ref`/`opts` are opaque provisioning routing data,
-    not authority inputs; freezing blocks whole-field replacement."""
+    Frozen and deeply immutable because every field is authority-bearing: `caps` drives
+    break-plan candidate selection (§4.1), `secret_refs` drives secret resolution (§3.4),
+    and `target_ref` is the provider attach-routing/path-safety input that admission
+    re-binds from the authoritative snapshot. A caller or provider that retains a
+    validated ref must not be able to mutate it in place — to add a break candidate or
+    secret ref, or redirect attach to a different device/host — after the authority
+    check. `target_ref`/`opts` are stored as read-only mappings; the wire shape is
+    unchanged (still JSON objects)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -131,9 +154,18 @@ class TransportRef(Model):
     channel_id: str
     line_role: LineRole
     caps: tuple[str, ...] = ()
-    target_ref: dict[str, Any] = Field(default_factory=dict)
-    opts: dict[str, Any] = Field(default_factory=dict)
+    target_ref: Mapping[str, Any] = Field(default_factory=dict, validate_default=True)
+    opts: Mapping[str, Any] = Field(default_factory=dict, validate_default=True)
     secret_refs: tuple[str, ...] = ()
+
+    @field_validator("target_ref", "opts", mode="after")
+    @classmethod
+    def _freeze_routing_data(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
+        return _deep_freeze(value)
+
+    @field_serializer("target_ref", "opts")
+    def _serialize_routing_data(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        return _deep_thaw(value)
 
 
 class OpenRequest(Model):
@@ -170,7 +202,7 @@ class TransportCapability(Model):
     provider_name: str
     provider_family: Literal["transport"] = "transport"
     locality: TransportLocality = TransportLocality.REMOTE
-    architectures: tuple[str, ...] = ()
+    architectures: tuple[Arch, ...] = ()
     provides_console: bool
     provides_rsp: bool
     supports_uart_break: bool
@@ -206,7 +238,7 @@ class TargetHandle(Model):
     target_id: str
     provisioner: str
     generation: int = Field(ge=0)
-    arch: str
+    arch: Arch
     native: bool
     state: TargetState
     access: TargetAccess

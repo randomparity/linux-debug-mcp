@@ -98,3 +98,26 @@ def test_hvc_console_with_ssh_uses_sysrq_g():
         platform=_platform(ssh=True, console=ConsoleKind.HVC),
     )
     assert plan.method is BreakMethod.SYSRQ_G
+
+
+def test_hvc_shared_console_with_uart_break_still_uses_sysrq_g():
+    # Contract §4.1: console_kind=hvc → sysrq_g (hvterm BREAK semantics differ from
+    # UART). A UART-style agent_proxy_break must not be planned on an HVC line even when
+    # the channel advertises supports_uart_break.
+    policy = ReferenceBreakPolicy()
+    plan = policy.plan(
+        channel=_channel(LineRole.SHARED_CONSOLE, ["provides_console", "supports_uart_break"]),
+        platform=_platform(ssh=True, console=ConsoleKind.HVC),
+    )
+    assert plan.method is BreakMethod.SYSRQ_G
+
+
+def test_hvc_dedicated_debug_with_uart_break_and_no_ssh_has_no_plan():
+    # On HVC, uart_break is not executable and there is no ssh fallback → no_break_plan.
+    policy = ReferenceBreakPolicy()
+    with pytest.raises(BreakPlanError) as excinfo:
+        policy.plan(
+            channel=_channel(LineRole.DEDICATED_DEBUG, ["provides_console", "supports_uart_break"]),
+            platform=_platform(ssh=False, console=ConsoleKind.HVC),
+        )
+    assert excinfo.value.code == "no_break_plan"

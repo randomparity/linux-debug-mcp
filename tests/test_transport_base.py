@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from linux_debug_mcp.seams.target import ConsoleKind, PlatformMetadata, TargetKey
+from linux_debug_mcp.seams.target import Arch, ConsoleKind, PlatformMetadata, TargetKey
 from linux_debug_mcp.transport.base import (
     DEFAULT_MIN_LEASE_TTL_SECONDS,
     BreakMethod,
@@ -140,6 +140,26 @@ def test_transport_ref_authority_fields_are_immutable():
         ref.caps = ("supports_uart_break",)
 
 
+def test_transport_ref_routing_data_is_immutable():
+    # target_ref drives provider attach routing and serial-local path-safety; in-place
+    # mutation after the snapshot/authority check must not be able to redirect attach.
+    ref = TransportRef(
+        provider="serial-local",
+        channel_id="c",
+        line_role=LineRole.DEDICATED_DEBUG,
+        target_ref={"device": "/dev/ttyS0", "nested": {"host": "127.0.0.1"}},
+        opts={"baud": 115200},
+    )
+    with pytest.raises(TypeError):
+        ref.target_ref["device"] = "/dev/evil"
+    with pytest.raises(TypeError):
+        ref.target_ref["nested"]["host"] = "10.0.0.9"
+    with pytest.raises(TypeError):
+        ref.opts["baud"] = 9600
+    # round-trips back to a plain JSON object
+    assert ref.model_dump(mode="json")["target_ref"]["device"] == "/dev/ttyS0"
+
+
 def test_open_request_requires_transport_ref():
     # transport_ref is mandatory: admission must re-bind/validate the selected channel.
     with pytest.raises(ValidationError):
@@ -248,6 +268,38 @@ def test_target_handle_holds_transport_refs():
         lease=None,
     )
     assert handle.access.transports[0].channel_id == "rsp-0"
+    assert handle.arch is Arch.X86_64
+
+
+def test_target_handle_rejects_unknown_architecture():
+    # arch is an authoritative target fact that flows into capability matching; a
+    # misspelled value must not pass the schema boundary as if it were real.
+    with pytest.raises(ValidationError):
+        TargetHandle(
+            target_id="run-1",
+            provisioner="local-qemu",
+            generation=0,
+            arch="x86",
+            native=True,
+            state="ready",
+            access={"ssh": None, "transports": []},
+            platform=_platform(),
+            kernel={"build_id": "b", "release": "6.9.0", "vmlinux_ref": "r", "cmdline": "ro"},
+            lease=None,
+        )
+
+
+def test_transport_capability_rejects_unknown_architecture():
+    with pytest.raises(ValidationError):
+        TransportCapability(
+            provider_name="qemu-gdbstub",
+            locality=TransportLocality.LOCAL,
+            architectures=["x86"],
+            provides_console=False,
+            provides_rsp=True,
+            supports_uart_break=False,
+            endpoint_exposure=EndpointExposure.LOOPBACK_LOCAL,
+        )
 
 
 def test_new_session_id_is_prefixed_and_unique():

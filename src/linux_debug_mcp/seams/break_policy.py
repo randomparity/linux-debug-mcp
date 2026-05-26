@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from linux_debug_mcp.seams.target import PlatformMetadata
+from linux_debug_mcp.seams.target import ConsoleKind, PlatformMetadata
 from linux_debug_mcp.transport.base import BreakMethod, BreakPlan, LineRole, TransportRef
 
 _SUPPORTS_UART_BREAK = "supports_uart_break"
@@ -67,12 +67,24 @@ class ReferenceBreakPolicy:
 
     def _candidates(self, channel: TransportRef, platform: PlatformMetadata) -> list[BreakMethod]:
         # Insertion order is preference order: line-native first, ssh fallback last.
+        # UART-style breaks (uart_break / agent_proxy_break) send a serial BREAK and are
+        # only executable on a real UART console; hvc/virtio consoles have different BREAK
+        # semantics (contract §4.1: console_kind=hvc → sysrq_g), so they are gated out.
+        uart_break_executable = platform.console_kind is ConsoleKind.UART
         candidates: list[BreakMethod] = []
         if channel.line_role is LineRole.RSP and _PROVIDES_RSP in channel.caps:
             candidates.append(BreakMethod.GDBSTUB_NATIVE)
-        if channel.line_role is LineRole.DEDICATED_DEBUG and _SUPPORTS_UART_BREAK in channel.caps:
+        if (
+            uart_break_executable
+            and channel.line_role is LineRole.DEDICATED_DEBUG
+            and _SUPPORTS_UART_BREAK in channel.caps
+        ):
             candidates.append(BreakMethod.UART_BREAK)
-        if channel.line_role is LineRole.SHARED_CONSOLE and _SUPPORTS_UART_BREAK in channel.caps:
+        if (
+            uart_break_executable
+            and channel.line_role is LineRole.SHARED_CONSOLE
+            and _SUPPORTS_UART_BREAK in channel.caps
+        ):
             candidates.append(BreakMethod.AGENT_PROXY_BREAK)
         if platform.ssh_reachable:
             candidates.append(BreakMethod.SYSRQ_G)
