@@ -77,6 +77,7 @@ def test_validate_config_line_accepts_valid_grammar(line: str) -> None:
         "rm -rf /",  # not a config line
         "# CONFIG_FOO is unset",  # wrong "is not set" phrasing
         'CONFIG_X="bad\nnewline"',  # embedded newline
+        'CONFIG_X="bad\rcarriage"',  # embedded carriage return
         "CONFIG_FOO=y\nCONFIG_BAR=y",  # multi-line single token
     ],
 )
