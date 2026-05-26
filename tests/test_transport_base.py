@@ -59,8 +59,47 @@ def test_tcp_endpoint_port_bounds():
         TcpEndpoint(host="127.0.0.1", port=0)
 
 
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.5", "::1"])
+def test_tcp_endpoint_accepts_loopback_hosts(host):
+    # §8.4 pins endpoints to loopback; the schema is the boundary that guarantees it.
+    assert TcpEndpoint(host=host, port=1234).host == host
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "10.0.0.1", "192.168.1.10", "example.com", "localhost", ""])
+def test_tcp_endpoint_rejects_non_loopback_hosts(host):
+    # A provider bug or stale persisted record must not be able to mint a routable RSP
+    # endpoint that bypasses the §8.4 trust boundary (default-deny at the schema edge).
+    with pytest.raises(ValidationError):
+        TcpEndpoint(host=host, port=1234)
+
+
+def test_tcp_endpoint_rejects_non_loopback_on_assignment():
+    endpoint = TcpEndpoint(host="127.0.0.1", port=1234)
+    with pytest.raises(ValidationError):
+        endpoint.host = "0.0.0.0"
+
+
 def test_unix_socket_mode_defaults_to_0600():
     assert UnixSocketEndpoint(path="/tmp/c.sock").mode == 0o600
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o700, 0o400, 0o200, 0o500])
+def test_unix_socket_accepts_owner_only_modes(mode):
+    assert UnixSocketEndpoint(path="/tmp/c.sock", mode=mode).mode == mode
+
+
+@pytest.mark.parametrize("mode", [0o660, 0o666, 0o640, 0o604, 0o777, 0o006, 0o060])
+def test_unix_socket_rejects_group_or_other_access(mode):
+    # §8.4 makes OS file permissions the console access-control boundary: a per-session
+    # socket reachable by another uid would defeat that, so reject it at the schema edge.
+    with pytest.raises(ValidationError):
+        UnixSocketEndpoint(path="/tmp/c.sock", mode=mode)
+
+
+@pytest.mark.parametrize("mode", [-1, 0o1000, 0o7777])
+def test_unix_socket_rejects_out_of_range_mode(mode):
+    with pytest.raises(ValidationError):
+        UnixSocketEndpoint(path="/tmp/c.sock", mode=mode)
 
 
 def test_open_request_default_ttl_and_optional_lease():

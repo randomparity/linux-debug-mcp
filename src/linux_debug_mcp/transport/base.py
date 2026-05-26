@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import threading
 import uuid
 from abc import ABC, abstractmethod
@@ -8,7 +9,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from linux_debug_mcp.domain import ArtifactRef, Model
 from linux_debug_mcp.seams.target import (
@@ -58,15 +59,47 @@ class ExecutionState(StrEnum):
 
 
 class TcpEndpoint(Model):
+    """Loopback-pinned TCP endpoint (spec §3.2, §8.4). `host` is constrained to a
+    loopback IP literal at the schema boundary so a provider bug or a stale persisted
+    record can never mint a routable RSP/console endpoint that bypasses the §8.4 trust
+    boundary; loopback is a reachability bound, not access control (§8.4)."""
+
     kind: Literal["tcp"] = "tcp"
     host: str
     port: int = Field(ge=1, le=65535)
 
+    @field_validator("host")
+    @classmethod
+    def _host_must_be_loopback(cls, value: str) -> str:
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"TCP endpoint host must be a loopback IP literal (e.g. 127.0.0.1, ::1), got {value!r}"
+            ) from exc
+        if not address.is_loopback:
+            raise ValueError(f"TCP endpoint host must be loopback (127.0.0.0/8 or ::1), got {value!r}")
+        return value
+
 
 class UnixSocketEndpoint(Model):
+    """Per-session unix-domain socket owned by the server user (spec §3.2, §8.4). OS
+    file permissions are the console access-control boundary, so `mode` is constrained
+    to owner-only (no group/other bits): a socket reachable by another uid would defeat
+    that guarantee."""
+
     kind: Literal["unix"] = "unix"
     path: str
     mode: int = 0o600
+
+    @field_validator("mode")
+    @classmethod
+    def _mode_must_be_owner_only(cls, value: int) -> int:
+        if not 0 <= value <= 0o777:
+            raise ValueError(f"unix socket mode must be within 0..0o777, got {value:#o}")
+        if value & 0o077:
+            raise ValueError(f"unix socket mode must not grant group/other access, got {value:#o}")
+        return value
 
 
 Endpoint = Annotated[TcpEndpoint | UnixSocketEndpoint, Field(discriminator="kind")]
@@ -100,7 +133,13 @@ class OpenRequest(Model):
 
 class TransportCapability(Model):
     """01-owned capability surfaced in providers.list. `endpoint_exposure` drives the
-    §8.4 endpoint-safety gate and is trusted registry metadata, never caller-supplied."""
+    §8.4 endpoint-safety gate and is trusted registry metadata, never caller-supplied.
+
+    The §7.2 startup check that rejects a *remote-family* provider declaring
+    `loopback_local` is Layer-5-owned (see the Layer-1 plan self-review); deriving the
+    remote/local family is a registration-time concern, not a frozen-shape field added
+    here. Independently, `TcpEndpoint`'s loopback-only constraint structurally prevents
+    any provider — correctly declared or not — from emitting a routable TCP endpoint."""
 
     provider_name: str
     provider_family: Literal["transport"] = "transport"
@@ -141,7 +180,12 @@ class TargetHandle(Model):
 
 class TransportSession(Model):
     """Write-ahead durable ownership record (spec §3.2, §4.7). Persisted as JSON;
-    liveness is owned by the in-process registry (Layer 4) while the server runs."""
+    liveness is owned by the in-process registry (Layer 4) while the server runs.
+
+    `rsp_endpoint` is a `TcpEndpoint` because gdb's RSP transport and agent-proxy are
+    TCP-only (§6.1, §8.4). The #08 broker swap widens this to the `Endpoint` union;
+    because `TcpEndpoint` stays a union member, records persisted now still validate
+    after the widening, so that swap is additive rather than a contract break (§8.4)."""
 
     session_id: str
     target_key: TargetKey
