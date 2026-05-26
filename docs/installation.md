@@ -113,8 +113,8 @@ This path skips pre-commit setup and the `just setup` host preparation checks.
 
 ## Server Smoke Check
 
-The console script starts the MCP server with `create_app().run()` and stays
-attached to stdio. Use `timeout` for a local startup smoke check:
+The console script starts the MCP server with `create_app(load_server_config()).run()`
+and stays attached to stdio. Use `timeout` for a local startup smoke check:
 
 ```bash
 timeout 2 uv run linux-debug-mcp || test $? -eq 124
@@ -128,3 +128,21 @@ failure.
 
 Runs are written under `.linux-debug-mcp/runs` by default. Override the artifact
 root only when you want run outputs outside the repository checkout.
+
+## Operator Configuration
+
+Set `LINUX_DEBUG_MCP_CONFIG` to the path of a JSON `ServerConfig` file to enforce
+operator-configured sensitive paths. When set, a `rootfs_source` override (passed
+to `kernel.create_run` or `target.boot`) that resolves inside any configured
+`sensitive_paths` entry is rejected with a configuration error. When the variable
+is unset, only the built-in path-safety guards apply.
+
+```json
+{
+  "artifact_root": "/var/lib/linux-debug-mcp/runs",
+  "sensitive_paths": ["/etc", "/var/lib/secrets"]
+}
+```
+
+An unreadable or invalid config file fails server startup with an actionable
+error rather than silently falling back.

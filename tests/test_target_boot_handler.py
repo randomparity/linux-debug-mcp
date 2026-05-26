@@ -685,3 +685,41 @@ def test_boot_response_is_redacted(tmp_path: Path) -> None:
 
     assert response.ok is True
     assert "supersecret" not in str(response.data)
+
+
+def test_boot_rootfs_source_override_overlapping_sensitive_path_is_rejected(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    sensitive_dir = tmp_path / "secrets"
+    sensitive_dir.mkdir()
+    override_rootfs = sensitive_dir / "override.qcow2"
+    override_rootfs.write_text("disk image", encoding="utf-8")
+
+    response = boot(
+        artifact_root,
+        tmp_path,
+        boot_overrides=BootOverrides(rootfs_source=str(override_rootfs)),
+        sensitive_paths=[sensitive_dir],
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert "sensitive" in response.error.message
+
+
+def test_boot_rootfs_source_override_allowed_without_sensitive_paths(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    override_rootfs = tmp_path / "elsewhere" / "override.qcow2"
+    override_rootfs.parent.mkdir()
+    override_rootfs.write_text("disk image", encoding="utf-8")
+
+    response = boot(
+        artifact_root,
+        tmp_path,
+        boot_overrides=BootOverrides(rootfs_source=str(override_rootfs)),
+        sensitive_paths=[],
+    )
+
+    assert response.ok is True

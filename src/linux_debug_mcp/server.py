@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from linux_debug_mcp.config import (
     BuildProfile,
     DebugProfile,
     RootfsProfile,
+    ServerConfig,
     TargetProfile,
     TestCommand,
     TestSuiteProfile,
@@ -59,6 +61,7 @@ from linux_debug_mcp.safety.paths import PathSafetyError, validate_rootfs_source
 from linux_debug_mcp.safety.redaction import Redactor
 
 DEFAULT_ARTIFACT_ROOT = Path(".linux-debug-mcp/runs")
+SERVER_CONFIG_ENV_VAR = "LINUX_DEBUG_MCP_CONFIG"
 DEFAULT_BUILD_PROFILES = {
     "x86_64-default": BuildProfile(name="x86_64-default", architecture="x86_64"),
 }
@@ -442,6 +445,7 @@ def create_run_handler(
     test_suite: str | None = None,
     build_overrides: BuildOverrides | None = None,
     boot_overrides: BootOverrides | None = None,
+    sensitive_paths: list[Path] | None = None,
 ) -> ToolResponse:
     try:
         resolved_source_path = validate_source_path(Path(source_path))
@@ -464,11 +468,11 @@ def create_run_handler(
     try:
         resolved_build = _resolve_initial_profiles(
             source_path=Path(resolved_source_path),
-            # No ServerConfig is loaded at runtime (out of scope; see the design doc's "Out of
-            # scope"), so there are no operator-configured sensitive paths to enforce here. The
-            # built-in validate_rootfs_source guards (reject /, $HOME, non-file, source-tree
-            # overlap, shell/control chars, symlink-resolved) still apply.
-            sensitive_paths=[],
+            # Operator-configured sensitive paths (from a loaded ServerConfig, threaded in by
+            # create_app) are enforced here alongside the built-in validate_rootfs_source guards
+            # (reject /, $HOME, non-file, source-tree overlap, shell/control chars,
+            # symlink-resolved). When no config is loaded this is empty and only the built-ins apply.
+            sensitive_paths=sensitive_paths or [],
             build_profile=build_profile,
             build_overrides=build_overrides,
             boot_overrides=boot_overrides,
@@ -852,6 +856,7 @@ def target_boot_handler(
     rootfs_profiles: dict[str, RootfsProfile] | None = None,
     default_libvirt_uri: str | None = None,
     boot_overrides: BootOverrides | None = None,
+    sensitive_paths: list[Path] | None = None,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -915,9 +920,9 @@ def target_boot_handler(
                 validated = validate_rootfs_source(
                     Path(effective_boot_overrides.rootfs_source),
                     source_paths=[Path(manifest.request.source_path)],
-                    # No ServerConfig is loaded (see create_run_handler), so there are no
-                    # operator-configured sensitive paths; the built-in guards still apply.
-                    sensitive_paths=[],
+                    # Operator-configured sensitive paths threaded in by create_app (empty when
+                    # no ServerConfig is loaded); the built-in guards always apply.
+                    sensitive_paths=sensitive_paths or [],
                 )
                 resolved_rootfs_profile = resolved_rootfs_profile.model_copy(update={"source": str(validated)})
         except (PathSafetyError, ValueError) as exc:
@@ -2390,8 +2395,33 @@ def _overrides_from_tool_args(
     return build_overrides, boot_overrides
 
 
-def create_app() -> FastMCP:
+def load_server_config() -> ServerConfig | None:
+    """Load the operator ServerConfig from the path in ``LINUX_DEBUG_MCP_CONFIG``, if set.
+
+    Returns ``None`` when the env var is unset or empty: no operator config is loaded and the
+    built-in path-safety guards still apply. Raises ``ValueError`` with actionable context when
+    the path is set but cannot be read or does not parse as a valid ``ServerConfig``.
+    """
+    config_path_value = os.environ.get(SERVER_CONFIG_ENV_VAR)
+    if not config_path_value:
+        return None
+    config_path = Path(config_path_value).expanduser()
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"failed to read server config at {config_path}: {exc}") from exc
+    try:
+        return ServerConfig.model_validate_json(raw)
+    except ValidationError as exc:
+        raise ValueError(f"invalid server config at {config_path}: {exc}") from exc
+
+
+def create_app(config: ServerConfig | None = None) -> FastMCP:
     app = FastMCP("linux-debug-mcp")
+    # Operator-configured sensitive paths are the only ServerConfig field consumed today; they
+    # are threaded into the rootfs-source validation in kernel.create_run and target.boot.
+    # Profiles remain code-defined (the DEFAULT_* registries) — wiring those is separate work.
+    sensitive_paths = list(config.sensitive_paths) if config is not None else []
 
     @app.tool(name="host.check_prerequisites")
     def host_check_prerequisites(
@@ -2442,6 +2472,7 @@ def create_app() -> FastMCP:
             test_suite=test_suite,
             build_overrides=build_overrides,
             boot_overrides=boot_overrides,
+            sensitive_paths=sensitive_paths,
         ).model_dump(mode="json")
 
     @app.tool(name="providers.list")
@@ -2733,6 +2764,7 @@ def create_app() -> FastMCP:
             rootfs_profile=rootfs_profile,
             force_reboot=force_reboot,
             boot_overrides=boot_overrides,
+            sensitive_paths=sensitive_paths,
         ).model_dump(mode="json")
 
     @app.tool(name="target.run_tests")
@@ -2980,4 +3012,4 @@ def create_app() -> FastMCP:
 
 def main() -> None:
     configure_logging()
-    create_app().run()
+    create_app(load_server_config()).run()
