@@ -1,4 +1,5 @@
 from linux_debug_mcp import __version__
+from linux_debug_mcp.config import BootOverrides, BuildOverrides
 from linux_debug_mcp.domain import (
     ArtifactRef,
     ErrorCategory,
@@ -6,6 +7,7 @@ from linux_debug_mcp.domain import (
     PrerequisiteCheck,
     PrerequisiteStatus,
     ProviderCapability,
+    RunRequest,
     TargetKind,
     ToolResponse,
 )
@@ -84,6 +86,31 @@ def test_provider_capability_records_semantics() -> None:
 
     assert capability.semantics.idempotent is True
     assert capability.target_kinds == [TargetKind.LOCAL]
+
+
+def test_run_request_overrides_default_none():
+    request = RunRequest(
+        source_path="/src",
+        build_profile="b",
+        target_profile="t",
+        rootfs_profile="r",
+    )
+    assert request.build_overrides is None
+    assert request.boot_overrides is None
+
+
+def test_run_request_accepts_overrides_round_trip():
+    request = RunRequest(
+        source_path="/src",
+        build_profile="b",
+        target_profile="t",
+        rootfs_profile="r",
+        build_overrides=BuildOverrides(make_variables={"CC": "clang"}),
+        boot_overrides=BootOverrides(kernel_args=["dhash_entries=1"]),
+    )
+    reparsed = RunRequest.model_validate_json(request.model_dump_json())
+    assert reparsed.boot_overrides.kernel_args == ["dhash_entries=1"]
+    assert reparsed.build_overrides.make_variables == {"CC": "clang"}
 
 
 def test_prerequisite_check_serializes_status_and_fix() -> None:
