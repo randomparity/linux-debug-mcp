@@ -12,7 +12,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from linux_debug_mcp.artifacts.manifest import RunManifest
+from linux_debug_mcp.artifacts.manifest import BootAttempt, RunManifest
 from linux_debug_mcp.domain import ErrorCategory, RunRequest, StepResult
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_artifact_root, validate_run_id
 
@@ -48,7 +48,13 @@ class ArtifactStore:
             except OSError as exc:
                 raise ManifestStateError(f"failed to create artifact root: {exc}") from exc
 
-    def create_run(self, request: RunRequest) -> RunManifest:
+    def create_run(
+        self,
+        request: RunRequest,
+        *,
+        resolved_build_profile: object | None = None,
+        boot_attempts: list[BootAttempt] | None = None,
+    ) -> RunManifest:
         run_id = self._validate_run_id(request.run_id or self._generate_run_id())
         run_dir = self._run_dir(run_id)
         if run_dir.exists():
@@ -61,7 +67,12 @@ class ArtifactStore:
             for subdir in self.SUBDIRS:
                 (run_dir / subdir).mkdir()
 
-            manifest = RunManifest.create(run_id=run_id, request=request.model_copy(update={"run_id": run_id}))
+            manifest = RunManifest.create(
+                run_id=run_id,
+                request=request.model_copy(update={"run_id": run_id}),
+                resolved_build_profile=resolved_build_profile,
+                boot_attempts=boot_attempts,
+            )
             self._write_manifest(run_dir, manifest)
         except FileExistsError as exc:
             if created_run_dir:
@@ -89,6 +100,22 @@ class ArtifactStore:
             updated = manifest.with_step_result(result, replace_succeeded=replace_succeeded)
             if updated != manifest:
                 self._write_manifest(run_dir, updated)
+            return updated
+
+    def record_boot_attempt(
+        self,
+        run_id: str,
+        *,
+        attempt: BootAttempt,
+        boot_result: StepResult,
+    ) -> RunManifest:
+        run_id = self._validate_run_id(run_id)
+        run_dir = self._run_dir(run_id)
+        with self._manifest_lock(run_dir):
+            manifest = self.load_manifest(run_id)
+            updated = manifest.with_boot_attempt(attempt)
+            updated = updated.with_step_result(boot_result, replace_succeeded=True)
+            self._write_manifest(run_dir, updated)
             return updated
 
     def run_dir(self, run_id: str) -> Path:
