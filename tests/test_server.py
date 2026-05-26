@@ -15,6 +15,10 @@ from linux_debug_mcp.server import (
 )
 
 
+def _get_tool_fn(app, name):
+    return app._tool_manager._tools[name].fn
+
+
 def make_source_tree(tmp_path: Path) -> Path:
     source = tmp_path / "linux"
     source.mkdir()
@@ -408,3 +412,44 @@ def test_build_profile_from_manifest_v1_fallback():
     )  # resolved_build_profile is None
     resolved = server._build_profile_from_manifest(manifest)
     assert resolved.name == "x86_64-default"
+
+
+def test_overrides_from_tool_args_builds_models():
+    from linux_debug_mcp.config import BootOverrides, BuildOverrides
+
+    build, boot = server._overrides_from_tool_args(
+        kernel_args=["dhash_entries=1"], rootfs_source=None, make_variables={"CC": "clang"}
+    )
+    assert isinstance(build, BuildOverrides) and build.make_variables == {"CC": "clang"}
+    assert isinstance(boot, BootOverrides) and boot.kernel_args == ["dhash_entries=1"]
+
+    none_build, none_boot = server._overrides_from_tool_args(kernel_args=None, rootfs_source=None, make_variables=None)
+    assert none_build is None and none_boot is None
+
+
+def test_create_run_tool_accepts_overrides_and_rejects_bad_args(tmp_path: Path):
+    src = make_source_tree(tmp_path)
+    app = server.create_app()
+    tool_fn = _get_tool_fn(app, "kernel.create_run")
+
+    ok = tool_fn(
+        source_path=str(src),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        artifact_root=str(tmp_path / "runs"),
+        kernel_args=["dhash_entries=1"],
+        make_variables={"CC": "clang"},
+    )
+    assert ok["ok"] is True
+
+    bad = tool_fn(
+        source_path=str(src),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        artifact_root=str(tmp_path / "runs2"),
+        kernel_args=["bad;arg"],
+    )
+    assert bad["ok"] is False
+    assert bad["error"]["category"] == "configuration_error"

@@ -2333,6 +2333,21 @@ def not_implemented_handler(tool_name: str, *, run_id: str | None = None) -> Too
     )
 
 
+def _overrides_from_tool_args(
+    *,
+    kernel_args: list[str] | None,
+    rootfs_source: str | None,
+    make_variables: dict[str, str] | None,
+) -> tuple[BuildOverrides | None, BootOverrides | None]:
+    build_overrides = BuildOverrides(make_variables=make_variables) if make_variables else None
+    boot_overrides = (
+        BootOverrides(kernel_args=kernel_args or [], rootfs_source=rootfs_source)
+        if (kernel_args or rootfs_source)
+        else None
+    )
+    return build_overrides, boot_overrides
+
+
 def create_app() -> FastMCP:
     app = FastMCP("linux-debug-mcp")
 
@@ -2358,7 +2373,18 @@ def create_app() -> FastMCP:
         run_id: str | None = None,
         debug_profile: str | None = None,
         test_suite: str | None = None,
+        kernel_args: list[str] | None = None,
+        rootfs_source: str | None = None,
+        make_variables: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        try:
+            build_overrides, boot_overrides = _overrides_from_tool_args(
+                kernel_args=kernel_args, rootfs_source=rootfs_source, make_variables=make_variables
+            )
+        except ValueError as exc:
+            return ToolResponse.failure(category=ErrorCategory.CONFIGURATION_ERROR, message=str(exc)).model_dump(
+                mode="json"
+            )
         return create_run_handler(
             artifact_root=Path(artifact_root),
             source_path=source_path,
@@ -2368,6 +2394,8 @@ def create_app() -> FastMCP:
             run_id=run_id,
             debug_profile=debug_profile,
             test_suite=test_suite,
+            build_overrides=build_overrides,
+            boot_overrides=boot_overrides,
         ).model_dump(mode="json")
 
     @app.tool(name="providers.list")
@@ -2641,13 +2669,24 @@ def create_app() -> FastMCP:
         target_profile: str | None = None,
         rootfs_profile: str | None = None,
         force_reboot: bool = False,
+        kernel_args: list[str] | None = None,
+        rootfs_source: str | None = None,
     ) -> dict[str, Any]:
+        try:
+            _build_overrides, boot_overrides = _overrides_from_tool_args(
+                kernel_args=kernel_args, rootfs_source=rootfs_source, make_variables=None
+            )
+        except ValueError as exc:
+            return ToolResponse.failure(category=ErrorCategory.CONFIGURATION_ERROR, message=str(exc)).model_dump(
+                mode="json"
+            )
         return target_boot_handler(
             artifact_root=Path(artifact_root),
             run_id=run_id,
             target_profile=target_profile,
             rootfs_profile=rootfs_profile,
             force_reboot=force_reboot,
+            boot_overrides=boot_overrides,
         ).model_dump(mode="json")
 
     @app.tool(name="target.run_tests")
