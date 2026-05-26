@@ -13,12 +13,15 @@ from linux_debug_mcp.artifacts.manifest import RunManifest
 from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
 from linux_debug_mcp.config import (
     SPRINT_4_DEBUG_OPERATIONS,
+    BootOverrides,
+    BuildOverrides,
     BuildProfile,
     DebugProfile,
     RootfsProfile,
     TargetProfile,
     TestCommand,
     TestSuiteProfile,
+    merge_kernel_args,
 )
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from linux_debug_mcp.logging import configure_logging
@@ -51,7 +54,7 @@ from linux_debug_mcp.providers.stubs import (
     future_not_implemented_response,
     select_future_provider,
 )
-from linux_debug_mcp.safety.paths import PathSafetyError, validate_source_path
+from linux_debug_mcp.safety.paths import PathSafetyError, validate_rootfs_source, validate_source_path
 from linux_debug_mcp.safety.redaction import Redactor
 
 DEFAULT_ARTIFACT_ROOT = Path(".linux-debug-mcp/runs")
@@ -369,6 +372,43 @@ def _validate_adhoc_commands(commands: list[list[str]] | None) -> list[TestComma
     return validated
 
 
+def _resolve_initial_profiles(
+    *,
+    source_path: Path,
+    sensitive_paths: list[Path],
+    build_profile: str,
+    target_profile: str,
+    rootfs_profile: str,
+    build_overrides: BuildOverrides | None,
+    boot_overrides: BootOverrides | None,
+) -> tuple[BuildProfile, TargetProfile, RootfsProfile]:
+    base_build = DEFAULT_BUILD_PROFILES[build_profile]
+    base_target = DEFAULT_TARGET_PROFILES[target_profile]
+    base_rootfs = DEFAULT_ROOTFS_PROFILES[rootfs_profile]
+
+    resolved_build = base_build
+    if build_overrides is not None and build_overrides.make_variables:
+        resolved_build = base_build.model_copy(
+            update={"make_variables": {**base_build.make_variables, **build_overrides.make_variables}}
+        )
+
+    resolved_target = base_target
+    resolved_rootfs = base_rootfs
+    if boot_overrides is not None:
+        if boot_overrides.kernel_args:
+            resolved_target = base_target.model_copy(
+                update={"kernel_args": merge_kernel_args(base_target.kernel_args, boot_overrides.kernel_args)}
+            )
+        if boot_overrides.rootfs_source is not None:
+            validated = validate_rootfs_source(
+                Path(boot_overrides.rootfs_source),
+                source_paths=[source_path],
+                sensitive_paths=sensitive_paths,
+            )
+            resolved_rootfs = base_rootfs.model_copy(update={"source": str(validated)})
+    return resolved_build, resolved_target, resolved_rootfs
+
+
 def create_run_handler(
     *,
     artifact_root: Path,
@@ -379,6 +419,8 @@ def create_run_handler(
     run_id: str | None = None,
     debug_profile: str | None = None,
     test_suite: str | None = None,
+    build_overrides: BuildOverrides | None = None,
+    boot_overrides: BootOverrides | None = None,
 ) -> ToolResponse:
     try:
         resolved_source_path = validate_source_path(Path(source_path))
@@ -388,6 +430,31 @@ def create_run_handler(
             message=str(exc),
             details={"source_path": source_path},
         )
+    for name, mapping in (
+        (build_profile, DEFAULT_BUILD_PROFILES),
+        (target_profile, DEFAULT_TARGET_PROFILES),
+        (rootfs_profile, DEFAULT_ROOTFS_PROFILES),
+    ):
+        if name not in mapping:
+            return ToolResponse.failure(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                message=f"unknown profile: {name}",
+            )
+    try:
+        resolved_build, _resolved_target, _resolved_rootfs = _resolve_initial_profiles(
+            source_path=Path(resolved_source_path),
+            sensitive_paths=[],
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            build_overrides=build_overrides,
+            boot_overrides=boot_overrides,
+        )
+    except (PathSafetyError, ValueError) as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            message=str(exc),
+        )
     request = RunRequest(
         source_path=str(resolved_source_path),
         build_profile=build_profile,
@@ -396,10 +463,12 @@ def create_run_handler(
         debug_profile=debug_profile,
         test_suite=test_suite,
         run_id=run_id,
+        build_overrides=build_overrides,
+        boot_overrides=boot_overrides,
     )
     try:
         store = ArtifactStore(artifact_root, source_paths=[resolved_source_path])
-        manifest = store.create_run(request)
+        manifest = store.create_run(request, resolved_build_profile=resolved_build)
     except ManifestStateError as exc:
         return ToolResponse.failure(
             category=exc.category,

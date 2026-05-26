@@ -1,6 +1,8 @@
 from pathlib import Path
 
+from linux_debug_mcp import server
 from linux_debug_mcp.artifacts.store import ArtifactStore
+from linux_debug_mcp.config import BootOverrides, BuildOverrides
 from linux_debug_mcp.domain import ArtifactRef, StepResult, StepStatus
 from linux_debug_mcp.server import (
     DEFAULT_TEST_SUITES,
@@ -336,3 +338,38 @@ def test_workflow_build_boot_test_tool_is_registered_with_force_flags() -> None:
     assert "force_rerun_tests" in tool.parameters["properties"]
     assert "force_recollect" in tool.parameters["properties"]
     assert tool.fn.__name__ == "workflow_build_boot_test"
+
+
+def test_create_run_freezes_merged_profiles(tmp_path):
+    source = make_source_tree(tmp_path)
+    response = server.create_run_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        build_overrides=BuildOverrides(make_variables={"CC": "clang"}),
+        boot_overrides=BootOverrides(kernel_args=["dhash_entries=1"]),
+    )
+    assert response.ok
+    run_id = response.run_id
+    store = server.ArtifactStore(tmp_path / "runs", create_root=False)
+    manifest = store.load_manifest(run_id)
+    assert manifest.resolved_build_profile.make_variables == {"CC": "clang"}
+    assert manifest.boot_attempts == []  # attempt 1 not yet booted
+    assert manifest.request.boot_overrides.kernel_args == ["dhash_entries=1"]
+
+
+def test_create_run_rejects_unknown_base_profile(tmp_path):
+    source = make_source_tree(tmp_path)
+    response = server.create_run_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=str(source),
+        build_profile="does-not-exist",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+    )
+    assert not response.ok
+    assert response.error.category.value == "configuration_error"
+    # fail-fast: no run directory/manifest created on a bad base profile
+    assert list((tmp_path / "runs").glob("*/manifest.json")) == []
