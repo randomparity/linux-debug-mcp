@@ -316,6 +316,7 @@ class LibvirtQemuProvider:
         kernel_image_path: Path,
         target_profile: TargetProfile,
         rootfs_profile: RootfsProfile,
+        attempt: int = 1,
     ) -> BootPlan:
         self._validate_profiles(target_profile=target_profile, rootfs_profile=rootfs_profile)
 
@@ -341,11 +342,12 @@ class LibvirtQemuProvider:
             # Kept for type narrowing; _validate_profiles rejects these before path resolution.
             raise self._configuration_error("target_ref and libvirt_uri are required")
 
-        domain_xml_path = resolved_run_dir / "target" / "domain.xml"
-        console_log_path = resolved_run_dir / "logs" / "console.log"
-        boot_log_path = resolved_run_dir / "logs" / "boot.log"
-        boot_plan_path = resolved_run_dir / "target" / "boot-plan.json"
-        boot_summary_path = resolved_run_dir / "summaries" / "boot-summary.json"
+        attempt_dir = resolved_run_dir / "boot" / f"attempt-{attempt}"
+        domain_xml_path = attempt_dir / "domain.xml"
+        console_log_path = attempt_dir / "console.log"
+        boot_log_path = attempt_dir / "boot.log"
+        boot_plan_path = attempt_dir / "boot-plan.json"
+        boot_summary_path = attempt_dir / "boot-summary.json"
         virsh_prefix = ["virsh", "-c", libvirt_uri]
 
         return BootPlan(

@@ -126,11 +126,11 @@ def test_plan_boot_generates_complete_boot_plan(tmp_path: Path) -> None:
     assert plan.kernel_args == ["panic=1", "quiet", "root=/dev/vda", "console=ttyS0"]
     assert plan.timeout_seconds == 180
     assert plan.readiness_marker == "linux-debug-mcp-ready"
-    assert plan.domain_xml_path == run_dir / "target" / "domain.xml"
-    assert plan.console_log_path == run_dir / "logs" / "console.log"
-    assert plan.boot_log_path == run_dir / "logs" / "boot.log"
-    assert plan.boot_plan_path == run_dir / "target" / "boot-plan.json"
-    assert plan.boot_summary_path == run_dir / "summaries" / "boot-summary.json"
+    assert plan.domain_xml_path == run_dir / "boot" / "attempt-1" / "domain.xml"
+    assert plan.console_log_path == run_dir / "boot" / "attempt-1" / "console.log"
+    assert plan.boot_log_path == run_dir / "boot" / "attempt-1" / "boot.log"
+    assert plan.boot_plan_path == run_dir / "boot" / "attempt-1" / "boot-plan.json"
+    assert plan.boot_summary_path == run_dir / "boot" / "attempt-1" / "boot-summary.json"
     assert plan.ownership == {
         "provider": "local-libvirt-qemu",
         "run_id": "run-abc123",
@@ -314,6 +314,26 @@ def test_plan_boot_normalizes_missing_paths_to_configuration_error(
         )
 
     assert_configuration_error(exc_info)
+
+
+def test_plan_boot_attempt_parameter_relocates_all_artifact_paths(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider()
+
+    plan = provider.plan_boot(
+        run_id="run-abc123",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(),
+        rootfs_profile=rootfs_profile(rootfs),
+        attempt=2,
+    )
+
+    assert plan.domain_xml_path == run_dir / "boot" / "attempt-2" / "domain.xml"
+    assert plan.console_log_path == run_dir / "boot" / "attempt-2" / "console.log"
+    assert plan.boot_log_path == run_dir / "boot" / "attempt-2" / "boot.log"
+    assert plan.boot_plan_path == run_dir / "boot" / "attempt-2" / "boot-plan.json"
+    assert plan.boot_summary_path == run_dir / "boot" / "attempt-2" / "boot-summary.json"
 
 
 def test_render_domain_xml_includes_direct_kernel_boot_devices_and_metadata(tmp_path: Path) -> None:
