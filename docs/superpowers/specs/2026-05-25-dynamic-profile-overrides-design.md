@@ -249,10 +249,11 @@ new and are what make boot iteration first-class.
 
 `target_run_tests_handler` currently resolves rootfs by name from
 `DEFAULT_ROOTFS_PROFILES` (`server.py:1027`). It is added to the set of handlers
-that read resolved state: a test run binds to the **latest** boot attempt (or an
-explicitly supplied `attempt` number) and uses that attempt's
-`resolved_rootfs_profile` for the SSH connection details — otherwise a boot
-attempt that swapped `rootfs_source` would be invisible to the tests.
+that read resolved state: a test run binds to the **latest** boot attempt and
+uses that attempt's `resolved_rootfs_profile` for the SSH connection details —
+otherwise a boot attempt that swapped `rootfs_source` would be invisible to the
+tests. (Phase 1 binds to the latest attempt only; an explicit `attempt` selector
+is deferred — the iterate-and-test loop always targets the most recent boot.)
 
 ### 6. Redaction of override values
 
@@ -322,8 +323,9 @@ behavior"*). `config_lines` is that option.
 
 - `kernel.create_run` gains optional `kernel_args`, `rootfs_source`,
   `make_variables` (Phase 1) and `config_lines` (Phase 2).
-- `target.boot` gains optional `kernel_args`, `rootfs_source`, and an optional
-  `attempt` selector on `target.run_tests`, opening / targeting boot attempts.
+- `target.boot` gains optional `kernel_args`, `rootfs_source`, opening a new
+  boot attempt. `target.run_tests` automatically binds to the latest boot
+  attempt (no `attempt` selector in Phase 1 — deferred).
 - Merge + validate happens in the handler.
 
 ## Data flow
