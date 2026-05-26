@@ -243,6 +243,25 @@ class LocalKernelBuildProvider:
                 details={"argv": plan.argv, "source_revision": source_revision},
                 diagnostic=self._log_tail(log_path),
             )
+        return self._assemble_build_result(
+            plan=plan,
+            log_path=log_path,
+            summary_path=summary_path,
+            exit_status=exit_status,
+            source_revision=source_revision,
+            started_at=started_at,
+        )
+
+    def _assemble_build_result(
+        self,
+        *,
+        plan: BuildPlan,
+        log_path: Path,
+        summary_path: Path,
+        exit_status: int,
+        source_revision: dict[str, object],
+        started_at: datetime,
+    ) -> BuildExecutionResult:
         ended_at = datetime.now(UTC)
         details = {
             "argv": plan.argv,
