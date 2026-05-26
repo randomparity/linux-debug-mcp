@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 import threading
 import uuid
 from abc import ABC, abstractmethod
@@ -37,8 +38,12 @@ def _deep_freeze(value: Any) -> Any:
     read-only form (mappings → read-only views, sequences → tuples) so it can be neither
     mutated in place nor fail JSON persistence later. Rejects non-JSON leaves such as
     `set`, `bytearray`, or custom objects, and non-string mapping keys."""
-    if value is None or isinstance(value, (str, int, float)):
+    if value is None or isinstance(value, (str, bool, int)):
         # bool is a subclass of int; both are valid JSON scalars.
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"routing data floats must be finite (no nan/inf), got {value!r}")
         return value
     if isinstance(value, Mapping):
         frozen: dict[str, Any] = {}

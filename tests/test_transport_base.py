@@ -467,6 +467,19 @@ def test_transport_ref_rejects_non_json_routing_leaves(bad_leaf):
         )
 
 
+@pytest.mark.parametrize("bad_float", [float("nan"), float("inf"), float("-inf")])
+def test_transport_ref_rejects_non_finite_floats(bad_float):
+    # NaN/inf are not JSON values; they serialize to null and would silently corrupt
+    # persisted routing/path-safety data relative to the in-memory authority.
+    with pytest.raises(ValidationError):
+        TransportRef(
+            provider="p",
+            channel_id="c",
+            line_role=LineRole.RSP,
+            target_ref={"x": bad_float},
+        )
+
+
 def test_transport_ref_accepts_nested_json_routing_data():
     ref = TransportRef(
         provider="p",

@@ -69,21 +69,27 @@ class ReferenceBreakPolicy:
         # Insertion order is preference order: line-native first, ssh fallback last.
         # `line_role` classifies the *selected* physical line; `console_kind` describes
         # the target's *primary* console. A dedicated_debug line is a separate reserved
-        # UART, so its uart_break is per-channel and independent of console_kind. The
-        # shared_console line *is* the primary console, so agent_proxy_break (a serial
-        # BREAK on it) is only executable when that console is a UART — hvc/virtio have
-        # different BREAK semantics (contract §4.1: console_kind=hvc → sysrq_g).
+        # UART, so its uart_break is per-channel and independent of console_kind.
+        #
+        # agent_proxy_break's contract predicate (§4.1) is just shared_console +
+        # supports_uart_break, and the no-ssh shared-console case is explicitly
+        # admissible — so it is never excluded by console_kind. console_kind only sets
+        # *preference*: a UART shared console prefers the line-native agent_proxy_break;
+        # a non-UART (hvc/virtio) shared console prefers sysrq_g over ssh (hvterm BREAK
+        # semantics differ from UART), keeping agent_proxy_break as a no-ssh fallback.
+        shared_console_uart_break = (
+            channel.line_role is LineRole.SHARED_CONSOLE and _SUPPORTS_UART_BREAK in channel.caps
+        )
+        prefer_agent_proxy = shared_console_uart_break and platform.console_kind is ConsoleKind.UART
         candidates: list[BreakMethod] = []
         if channel.line_role is LineRole.RSP and _PROVIDES_RSP in channel.caps:
             candidates.append(BreakMethod.GDBSTUB_NATIVE)
         if channel.line_role is LineRole.DEDICATED_DEBUG and _SUPPORTS_UART_BREAK in channel.caps:
             candidates.append(BreakMethod.UART_BREAK)
-        if (
-            channel.line_role is LineRole.SHARED_CONSOLE
-            and _SUPPORTS_UART_BREAK in channel.caps
-            and platform.console_kind is ConsoleKind.UART
-        ):
+        if prefer_agent_proxy:
             candidates.append(BreakMethod.AGENT_PROXY_BREAK)
         if platform.ssh_reachable:
             candidates.append(BreakMethod.SYSRQ_G)
+        if shared_console_uart_break and not prefer_agent_proxy:
+            candidates.append(BreakMethod.AGENT_PROXY_BREAK)
         return candidates

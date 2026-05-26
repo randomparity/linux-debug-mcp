@@ -112,6 +112,19 @@ def test_hvc_shared_console_with_uart_break_still_uses_sysrq_g():
     assert plan.method is BreakMethod.SYSRQ_G
 
 
+def test_hvc_shared_console_without_ssh_falls_back_to_agent_proxy_break():
+    # Contract §4.1 boundary: shared_console + supports_uart_break + ssh_reachable=false
+    # is admissible via agent_proxy_break. On a non-UART console sysrq_g is preferred but
+    # needs ssh, so with no ssh the executable agent_proxy_break path must still be taken
+    # rather than rejected as no_break_plan.
+    policy = ReferenceBreakPolicy()
+    plan = policy.plan(
+        channel=_channel(LineRole.SHARED_CONSOLE, ["provides_console", "supports_uart_break"]),
+        platform=_platform(ssh=False, console=ConsoleKind.HVC),
+    )
+    assert plan.method is BreakMethod.AGENT_PROXY_BREAK
+
+
 def test_hvc_primary_console_still_allows_dedicated_uart_debug_line():
     # console_kind describes the *primary* console; a separate dedicated_debug UART line
     # can still break even when the primary console is HVC and ssh is unavailable. The
