@@ -214,6 +214,39 @@ def test_break_plan_method_enum():
     assert plan.method == "gdbstub_native"
 
 
+def test_transport_capability_is_immutable_after_construction():
+    # endpoint_exposure is the trusted §8.4 gate input; it must not be mutable, or a
+    # brokered_required transport could be flipped to loopback_local post-registration.
+    cap = TransportCapability(
+        provider_name="remote-sol",
+        architectures=["x86_64"],
+        provides_console=True,
+        provides_rsp=False,
+        supports_uart_break=True,
+        endpoint_exposure=EndpointExposure.BROKERED_REQUIRED,
+    )
+    with pytest.raises(ValidationError):
+        cap.endpoint_exposure = EndpointExposure.LOOPBACK_LOCAL
+    # list-valued fields are immutable too: no in-place append can widen them.
+    with pytest.raises(AttributeError):
+        cap.operations.append("transport.open")
+
+
+def test_registered_capability_cannot_be_mutated_through_registry():
+    registry = TransportRegistry()
+    cap = TransportCapability(
+        provider_name="remote-sol",
+        provides_console=True,
+        provides_rsp=False,
+        supports_uart_break=True,
+        endpoint_exposure=EndpointExposure.BROKERED_REQUIRED,
+    )
+    registry.register(cap)
+    with pytest.raises(ValidationError):
+        registry.get("remote-sol").endpoint_exposure = EndpointExposure.LOOPBACK_LOCAL
+    assert registry.endpoint_exposure("remote-sol") is EndpointExposure.BROKERED_REQUIRED
+
+
 def test_transport_registry_register_lookup_and_duplicate():
     registry = TransportRegistry()
     cap = TransportCapability(

@@ -9,7 +9,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import ConfigDict, Field, field_validator
 
 from linux_debug_mcp.domain import ArtifactRef, Model
 from linux_debug_mcp.seams.target import (
@@ -139,16 +139,22 @@ class TransportCapability(Model):
     `loopback_local` is Layer-5-owned (see the Layer-1 plan self-review); deriving the
     remote/local family is a registration-time concern, not a frozen-shape field added
     here. Independently, `TcpEndpoint`'s loopback-only constraint structurally prevents
-    any provider — correctly declared or not — from emitting a routable TCP endpoint."""
+    any provider — correctly declared or not — from emitting a routable TCP endpoint.
+
+    Frozen and tuple-valued so the registry can hold a capability the gate trusts: once
+    registered, no caller-retained reference can flip `endpoint_exposure` or widen the
+    `operations`/`architectures` surface."""
+
+    model_config = ConfigDict(frozen=True)
 
     provider_name: str
     provider_family: Literal["transport"] = "transport"
-    architectures: list[str] = Field(default_factory=list)
+    architectures: tuple[str, ...] = ()
     provides_console: bool
     provides_rsp: bool
     supports_uart_break: bool
     endpoint_exposure: EndpointExposure
-    operations: list[str] = Field(default_factory=list)
+    operations: tuple[str, ...] = ()
 
 
 class BreakPlan(Model):

@@ -31,7 +31,15 @@ class EnvSecretsResolver:
     ships env-only and defers the rest."""
 
     def __init__(self, references: list[SecretReference]) -> None:
-        self._by_reference = {ref.reference: ref for ref in references}
+        by_reference: dict[str, SecretReference] = {}
+        for ref in references:
+            if ref.reference in by_reference:
+                raise SecretsResolutionError(
+                    f"duplicate secret reference: {ref.reference}; resolution would be "
+                    "order-dependent (requiredness/kind could be silently overridden)"
+                )
+            by_reference[ref.reference] = ref
+        self._by_reference = by_reference
 
     def resolve(self, refs: list[str]) -> dict[str, str]:
         resolved: dict[str, str] = {}

@@ -65,6 +65,27 @@ def test_missing_required_env_raises():
         resolver.resolve(["ABSENT_VAR"])
 
 
+def test_duplicate_reference_required_then_optional_is_rejected():
+    # A duplicate reference must not let an optional definition silently mask a required
+    # one — that would turn a missing credential into an empty resolve() instead of error.
+    refs = [
+        SecretReference(kind=SecretReferenceKind.ENV, label="a", reference="DUP", required=True),
+        SecretReference(kind=SecretReferenceKind.ENV, label="b", reference="DUP", required=False),
+    ]
+    with pytest.raises(SecretsResolutionError):
+        EnvSecretsResolver(refs)
+
+
+def test_duplicate_reference_cross_kind_is_rejected():
+    # An env ref must not be able to mask a file/external ref carrying the same string.
+    refs = [
+        SecretReference(kind=SecretReferenceKind.FILE, label="f", reference="DUP"),
+        SecretReference(kind=SecretReferenceKind.ENV, label="e", reference="DUP"),
+    ]
+    with pytest.raises(SecretsResolutionError):
+        EnvSecretsResolver(refs)
+
+
 def test_missing_optional_env_is_skipped(monkeypatch):
     monkeypatch.delenv("OPT_VAR", raising=False)
     ref = SecretReference(kind=SecretReferenceKind.ENV, label="opt", reference="OPT_VAR", required=False)
