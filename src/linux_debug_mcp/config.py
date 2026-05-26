@@ -105,6 +105,22 @@ SPRINT_4_DEBUG_OPERATIONS = [
     "debug.evaluate",
     "debug.end_session",
 ]
+TRANSPORT_OPERATIONS = [
+    "transport.open",
+    "transport.status",
+    "transport.health",
+    "transport.inject_break",
+    "transport.close",
+]
+TRANSPORT_DESTRUCTIVE_PERMISSIONS = {
+    "transport.inject_break": ["drop target kernel into the debugger"],
+}
+
+
+def validate_transport_operation(operation: str) -> str:
+    if operation not in TRANSPORT_OPERATIONS:
+        raise ValueError(f"unsupported transport operation: {operation}")
+    return operation
 
 
 def _has_control_character(value: str) -> bool:
