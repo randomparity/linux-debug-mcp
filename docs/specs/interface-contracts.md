@@ -17,8 +17,8 @@ Provisioning epic (TBD)
 - **Provisioning providers** — "give me a target booted on my kernel"
   (local/remote KVM, Proxmox, bare-metal x86_64, PowerVM LPAR, cross-arch QEMU).
 - **Transport providers** — "here is how I reach a target's console / debugger"
-  (`qemu-gdbstub`, `ipmi-sol`, `redfish-serial`, `ser2net`, `hmc-vterm`,
-  `novalink`, `openbmc-sol`).
+  (`qemu-gdbstub`, `qemu-virtio-serial`, `ipmi-sol`, `redfish-serial`, `ser2net`,
+  `hmc-vterm`, `novalink`, `openbmc-sol`).
 
 This document is the single source of truth for the seam between them. It exists
 because the coupling is non-trivial: a target's console may be a scarce
@@ -119,8 +119,9 @@ inline values** (issue 08).
 
 ```yaml
 TransportRef:
-  provider:      str           # qemu-gdbstub | ipmi-sol | redfish-serial |
-                               # ser2net | hmc-vterm | novalink | openbmc-sol
+  provider:      str           # qemu-gdbstub | qemu-virtio-serial | ipmi-sol |
+                               # redfish-serial | ser2net | hmc-vterm | novalink |
+                               # openbmc-sol
   channel_id:    str           # stable per-channel id, UNIQUE within transports[]
   line_role:     enum          # shared_console | dedicated_debug | rsp — see §4.1
   caps:          list[str]     # THIS channel's capabilities (provides_console /
@@ -424,7 +425,9 @@ lease (§5.4) against an old helper that still believes it owns the line.
 - **`qemu-gdbstub` exception:** RSP is a separate TCP channel, so console
   contention does not arise; the lease is trivially `free` and this protocol is a
   no-op. The lease matters only for serial/console-multiplexed transports
-  (`ipmi-sol`, `ser2net`, `hmc-vterm`, `openbmc-sol`, `novalink` console).
+  (`qemu-virtio-serial`, `ipmi-sol`, `ser2net`, `hmc-vterm`, `openbmc-sol`,
+  `novalink` console) — `qemu-virtio-serial` carries the console over a
+  virtio-serial/unix socket, so unlike `qemu-gdbstub` it is a single-owner line.
 
 ### 5.3 Boot → debug handoff protocol
 
