@@ -206,6 +206,15 @@ def test_kernel_build_response_redacts_secret_make_variable(tmp_path: Path) -> N
     assert "supersecret" not in flattened
     assert "API_TOKEN=[REDACTED]" in flattened
 
+    # the repeat-build path (_recorded_build_success_response) must redact too
+    repeat = kernel_build_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=LocalKernelBuildProvider(runner=NoopRunner()),
+    )
+    assert repeat.ok is True
+    assert "supersecret" not in str(repeat.data)
+
 
 def test_kernel_build_repeat_success_returns_recorded_result(tmp_path: Path) -> None:
     _, artifact_root = create_run(tmp_path)

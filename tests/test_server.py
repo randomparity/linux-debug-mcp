@@ -364,6 +364,22 @@ def test_create_run_freezes_merged_profiles(tmp_path):
     assert manifest.request.boot_overrides.kernel_args == ["dhash_entries=1"]
 
 
+def test_create_run_response_redacts_secret_make_variable(tmp_path):
+    source = make_source_tree(tmp_path)
+    response = server.create_run_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        build_overrides=BuildOverrides(make_variables={"API_TOKEN": "supersecret"}),
+    )
+    assert response.ok
+    # the create_run response embeds the manifest dump (which carries make_variables);
+    # it must be redacted like the get_manifest view, not echoed verbatim.
+    assert "supersecret" not in str(response.data)
+
+
 def test_create_run_rejects_unknown_base_profile(tmp_path):
     source = make_source_tree(tmp_path)
     response = server.create_run_handler(

@@ -131,7 +131,7 @@ def _recorded_build_success_response(*, run_id: str, result: StepResult) -> Tool
     return ToolResponse.success(
         summary=result.summary,
         run_id=run_id,
-        data=result.details,
+        data=Redactor().redact_value(result.details),
         artifacts=result.artifacts,
         suggested_next_actions=["artifacts.get_manifest"],
     )
@@ -142,7 +142,7 @@ def _running_build_response(*, run_id: str, result: StepResult) -> ToolResponse:
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         message=RUNNING_BUILD_MESSAGE,
         run_id=run_id,
-        details=result.details,
+        details=Redactor().redact_value(result.details),
         suggested_next_actions=["artifacts.get_manifest"],
     )
 
@@ -489,7 +489,10 @@ def create_run_handler(
     return ToolResponse.success(
         summary=f"created run {manifest.run_id}",
         run_id=manifest.run_id,
-        data={"manifest": manifest.model_dump(mode="json"), "manifest_path": str(manifest_path)},
+        data={
+            "manifest": Redactor().redact_value(manifest.model_dump(mode="json")),
+            "manifest_path": str(manifest_path),
+        },
         artifacts=[ArtifactRef(path=str(manifest_path), kind="manifest")],
         suggested_next_actions=["kernel.build"],
     )
