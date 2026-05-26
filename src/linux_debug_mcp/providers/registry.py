@@ -24,8 +24,7 @@ class ProviderRegistry:
         if plugin_spec is not None:
             if capability.implementation_state != plugin_spec.implementation_state:
                 raise ValueError(
-                    "provider implementation_state must match plugin implementation_state: "
-                    f"{capability.provider_name}"
+                    f"provider implementation_state must match plugin implementation_state: {capability.provider_name}"
                 )
             capability = capability.model_copy(update={"documentation_paths": list(plugin_spec.documentation_paths)})
         self._providers[capability.provider_name] = capability
