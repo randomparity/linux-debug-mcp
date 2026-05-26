@@ -54,7 +54,7 @@ console, and real-boot providers.
 The server exposes atomic **MCP tools** over stdio. How a tool runs depends on
 the tool:
 
-- **Implemented local tools** dispatch in one of two ways, neither of which
+- **Most implemented local tools** dispatch in one of two ways, neither of which
   consults the provider registry:
   - *concrete-provider dispatch* — the tool's handler calls a provider class
     directly (`LocalKernelBuildProvider`, `LibvirtQemuProvider`,
@@ -67,7 +67,10 @@ the tool:
     metadata-only operations of a provider capability (`host.check_prerequisites`
     under `local-prereqs`; `kernel.create_run` and `artifacts.get_manifest` under
     `local-artifacts`), and orphan server tools that back no provider operation at
-    all (`providers.list`, `artifacts.collect`, `workflow.build_boot_test`).
+    all (`artifacts.collect`, `workflow.build_boot_test`).
+  The discovery tool `providers.list` is the exception among implemented tools: it
+  materializes the provider registry on demand and returns its catalog (it backs no
+  provider operation, so it belongs to no provider row).
 - **Future-stub tools** validate a typed request contract, then resolve an
   advertised provider through the registry (`select_future_provider`). A
   contract-valid request that resolves to exactly one provider returns
@@ -165,9 +168,10 @@ current boundaries.
 
 ## What Works Today
 
-Local x86_64 build to boot to smoke-test to debug, end to end, plus artifact
-manifests and discovery-only future-provider stubs. A full architecture document
-is in progress; the sections above are the current orientation.
+Two local x86_64 workflows: build-boot-test (build, boot, run smoke tests, collect
+artifacts) and build-boot-debug (build, boot, start a gdbstub debug session), plus
+artifact manifests and discovery-only future-provider stubs. A full architecture
+document is in progress; the sections above are the current orientation.
 
 ## Quick Start
 
