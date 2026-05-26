@@ -25,15 +25,31 @@ from linux_debug_mcp.seams.target import (
 
 DEFAULT_MIN_LEASE_TTL_SECONDS = 300
 
+# Closed allowlist of transport providers trusted to bind a loopback endpoint against a
+# local source (spec §3.2). `endpoint_exposure`/`locality` are provider-declared, so the
+# trust bottoms out here: a provider not in this set may never register `loopback_local`,
+# which keeps every unknown/remote transport `brokered_required` (default-deny, §8.4).
+LOCAL_TRANSPORT_PROVIDERS: frozenset[str] = frozenset({"qemu-gdbstub", "serial-local"})
+
 
 def _deep_freeze(value: Any) -> Any:
-    """Recursively convert mappings to read-only views and sequences to tuples so a
-    validated structure cannot be mutated in place."""
+    """Recursively validate that a structure is JSON-compatible and convert it to a
+    read-only form (mappings → read-only views, sequences → tuples) so it can be neither
+    mutated in place nor fail JSON persistence later. Rejects non-JSON leaves such as
+    `set`, `bytearray`, or custom objects, and non-string mapping keys."""
+    if value is None or isinstance(value, (str, int, float)):
+        # bool is a subclass of int; both are valid JSON scalars.
+        return value
     if isinstance(value, Mapping):
-        return MappingProxyType({key: _deep_freeze(item) for key, item in value.items()})
+        frozen: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"routing data mapping keys must be strings, got {type(key).__name__}")
+            frozen[key] = _deep_freeze(item)
+        return MappingProxyType(frozen)
     if isinstance(value, (list, tuple)):
         return tuple(_deep_freeze(item) for item in value)
-    return value
+    raise ValueError(f"routing data must be JSON-compatible, got non-JSON value of type {type(value).__name__}")
 
 
 def _deep_thaw(value: Any) -> Any:
@@ -317,6 +333,15 @@ class TransportRegistry:
     def register(self, capability: TransportCapability) -> None:
         if capability.provider_name in self._capabilities:
             raise ValueError(f"transport already registered: {capability.provider_name}")
+        if (
+            capability.endpoint_exposure is EndpointExposure.LOOPBACK_LOCAL
+            and capability.provider_name not in LOCAL_TRANSPORT_PROVIDERS
+        ):
+            raise ValueError(
+                f"transport {capability.provider_name!r} is not an allowlisted local provider "
+                "and may not register loopback_local exposure; unknown/remote transports are "
+                "brokered_required (§3.2, §8.4)"
+            )
         self._capabilities[capability.provider_name] = capability
 
     def get(self, provider_name: str) -> TransportCapability:

@@ -146,7 +146,10 @@ choices made here are called out.
   `target_ref`/`opts` JSON objects): every field is authority-bearing — `caps` drives
   break-plan candidate selection (§4.1), `secret_refs` drives secret resolution (§3.4),
   and `target_ref` is the attach-routing/path-safety input admission re-binds from the
-  snapshot — so a retained ref cannot be mutated in place after the authority check. The §8.4
+  snapshot — so a retained ref cannot be mutated in place after the authority check.
+  `target_ref`/`opts` are validated as JSON-compatible (string-keyed mappings, lists, and
+  `str|int|float|bool|None` leaves) so no mutable non-JSON leaf can survive the freeze or
+  break persistence. The §8.4
   endpoint-safety input (`endpoint_exposure`) is **not** a per-channel provisioning
   fact — it is a property of the *transport provider*, so it lives on the **01-owned
   `TransportCapability`** (below) and the gate derives it by looking up the selected
@@ -181,8 +184,12 @@ choices made here are called out.
   (a `locality=remote` + `endpoint_exposure=loopback_local` capability is rejected),
   so a misregistered remote provider cannot present trusted metadata that the §8.4 gate
   would read as authorizing a raw TCP endpoint; `locality` defaults to `remote` (the
-  safe value) so a provider must opt in to `local`. **Choice:** a dedicated model
-  rather than overloading `ProviderCapability`, so these flags are first-class.
+  safe value) so a provider must opt in to `local`. Because `locality`/`endpoint_exposure`
+  are provider-declared, the trust **bottoms out at registration**: `TransportRegistry`
+  rejects any `loopback_local` capability whose `provider_name` is not in the closed
+  `LOCAL_TRANSPORT_PROVIDERS` allowlist (`qemu-gdbstub`, `serial-local`), so a remote
+  transport cannot self-certify as local to win raw-TCP exposure. **Choice:** a dedicated
+  model rather than overloading `ProviderCapability`, so these flags are first-class.
 - `BreakPlan` — `method: gdbstub_native|uart_break|agent_proxy_break|sysrq_g`,
   `channel_id`, `rationale: str`.
 - `TransportSession` — `session_id, target_key, generation, provider, channel_id,

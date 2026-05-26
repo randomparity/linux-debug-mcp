@@ -407,6 +407,76 @@ def test_transport_registry_register_lookup_and_duplicate():
         registry.get("missing")
 
 
+def test_registry_rejects_loopback_local_from_non_allowlisted_provider():
+    # locality is provider-supplied, so the trust must bottom out at registration: a
+    # remote transport that self-certifies locality=LOCAL must still be refused
+    # loopback_local because its provider name is not an allowlisted local transport.
+    registry = TransportRegistry()
+    cap = TransportCapability(
+        provider_name="ipmi-sol",
+        locality=TransportLocality.LOCAL,
+        provides_console=True,
+        provides_rsp=False,
+        supports_uart_break=True,
+        endpoint_exposure=EndpointExposure.LOOPBACK_LOCAL,
+    )
+    with pytest.raises(ValueError):
+        registry.register(cap)
+
+
+def test_registry_accepts_loopback_local_from_allowlisted_provider():
+    registry = TransportRegistry()
+    cap = TransportCapability(
+        provider_name="serial-local",
+        locality=TransportLocality.LOCAL,
+        provides_console=True,
+        provides_rsp=False,
+        supports_uart_break=True,
+        endpoint_exposure=EndpointExposure.LOOPBACK_LOCAL,
+    )
+    registry.register(cap)
+    assert registry.endpoint_exposure("serial-local") is EndpointExposure.LOOPBACK_LOCAL
+
+
+def test_registry_accepts_brokered_required_from_any_provider():
+    # Only loopback_local is gated; a remote provider registering brokered_required is
+    # fine (it never returns a raw TCP endpoint).
+    registry = TransportRegistry()
+    cap = TransportCapability(
+        provider_name="ipmi-sol",
+        locality=TransportLocality.REMOTE,
+        provides_console=True,
+        provides_rsp=False,
+        supports_uart_break=True,
+        endpoint_exposure=EndpointExposure.BROKERED_REQUIRED,
+    )
+    registry.register(cap)
+    assert registry.endpoint_exposure("ipmi-sol") is EndpointExposure.BROKERED_REQUIRED
+
+
+@pytest.mark.parametrize("bad_leaf", [{1, 2}, bytearray(b"ab"), object()])
+def test_transport_ref_rejects_non_json_routing_leaves(bad_leaf):
+    # A mutable non-JSON leaf would survive inside the read-only mapping (mutable after
+    # validation) and break persistence; routing data must be JSON-compatible.
+    with pytest.raises(ValidationError):
+        TransportRef(
+            provider="p",
+            channel_id="c",
+            line_role=LineRole.RSP,
+            target_ref={"x": bad_leaf},
+        )
+
+
+def test_transport_ref_accepts_nested_json_routing_data():
+    ref = TransportRef(
+        provider="p",
+        channel_id="c",
+        line_role=LineRole.RSP,
+        target_ref={"device": "/dev/ttyS0", "n": 1, "f": 1.5, "b": True, "z": None, "lst": [1, "a"]},
+    )
+    assert ref.model_dump(mode="json")["target_ref"]["lst"] == [1, "a"]
+
+
 def test_transport_abc_cannot_be_instantiated_without_methods():
     with pytest.raises(TypeError):
         Transport()  # abstract
