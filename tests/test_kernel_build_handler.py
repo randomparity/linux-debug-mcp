@@ -175,6 +175,38 @@ def test_kernel_build_failure_response_includes_artifacts(tmp_path: Path) -> Non
     assert {artifact.kind for artifact in response.artifacts} == {"build-log", "build-summary"}
 
 
+def test_kernel_build_response_redacts_secret_make_variable(tmp_path: Path) -> None:
+    from linux_debug_mcp.config import BuildOverrides
+
+    source = make_source_tree(tmp_path)
+    artifact_root = tmp_path / "runs"
+    created = create_run_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        run_id="run-abc123",
+        build_overrides=BuildOverrides(make_variables={"API_TOKEN": "supersecret"}),
+    )
+    assert created.ok is True
+    build_dir = artifact_root / "run-abc123" / "build"
+    (build_dir / "arch" / "x86" / "boot").mkdir(parents=True)
+    (build_dir / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
+
+    response = kernel_build_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=LocalKernelBuildProvider(runner=NoopRunner()),
+    )
+
+    assert response.ok is True
+    flattened = str(response.data)
+    # the secret-shaped make variable reaches the build argv but must not leak unredacted
+    assert "supersecret" not in flattened
+    assert "API_TOKEN=[REDACTED]" in flattened
+
+
 def test_kernel_build_repeat_success_returns_recorded_result(tmp_path: Path) -> None:
     _, artifact_root = create_run(tmp_path)
     build_dir = artifact_root / "run-abc123" / "build"

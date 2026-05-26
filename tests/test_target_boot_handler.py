@@ -495,6 +495,25 @@ def test_target_boot_unexpected_execute_exception_records_infrastructure_failure
     assert manifest.step_results["boot"].summary == "unexpected boot provider failure"
 
 
+def test_target_boot_execute_exception_records_failed_attempt_and_retry_uses_next_attempt(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+
+    failing = boot(artifact_root, tmp_path, provider=FakeBootProvider(raise_on_execute=RuntimeError("boom")))
+    assert failing.ok is False
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
+    # the failed attempt is recorded atomically, so it occupies attempt-1 ...
+    assert [attempt.attempt for attempt in manifest.boot_attempts] == [1]
+    assert manifest.boot_attempts[0].status == StepStatus.FAILED
+
+    # ... and a retry advances to attempt-2 instead of overwriting attempt-1
+    retry = boot(artifact_root, tmp_path, provider=FakeBootProvider())
+    assert retry.ok is True
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
+    assert [attempt.attempt for attempt in manifest.boot_attempts] == [1, 2]
+    assert manifest.boot_attempts[1].status == StepStatus.SUCCEEDED
+
+
 def test_target_boot_failed_execution_result_propagates_error_category(tmp_path: Path) -> None:
     artifact_root = create_run(tmp_path)
     record_build(artifact_root)

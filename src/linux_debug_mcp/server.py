@@ -393,6 +393,9 @@ def _resolve_initial_profiles(
     base_target = DEFAULT_TARGET_PROFILES[target_profile]
     base_rootfs = DEFAULT_ROOTFS_PROFILES[rootfs_profile]
 
+    # model_copy(update=...) skips field validators, which is safe here: both base and
+    # override values were validated at construction (BuildProfile/BootOverrides), and the
+    # merges only union dicts or de-dup pre-validated tokens, so the result stays valid.
     resolved_build = base_build
     if build_overrides is not None and build_overrides.make_variables:
         resolved_build = base_build.model_copy(
@@ -789,7 +792,7 @@ def kernel_build_handler(
                     category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                     message=result.summary,
                     run_id=run_id,
-                    details=result.details,
+                    details=Redactor().redact_value(result.details),
                     artifacts=result.artifacts,
                     suggested_next_actions=["artifacts.get_manifest"],
                 )
@@ -807,7 +810,7 @@ def kernel_build_handler(
         return ToolResponse.success(
             summary=execution.summary,
             run_id=run_id,
-            data=execution.details,
+            data=Redactor().redact_value(execution.details),
             artifacts=execution.artifacts,
             suggested_next_actions=["artifacts.get_manifest"],
         )
@@ -815,7 +818,7 @@ def kernel_build_handler(
         category=execution.error_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
         message=execution.summary,
         run_id=run_id,
-        details={**execution.details, "diagnostic": execution.diagnostic},
+        details=Redactor().redact_value({**execution.details, "diagnostic": execution.diagnostic}),
         artifacts=execution.artifacts,
         suggested_next_actions=["artifacts.get_manifest"],
     )
@@ -930,6 +933,14 @@ def target_boot_handler(
     provider = provider or LibvirtQemuProvider()
 
     def execute_boot(*, plan: Any, retrying_after_failure: bool, replace_succeeded: bool, attempt: int) -> ToolResponse:
+        def _failed_attempt_record() -> BootAttempt:
+            return BootAttempt(
+                attempt=attempt,
+                resolved_target_profile=resolved_target_profile,
+                resolved_rootfs_profile=resolved_rootfs_profile,
+                status=StepStatus.FAILED,
+            )
+
         plan_gdbstub_endpoint = getattr(plan, "gdbstub_endpoint", None)
         if plan_gdbstub_endpoint is not None and hasattr(plan_gdbstub_endpoint, "as_dict"):
             plan_gdbstub_endpoint = plan_gdbstub_endpoint.as_dict()
@@ -966,7 +977,7 @@ def target_boot_handler(
                 artifacts=exc.artifacts,
                 details=exc.details,
             )
-            store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded)
+            store.record_boot_attempt(run_id, attempt=_failed_attempt_record(), boot_result=failed)
             return ToolResponse.failure(
                 category=exc.category,
                 message=str(exc),
@@ -988,7 +999,7 @@ def target_boot_handler(
                     "error": str(exc),
                 },
             )
-            store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded)
+            store.record_boot_attempt(run_id, attempt=_failed_attempt_record(), boot_result=failed)
             return ToolResponse.failure(
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 message=failed.summary,
