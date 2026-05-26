@@ -10,7 +10,17 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 from linux_debug_mcp.safety.secrets import SecretReference
 
 _SAFE_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-_KERNEL_ARG_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:=,/-]*\Z")
+# Unquoted kernel-arg token: no whitespace (would split the cmdline), no XML- or
+# shell-special characters. + % @ are safe additions (not special to the kernel cmdline
+# parser, XML text, or — there is no shell — the host).
+_KERNEL_ARG_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:=,/+%@-]*\Z")
+# Quoted kernel-arg token: key="value". The kernel cmdline parser groups a double-quoted
+# value (embedded spaces become part of the single parameter). The value is restricted to
+# printable ASCII except " — excluding " (which would close the quote early and split the
+# cmdline) and all control characters (C0, DEL, and C1) to match the codebase's control-char
+# hygiene. ElementTree escapes the surrounding XML text, and there is no shell, so no
+# host-side injection results.
+_KERNEL_ARG_QUOTED_PATTERN = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_.:/+%@-]*="[\x20-\x21\x23-\x7e]*"\Z')
 _MAKE_VAR_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 _CONFIG_LINE_PATTERN = re.compile(
     r'^(?:CONFIG_[A-Z0-9_]+=(?:[ymn]|-?\d+|0x[0-9A-Fa-f]+|"[^"\n\r]*")|# CONFIG_[A-Z0-9_]+ is not set)\Z'
@@ -20,7 +30,7 @@ _CONFIG_LINE_PATTERN = re.compile(
 def validate_kernel_arg_tokens(value: list[str]) -> list[str]:
     seen_keys: set[str] = set()
     for token in value:
-        if not _KERNEL_ARG_PATTERN.match(token):
+        if not (_KERNEL_ARG_PATTERN.match(token) or _KERNEL_ARG_QUOTED_PATTERN.match(token)):
             raise ValueError(f"unsafe kernel argument token: {token!r}")
         key = token.split("=", 1)[0] if "=" in token else token
         if key in seen_keys:
