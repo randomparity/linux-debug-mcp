@@ -21,6 +21,12 @@ from linux_debug_mcp.domain import (
 from linux_debug_mcp.safety.redaction import Redactor
 
 
+class ConfigMergeError(Exception):
+    def __init__(self, message: str, *, diagnostic: str | None = None) -> None:
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
+
 @dataclass(frozen=True)
 class BuildPlan:
     argv: list[str]
@@ -132,6 +138,43 @@ class LocalKernelBuildProvider:
         shutil.copy2(source_config, output_config)
         return output_config
 
+    def _apply_config_lines(self, *, plan: BuildPlan, base_config: Path, log_dir: Path) -> None:
+        if not plan.config_lines:
+            return
+        merge_script = plan.source_path / "scripts" / "kconfig" / "merge_config.sh"
+        if not merge_script.is_file():
+            raise ConfigMergeError(f"merge_config.sh not found at {merge_script}")
+        inputs_dir = plan.output_path.parent / "inputs"
+        inputs_dir.mkdir(parents=True, exist_ok=True)
+        override_config = inputs_dir / "override.config"
+        override_config.write_text("\n".join(plan.config_lines) + "\n", encoding="utf-8")
+        merge_log = log_dir / "config-merge.log"
+        merge_status = self.runner.run(
+            [str(merge_script), "-m", "-O", str(plan.output_path), str(base_config), str(override_config)],
+            timeout=plan.timeout_seconds,
+            log_path=merge_log,
+            env=plan.environment,
+            cwd=plan.output_path,
+        )
+        if merge_status != 0:
+            raise ConfigMergeError(
+                f"kernel config merge failed (exit status {merge_status})",
+                diagnostic=self._log_tail(merge_log),
+            )
+        olddefconfig_log = log_dir / "config-olddefconfig.log"
+        olddefconfig_status = self.runner.run(
+            ["make", "-C", str(plan.source_path), f"O={plan.output_path}", "ARCH=x86_64", "olddefconfig"],
+            timeout=plan.timeout_seconds,
+            log_path=olddefconfig_log,
+            env=plan.environment,
+            cwd=plan.output_path,
+        )
+        if olddefconfig_status != 0:
+            raise ConfigMergeError(
+                f"olddefconfig failed (exit status {olddefconfig_status})",
+                diagnostic=self._log_tail(olddefconfig_log),
+            )
+
     def detect_source_revision(self, source_path: Path) -> dict[str, object]:
         try:
             commit = subprocess.check_output(
@@ -172,9 +215,18 @@ class LocalKernelBuildProvider:
                 details={"missing_tools": missing_tools, "argv": plan.argv, "source_revision": source_revision},
             )
         try:
-            self.prepare_config(source_path=plan.source_path, output_path=plan.output_path)
+            base_config = self.prepare_config(source_path=plan.source_path, output_path=plan.output_path)
+            self._apply_config_lines(plan=plan, base_config=base_config, log_dir=log_path.parent)
             exit_status = self.runner.run(
                 plan.argv, timeout=plan.timeout_seconds, log_path=log_path, env=plan.environment
+            )
+        except ConfigMergeError as exc:
+            return BuildExecutionResult(
+                status=StepStatus.FAILED,
+                summary=str(exc),
+                error_category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"argv": plan.argv, "source_revision": source_revision},
+                diagnostic=exc.diagnostic,
             )
         except ValueError as exc:
             return BuildExecutionResult(

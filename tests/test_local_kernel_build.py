@@ -92,9 +92,17 @@ def test_plan_build_threads_config_lines_into_plan(tmp_path: Path) -> None:
 
 
 class FakeRunner:
-    def __init__(self, *, tools: dict[str, str] | None = None, returncode: int = 0, output: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        tools: dict[str, str] | None = None,
+        returncode: int = 0,
+        returncodes: list[int] | None = None,
+        output: str = "",
+    ) -> None:
         self.tools = {"make": "/usr/bin/make"} if tools is None else tools
         self.returncode = returncode
+        self.returncodes = returncodes
         self.output = output
         self.commands: list[list[str]] = []
         self.environments: list[dict[str, str]] = []
@@ -117,6 +125,9 @@ class FakeRunner:
         self.cwds.append(cwd)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text(self.output, encoding="utf-8")
+        if self.returncodes is not None:
+            index = min(len(self.commands) - 1, len(self.returncodes) - 1)
+            return self.returncodes[index]
         return self.returncode
 
 
@@ -391,6 +402,131 @@ def test_source_revision_for_git_tree_records_commit_and_dirty_state(tmp_path: P
     revision = provider.detect_source_revision(source)
 
     assert revision == {"commit": expected_commit, "dirty": True, "reason": None}
+
+
+def _make_run_dir(tmp_path: Path) -> tuple[Path, Path]:
+    source = tmp_path / "linux"
+    (source / "scripts" / "kconfig").mkdir(parents=True)
+    (source / "scripts" / "kconfig" / "merge_config.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (source / ".config").write_text("CONFIG_BASE=y\n", encoding="utf-8")
+    run_dir = tmp_path / "runs" / "run-1"
+    output = run_dir / "build"
+    (output / "arch" / "x86" / "boot").mkdir(parents=True)
+    (output / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
+    return source, output
+
+
+def test_execute_applies_config_lines_before_main_make(tmp_path: Path) -> None:
+    source, output = _make_run_dir(tmp_path)
+    runner = FakeRunner(output="ok\n")
+    provider = LocalKernelBuildProvider(runner=runner)
+    profile = BuildProfile(
+        name="frag", architecture="x86_64", config_lines=["CONFIG_DEBUG_INFO=y", "# CONFIG_FOO is not set"]
+    )
+    plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
+
+    result = provider.execute_build(
+        plan=plan,
+        log_path=output.parent / "logs" / "build.log",
+        summary_path=output.parent / "summaries" / "build-summary.json",
+    )
+
+    assert result.status == "succeeded"
+    # Three runner calls in order: merge_config.sh, olddefconfig, main make.
+    assert runner.commands[0] == [
+        str(source / "scripts" / "kconfig" / "merge_config.sh"),
+        "-m",
+        "-O",
+        str(output),
+        str(output / ".config"),
+        str(output.parent / "inputs" / "override.config"),
+    ]
+    assert runner.commands[1] == ["make", "-C", str(source), f"O={output}", "ARCH=x86_64", "olddefconfig"]
+    assert runner.commands[2] == plan.argv
+    assert runner.cwds[0] == output
+    override = (output.parent / "inputs" / "override.config").read_text(encoding="utf-8")
+    assert override == "CONFIG_DEBUG_INFO=y\n# CONFIG_FOO is not set\n"
+
+
+def test_execute_without_config_lines_runs_only_main_make(tmp_path: Path) -> None:
+    source, output = _make_run_dir(tmp_path)
+    runner = FakeRunner(output="ok\n")
+    provider = LocalKernelBuildProvider(runner=runner)
+    profile = BuildProfile(name="x86_64-default", architecture="x86_64")
+    plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
+
+    result = provider.execute_build(
+        plan=plan,
+        log_path=output.parent / "logs" / "build.log",
+        summary_path=output.parent / "summaries" / "build-summary.json",
+    )
+
+    assert result.status == "succeeded"
+    assert runner.commands == [plan.argv]
+    assert not (output.parent / "inputs" / "override.config").exists()
+
+
+def test_execute_config_merge_nonzero_returns_configuration_error(tmp_path: Path) -> None:
+    source, output = _make_run_dir(tmp_path)
+    runner = FakeRunner(returncode=1, output="token=secret\nmerge boom\n")
+    provider = LocalKernelBuildProvider(runner=runner)
+    profile = BuildProfile(name="frag", architecture="x86_64", config_lines=["CONFIG_DEBUG_INFO=y"])
+    plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
+
+    result = provider.execute_build(
+        plan=plan,
+        log_path=output.parent / "logs" / "build.log",
+        summary_path=output.parent / "summaries" / "build-summary.json",
+    )
+
+    assert result.status == "failed"
+    assert result.error_category == ErrorCategory.CONFIGURATION_ERROR
+    assert "config merge failed" in result.summary
+    assert "token=[REDACTED]" in result.diagnostic
+
+
+def test_execute_olddefconfig_nonzero_returns_configuration_error(tmp_path: Path) -> None:
+    source, output = _make_run_dir(tmp_path)
+    runner = FakeRunner(returncodes=[0, 2], output="token=secret\nolddefconfig boom\n")
+    provider = LocalKernelBuildProvider(runner=runner)
+    profile = BuildProfile(name="frag", architecture="x86_64", config_lines=["CONFIG_DEBUG_INFO=y"])
+    plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
+
+    result = provider.execute_build(
+        plan=plan,
+        log_path=output.parent / "logs" / "build.log",
+        summary_path=output.parent / "summaries" / "build-summary.json",
+    )
+
+    assert result.status == "failed"
+    assert result.error_category == ErrorCategory.CONFIGURATION_ERROR
+    assert "olddefconfig failed" in result.summary
+    assert "token=[REDACTED]" in result.diagnostic
+    # merge_config.sh then olddefconfig ran; the main make never started
+    assert len(runner.commands) == 2
+
+
+def test_execute_config_lines_without_merge_script_fails(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    source.mkdir()
+    (source / ".config").write_text("CONFIG_BASE=y\n", encoding="utf-8")
+    output = tmp_path / "runs" / "run-1" / "build"
+    (output / "arch" / "x86" / "boot").mkdir(parents=True)
+    (output / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
+    runner = FakeRunner(output="ok\n")
+    provider = LocalKernelBuildProvider(runner=runner)
+    profile = BuildProfile(name="frag", architecture="x86_64", config_lines=["CONFIG_DEBUG_INFO=y"])
+    plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
+
+    result = provider.execute_build(
+        plan=plan,
+        log_path=output.parent / "logs" / "build.log",
+        summary_path=output.parent / "summaries" / "build-summary.json",
+    )
+
+    assert result.status == "failed"
+    assert result.error_category == ErrorCategory.CONFIGURATION_ERROR
+    assert "merge_config.sh not found" in result.summary
 
 
 def test_execute_summary_records_source_revision(tmp_path: Path) -> None:
