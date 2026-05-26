@@ -59,7 +59,9 @@ the tool:
   - *concrete-provider dispatch* — the tool's handler calls a provider class
     directly (`LocalKernelBuildProvider`, `LibvirtQemuProvider`,
     `LocalSshTestProvider`, `QemuGdbstubProvider`) to act on a local or virtual
-    target.
+    target. The multi-step `workflow.build_boot_test` and
+    `workflow.build_boot_debug` tools are the exception: they are
+    server-orchestrated rather than a single provider call (see below).
   - *server-handler orchestration* — other tools run entirely in the server with
     no provider class. These split into two kinds: tools advertised as
     metadata-only operations of a provider capability (`host.check_prerequisites`
@@ -119,6 +121,12 @@ are not working features.
 | boot | local-libvirt-qemu | implemented | x86_64 | target.boot | virtual |
 | test | local-ssh-tests | implemented | x86_64 | target.run_tests | virtual |
 | debug | local-qemu-gdbstub | implemented | x86_64 | workflow.build_boot_debug + 11 debug.* ops | virtual |
+
+The debug row's `workflow.build_boot_debug` is advertised in the
+`local-qemu-gdbstub` metadata, but it runs as a server-orchestrated workflow that
+chains the build, boot, and debug-session handlers — like `workflow.build_boot_test`.
+Only the debug-session step and the 11 `debug.*` operations are direct
+`QemuGdbstubProvider` dispatch.
 
 **Discovery-only stubs (not yet implemented):**
 
