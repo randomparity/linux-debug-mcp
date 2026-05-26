@@ -18,7 +18,7 @@ class BootAttempt(Model):
 
 
 class RunManifest(Model):
-    schema_version: int = 2
+    schema_version: int = 3
     writer_version: str = __version__
     run_id: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -27,6 +27,8 @@ class RunManifest(Model):
     step_results: dict[str, StepResult] = Field(default_factory=dict)
     cleanup_state: str = "not_started"
     resolved_build_profile: BuildProfile | None = None
+    resolved_target_profile: TargetProfile | None = None
+    resolved_rootfs_profile: RootfsProfile | None = None
     boot_attempts: list[BootAttempt] = Field(default_factory=list)
 
     @classmethod
@@ -36,11 +38,15 @@ class RunManifest(Model):
         run_id: str,
         request: RunRequest,
         resolved_build_profile: BuildProfile | None = None,
+        resolved_target_profile: TargetProfile | None = None,
+        resolved_rootfs_profile: RootfsProfile | None = None,
     ) -> RunManifest:
         return cls(
             run_id=run_id,
             request=request,
             resolved_build_profile=resolved_build_profile,
+            resolved_target_profile=resolved_target_profile,
+            resolved_rootfs_profile=resolved_rootfs_profile,
             steps=[
                 RunStep(name="create_run", status=StepStatus.SUCCEEDED, provider="local-artifacts"),
                 RunStep(name="build", status=StepStatus.PENDING),

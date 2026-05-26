@@ -90,6 +90,13 @@ The local providers do not create root filesystems, install SSH packages or
 keys, discover guest addresses, generate kernel configs, or apply config
 fragments automatically.
 
+`kernel.create_run` accepts either named profiles (`build_profile`,
+`target_profile`, `rootfs_profile`) or inline specs (`build_profile_spec`,
+`target_profile_spec`, `rootfs_profile_spec`) — exactly one per kind. An inline
+spec is validated by the same model as the named profile and frozen into the run
+manifest; an inline `rootfs_source` is subject to the same path-safety guards as
+a `rootfs_source` override.
+
 ## Local Debug Tools
 
 The implemented debug path attaches local `gdb` to a localhost-only QEMU
