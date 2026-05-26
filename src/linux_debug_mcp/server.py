@@ -9,16 +9,20 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
-from linux_debug_mcp.artifacts.manifest import RunManifest
+from linux_debug_mcp.artifacts.manifest import BootAttempt, RunManifest
 from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
 from linux_debug_mcp.config import (
     SPRINT_4_DEBUG_OPERATIONS,
+    BootOverrides,
+    BuildOverrides,
     BuildProfile,
     DebugProfile,
     RootfsProfile,
     TargetProfile,
     TestCommand,
     TestSuiteProfile,
+    merge_config_lines,
+    merge_kernel_args,
 )
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from linux_debug_mcp.logging import configure_logging
@@ -51,7 +55,7 @@ from linux_debug_mcp.providers.stubs import (
     future_not_implemented_response,
     select_future_provider,
 )
-from linux_debug_mcp.safety.paths import PathSafetyError, validate_source_path
+from linux_debug_mcp.safety.paths import PathSafetyError, validate_rootfs_source, validate_source_path
 from linux_debug_mcp.safety.redaction import Redactor
 
 DEFAULT_ARTIFACT_ROOT = Path(".linux-debug-mcp/runs")
@@ -128,7 +132,7 @@ def _recorded_build_success_response(*, run_id: str, result: StepResult) -> Tool
     return ToolResponse.success(
         summary=result.summary,
         run_id=run_id,
-        data=result.details,
+        data=Redactor().redact_value(result.details),
         artifacts=result.artifacts,
         suggested_next_actions=["artifacts.get_manifest"],
     )
@@ -139,12 +143,15 @@ def _running_build_response(*, run_id: str, result: StepResult) -> ToolResponse:
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         message=RUNNING_BUILD_MESSAGE,
         run_id=run_id,
-        details=result.details,
+        details=Redactor().redact_value(result.details),
         suggested_next_actions=["artifacts.get_manifest"],
     )
 
 
-def _build_profile_from_manifest(profile_name: str) -> BuildProfile:
+def _build_profile_from_manifest(manifest: RunManifest) -> BuildProfile:
+    if manifest.resolved_build_profile is not None:
+        return manifest.resolved_build_profile
+    profile_name = manifest.request.build_profile
     try:
         return DEFAULT_BUILD_PROFILES[profile_name]
     except KeyError as exc:
@@ -171,11 +178,15 @@ def _record_terminal_build_result(
             delay_seconds *= 2
 
 
+def _redacted_boot_data(data: dict[str, Any]) -> dict[str, Any]:
+    return Redactor().redact_value(data)
+
+
 def _recorded_boot_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
     return ToolResponse.success(
         summary=result.summary,
         run_id=run_id,
-        data=result.details,
+        data=_redacted_boot_data(result.details),
         artifacts=result.artifacts,
         suggested_next_actions=["artifacts.get_manifest"],
     )
@@ -215,7 +226,7 @@ def _running_boot_response(*, run_id: str, result: StepResult, message: str = RU
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         message=message,
         run_id=run_id,
-        details=result.details,
+        details=_redacted_boot_data(result.details),
         artifacts=result.artifacts,
         suggested_next_actions=["artifacts.get_manifest"],
     )
@@ -369,6 +380,40 @@ def _validate_adhoc_commands(commands: list[list[str]] | None) -> list[TestComma
     return validated
 
 
+def _resolve_initial_profiles(
+    *,
+    source_path: Path,
+    sensitive_paths: list[Path],
+    build_profile: str,
+    build_overrides: BuildOverrides | None,
+    boot_overrides: BootOverrides | None,
+) -> BuildProfile:
+    base_build = DEFAULT_BUILD_PROFILES[build_profile]
+
+    # model_copy(update=...) skips field validators, which is safe here: both base and
+    # override values were validated at construction (BuildProfile/BootOverrides), and the
+    # merges only union dicts, de-dup kernel-arg tokens by key, or merge config_lines by
+    # symbol (last wins) over already-validated values, so the result stays valid.
+    resolved_build = base_build
+    if build_overrides is not None:
+        build_update: dict[str, object] = {}
+        if build_overrides.make_variables:
+            build_update["make_variables"] = {**base_build.make_variables, **build_overrides.make_variables}
+        if build_overrides.config_lines:
+            build_update["config_lines"] = merge_config_lines(base_build.config_lines, build_overrides.config_lines)
+        if build_update:
+            resolved_build = base_build.model_copy(update=build_update)
+
+    # Fail-fast on a bad rootfs override at run creation; the resolved rootfs is re-derived at boot.
+    if boot_overrides is not None and boot_overrides.rootfs_source is not None:
+        validate_rootfs_source(
+            Path(boot_overrides.rootfs_source),
+            source_paths=[source_path],
+            sensitive_paths=sensitive_paths,
+        )
+    return resolved_build
+
+
 def create_run_handler(
     *,
     artifact_root: Path,
@@ -379,6 +424,8 @@ def create_run_handler(
     run_id: str | None = None,
     debug_profile: str | None = None,
     test_suite: str | None = None,
+    build_overrides: BuildOverrides | None = None,
+    boot_overrides: BootOverrides | None = None,
 ) -> ToolResponse:
     try:
         resolved_source_path = validate_source_path(Path(source_path))
@@ -388,6 +435,33 @@ def create_run_handler(
             message=str(exc),
             details={"source_path": source_path},
         )
+    for name, mapping in (
+        (build_profile, DEFAULT_BUILD_PROFILES),
+        (target_profile, DEFAULT_TARGET_PROFILES),
+        (rootfs_profile, DEFAULT_ROOTFS_PROFILES),
+    ):
+        if name not in mapping:
+            return ToolResponse.failure(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                message=f"unknown profile: {name}",
+            )
+    try:
+        resolved_build = _resolve_initial_profiles(
+            source_path=Path(resolved_source_path),
+            # No ServerConfig is loaded at runtime (out of scope; see the design doc's "Out of
+            # scope"), so there are no operator-configured sensitive paths to enforce here. The
+            # built-in validate_rootfs_source guards (reject /, $HOME, non-file, source-tree
+            # overlap, shell/control chars, symlink-resolved) still apply.
+            sensitive_paths=[],
+            build_profile=build_profile,
+            build_overrides=build_overrides,
+            boot_overrides=boot_overrides,
+        )
+    except (PathSafetyError, ValueError) as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            message=str(exc),
+        )
     request = RunRequest(
         source_path=str(resolved_source_path),
         build_profile=build_profile,
@@ -396,10 +470,12 @@ def create_run_handler(
         debug_profile=debug_profile,
         test_suite=test_suite,
         run_id=run_id,
+        build_overrides=build_overrides,
+        boot_overrides=boot_overrides,
     )
     try:
         store = ArtifactStore(artifact_root, source_paths=[resolved_source_path])
-        manifest = store.create_run(request)
+        manifest = store.create_run(request, resolved_build_profile=resolved_build)
     except ManifestStateError as exc:
         return ToolResponse.failure(
             category=exc.category,
@@ -410,7 +486,10 @@ def create_run_handler(
     return ToolResponse.success(
         summary=f"created run {manifest.run_id}",
         run_id=manifest.run_id,
-        data={"manifest": manifest.model_dump(mode="json"), "manifest_path": str(manifest_path)},
+        data={
+            "manifest": Redactor().redact_value(manifest.model_dump(mode="json")),
+            "manifest_path": str(manifest_path),
+        },
         artifacts=[ArtifactRef(path=str(manifest_path), kind="manifest")],
         suggested_next_actions=["kernel.build"],
     )
@@ -664,7 +743,7 @@ def kernel_build_handler(
     try:
         source_path = validate_source_path(Path(manifest.request.source_path))
         store = ArtifactStore(artifact_root, source_paths=[source_path], create_root=False)
-        profile = _build_profile_from_manifest(requested_profile)
+        profile = _build_profile_from_manifest(manifest)
         provider = provider or LocalKernelBuildProvider()
         run_dir = store.run_dir(run_id)
         plan = provider.plan_build(source_path=source_path, output_path=run_dir / "build", profile=profile)
@@ -713,7 +792,7 @@ def kernel_build_handler(
                     category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                     message=result.summary,
                     run_id=run_id,
-                    details=result.details,
+                    details=Redactor().redact_value(result.details),
                     artifacts=result.artifacts,
                     suggested_next_actions=["artifacts.get_manifest"],
                 )
@@ -731,7 +810,7 @@ def kernel_build_handler(
         return ToolResponse.success(
             summary=execution.summary,
             run_id=run_id,
-            data=execution.details,
+            data=Redactor().redact_value(execution.details),
             artifacts=execution.artifacts,
             suggested_next_actions=["artifacts.get_manifest"],
         )
@@ -739,7 +818,7 @@ def kernel_build_handler(
         category=execution.error_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
         message=execution.summary,
         run_id=run_id,
-        details={**execution.details, "diagnostic": execution.diagnostic},
+        details=Redactor().redact_value({**execution.details, "diagnostic": execution.diagnostic}),
         artifacts=execution.artifacts,
         suggested_next_actions=["artifacts.get_manifest"],
     )
@@ -756,6 +835,7 @@ def target_boot_handler(
     target_profiles: dict[str, TargetProfile] | None = None,
     rootfs_profiles: dict[str, RootfsProfile] | None = None,
     default_libvirt_uri: str | None = None,
+    boot_overrides: BootOverrides | None = None,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -802,6 +882,31 @@ def target_boot_handler(
     if resolved_target_profile.target_ref is None:
         return _configuration_failure(run_id=run_id, message="target profile target_ref is required")
 
+    effective_boot_overrides = boot_overrides
+    if effective_boot_overrides is None and not manifest.boot_attempts:
+        effective_boot_overrides = manifest.request.boot_overrides
+    if effective_boot_overrides is not None:
+        try:
+            if effective_boot_overrides.kernel_args:
+                resolved_target_profile = resolved_target_profile.model_copy(
+                    update={
+                        "kernel_args": merge_kernel_args(
+                            resolved_target_profile.kernel_args, effective_boot_overrides.kernel_args
+                        )
+                    }
+                )
+            if effective_boot_overrides.rootfs_source is not None:
+                validated = validate_rootfs_source(
+                    Path(effective_boot_overrides.rootfs_source),
+                    source_paths=[Path(manifest.request.source_path)],
+                    # No ServerConfig is loaded (see create_run_handler), so there are no
+                    # operator-configured sensitive paths; the built-in guards still apply.
+                    sensitive_paths=[],
+                )
+                resolved_rootfs_profile = resolved_rootfs_profile.model_copy(update={"source": str(validated)})
+        except (PathSafetyError, ValueError) as exc:
+            return _configuration_failure(run_id=run_id, message=str(exc))
+
     build_result = manifest.step_results.get("build")
     if build_result is None or build_result.status != StepStatus.SUCCEEDED:
         return _configuration_failure(run_id=run_id, message="target boot requires a succeeded build")
@@ -819,13 +924,25 @@ def target_boot_handler(
             },
         )
 
+    has_new_boot_overrides = boot_overrides is not None and (
+        bool(boot_overrides.kernel_args) or boot_overrides.rootfs_source is not None
+    )
+
     existing = manifest.step_results.get("boot")
-    if existing and existing.status == StepStatus.SUCCEEDED and not force_reboot:
+    if existing and existing.status == StepStatus.SUCCEEDED and not force_reboot and not has_new_boot_overrides:
         return _recorded_boot_success_response(run_id=run_id, result=existing)
 
     provider = provider or LibvirtQemuProvider()
 
-    def execute_boot(*, plan: Any, retrying_after_failure: bool, replace_succeeded: bool) -> ToolResponse:
+    def execute_boot(*, plan: Any, retrying_after_failure: bool, replace_succeeded: bool, attempt: int) -> ToolResponse:
+        def _failed_attempt_record() -> BootAttempt:
+            return BootAttempt(
+                attempt=attempt,
+                resolved_target_profile=resolved_target_profile,
+                resolved_rootfs_profile=resolved_rootfs_profile,
+                status=StepStatus.FAILED,
+            )
+
         plan_gdbstub_endpoint = getattr(plan, "gdbstub_endpoint", None)
         if plan_gdbstub_endpoint is not None and hasattr(plan_gdbstub_endpoint, "as_dict"):
             plan_gdbstub_endpoint = plan_gdbstub_endpoint.as_dict()
@@ -862,12 +979,12 @@ def target_boot_handler(
                 artifacts=exc.artifacts,
                 details=exc.details,
             )
-            store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded)
+            store.record_boot_attempt(run_id, attempt=_failed_attempt_record(), boot_result=failed)
             return ToolResponse.failure(
                 category=exc.category,
                 message=str(exc),
                 run_id=run_id,
-                details=exc.details,
+                details=_redacted_boot_data(exc.details),
                 artifacts=exc.artifacts,
                 suggested_next_actions=["artifacts.get_manifest"],
             )
@@ -884,12 +1001,12 @@ def target_boot_handler(
                     "error": str(exc),
                 },
             )
-            store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded)
+            store.record_boot_attempt(run_id, attempt=_failed_attempt_record(), boot_result=failed)
             return ToolResponse.failure(
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 message=failed.summary,
                 run_id=run_id,
-                details=failed.details,
+                details=_redacted_boot_data(failed.details),
                 artifacts=failed.artifacts,
                 suggested_next_actions=["artifacts.get_manifest"],
             )
@@ -900,12 +1017,18 @@ def target_boot_handler(
             artifacts=execution.artifacts,
             details={**execution.details, "kernel_image_path": str(kernel_image.path)},
         )
-        store.record_step_result(run_id, terminal, replace_succeeded=replace_succeeded)
+        attempt_record = BootAttempt(
+            attempt=attempt,
+            resolved_target_profile=resolved_target_profile,
+            resolved_rootfs_profile=resolved_rootfs_profile,
+            status=execution.status,
+        )
+        store.record_boot_attempt(run_id, attempt=attempt_record, boot_result=terminal)
         if execution.status == StepStatus.SUCCEEDED:
             return ToolResponse.success(
                 summary=execution.summary,
                 run_id=run_id,
-                data=terminal.details,
+                data=_redacted_boot_data(terminal.details),
                 artifacts=execution.artifacts,
                 suggested_next_actions=["artifacts.get_manifest"],
             )
@@ -913,7 +1036,7 @@ def target_boot_handler(
             category=execution.error_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
             message=execution.summary,
             run_id=run_id,
-            details={**execution.details, "diagnostic": execution.diagnostic},
+            details=_redacted_boot_data({**execution.details, "diagnostic": execution.diagnostic}),
             artifacts=execution.artifacts,
             suggested_next_actions=["artifacts.get_manifest"],
         )
@@ -922,10 +1045,18 @@ def target_boot_handler(
         with store.boot_lock(run_id):
             locked_manifest = store.load_manifest(run_id)
             locked_existing = locked_manifest.step_results.get("boot")
-            if locked_existing and locked_existing.status == StepStatus.SUCCEEDED and not force_reboot:
+            if (
+                locked_existing
+                and locked_existing.status == StepStatus.SUCCEEDED
+                and not force_reboot
+                and not has_new_boot_overrides
+            ):
                 return _recorded_boot_success_response(run_id=run_id, result=locked_existing)
+            next_attempt = len(locked_manifest.boot_attempts) + 1
             retrying_after_failure = bool(locked_existing and locked_existing.status == StepStatus.FAILED)
-            replace_succeeded = bool(locked_existing and locked_existing.status == StepStatus.SUCCEEDED)
+            replace_succeeded = (
+                bool(locked_existing and locked_existing.status == StepStatus.SUCCEEDED) or has_new_boot_overrides
+            )
             with store.target_lock(resolved_target_profile.target_ref):
                 if locked_existing and locked_existing.status == StepStatus.RUNNING:
                     stale_failed = StepResult(
@@ -944,6 +1075,7 @@ def target_boot_handler(
                         kernel_image_path=Path(kernel_image.path),
                         target_profile=resolved_target_profile,
                         rootfs_profile=resolved_rootfs_profile,
+                        attempt=next_attempt,
                     )
                 except ProviderBootError as exc:
                     failed = StepResult(
@@ -958,7 +1090,7 @@ def target_boot_handler(
                         category=exc.category,
                         message=str(exc),
                         run_id=run_id,
-                        details=exc.details,
+                        details=_redacted_boot_data(exc.details),
                         artifacts=exc.artifacts,
                         suggested_next_actions=["artifacts.get_manifest"],
                     )
@@ -968,6 +1100,7 @@ def target_boot_handler(
                     plan=plan,
                     retrying_after_failure=retrying_after_failure,
                     replace_succeeded=replace_succeeded or force_reboot,
+                    attempt=next_attempt,
                 )
     except ManifestStateError as exc:
         if "boot is locked" in str(exc):
@@ -1023,13 +1156,16 @@ def target_run_tests_handler(
 
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
     test_suites = test_suites if test_suites is not None else DEFAULT_TEST_SUITES
-    try:
-        resolved_rootfs_profile = rootfs_profiles[manifest.request.rootfs_profile]
-    except KeyError:
-        return _configuration_failure(
-            run_id=run_id,
-            message=f"unknown rootfs profile: {manifest.request.rootfs_profile}",
-        )
+    if manifest.boot_attempts:
+        resolved_rootfs_profile = manifest.boot_attempts[-1].resolved_rootfs_profile
+    else:
+        try:
+            resolved_rootfs_profile = rootfs_profiles[manifest.request.rootfs_profile]
+        except KeyError:
+            return _configuration_failure(
+                run_id=run_id,
+                message=f"unknown rootfs profile: {manifest.request.rootfs_profile}",
+            )
     try:
         suite_profile = test_suites[requested_suite] if requested_suite is not None else None
     except KeyError:
@@ -2210,6 +2346,26 @@ def not_implemented_handler(tool_name: str, *, run_id: str | None = None) -> Too
     )
 
 
+def _overrides_from_tool_args(
+    *,
+    kernel_args: list[str] | None,
+    rootfs_source: str | None,
+    make_variables: dict[str, str] | None,
+    config_lines: list[str] | None,
+) -> tuple[BuildOverrides | None, BootOverrides | None]:
+    build_overrides = (
+        BuildOverrides(make_variables=make_variables or {}, config_lines=config_lines or [])
+        if (make_variables or config_lines)
+        else None
+    )
+    boot_overrides = (
+        BootOverrides(kernel_args=kernel_args or [], rootfs_source=rootfs_source)
+        if (kernel_args or rootfs_source)
+        else None
+    )
+    return build_overrides, boot_overrides
+
+
 def create_app() -> FastMCP:
     app = FastMCP("linux-debug-mcp")
 
@@ -2235,7 +2391,22 @@ def create_app() -> FastMCP:
         run_id: str | None = None,
         debug_profile: str | None = None,
         test_suite: str | None = None,
+        kernel_args: list[str] | None = None,
+        rootfs_source: str | None = None,
+        make_variables: dict[str, str] | None = None,
+        config_lines: list[str] | None = None,
     ) -> dict[str, Any]:
+        try:
+            build_overrides, boot_overrides = _overrides_from_tool_args(
+                kernel_args=kernel_args,
+                rootfs_source=rootfs_source,
+                make_variables=make_variables,
+                config_lines=config_lines,
+            )
+        except ValueError as exc:
+            return ToolResponse.failure(category=ErrorCategory.CONFIGURATION_ERROR, message=str(exc)).model_dump(
+                mode="json"
+            )
         return create_run_handler(
             artifact_root=Path(artifact_root),
             source_path=source_path,
@@ -2245,6 +2416,8 @@ def create_app() -> FastMCP:
             run_id=run_id,
             debug_profile=debug_profile,
             test_suite=test_suite,
+            build_overrides=build_overrides,
+            boot_overrides=boot_overrides,
         ).model_dump(mode="json")
 
     @app.tool(name="providers.list")
@@ -2518,13 +2691,24 @@ def create_app() -> FastMCP:
         target_profile: str | None = None,
         rootfs_profile: str | None = None,
         force_reboot: bool = False,
+        kernel_args: list[str] | None = None,
+        rootfs_source: str | None = None,
     ) -> dict[str, Any]:
+        try:
+            _build_overrides, boot_overrides = _overrides_from_tool_args(
+                kernel_args=kernel_args, rootfs_source=rootfs_source, make_variables=None, config_lines=None
+            )
+        except ValueError as exc:
+            return ToolResponse.failure(category=ErrorCategory.CONFIGURATION_ERROR, message=str(exc)).model_dump(
+                mode="json"
+            )
         return target_boot_handler(
             artifact_root=Path(artifact_root),
             run_id=run_id,
             target_profile=target_profile,
             rootfs_profile=rootfs_profile,
             force_reboot=force_reboot,
+            boot_overrides=boot_overrides,
         ).model_dump(mode="json")
 
     @app.tool(name="target.run_tests")

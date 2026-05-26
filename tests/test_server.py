@@ -1,6 +1,8 @@
 from pathlib import Path
 
+from linux_debug_mcp import server
 from linux_debug_mcp.artifacts.store import ArtifactStore
+from linux_debug_mcp.config import BootOverrides, BuildOverrides
 from linux_debug_mcp.domain import ArtifactRef, StepResult, StepStatus
 from linux_debug_mcp.server import (
     DEFAULT_TEST_SUITES,
@@ -11,6 +13,10 @@ from linux_debug_mcp.server import (
     not_implemented_handler,
     prerequisites_handler,
 )
+
+
+def _get_tool_fn(app, name):
+    return app._tool_manager._tools[name].fn
 
 
 def make_source_tree(tmp_path: Path) -> Path:
@@ -336,3 +342,189 @@ def test_workflow_build_boot_test_tool_is_registered_with_force_flags() -> None:
     assert "force_rerun_tests" in tool.parameters["properties"]
     assert "force_recollect" in tool.parameters["properties"]
     assert tool.fn.__name__ == "workflow_build_boot_test"
+
+
+def test_create_run_freezes_merged_profiles(tmp_path):
+    source = make_source_tree(tmp_path)
+    response = server.create_run_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        build_overrides=BuildOverrides(make_variables={"CC": "clang"}),
+        boot_overrides=BootOverrides(kernel_args=["dhash_entries=1"]),
+    )
+    assert response.ok
+    run_id = response.run_id
+    store = server.ArtifactStore(tmp_path / "runs", create_root=False)
+    manifest = store.load_manifest(run_id)
+    assert manifest.resolved_build_profile.make_variables == {"CC": "clang"}
+    assert manifest.boot_attempts == []  # attempt 1 not yet booted
+    assert manifest.request.boot_overrides.kernel_args == ["dhash_entries=1"]
+
+
+def test_create_run_response_redacts_secret_make_variable(tmp_path):
+    source = make_source_tree(tmp_path)
+    response = server.create_run_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        build_overrides=BuildOverrides(make_variables={"API_TOKEN": "supersecret"}),
+    )
+    assert response.ok
+    # the create_run response embeds the manifest dump (which carries make_variables);
+    # it must be redacted like the get_manifest view, not echoed verbatim.
+    assert "supersecret" not in str(response.data)
+
+
+def test_create_run_response_redacts_secret_shaped_config_line(tmp_path):
+    source = make_source_tree(tmp_path)
+    response = server.create_run_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        build_overrides=BuildOverrides(config_lines=['CONFIG_CMDLINE="token=supersecret"']),
+    )
+    assert response.ok
+    assert "supersecret" not in str(response.data)
+    assert "[REDACTED]" in str(response.data)
+
+
+def test_create_run_rejects_unknown_base_profile(tmp_path):
+    source = make_source_tree(tmp_path)
+    response = server.create_run_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=str(source),
+        build_profile="does-not-exist",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+    )
+    assert not response.ok
+    assert response.error.category.value == "configuration_error"
+    # fail-fast: no run directory/manifest created on a bad base profile
+    assert list((tmp_path / "runs").glob("*/manifest.json")) == []
+
+
+def test_create_run_freezes_merged_config_lines(tmp_path):
+    source = make_source_tree(tmp_path)
+    response = server.create_run_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        build_overrides=BuildOverrides(config_lines=["CONFIG_DEBUG_INFO=y"]),
+    )
+    assert response.ok
+    run_id = response.run_id
+    store = server.ArtifactStore(tmp_path / "runs", create_root=False)
+    manifest = store.load_manifest(run_id)
+    assert manifest.resolved_build_profile is not None
+    assert manifest.resolved_build_profile.config_lines == ["CONFIG_DEBUG_INFO=y"]
+
+
+def test_build_reads_resolved_profile_not_global(tmp_path):
+    src = make_source_tree(tmp_path)
+    created = server.create_run_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=str(src),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        build_overrides=BuildOverrides(make_variables={"CC": "clang"}),
+    )
+    assert created.ok
+    run_id = created.run_id
+    store = server.ArtifactStore(tmp_path / "runs", create_root=False)
+    manifest = store.load_manifest(run_id)
+    resolved = server._build_profile_from_manifest(manifest)
+    assert resolved.make_variables == {"CC": "clang"}
+
+
+def test_build_profile_from_manifest_v1_fallback():
+    from linux_debug_mcp.artifacts.manifest import RunManifest
+    from linux_debug_mcp.domain import RunRequest
+
+    manifest = RunManifest.create(
+        run_id="r",
+        request=RunRequest(
+            source_path="/s",
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+        ),
+    )  # resolved_build_profile is None
+    resolved = server._build_profile_from_manifest(manifest)
+    assert resolved.name == "x86_64-default"
+
+
+def test_overrides_from_tool_args_builds_models():
+    from linux_debug_mcp.config import BootOverrides, BuildOverrides
+
+    build, boot = server._overrides_from_tool_args(
+        kernel_args=["dhash_entries=1"], rootfs_source=None, make_variables={"CC": "clang"}, config_lines=None
+    )
+    assert isinstance(build, BuildOverrides) and build.make_variables == {"CC": "clang"}
+    assert build.config_lines == []
+    assert isinstance(boot, BootOverrides) and boot.kernel_args == ["dhash_entries=1"]
+
+    none_build, none_boot = server._overrides_from_tool_args(
+        kernel_args=None, rootfs_source=None, make_variables=None, config_lines=None
+    )
+    assert none_build is None and none_boot is None
+
+
+def test_overrides_from_tool_args_builds_config_lines():
+    build_overrides, boot_overrides = server._overrides_from_tool_args(
+        kernel_args=None,
+        rootfs_source=None,
+        make_variables=None,
+        config_lines=["CONFIG_DEBUG_INFO=y"],
+    )
+    assert build_overrides is not None
+    assert build_overrides.config_lines == ["CONFIG_DEBUG_INFO=y"]
+    assert boot_overrides is None
+
+
+def test_overrides_from_tool_args_none_when_no_build_overrides():
+    build_overrides, _ = server._overrides_from_tool_args(
+        kernel_args=["nokaslr"], rootfs_source=None, make_variables=None, config_lines=None
+    )
+    assert build_overrides is None
+
+
+def test_create_run_tool_accepts_overrides_and_rejects_bad_args(tmp_path: Path):
+    src = make_source_tree(tmp_path)
+    app = server.create_app()
+    tool_fn = _get_tool_fn(app, "kernel.create_run")
+
+    ok = tool_fn(
+        source_path=str(src),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        artifact_root=str(tmp_path / "runs"),
+        kernel_args=["dhash_entries=1"],
+        make_variables={"CC": "clang"},
+        config_lines=["CONFIG_DEBUG_INFO=y"],
+    )
+    assert ok["ok"] is True
+    run_id = ok["run_id"]
+    manifest = server.ArtifactStore(tmp_path / "runs", create_root=False).load_manifest(run_id)
+    assert manifest.resolved_build_profile.config_lines == ["CONFIG_DEBUG_INFO=y"]
+
+    bad = tool_fn(
+        source_path=str(src),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        artifact_root=str(tmp_path / "runs2"),
+        kernel_args=["bad;arg"],
+    )
+    assert bad["ok"] is False
+    assert bad["error"]["category"] == "configuration_error"

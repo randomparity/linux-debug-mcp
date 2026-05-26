@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import RootfsProfile, TargetProfile
+from linux_debug_mcp.config import BootOverrides, RootfsProfile, TargetProfile
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
 from linux_debug_mcp.providers.libvirt_qemu import BootExecutionResult, ProviderBootError
 from linux_debug_mcp.server import create_run_handler, target_boot_handler
@@ -55,6 +55,7 @@ class FakeBootProvider:
         kernel_image_path: Path,
         target_profile: TargetProfile,
         rootfs_profile: RootfsProfile,
+        attempt: int = 1,
     ) -> Plan:
         if self.raise_on_plan is not None:
             raise self.raise_on_plan
@@ -65,14 +66,15 @@ class FakeBootProvider:
                 "kernel_image_path": kernel_image_path,
                 "target_profile": target_profile,
                 "rootfs_profile": rootfs_profile,
+                "attempt": attempt,
             }
         )
         return Plan(
             run_id=run_id,
             domain_name=target_profile.target_ref or target_profile.name,
-            boot_log_path=run_dir / "logs" / "boot.log",
-            boot_plan_path=run_dir / "target" / "boot-plan.json",
-            boot_summary_path=run_dir / "summaries" / "boot-summary.json",
+            boot_log_path=run_dir / "boot" / f"attempt-{attempt}" / "boot.log",
+            boot_plan_path=run_dir / "boot" / f"attempt-{attempt}" / "boot-plan.json",
+            boot_summary_path=run_dir / "boot" / f"attempt-{attempt}" / "boot-summary.json",
             debug_gdbstub=target_profile.debug_gdbstub,
             gdbstub_endpoint={"host": "127.0.0.1", "port": 1234} if target_profile.debug_gdbstub else None,
             nokaslr_source="provider_added" if target_profile.debug_gdbstub else "not_applicable",
@@ -493,6 +495,25 @@ def test_target_boot_unexpected_execute_exception_records_infrastructure_failure
     assert manifest.step_results["boot"].summary == "unexpected boot provider failure"
 
 
+def test_target_boot_execute_exception_records_failed_attempt_and_retry_uses_next_attempt(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+
+    failing = boot(artifact_root, tmp_path, provider=FakeBootProvider(raise_on_execute=RuntimeError("boom")))
+    assert failing.ok is False
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
+    # the failed attempt is recorded atomically, so it occupies attempt-1 ...
+    assert [attempt.attempt for attempt in manifest.boot_attempts] == [1]
+    assert manifest.boot_attempts[0].status == StepStatus.FAILED
+
+    # ... and a retry advances to attempt-2 instead of overwriting attempt-1
+    retry = boot(artifact_root, tmp_path, provider=FakeBootProvider())
+    assert retry.ok is True
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
+    assert [attempt.attempt for attempt in manifest.boot_attempts] == [1, 2]
+    assert manifest.boot_attempts[1].status == StepStatus.SUCCEEDED
+
+
 def test_target_boot_failed_execution_result_propagates_error_category(tmp_path: Path) -> None:
     artifact_root = create_run(tmp_path)
     record_build(artifact_root)
@@ -609,3 +630,58 @@ def test_target_boot_stale_running_is_not_marked_failed_when_target_lock_unavail
     assert response.error is not None
     assert "target domain is locked" in response.error.message
     assert manifest.step_results["boot"] == old_running
+
+
+def test_second_boot_with_new_kernel_args_opens_attempt_2(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    provider = FakeBootProvider()
+
+    first = boot(artifact_root, tmp_path, provider=provider)
+    assert first.ok is True
+
+    second = boot(
+        artifact_root,
+        tmp_path,
+        provider=provider,
+        boot_overrides=BootOverrides(kernel_args=["dhash_entries=1"]),
+    )
+
+    assert second.ok is True
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
+    assert [attempt.attempt for attempt in manifest.boot_attempts] == [1, 2]
+    assert "dhash_entries=1" in manifest.boot_attempts[-1].resolved_target_profile.kernel_args
+
+
+class LeakyBootProvider(FakeBootProvider):
+    def execute_boot(
+        self,
+        plan: Plan,
+        *,
+        force_reboot: bool = False,
+        retrying_after_failure: bool = False,
+    ) -> BootExecutionResult:
+        result = super().execute_boot(
+            plan,
+            force_reboot=force_reboot,
+            retrying_after_failure=retrying_after_failure,
+        )
+        return BootExecutionResult(
+            status=result.status,
+            summary=result.summary,
+            details={**result.details, "leaked": "x=token=supersecret"},
+            artifacts=result.artifacts,
+            error_category=result.error_category,
+            diagnostic=result.diagnostic,
+        )
+
+
+def test_boot_response_is_redacted(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    provider = LeakyBootProvider()
+
+    response = boot(artifact_root, tmp_path, provider=provider)
+
+    assert response.ok is True
+    assert "supersecret" not in str(response.data)

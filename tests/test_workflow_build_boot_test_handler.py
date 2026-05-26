@@ -1,7 +1,30 @@
+from dataclasses import dataclass
 from pathlib import Path
 
-from linux_debug_mcp.domain import ErrorCategory, ToolResponse
-from linux_debug_mcp.server import create_run_handler, workflow_build_boot_test_handler
+from linux_debug_mcp.artifacts.store import ArtifactStore
+from linux_debug_mcp.config import (
+    BootOverrides,
+    BuildOverrides,
+    RootfsProfile,
+    TargetProfile,
+)
+from linux_debug_mcp.config import (
+    TestCommand as _TestCommand,
+)
+from linux_debug_mcp.config import (
+    TestSuiteProfile as _TestSuiteProfile,
+)
+from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, StepStatus, ToolResponse
+from linux_debug_mcp.providers.libvirt_qemu import BootExecutionResult
+from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
+from linux_debug_mcp.providers.local_ssh_tests import TestExecutionResult as _TestExecutionResult
+from linux_debug_mcp.server import (
+    create_run_handler,
+    kernel_build_handler,
+    target_boot_handler,
+    target_run_tests_handler,
+    workflow_build_boot_test_handler,
+)
 
 
 def success(summary: str, *, run_id: str = "run-abc123") -> ToolResponse:
@@ -221,3 +244,249 @@ def test_workflow_creates_missing_supplied_run_id_exactly(tmp_path: Path, monkey
     assert response.ok is True
     assert captured["run_id"] == "run-explicit"
     assert calls == ["build", "boot", "tests", "collect"]
+
+
+# ---------------------------------------------------------------------------
+# End-to-end override flow helpers (no monkeypatching; real handlers + fakes)
+# ---------------------------------------------------------------------------
+
+
+class _NoopBuildRunner:
+    """Fake subprocess runner that records invocations and creates the log."""
+
+    def __init__(self) -> None:
+        self.commands: list[list[str]] = []
+
+    def which(self, command: str) -> str | None:
+        return f"/usr/bin/{command}"
+
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
+        self.commands.append(argv)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("ok\n", encoding="utf-8")
+        return 0
+
+
+@dataclass
+class _FakeBootPlan:
+    run_id: str
+    domain_name: str
+    boot_log_path: Path
+    boot_plan_path: Path
+    boot_summary_path: Path
+    debug_gdbstub: bool = False
+    gdbstub_endpoint: dict[str, object] | None = None
+    nokaslr_source: str = "not_applicable"
+
+
+class _FakeBootProvider:
+    name = "local-libvirt-qemu"
+
+    def __init__(self) -> None:
+        self.plans: list[dict[str, object]] = []
+        self.executions: list[dict[str, object]] = []
+
+    def plan_boot(
+        self,
+        *,
+        run_id: str,
+        run_dir: Path,
+        kernel_image_path: Path,
+        target_profile: TargetProfile,
+        rootfs_profile: RootfsProfile,
+        attempt: int = 1,
+    ) -> _FakeBootPlan:
+        self.plans.append(
+            {
+                "run_id": run_id,
+                "target_profile": target_profile,
+                "rootfs_profile": rootfs_profile,
+                "attempt": attempt,
+            }
+        )
+        return _FakeBootPlan(
+            run_id=run_id,
+            domain_name=target_profile.target_ref or target_profile.name,
+            boot_log_path=run_dir / "boot" / f"attempt-{attempt}" / "boot.log",
+            boot_plan_path=run_dir / "boot" / f"attempt-{attempt}" / "boot-plan.json",
+            boot_summary_path=run_dir / "boot" / f"attempt-{attempt}" / "boot-summary.json",
+        )
+
+    def execute_boot(
+        self,
+        plan: _FakeBootPlan,
+        *,
+        force_reboot: bool = False,
+        retrying_after_failure: bool = False,
+    ) -> BootExecutionResult:
+        self.executions.append({"run_id": plan.run_id, "attempt": len(self.executions) + 1})
+        plan.boot_log_path.parent.mkdir(parents=True, exist_ok=True)
+        plan.boot_log_path.write_text("boot log\n", encoding="utf-8")
+        plan.boot_plan_path.write_text("{}\n", encoding="utf-8")
+        plan.boot_summary_path.write_text("{}\n", encoding="utf-8")
+        return BootExecutionResult(
+            status=StepStatus.SUCCEEDED,
+            summary="target booted",
+            details={"domain": plan.domain_name, "debug_boot": False, "gdbstub_endpoint": None},
+            artifacts=[ArtifactRef(path=str(plan.boot_log_path), kind="boot-log")],
+        )
+
+
+class _FakeTestProvider:
+    name = "local-ssh-tests"
+
+    def __init__(self) -> None:
+        self.executions = 0
+
+    def plan_tests(self, **kwargs: object) -> object:
+        return {"plan": kwargs}
+
+    def execute_tests(self, plan: object) -> _TestExecutionResult:
+        self.executions += 1
+        return _TestExecutionResult(
+            status=StepStatus.SUCCEEDED,
+            summary="test suite smoke-basic passed: 1 passed, 0 failed",
+            artifacts=[],
+            details={"counts": {"passed": 1, "failed": 0}, "commands": []},
+        )
+
+
+def _make_e2e_source_tree(tmp_path: Path) -> Path:
+    """Build a minimal Linux source tree with a developer .config."""
+    source = tmp_path / "linux"
+    source.mkdir(parents=True)
+    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
+    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    (source / ".config").write_text("CONFIG_TEST=y\n", encoding="utf-8")
+    return source
+
+
+def _make_e2e_profiles(
+    tmp_path: Path,
+) -> tuple[
+    dict[str, TargetProfile],
+    dict[str, RootfsProfile],
+    dict[str, _TestSuiteProfile],
+]:
+    rootfs_img = tmp_path / "minimal.img"
+    rootfs_img.write_text("rootfs\n", encoding="utf-8")
+    target = TargetProfile(
+        name="local-qemu",
+        architecture="x86_64",
+        target_ref="mcp-linux-debug-dev",
+        managed_domain=True,
+        managed_domain_prefix="mcp-linux-debug-",
+        libvirt_uri="qemu:///system",
+    )
+    rootfs = RootfsProfile(
+        name="minimal",
+        source=str(rootfs_img),
+        mutability="read_only",
+        readiness_marker="ready",
+        ssh_host="127.0.0.1",
+        ssh_user="root",
+    )
+    suite = _TestSuiteProfile(
+        name="smoke-basic",
+        commands=[_TestCommand(name="uname", argv=["uname", "-a"])],
+    )
+    return (
+        {target.name: target},
+        {rootfs.name: rootfs},
+        {suite.name: suite},
+    )
+
+
+def test_override_flow_end_to_end(tmp_path: Path) -> None:
+    """End-to-end: create_run overrides → attempt 1 → attempt 2 (no accumulation) → build reused → run_tests ok."""
+    run_id = "run-override-e2e"
+    source = _make_e2e_source_tree(tmp_path)
+    artifact_root = tmp_path / "runs"
+    target_profiles, rootfs_profiles, test_suites = _make_e2e_profiles(tmp_path)
+
+    # Step 1: create_run with build and boot overrides.
+    created = create_run_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        run_id=run_id,
+        build_overrides=BuildOverrides(make_variables={"CC": "clang"}),
+        boot_overrides=BootOverrides(kernel_args=["dhash_entries=1"]),
+    )
+    assert created.ok is True
+
+    # Verify the resolved build profile was frozen with CC=clang.
+    store = ArtifactStore(artifact_root, create_root=False)
+    manifest = store.load_manifest(run_id)
+    assert manifest.resolved_build_profile is not None
+    assert manifest.resolved_build_profile.make_variables == {"CC": "clang"}
+
+    # Step 2: kernel_build_handler with a NoopRunner — pre-create bzImage so detection succeeds.
+    build_dir = artifact_root / run_id / "build"
+    (build_dir / "arch" / "x86" / "boot").mkdir(parents=True)
+    (build_dir / "arch" / "x86" / "boot" / "bzImage").write_text("kernel\n", encoding="utf-8")
+    noop_runner = _NoopBuildRunner()
+    build_response = kernel_build_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=LocalKernelBuildProvider(runner=noop_runner),
+    )
+    assert build_response.ok is True
+
+    # build_argv must include CC=clang (resolved profile reaches the provider plan).
+    assert any("CC=clang" in arg for arg in noop_runner.commands[0])
+
+    # Step 3: first boot — applies create_run boot_overrides (dhash_entries=1) as attempt 1.
+    boot_provider = _FakeBootProvider()
+    boot1 = target_boot_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=boot_provider,
+        target_profiles=target_profiles,
+        rootfs_profiles=rootfs_profiles,
+    )
+    assert boot1.ok is True
+    manifest = store.load_manifest(run_id)
+    assert [a.attempt for a in manifest.boot_attempts] == [1]
+    assert "dhash_entries=1" in manifest.boot_attempts[0].resolved_target_profile.kernel_args
+
+    # Step 4: second boot with NEW overrides (dhash_entries=2) → attempt 2; no accumulation; build not re-run.
+    boot2 = target_boot_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=boot_provider,
+        boot_overrides=BootOverrides(kernel_args=["dhash_entries=2"]),
+        target_profiles=target_profiles,
+        rootfs_profiles=rootfs_profiles,
+    )
+    assert boot2.ok is True
+    manifest = store.load_manifest(run_id)
+    assert [a.attempt for a in manifest.boot_attempts] == [1, 2]
+    attempt2_args = manifest.boot_attempts[1].resolved_target_profile.kernel_args
+    assert "dhash_entries=2" in attempt2_args
+    assert "dhash_entries=1" not in attempt2_args  # no accumulation across attempts
+
+    # Build was NOT re-run (runner was only called once, for the build step).
+    assert len(noop_runner.commands) == 1
+
+    # Step 5: run_tests succeeds and binds to attempt 2's rootfs.
+    test_provider = _FakeTestProvider()
+    tests_response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=test_provider,
+        rootfs_profiles=rootfs_profiles,
+        test_suites=test_suites,
+    )
+    assert tests_response.ok is True
+    assert test_provider.executions == 1

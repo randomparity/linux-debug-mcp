@@ -1,7 +1,8 @@
 from pathlib import Path
 
+from linux_debug_mcp.artifacts.manifest import BootAttempt
 from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import RootfsProfile, TestCommand, TestSuiteProfile
+from linux_debug_mcp.config import RootfsProfile, TargetProfile, TestCommand, TestSuiteProfile
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
 from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider, TestExecutionResult
 from linux_debug_mcp.server import create_run_handler, target_run_tests_handler
@@ -19,9 +20,11 @@ class FakeTestProvider:
         )
         self.plans: list[dict[str, object]] = []
         self.executions = 0
+        self.planned_rootfs: RootfsProfile | None = None
 
     def plan_tests(self, **kwargs: object) -> object:
         self.plans.append(kwargs)
+        self.planned_rootfs = kwargs.get("rootfs_profile")  # type: ignore[assignment]
         return {"plan": kwargs}
 
     def execute_tests(self, plan: object) -> TestExecutionResult:
@@ -363,3 +366,42 @@ def test_run_tests_success_response_redacts_secret_like_snippets(tmp_path: Path)
     assert "secret-token-value" not in str(payload)
     assert "hunter2" not in str(payload)
     assert "[REDACTED]" in str(payload)
+
+
+def test_run_tests_uses_boot_attempt_rootfs_profile(tmp_path: Path) -> None:
+    """run_tests must bind to the latest boot attempt's resolved_rootfs_profile."""
+    artifact_root = create_booted_run(tmp_path)
+    run_id = "run-abc123"
+    store = ArtifactStore(artifact_root, create_root=False)
+
+    # Record a boot attempt whose rootfs source differs from the base minimal profile.
+    swapped = RootfsProfile(
+        name="minimal",
+        source="/alt/rootfs.qcow2",
+        ssh_host="127.0.0.1",
+        ssh_user="root",
+    )
+    attempt = BootAttempt(
+        attempt=1,
+        resolved_target_profile=TargetProfile(name="local-qemu", architecture="x86_64"),
+        resolved_rootfs_profile=swapped,
+        status=StepStatus.SUCCEEDED,
+    )
+    store.record_boot_attempt(
+        run_id,
+        attempt=attempt,
+        boot_result=StepResult(step_name="boot", status=StepStatus.SUCCEEDED, summary="booted"),
+    )
+
+    provider = FakeTestProvider()
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=provider,
+        rootfs_profiles={"minimal": rootfs(tmp_path)},
+        test_suites=suites(),
+    )
+
+    assert response.ok is True
+    assert provider.planned_rootfs is not None
+    assert provider.planned_rootfs.source == "/alt/rootfs.qcow2"

@@ -1,0 +1,141 @@
+import pytest
+
+from linux_debug_mcp.config import (
+    BootOverrides,
+    BuildOverrides,
+    BuildProfile,
+    TargetProfile,
+    merge_config_lines,
+    merge_kernel_args,
+    validate_config_line_tokens,
+)
+
+
+def test_kernel_args_accepts_safe_tokens():
+    overrides = BootOverrides(kernel_args=["dhash_entries=1", "nokaslr", "console=ttyS0,115200"])
+    assert overrides.kernel_args == ["dhash_entries=1", "nokaslr", "console=ttyS0,115200"]
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["foo; rm -rf /", "a b", "x=$(id)", 'quote="bad"', "tab\tval", "pipe|x", "nokaslr\n", "console=ttyS0\r"],
+)
+def test_kernel_args_rejects_unsafe_tokens(token):
+    with pytest.raises(ValueError):
+        BootOverrides(kernel_args=[token])
+
+
+def test_kernel_args_rejects_duplicate_keys_in_same_list():
+    with pytest.raises(ValueError, match="duplicate kernel argument key"):
+        BootOverrides(kernel_args=["dhash_entries=1", "dhash_entries=2"])
+
+
+def test_target_profile_kernel_args_validated():
+    with pytest.raises(ValueError):
+        TargetProfile(name="t", architecture="x86_64", kernel_args=["bad;arg"])
+
+
+def test_build_overrides_make_variables_reuse_existing_rules():
+    BuildOverrides(make_variables={"CC": "clang"})
+    with pytest.raises(ValueError):
+        BuildOverrides(make_variables={"O": "x"})  # reserved, provider-owned
+
+
+def test_make_variable_name_rejects_trailing_newline():
+    with pytest.raises(ValueError):
+        BuildOverrides(make_variables={"CC\n": "clang"})
+
+
+def test_merge_kernel_args_dedups_by_key():
+    base = ["console=ttyS0", "nokaslr", "dhash_entries=2"]
+    override = ["dhash_entries=1", "quiet"]
+    assert merge_kernel_args(base, override) == ["console=ttyS0", "nokaslr", "dhash_entries=1", "quiet"]
+
+
+def test_merge_kernel_args_dedups_bare_flag():
+    assert merge_kernel_args(["nokaslr", "ro"], ["nokaslr"]) == ["ro", "nokaslr"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "CONFIG_DEBUG_INFO=y",
+        "CONFIG_FOO=m",
+        "# CONFIG_BAR is not set",
+        "CONFIG_NR_CPUS=8",
+        "CONFIG_DELAY=-1",
+        "CONFIG_BASE=0x1000",
+        'CONFIG_CMDLINE="console=ttyS0 nokaslr"',
+    ],
+)
+def test_validate_config_line_accepts_valid_grammar(line: str) -> None:
+    assert validate_config_line_tokens([line]) == [line]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "CONFIG_FOO",  # no value
+        "CONFIG_FOO=maybe",  # not y/m/n/int/hex/string
+        "CONFIG_foo=y",  # lowercase symbol
+        "CONFIG_FOO=y; rm -rf /",  # shell injection
+        "rm -rf /",  # not a config line
+        "# CONFIG_FOO is unset",  # wrong "is not set" phrasing
+        'CONFIG_X="bad\nnewline"',  # embedded newline
+        'CONFIG_X="bad\rcarriage"',  # embedded carriage return
+        "CONFIG_FOO=y\nCONFIG_BAR=y",  # multi-line single token
+        "CONFIG_FOO=y\n",  # trailing newline (must not slip past the anchor)
+    ],
+)
+def test_validate_config_line_rejects_invalid_grammar(line: str) -> None:
+    with pytest.raises(ValueError, match="invalid kernel config line"):
+        validate_config_line_tokens([line])
+
+
+def test_validate_config_line_rejects_duplicate_symbol() -> None:
+    with pytest.raises(ValueError, match="duplicate kernel config symbol"):
+        validate_config_line_tokens(["CONFIG_A=y", "CONFIG_A=n"])
+
+
+def test_validate_config_line_rejects_duplicate_unset_symbol() -> None:
+    with pytest.raises(ValueError, match="duplicate kernel config symbol"):
+        validate_config_line_tokens(["CONFIG_A=y", "# CONFIG_A is not set"])
+
+
+def test_merge_config_lines_last_wins_by_symbol() -> None:
+    base = ["CONFIG_A=y", "CONFIG_B=m"]
+    override = ["CONFIG_B=n", "CONFIG_C=y"]
+    assert merge_config_lines(base, override) == ["CONFIG_A=y", "CONFIG_B=n", "CONFIG_C=y"]
+
+
+def test_merge_config_lines_override_can_unset_base_symbol() -> None:
+    base = ["CONFIG_A=y"]
+    override = ["# CONFIG_A is not set"]
+    assert merge_config_lines(base, override) == ["# CONFIG_A is not set"]
+
+
+def test_merge_config_lines_empty_override_returns_base() -> None:
+    base = ["CONFIG_A=y"]
+    assert merge_config_lines(base, []) == ["CONFIG_A=y"]
+
+
+def test_build_profile_has_config_lines_and_validates() -> None:
+    profile = BuildProfile(name="x", architecture="x86_64", config_lines=["CONFIG_A=y"])
+    assert profile.config_lines == ["CONFIG_A=y"]
+
+
+def test_build_profile_rejects_invalid_config_line() -> None:
+    with pytest.raises(ValueError, match="invalid kernel config line"):
+        BuildProfile(name="x", architecture="x86_64", config_lines=["CONFIG_A=y; evil"])
+
+
+def test_build_profile_no_longer_accepts_config_fragments() -> None:
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        BuildProfile(name="x", architecture="x86_64", config_fragments=["/tmp/frag"])
+
+
+def test_build_overrides_config_lines_validated() -> None:
+    overrides = BuildOverrides(config_lines=["# CONFIG_A is not set"])
+    assert overrides.config_lines == ["# CONFIG_A is not set"]
+    with pytest.raises(ValueError, match="invalid kernel config line"):
+        BuildOverrides(config_lines=["not a config line"])

@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from linux_debug_mcp.config import BootOverrides, BuildOverrides
+
 
 class StepStatus(StrEnum):
     PENDING = "pending"
@@ -84,6 +86,8 @@ class RunRequest(Model):
     debug_profile: str | None = None
     test_suite: str | None = None
     run_id: str | None = None
+    build_overrides: BuildOverrides | None = None
+    boot_overrides: BootOverrides | None = None
 
 
 class RunStep(Model):

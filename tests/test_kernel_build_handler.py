@@ -12,7 +12,15 @@ class NoopRunner:
     def which(self, command: str) -> str | None:
         return f"/usr/bin/{command}"
 
-    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
         self.commands.append(argv)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("ok\n", encoding="utf-8")
@@ -25,7 +33,15 @@ class BlockingRunner(NoopRunner):
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
         self.commands.append(argv)
         self.started.set()
         self.release.wait(timeout=5)
@@ -35,13 +51,29 @@ class BlockingRunner(NoopRunner):
 
 
 class RaisingRunner(NoopRunner):
-    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
         self.commands.append(argv)
         raise RuntimeError("boom")
 
 
 class FailingRunner(NoopRunner):
-    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
         self.commands.append(argv)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("build failed\n", encoding="utf-8")
@@ -49,8 +81,16 @@ class FailingRunner(NoopRunner):
 
 
 class TransientManifestLockRunner(NoopRunner):
-    def run(self, argv: list[str], *, timeout: int, log_path: Path, env: dict[str, str]) -> int:
-        result = super().run(argv, timeout=timeout, log_path=log_path, env=env)
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
+        result = super().run(argv, timeout=timeout, log_path=log_path, env=env, cwd=cwd)
         lock_path = log_path.parents[1] / ".manifest.lock"
         lock_path.write_text("transient", encoding="utf-8")
 
@@ -110,7 +150,25 @@ def test_kernel_build_rejects_profile_mismatch(tmp_path: Path) -> None:
 
 
 def test_kernel_build_rejects_missing_manifest_profile(tmp_path: Path) -> None:
-    _, artifact_root = create_run(tmp_path, build_profile="unknown-profile")
+    # create_run_handler now rejects an unknown base profile fail-fast (covered by
+    # test_create_run_rejects_unknown_base_profile). The build-time guard still
+    # protects a legacy/v1 manifest whose recorded build profile is unknown and
+    # carries no resolved_build_profile, so build that scenario via the store.
+    from linux_debug_mcp.artifacts.store import ArtifactStore
+    from linux_debug_mcp.domain import RunRequest
+
+    source = make_source_tree(tmp_path)
+    artifact_root = tmp_path / "runs"
+    store = ArtifactStore(artifact_root, source_paths=[source])
+    store.create_run(
+        RunRequest(
+            source_path=str(source),
+            build_profile="unknown-profile",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+            run_id="run-abc123",
+        )
+    )
 
     response = kernel_build_handler(artifact_root=artifact_root, run_id="run-abc123")
 
@@ -155,6 +213,47 @@ def test_kernel_build_failure_response_includes_artifacts(tmp_path: Path) -> Non
 
     assert response.ok is False
     assert {artifact.kind for artifact in response.artifacts} == {"build-log", "build-summary"}
+
+
+def test_kernel_build_response_redacts_secret_make_variable(tmp_path: Path) -> None:
+    from linux_debug_mcp.config import BuildOverrides
+
+    source = make_source_tree(tmp_path)
+    artifact_root = tmp_path / "runs"
+    created = create_run_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        run_id="run-abc123",
+        build_overrides=BuildOverrides(make_variables={"API_TOKEN": "supersecret"}),
+    )
+    assert created.ok is True
+    build_dir = artifact_root / "run-abc123" / "build"
+    (build_dir / "arch" / "x86" / "boot").mkdir(parents=True)
+    (build_dir / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
+
+    response = kernel_build_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=LocalKernelBuildProvider(runner=NoopRunner()),
+    )
+
+    assert response.ok is True
+    flattened = str(response.data)
+    # the secret-shaped make variable reaches the build argv but must not leak unredacted
+    assert "supersecret" not in flattened
+    assert "API_TOKEN=[REDACTED]" in flattened
+
+    # the repeat-build path (_recorded_build_success_response) must redact too
+    repeat = kernel_build_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=LocalKernelBuildProvider(runner=NoopRunner()),
+    )
+    assert repeat.ok is True
+    assert "supersecret" not in str(repeat.data)
 
 
 def test_kernel_build_repeat_success_returns_recorded_result(tmp_path: Path) -> None:
@@ -268,6 +367,43 @@ def test_kernel_build_retries_terminal_result_write_after_transient_manifest_loc
     assert response.ok is True
     manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
     assert manifest.step_results["build"].status == StepStatus.SUCCEEDED
+
+
+def test_build_applies_config_lines_before_main_make(tmp_path: Path) -> None:
+    from linux_debug_mcp.config import BuildOverrides
+
+    source = make_source_tree(tmp_path)
+    (source / "scripts" / "kconfig").mkdir(parents=True)
+    (source / "scripts" / "kconfig" / "merge_config.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    artifact_root = tmp_path / "runs"
+    created = create_run_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        run_id="run-abc123",
+        build_overrides=BuildOverrides(config_lines=["CONFIG_DEBUG_INFO=y"]),
+    )
+    assert created.ok is True
+    build_dir = artifact_root / "run-abc123" / "build"
+    (build_dir / "arch" / "x86" / "boot").mkdir(parents=True)
+    (build_dir / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
+
+    runner = NoopRunner()
+    response = kernel_build_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=LocalKernelBuildProvider(runner=runner),
+    )
+
+    assert response.ok is True
+    assert len(runner.commands) == 3
+    assert runner.commands[0][0].endswith("merge_config.sh")
+    assert runner.commands[1][-1] == "olddefconfig"
+    assert runner.commands[2][-1] == "bzImage"
+    override = (build_dir.parent / "inputs" / "override.config").read_text(encoding="utf-8")
+    assert override == "CONFIG_DEBUG_INFO=y\n"
 
 
 def test_kernel_build_concurrent_calls_only_start_one_subprocess(tmp_path: Path) -> None:

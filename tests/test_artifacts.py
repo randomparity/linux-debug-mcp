@@ -101,7 +101,7 @@ def test_manifest_round_trips_and_records_schema_version(tmp_path: Path) -> None
     loaded = store.load_manifest("run-abc123")
 
     assert loaded == created
-    assert loaded.schema_version == 1
+    assert loaded.schema_version == 2
     assert loaded.writer_version == "0.1.0"
 
 
