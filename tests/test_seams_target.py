@@ -1,4 +1,5 @@
 import hashlib
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -75,6 +76,24 @@ def test_platform_metadata_requires_positive_console_count():
 def test_models_forbid_extra_fields():
     with pytest.raises(ValidationError):
         LeaseInfo(lease_id="l", holder="h", renewable=True, bogus=1)
+
+
+def test_lease_info_rejects_naive_expires_at():
+    # The near-expiry admission gate compares expires_at to a UTC clock; a naive value
+    # would make that comparison raise or depend on ad hoc interpretation.
+    with pytest.raises(ValidationError):
+        LeaseInfo(lease_id="l", holder="h", renewable=True, expires_at=datetime(2030, 1, 1, 0, 0, 0))
+
+
+def test_lease_info_normalizes_expires_at_to_utc():
+    aware = datetime(2030, 1, 1, 5, 0, 0, tzinfo=timezone(timedelta(hours=5)))
+    lease = LeaseInfo(lease_id="l", holder="h", renewable=True, expires_at=aware)
+    assert lease.expires_at == datetime(2030, 1, 1, 0, 0, 0, tzinfo=UTC)
+    assert lease.expires_at.utcoffset() == timedelta(0)
+
+
+def test_lease_info_expires_at_optional():
+    assert LeaseInfo(lease_id="l", holder="h", renewable=True).expires_at is None
 
 
 def test_enums_have_contract_values():

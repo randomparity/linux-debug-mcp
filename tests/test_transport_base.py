@@ -121,6 +121,25 @@ def test_transport_ref_and_open_request_forbid_extra_fields():
         TransportRef(provider="p", channel_id="c", line_role=LineRole.RSP, bogus=1)
 
 
+def test_transport_ref_authority_fields_are_immutable():
+    # caps feed break-plan candidate selection and secret_refs feed secret resolution;
+    # a retained ref must not be mutable in place to add a break candidate or a secret
+    # ref after the snapshot/authority check.
+    ref = TransportRef(
+        provider="p",
+        channel_id="c",
+        line_role=LineRole.SHARED_CONSOLE,
+        caps=["provides_console"],
+        secret_refs=["TOKEN"],
+    )
+    with pytest.raises(AttributeError):
+        ref.caps.append("supports_uart_break")
+    with pytest.raises(AttributeError):
+        ref.secret_refs.append("OTHER")
+    with pytest.raises(ValidationError):
+        ref.caps = ("supports_uart_break",)
+
+
 def test_open_request_requires_transport_ref():
     # transport_ref is mandatory: admission must re-bind/validate the selected channel.
     with pytest.raises(ValidationError):

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from linux_debug_mcp.domain import Model
 
@@ -87,3 +87,14 @@ class LeaseInfo(Model):
     holder: str
     expires_at: datetime | None = None
     renewable: bool
+
+    @field_validator("expires_at")
+    @classmethod
+    def _expires_at_must_be_utc_aware(cls, value: datetime | None) -> datetime | None:
+        """Reject naive timestamps and normalize to UTC so the near-expiry admission
+        gate can compare against a UTC clock without ad hoc interpretation."""
+        if value is None:
+            return None
+        if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+            raise ValueError("LeaseInfo.expires_at must be timezone-aware")
+        return value.astimezone(UTC)

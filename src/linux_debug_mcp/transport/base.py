@@ -116,15 +116,24 @@ Endpoint = Annotated[TcpEndpoint | UnixSocketEndpoint, Field(discriminator="kind
 
 class TransportRef(Model):
     """The settled-contract channel descriptor (contract §3.2). Shape is frozen —
-    this layer adds no field."""
+    this layer adds no field.
+
+    Frozen, with `caps`/`secret_refs` as tuples, because these are authority-bearing:
+    `caps` drives break-plan candidate selection (§4.1) and `secret_refs` drives secret
+    resolution (§3.4). A caller or provider that retains a validated ref must not be
+    able to mutate it in place to add a break candidate or a secret ref after the
+    snapshot/authority check. `target_ref`/`opts` are opaque provisioning routing data,
+    not authority inputs; freezing blocks whole-field replacement."""
+
+    model_config = ConfigDict(frozen=True)
 
     provider: str
     channel_id: str
     line_role: LineRole
-    caps: list[str] = Field(default_factory=list)
+    caps: tuple[str, ...] = ()
     target_ref: dict[str, Any] = Field(default_factory=dict)
     opts: dict[str, Any] = Field(default_factory=dict)
-    secret_refs: list[str] = Field(default_factory=list)
+    secret_refs: tuple[str, ...] = ()
 
 
 class OpenRequest(Model):
