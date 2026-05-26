@@ -42,7 +42,7 @@ def test_artifact_root_rejects_parent_of_source_checkout(tmp_path: Path) -> None
 
 
 def test_run_id_rejects_path_traversal_and_leading_dot() -> None:
-    for value in ["../x", ".hidden", "run/123", "run;rm"]:
+    for value in ["../x", ".hidden", "run/123", "run;rm", "run-x\n", "run-x\r"]:
         with pytest.raises(PathSafetyError):
             validate_run_id(value)
 

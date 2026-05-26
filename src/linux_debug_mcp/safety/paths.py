@@ -10,7 +10,7 @@ class PathSafetyError(ValueError):
     pass
 
 
-_RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _SHELL_METACHARS = set(";|&`$<>\\")
 
 

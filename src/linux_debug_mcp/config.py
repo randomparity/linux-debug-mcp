@@ -127,7 +127,7 @@ class BuildProfile(ConfigModel):
     @field_validator("targets")
     @classmethod
     def validate_targets(cls, value: list[str]) -> list[str]:
-        target_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./+-]*$")
+        target_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./+-]*\Z")
         for target in value:
             if not target_pattern.match(target):
                 raise ValueError(f"target {target!r} is not a simple make target")
