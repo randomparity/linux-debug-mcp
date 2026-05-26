@@ -16,11 +16,13 @@ def _attempt(n):
     )
 
 
-def test_schema_version_is_2():
+def test_schema_version_is_3():
     manifest = RunManifest.create(run_id="run-1", request=_request())
-    assert manifest.schema_version == 2
+    assert manifest.schema_version == 3
     assert manifest.boot_attempts == []
     assert manifest.resolved_build_profile is None
+    assert manifest.resolved_target_profile is None
+    assert manifest.resolved_rootfs_profile is None
 
 
 def test_with_boot_attempt_appends_without_mutating():

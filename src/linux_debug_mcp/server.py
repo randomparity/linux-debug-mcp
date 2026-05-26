@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -399,15 +400,58 @@ def _select_boot_attempt(boot_attempts: list[BootAttempt], attempt: int | None) 
     return selected
 
 
+@dataclass(frozen=True)
+class _ResolvedProfiles:
+    build: BuildProfile
+    target: TargetProfile
+    rootfs: RootfsProfile
+
+
+def _resolve_base_profile(
+    kind: str,
+    *,
+    name: str | None,
+    spec: dict[str, Any] | None,
+    registry: dict[str, Any],
+    model: type[BuildProfile | TargetProfile | RootfsProfile],
+) -> BuildProfile | TargetProfile | RootfsProfile:
+    """Resolve a base profile from exactly one of a named registry entry or an inline spec."""
+    if name is not None and spec is not None:
+        raise ValueError(f"provide either {kind}_profile or {kind}_profile_spec, not both")
+    if name is None and spec is None:
+        raise ValueError(f"{kind}_profile or {kind}_profile_spec is required")
+    if spec is not None:
+        try:
+            return model.model_validate(spec)
+        except ValidationError as exc:
+            raise ValueError(f"invalid {kind}_profile_spec: {exc.error_count()} validation error(s)") from exc
+    if name not in registry:
+        raise ValueError(f"unknown profile: {name}")
+    return registry[name]
+
+
 def _resolve_initial_profiles(
     *,
     source_path: Path,
     sensitive_paths: list[Path],
-    build_profile: str,
+    build_profile: str | None,
+    build_profile_spec: dict[str, Any] | None,
+    target_profile: str | None,
+    target_profile_spec: dict[str, Any] | None,
+    rootfs_profile: str | None,
+    rootfs_profile_spec: dict[str, Any] | None,
     build_overrides: BuildOverrides | None,
     boot_overrides: BootOverrides | None,
-) -> BuildProfile:
-    base_build = DEFAULT_BUILD_PROFILES[build_profile]
+) -> _ResolvedProfiles:
+    base_build = _resolve_base_profile(
+        "build", name=build_profile, spec=build_profile_spec, registry=DEFAULT_BUILD_PROFILES, model=BuildProfile
+    )
+    base_target = _resolve_base_profile(
+        "target", name=target_profile, spec=target_profile_spec, registry=DEFAULT_TARGET_PROFILES, model=TargetProfile
+    )
+    base_rootfs = _resolve_base_profile(
+        "rootfs", name=rootfs_profile, spec=rootfs_profile_spec, registry=DEFAULT_ROOTFS_PROFILES, model=RootfsProfile
+    )
 
     # model_copy(update=...) skips field validators, which is safe here: both base and
     # override values were validated at construction (BuildProfile/BootOverrides), and the
@@ -423,6 +467,18 @@ def _resolve_initial_profiles(
         if build_update:
             resolved_build = base_build.model_copy(update=build_update)
 
+    # An inline rootfs spec carries an agent-controlled `source`. Subject it to the same
+    # path-safety guards as a rootfs_source override (sensitive paths, source-tree overlap,
+    # shell/control chars, /, $HOME, must-be-a-file) so inline profiles cannot bypass them, and
+    # freeze the resolved (symlink-canonical) path that was validated.
+    if rootfs_profile_spec is not None:
+        validated_source = validate_rootfs_source(
+            Path(base_rootfs.source),
+            source_paths=[source_path],
+            sensitive_paths=sensitive_paths,
+        )
+        base_rootfs = base_rootfs.model_copy(update={"source": str(validated_source)})
+
     # Fail-fast on a bad rootfs override at run creation; the resolved rootfs is re-derived at boot.
     if boot_overrides is not None and boot_overrides.rootfs_source is not None:
         validate_rootfs_source(
@@ -430,22 +486,25 @@ def _resolve_initial_profiles(
             source_paths=[source_path],
             sensitive_paths=sensitive_paths,
         )
-    return resolved_build
+    return _ResolvedProfiles(build=resolved_build, target=base_target, rootfs=base_rootfs)
 
 
 def create_run_handler(
     *,
     artifact_root: Path,
     source_path: str,
-    build_profile: str,
-    target_profile: str,
-    rootfs_profile: str,
+    build_profile: str | None = None,
+    target_profile: str | None = None,
+    rootfs_profile: str | None = None,
     run_id: str | None = None,
     debug_profile: str | None = None,
     test_suite: str | None = None,
     build_overrides: BuildOverrides | None = None,
     boot_overrides: BootOverrides | None = None,
     sensitive_paths: list[Path] | None = None,
+    build_profile_spec: dict[str, Any] | None = None,
+    target_profile_spec: dict[str, Any] | None = None,
+    rootfs_profile_spec: dict[str, Any] | None = None,
 ) -> ToolResponse:
     try:
         resolved_source_path = validate_source_path(Path(source_path))
@@ -455,18 +514,8 @@ def create_run_handler(
             message=str(exc),
             details={"source_path": source_path},
         )
-    for name, mapping in (
-        (build_profile, DEFAULT_BUILD_PROFILES),
-        (target_profile, DEFAULT_TARGET_PROFILES),
-        (rootfs_profile, DEFAULT_ROOTFS_PROFILES),
-    ):
-        if name not in mapping:
-            return ToolResponse.failure(
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                message=f"unknown profile: {name}",
-            )
     try:
-        resolved_build = _resolve_initial_profiles(
+        resolved = _resolve_initial_profiles(
             source_path=Path(resolved_source_path),
             # Operator-configured sensitive paths (from a loaded ServerConfig, threaded in by
             # create_app) are enforced here alongside the built-in validate_rootfs_source guards
@@ -474,6 +523,11 @@ def create_run_handler(
             # symlink-resolved). When no config is loaded this is empty and only the built-ins apply.
             sensitive_paths=sensitive_paths or [],
             build_profile=build_profile,
+            build_profile_spec=build_profile_spec,
+            target_profile=target_profile,
+            target_profile_spec=target_profile_spec,
+            rootfs_profile=rootfs_profile,
+            rootfs_profile_spec=rootfs_profile_spec,
             build_overrides=build_overrides,
             boot_overrides=boot_overrides,
         )
@@ -484,9 +538,9 @@ def create_run_handler(
         )
     request = RunRequest(
         source_path=str(resolved_source_path),
-        build_profile=build_profile,
-        target_profile=target_profile,
-        rootfs_profile=rootfs_profile,
+        build_profile=resolved.build.name,
+        target_profile=resolved.target.name,
+        rootfs_profile=resolved.rootfs.name,
         debug_profile=debug_profile,
         test_suite=test_suite,
         run_id=run_id,
@@ -495,7 +549,14 @@ def create_run_handler(
     )
     try:
         store = ArtifactStore(artifact_root, source_paths=[resolved_source_path])
-        manifest = store.create_run(request, resolved_build_profile=resolved_build)
+        # The build profile is always frozen (named base + overrides). Target/rootfs are frozen
+        # only when supplied inline, since named profiles are re-resolved by name at boot.
+        manifest = store.create_run(
+            request,
+            resolved_build_profile=resolved.build,
+            resolved_target_profile=resolved.target if target_profile_spec is not None else None,
+            resolved_rootfs_profile=resolved.rootfs if rootfs_profile_spec is not None else None,
+        )
     except ManifestStateError as exc:
         return ToolResponse.failure(
             category=exc.category,
@@ -890,14 +951,22 @@ def target_boot_handler(
 
     target_profiles = target_profiles if target_profiles is not None else DEFAULT_TARGET_PROFILES
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
-    try:
-        resolved_target_profile = target_profiles[requested_target_profile]
-    except KeyError:
-        return _configuration_failure(run_id=run_id, message=f"unknown target profile: {requested_target_profile}")
-    try:
-        resolved_rootfs_profile = rootfs_profiles[requested_rootfs_profile]
-    except KeyError:
-        return _configuration_failure(run_id=run_id, message=f"unknown rootfs profile: {requested_rootfs_profile}")
+    # Inline profiles (no named registry entry) were frozen into the manifest at create time;
+    # prefer them. Named profiles are resolved by name from the registry as before.
+    if manifest.resolved_target_profile is not None:
+        resolved_target_profile = manifest.resolved_target_profile
+    else:
+        try:
+            resolved_target_profile = target_profiles[requested_target_profile]
+        except KeyError:
+            return _configuration_failure(run_id=run_id, message=f"unknown target profile: {requested_target_profile}")
+    if manifest.resolved_rootfs_profile is not None:
+        resolved_rootfs_profile = manifest.resolved_rootfs_profile
+    else:
+        try:
+            resolved_rootfs_profile = rootfs_profiles[requested_rootfs_profile]
+        except KeyError:
+            return _configuration_failure(run_id=run_id, message=f"unknown rootfs profile: {requested_rootfs_profile}")
     if resolved_target_profile.libvirt_uri is None and default_libvirt_uri is not None:
         resolved_target_profile = resolved_target_profile.model_copy(update={"libvirt_uri": default_libvirt_uri})
     if resolved_target_profile.target_ref is None:
@@ -2438,9 +2507,9 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
     @app.tool(name="kernel.create_run")
     def kernel_create_run(
         source_path: str,
-        build_profile: str,
-        target_profile: str,
-        rootfs_profile: str,
+        build_profile: str | None = None,
+        target_profile: str | None = None,
+        rootfs_profile: str | None = None,
         artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
         run_id: str | None = None,
         debug_profile: str | None = None,
@@ -2449,6 +2518,9 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
         rootfs_source: str | None = None,
         make_variables: dict[str, str] | None = None,
         config_lines: list[str] | None = None,
+        build_profile_spec: dict[str, Any] | None = None,
+        target_profile_spec: dict[str, Any] | None = None,
+        rootfs_profile_spec: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
             build_overrides, boot_overrides = _overrides_from_tool_args(
@@ -2473,6 +2545,9 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             build_overrides=build_overrides,
             boot_overrides=boot_overrides,
             sensitive_paths=sensitive_paths,
+            build_profile_spec=build_profile_spec,
+            target_profile_spec=target_profile_spec,
+            rootfs_profile_spec=rootfs_profile_spec,
         ).model_dump(mode="json")
 
     @app.tool(name="providers.list")
