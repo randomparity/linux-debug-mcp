@@ -365,6 +365,25 @@ def test_render_domain_xml_includes_direct_kernel_boot_devices_and_metadata(tmp_
     assert metadata.findtext(f"{{{MCP_METADATA_NS}}}run_id") == "run-abc123"
 
 
+def test_render_domain_xml_preserves_quoted_kernel_arg_intact(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider()
+    plan = provider.plan_boot(
+        run_id="run-abc123",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(kernel_args=["panic=1", 'extra="a b c"']),
+        rootfs_profile=rootfs_profile(rootfs),
+    )
+
+    cmdline = ElementTree.fromstring(provider.render_domain_xml(plan)).findtext("os/cmdline")
+
+    assert 'extra="a b c"' in cmdline
+    # The quoted value stays a single kernel parameter: splitting on the quote yields the
+    # value with its embedded space intact (no premature cmdline split).
+    assert cmdline.split('extra="')[1].split('"')[0] == "a b c"
+
+
 @pytest.mark.parametrize(
     ("mutability", "expect_readonly"),
     [

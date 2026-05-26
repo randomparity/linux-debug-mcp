@@ -18,7 +18,42 @@ def test_kernel_args_accepts_safe_tokens():
 
 @pytest.mark.parametrize(
     "token",
-    ["foo; rm -rf /", "a b", "x=$(id)", 'quote="bad"', "tab\tval", "pipe|x", "nokaslr\n", "console=ttyS0\r"],
+    [
+        "mem=512M",
+        "foo=a+b",
+        "bar=50%",
+        "init=/sbin/init@2",
+        'foo="bar baz"',
+        'console="ttyS0,115200n8"',
+        'cmd="a b c"',
+        'empty=""',
+    ],
+)
+def test_kernel_args_accepts_extended_and_quoted_tokens(token):
+    overrides = BootOverrides(kernel_args=[token])
+    assert overrides.kernel_args == [token]
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "foo; rm -rf /",
+        "a b",
+        "x=$(id)",
+        "tab\tval",
+        "pipe|x",
+        "nokaslr\n",
+        "console=ttyS0\r",
+        # Quote-based injection attempts must stay rejected:
+        'foo="bar" evil=1',  # content after the closing quote
+        'foo="a"b"c"',  # multiple quote pairs
+        'foo="bar',  # unbalanced quote
+        'foo=bar"baz"',  # quote not introduced by ="
+        'foo="bar\nbaz"',  # C0 control character inside quotes
+        'foo="bar\x85baz"',  # C1 control character inside quotes
+        'foo="café"',  # non-ASCII inside quotes
+        '"foo bar"',  # whole-arg quote without a key
+    ],
 )
 def test_kernel_args_rejects_unsafe_tokens(token):
     with pytest.raises(ValueError):
@@ -54,6 +89,12 @@ def test_merge_kernel_args_dedups_by_key():
 
 def test_merge_kernel_args_dedups_bare_flag():
     assert merge_kernel_args(["nokaslr", "ro"], ["nokaslr"]) == ["ro", "nokaslr"]
+
+
+def test_merge_kernel_args_dedups_quoted_value_by_key():
+    base = ["console=ttyS0", "foo=old"]
+    override = ['foo="new value"']
+    assert merge_kernel_args(base, override) == ["console=ttyS0", 'foo="new value"']
 
 
 @pytest.mark.parametrize(
