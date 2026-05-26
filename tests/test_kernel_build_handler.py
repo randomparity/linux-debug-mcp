@@ -369,6 +369,43 @@ def test_kernel_build_retries_terminal_result_write_after_transient_manifest_loc
     assert manifest.step_results["build"].status == StepStatus.SUCCEEDED
 
 
+def test_build_applies_config_lines_before_main_make(tmp_path: Path) -> None:
+    from linux_debug_mcp.config import BuildOverrides
+
+    source = make_source_tree(tmp_path)
+    (source / "scripts" / "kconfig").mkdir(parents=True)
+    (source / "scripts" / "kconfig" / "merge_config.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    artifact_root = tmp_path / "runs"
+    created = create_run_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        run_id="run-abc123",
+        build_overrides=BuildOverrides(config_lines=["CONFIG_DEBUG_INFO=y"]),
+    )
+    assert created.ok is True
+    build_dir = artifact_root / "run-abc123" / "build"
+    (build_dir / "arch" / "x86" / "boot").mkdir(parents=True)
+    (build_dir / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
+
+    runner = NoopRunner()
+    response = kernel_build_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=LocalKernelBuildProvider(runner=runner),
+    )
+
+    assert response.ok is True
+    assert len(runner.commands) == 3
+    assert runner.commands[0][0].endswith("merge_config.sh")
+    assert runner.commands[1][-1] == "olddefconfig"
+    assert runner.commands[2][-1] == "bzImage"
+    override = (build_dir.parent / "inputs" / "override.config").read_text(encoding="utf-8")
+    assert override == "CONFIG_DEBUG_INFO=y\n"
+
+
 def test_kernel_build_concurrent_calls_only_start_one_subprocess(tmp_path: Path) -> None:
     _, artifact_root = create_run(tmp_path)
     build_dir = artifact_root / "run-abc123" / "build"

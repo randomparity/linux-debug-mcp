@@ -380,6 +380,21 @@ def test_create_run_response_redacts_secret_make_variable(tmp_path):
     assert "supersecret" not in str(response.data)
 
 
+def test_create_run_response_redacts_secret_shaped_config_line(tmp_path):
+    source = make_source_tree(tmp_path)
+    response = server.create_run_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        build_overrides=BuildOverrides(config_lines=['CONFIG_CMDLINE="token=supersecret"']),
+    )
+    assert response.ok
+    assert "supersecret" not in str(response.data)
+    assert "[REDACTED]" in str(response.data)
+
+
 def test_create_run_rejects_unknown_base_profile(tmp_path):
     source = make_source_tree(tmp_path)
     response = server.create_run_handler(
