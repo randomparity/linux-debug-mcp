@@ -19,6 +19,7 @@ from linux_debug_mcp.config import (
     BuildOverrides,
     BuildProfile,
     DebugProfile,
+    RootfsOverrides,
     RootfsProfile,
     ServerConfig,
     TargetProfile,
@@ -985,6 +986,7 @@ def target_boot_handler(
                         )
                     }
                 )
+            rootfs_update: dict[str, object] = {}
             if effective_boot_overrides.rootfs_source is not None:
                 validated = validate_rootfs_source(
                     Path(effective_boot_overrides.rootfs_source),
@@ -993,7 +995,13 @@ def target_boot_handler(
                     # no ServerConfig is loaded); the built-in guards always apply.
                     sensitive_paths=sensitive_paths or [],
                 )
-                resolved_rootfs_profile = resolved_rootfs_profile.model_copy(update={"source": str(validated)})
+                rootfs_update["source"] = str(validated)
+            if effective_boot_overrides.rootfs is not None:
+                # Each override field was validated at BootOverrides construction; RootfsProfile
+                # has no cross-field validators, so model_copy yields a valid profile.
+                rootfs_update.update(effective_boot_overrides.rootfs.as_profile_update())
+            if rootfs_update:
+                resolved_rootfs_profile = resolved_rootfs_profile.model_copy(update=rootfs_update)
         except (PathSafetyError, ValueError) as exc:
             return _configuration_failure(run_id=run_id, message=str(exc))
 
@@ -1015,7 +1023,9 @@ def target_boot_handler(
         )
 
     has_new_boot_overrides = boot_overrides is not None and (
-        bool(boot_overrides.kernel_args) or boot_overrides.rootfs_source is not None
+        bool(boot_overrides.kernel_args)
+        or boot_overrides.rootfs_source is not None
+        or boot_overrides.has_rootfs_field_overrides()
     )
 
     existing = manifest.step_results.get("boot")
@@ -2450,15 +2460,19 @@ def _overrides_from_tool_args(
     rootfs_source: str | None,
     make_variables: dict[str, str] | None,
     config_lines: list[str] | None,
+    rootfs_overrides: dict[str, Any] | None = None,
 ) -> tuple[BuildOverrides | None, BootOverrides | None]:
     build_overrides = (
         BuildOverrides(make_variables=make_variables or {}, config_lines=config_lines or [])
         if (make_variables or config_lines)
         else None
     )
+    # RootfsOverrides validation raises pydantic ValidationError (a ValueError subclass), which
+    # the tool wrappers surface as a configuration error.
+    rootfs = RootfsOverrides(**rootfs_overrides) if rootfs_overrides else None
     boot_overrides = (
-        BootOverrides(kernel_args=kernel_args or [], rootfs_source=rootfs_source)
-        if (kernel_args or rootfs_source)
+        BootOverrides(kernel_args=kernel_args or [], rootfs_source=rootfs_source, rootfs=rootfs)
+        if (kernel_args or rootfs_source or rootfs)
         else None
     )
     return build_overrides, boot_overrides
@@ -2518,6 +2532,7 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
         rootfs_source: str | None = None,
         make_variables: dict[str, str] | None = None,
         config_lines: list[str] | None = None,
+        rootfs_overrides: dict[str, Any] | None = None,
         build_profile_spec: dict[str, Any] | None = None,
         target_profile_spec: dict[str, Any] | None = None,
         rootfs_profile_spec: dict[str, Any] | None = None,
@@ -2528,6 +2543,7 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
                 rootfs_source=rootfs_source,
                 make_variables=make_variables,
                 config_lines=config_lines,
+                rootfs_overrides=rootfs_overrides,
             )
         except ValueError as exc:
             return ToolResponse.failure(category=ErrorCategory.CONFIGURATION_ERROR, message=str(exc)).model_dump(
@@ -2823,10 +2839,15 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
         force_reboot: bool = False,
         kernel_args: list[str] | None = None,
         rootfs_source: str | None = None,
+        rootfs_overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
             _build_overrides, boot_overrides = _overrides_from_tool_args(
-                kernel_args=kernel_args, rootfs_source=rootfs_source, make_variables=None, config_lines=None
+                kernel_args=kernel_args,
+                rootfs_source=rootfs_source,
+                make_variables=None,
+                config_lines=None,
+                rootfs_overrides=rootfs_overrides,
             )
         except ValueError as exc:
             return ToolResponse.failure(category=ErrorCategory.CONFIGURATION_ERROR, message=str(exc)).model_dump(

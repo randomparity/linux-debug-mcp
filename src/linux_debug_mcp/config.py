@@ -111,6 +111,33 @@ def _has_control_character(value: str) -> bool:
     return any(unicodedata.category(char) == "Cc" for char in value)
 
 
+def validate_optional_ssh_text(value: str | None) -> str | None:
+    if value is not None and (not value or _has_control_character(value)):
+        raise ValueError("SSH profile fields must be non-empty and must not contain control characters")
+    return value
+
+
+def validate_ssh_options_map(value: dict[str, str]) -> dict[str, str]:
+    for key, item in value.items():
+        if key not in _ALLOWED_SSH_OPTIONS:
+            raise ValueError(f"unsupported SSH option: {key}")
+        if not key or any(char.isspace() or unicodedata.category(char) == "Cc" for char in key):
+            raise ValueError("SSH option names must be simple names")
+        if not item or _has_control_character(item):
+            raise ValueError(f"invalid SSH option value for {key}")
+        rule = _ALLOWED_SSH_OPTIONS[key]
+        if rule.get("validator") == "timeout":
+            try:
+                parsed = int(item)
+            except ValueError as exc:
+                raise ValueError("ConnectTimeout must be an integer") from exc
+            if parsed < 1 or parsed > 3600:
+                raise ValueError("ConnectTimeout must be between 1 and 3600 seconds")
+        elif item not in rule["values"]:
+            raise ValueError(f"invalid SSH option value for {key}")
+    return value
+
+
 class ConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
@@ -211,31 +238,12 @@ class RootfsProfile(ConfigModel):
     @field_validator("ssh_host", "ssh_user", "ssh_key_ref")
     @classmethod
     def validate_optional_ssh_text(cls, value: str | None) -> str | None:
-        if value is not None and (not value or _has_control_character(value)):
-            raise ValueError("SSH profile fields must be non-empty and must not contain control characters")
-        return value
+        return validate_optional_ssh_text(value)
 
     @field_validator("ssh_options")
     @classmethod
     def validate_ssh_options(cls, value: dict[str, str]) -> dict[str, str]:
-        for key, item in value.items():
-            if key not in _ALLOWED_SSH_OPTIONS:
-                raise ValueError(f"unsupported SSH option: {key}")
-            if not key or any(char.isspace() or unicodedata.category(char) == "Cc" for char in key):
-                raise ValueError("SSH option names must be simple names")
-            if not item or _has_control_character(item):
-                raise ValueError(f"invalid SSH option value for {key}")
-            rule = _ALLOWED_SSH_OPTIONS[key]
-            if rule.get("validator") == "timeout":
-                try:
-                    parsed = int(item)
-                except ValueError as exc:
-                    raise ValueError("ConnectTimeout must be an integer") from exc
-                if parsed < 1 or parsed > 3600:
-                    raise ValueError("ConnectTimeout must be between 1 and 3600 seconds")
-            elif item not in rule["values"]:
-                raise ValueError(f"invalid SSH option value for {key}")
-        return value
+        return validate_ssh_options_map(value)
 
 
 class TargetProfile(ConfigModel):
@@ -273,9 +281,48 @@ class BuildOverrides(ConfigModel):
         return validate_config_line_tokens(value)
 
 
+class RootfsOverrides(ConfigModel):
+    """Per-run overrides for RootfsProfile fields other than `source` (handled by rootfs_source).
+
+    Each field is None when not overridden. Validation mirrors the corresponding RootfsProfile
+    field so an override cannot produce an invalid profile.
+    """
+
+    mutability: Literal["read_only", "copy_on_write", "mutable"] | None = None
+    access_method: Literal["ssh", "serial", "ssh_and_serial", "none"] | None = None
+    readiness_marker: str | None = None
+    ssh_host: str | None = None
+    ssh_port: int | None = Field(default=None, ge=1, le=65535)
+    ssh_user: str | None = None
+    ssh_key_ref: str | None = None
+    ssh_options: dict[str, str] | None = None
+
+    @field_validator("ssh_host", "ssh_user", "ssh_key_ref")
+    @classmethod
+    def validate_optional_ssh_text(cls, value: str | None) -> str | None:
+        return validate_optional_ssh_text(value)
+
+    @field_validator("readiness_marker")
+    @classmethod
+    def validate_readiness_marker(cls, value: str | None) -> str | None:
+        if value is not None and (not value or _has_control_character(value)):
+            raise ValueError("readiness_marker must be non-empty and free of control characters")
+        return value
+
+    @field_validator("ssh_options")
+    @classmethod
+    def validate_ssh_options(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        return value if value is None else validate_ssh_options_map(value)
+
+    def as_profile_update(self) -> dict[str, object]:
+        """Return the set overrides as a RootfsProfile.model_copy update mapping."""
+        return self.model_dump(exclude_none=True)
+
+
 class BootOverrides(ConfigModel):
     kernel_args: list[str] = Field(default_factory=list)
     rootfs_source: str | None = None
+    rootfs: RootfsOverrides | None = None
 
     @field_validator("kernel_args")
     @classmethod
@@ -289,6 +336,9 @@ class BootOverrides(ConfigModel):
         if value is not None and (not value or _has_control_character(value)):
             raise ValueError("rootfs_source must be non-empty and free of control characters")
         return value
+
+    def has_rootfs_field_overrides(self) -> bool:
+        return self.rootfs is not None and bool(self.rootfs.as_profile_update())
 
 
 class DebugProfile(ConfigModel):

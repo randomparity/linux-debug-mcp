@@ -97,6 +97,12 @@ spec is validated by the same model as the named profile and frozen into the run
 manifest; an inline `rootfs_source` is subject to the same path-safety guards as
 a `rootfs_source` override.
 
+Per-run rootfs field overrides (besides `source`) are supplied via the
+`rootfs_overrides` object on `kernel.create_run` / `target.boot`: `mutability`,
+`access_method`, `readiness_marker`, `ssh_host`, `ssh_port`, `ssh_user`,
+`ssh_key_ref`, and `ssh_options`. Each is validated like the corresponding
+`RootfsProfile` field and replaces that field on the resolved profile at boot.
+
 ## Local Debug Tools
 
 The implemented debug path attaches local `gdb` to a localhost-only QEMU
