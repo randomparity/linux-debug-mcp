@@ -6,6 +6,7 @@ from linux_debug_mcp.safety.paths import (
     PathSafetyError,
     validate_artifact_root,
     validate_guest_path,
+    validate_rootfs_source,
     validate_run_id,
     validate_secret_file_reference,
     validate_source_path,
@@ -69,6 +70,39 @@ def test_guest_path_requires_absolute_safe_posix_path() -> None:
     for value in ["tmp", "/tmp/../etc", "/tmp//x", "/tmp/has;semi"]:
         with pytest.raises(PathSafetyError):
             validate_guest_path(value)
+
+
+def test_validate_rootfs_source_accepts_regular_file(tmp_path: Path) -> None:
+    image = tmp_path / "rootfs.qcow2"
+    image.write_bytes(b"x")
+    resolved = validate_rootfs_source(image, source_paths=[], sensitive_paths=[])
+    assert resolved == image.resolve()
+
+
+def test_validate_rootfs_source_rejects_missing(tmp_path: Path) -> None:
+    with pytest.raises(PathSafetyError):
+        validate_rootfs_source(tmp_path / "missing.qcow2", source_paths=[], sensitive_paths=[])
+
+
+def test_validate_rootfs_source_rejects_directory(tmp_path: Path) -> None:
+    with pytest.raises(PathSafetyError):
+        validate_rootfs_source(tmp_path, source_paths=[], sensitive_paths=[])
+
+
+def test_validate_rootfs_source_rejects_source_overlap(tmp_path: Path) -> None:
+    src = tmp_path / "linux"
+    src.mkdir()
+    image = src / "rootfs.qcow2"
+    image.write_bytes(b"x")
+    with pytest.raises(PathSafetyError):
+        validate_rootfs_source(image, source_paths=[src], sensitive_paths=[])
+
+
+def test_validate_rootfs_source_rejects_shell_metacharacters(tmp_path: Path) -> None:
+    image = tmp_path / "rootfs.qcow2"
+    image.write_bytes(b"x")
+    with pytest.raises(PathSafetyError):
+        validate_rootfs_source(Path(f"{image};rm"), source_paths=[], sensitive_paths=[])
 
 
 def test_secret_file_reference_validates_shape_and_optional_existence(tmp_path: Path) -> None:

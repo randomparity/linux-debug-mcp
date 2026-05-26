@@ -83,6 +83,31 @@ def validate_source_path(source_path: Path) -> Path:
     return resolved
 
 
+def validate_rootfs_source(
+    rootfs_source: Path,
+    *,
+    source_paths: list[Path],
+    sensitive_paths: list[Path],
+) -> Path:
+    if any(char in _SHELL_METACHARS for char in str(rootfs_source)) or any(
+        ord(char) < 32 for char in str(rootfs_source)
+    ):
+        raise PathSafetyError("rootfs source contains unsafe characters")
+    resolved = rootfs_source.expanduser().resolve()
+    home = Path.home().resolve()
+    if resolved in {Path("/"), home}:
+        raise PathSafetyError("rootfs source is too broad")
+    if not resolved.is_file():
+        raise PathSafetyError("rootfs source is not a file")
+    for source in source_paths:
+        if _paths_overlap(resolved, _resolve_existing_or_parent(source)):
+            raise PathSafetyError("rootfs source overlaps source path")
+    for sensitive in sensitive_paths:
+        if _paths_overlap(resolved, _resolve_existing_or_parent(sensitive)):
+            raise PathSafetyError("rootfs source overlaps sensitive path")
+    return resolved
+
+
 def validate_guest_path(path: str) -> str:
     if not path.startswith("/"):
         raise PathSafetyError("guest path must be absolute")
