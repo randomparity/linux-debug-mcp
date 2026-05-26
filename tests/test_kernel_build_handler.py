@@ -110,7 +110,25 @@ def test_kernel_build_rejects_profile_mismatch(tmp_path: Path) -> None:
 
 
 def test_kernel_build_rejects_missing_manifest_profile(tmp_path: Path) -> None:
-    _, artifact_root = create_run(tmp_path, build_profile="unknown-profile")
+    # create_run_handler now rejects an unknown base profile fail-fast (covered by
+    # test_create_run_rejects_unknown_base_profile). The build-time guard still
+    # protects a legacy/v1 manifest whose recorded build profile is unknown and
+    # carries no resolved_build_profile, so build that scenario via the store.
+    from linux_debug_mcp.artifacts.store import ArtifactStore
+    from linux_debug_mcp.domain import RunRequest
+
+    source = make_source_tree(tmp_path)
+    artifact_root = tmp_path / "runs"
+    store = ArtifactStore(artifact_root, source_paths=[source])
+    store.create_run(
+        RunRequest(
+            source_path=str(source),
+            build_profile="unknown-profile",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+            run_id="run-abc123",
+        )
+    )
 
     response = kernel_build_handler(artifact_root=artifact_root, run_id="run-abc123")
 
