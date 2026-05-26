@@ -10,6 +10,39 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 from linux_debug_mcp.safety.secrets import SecretReference
 
 _SAFE_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_KERNEL_ARG_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:=,/-]*$")
+
+
+def validate_kernel_arg_tokens(value: list[str]) -> list[str]:
+    for token in value:
+        if not _KERNEL_ARG_PATTERN.match(token):
+            raise ValueError(f"unsafe kernel argument token: {token!r}")
+    return value
+
+
+def merge_kernel_args(base: list[str], override: list[str]) -> list[str]:
+    def key_of(token: str) -> str:
+        return token.split("=", 1)[0] if "=" in token else token
+
+    override_keys = {key_of(token) for token in override}
+    merged = [token for token in base if key_of(token) not in override_keys]
+    merged.extend(override)
+    return merged
+
+
+def validate_make_variable_map(value: dict[str, str]) -> dict[str, str]:
+    reserved = {"O", "ARCH", "KBUILD_OUTPUT"}
+    name_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    for key, item in value.items():
+        if key in reserved:
+            raise ValueError(f"make variable {key} is provider-owned")
+        if not name_pattern.match(key):
+            raise ValueError(f"make variable {key} is not a simple make variable name")
+        if any(unicodedata.category(char) == "Cc" for char in item):
+            raise ValueError(f"make variable {key} contains a control character")
+    return value
+
+
 _ALLOWED_SSH_OPTIONS = {
     "ConnectTimeout": {"validator": "timeout"},
     "IdentitiesOnly": {"values": {"yes", "no"}},
@@ -70,16 +103,7 @@ class BuildProfile(ConfigModel):
     @field_validator("make_variables")
     @classmethod
     def validate_make_variables(cls, value: dict[str, str]) -> dict[str, str]:
-        reserved = {"O", "ARCH", "KBUILD_OUTPUT"}
-        name_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-        for key, item in value.items():
-            if key in reserved:
-                raise ValueError(f"make variable {key} is provider-owned")
-            if not name_pattern.match(key):
-                raise ValueError(f"make variable {key} is not a simple make variable name")
-            if any(unicodedata.category(char) == "Cc" for char in item):
-                raise ValueError(f"make variable {key} contains a control character")
-        return value
+        return validate_make_variable_map(value)
 
 
 class TestCommand(ConfigModel):
@@ -179,6 +203,37 @@ class TargetProfile(ConfigModel):
     libvirt_uri: str | None = None
     managed_domain: bool = False
     managed_domain_prefix: str | None = None
+
+    @field_validator("kernel_args")
+    @classmethod
+    def validate_kernel_args(cls, value: list[str]) -> list[str]:
+        return validate_kernel_arg_tokens(value)
+
+
+class BuildOverrides(ConfigModel):
+    make_variables: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("make_variables")
+    @classmethod
+    def validate_make_variables(cls, value: dict[str, str]) -> dict[str, str]:
+        return validate_make_variable_map(value)
+
+
+class BootOverrides(ConfigModel):
+    kernel_args: list[str] = Field(default_factory=list)
+    rootfs_source: str | None = None
+
+    @field_validator("kernel_args")
+    @classmethod
+    def validate_kernel_args(cls, value: list[str]) -> list[str]:
+        return validate_kernel_arg_tokens(value)
+
+    @field_validator("rootfs_source")
+    @classmethod
+    def validate_rootfs_source(cls, value: str | None) -> str | None:
+        if value is not None and (not value or _has_control_character(value)):
+            raise ValueError("rootfs_source must be non-empty and free of control characters")
+        return value
 
 
 class DebugProfile(ConfigModel):
