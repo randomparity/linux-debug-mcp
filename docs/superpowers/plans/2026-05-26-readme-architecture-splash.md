@@ -61,9 +61,11 @@ the tool:
     `LocalSshTestProvider`, `QemuGdbstubProvider`) to act on a local or virtual
     target.
   - *server-handler orchestration* — other tools run entirely in the server with
-    no provider class: `providers.list`, `artifacts.collect`,
-    `workflow.build_boot_test`, and the metadata-only `host.check_prerequisites`,
-    `kernel.create_run`, and `artifacts.get_manifest`.
+    no provider class. These split into two kinds: tools advertised as
+    metadata-only operations of a provider capability (`host.check_prerequisites`
+    under `local-prereqs`; `kernel.create_run` and `artifacts.get_manifest` under
+    `local-artifacts`), and orphan server tools that back no provider operation at
+    all (`providers.list`, `artifacts.collect`, `workflow.build_boot_test`).
 - **Future-stub tools** validate a typed request contract, then resolve an
   advertised provider through the registry (`select_future_provider`). A
   contract-valid request that resolves to exactly one provider returns
@@ -136,9 +138,14 @@ failures return `configuration_error`. Stubs perform no external side effects.
 A third state, `external_reserved`, exists for future externally-hosted
 providers but is unused today.
 
-**Orchestration / utility tools** are implemented MCP tools the server registers
-directly, outside provider metadata: `providers.list`, `artifacts.collect`, and
-`workflow.build_boot_test`. They do not belong to any provider.
+**Orchestration / utility tools** — `providers.list`, `artifacts.collect`, and
+`workflow.build_boot_test` — are implemented MCP tools the server registers
+directly; they back no provider operation and appear in no provider's metadata.
+By contrast, `host.check_prerequisites`, `kernel.create_run`, and
+`artifacts.get_manifest` are also server-handled with no provider class, but they
+*are* advertised as metadata-only operations of the `local-prereqs` and
+`local-artifacts` providers — so they appear in the Implemented table above, while
+the three orchestration tools belong to no provider row.
 
 ### Architecture support
 
@@ -228,8 +235,48 @@ Expected: `QEMU_GDBSTUB_OPERATIONS = ["workflow.build_boot_debug", *SPRINT_4_DEB
 
 - [ ] **Step 3: Verify stub providers (families, ops, architectures, target_kinds)**
 
-Run: `rg -n "name=\"|family=\"|TargetKind\.|_operation\(\"" src/linux_debug_mcp/providers/stubs.py`
-Expected: the seven stubs match the **Discovery-only stubs** table — `remote-build-stub` (build, remote.build_kernel, REMOTE), `remote-artifact-sync-stub` (artifacts, remote.sync_artifacts, REMOTE), `reservation-stub` (reservation, request/release_host, REMOTE+PHYSICAL), `provisioning-stub` (provisioning, provision.prepare_target, REMOTE+PHYSICAL), `hardware-control-stub` (hardware, hardware.power_control, PHYSICAL), `console-access-stub` (console, open/read/write, REMOTE+PHYSICAL), `real-boot-stub` (boot, hardware.boot_kernel + workflow.reserve_provision_boot, REMOTE+PHYSICAL). All stubs use `STUB_ARCHITECTURES = ["x86_64", "ppc64le"]`.
+A text grep over `stubs.py` is not reliable here: the destructive stubs put each
+operation string on the line *after* `_operation(`, so a `_operation("` pattern
+silently skips `reservation.*`, `provision.*`, `hardware.*`, and
+`workflow.reserve_provision_boot`. Assert the full table against the live registry
+instead:
+```bash
+uv run python - <<'PY'
+from linux_debug_mcp.providers.registry import ProviderRegistry
+
+caps = {c.provider_name: c for c in ProviderRegistry.with_defaults().list_capabilities()}
+
+expected = {
+    "remote-build-stub": ("build", ["remote.build_kernel"], ["remote"]),
+    "remote-artifact-sync-stub": ("artifacts", ["remote.sync_artifacts"], ["remote"]),
+    "reservation-stub": ("reservation", ["reservation.request_host", "reservation.release_host"], ["remote", "physical"]),
+    "provisioning-stub": ("provisioning", ["provision.prepare_target"], ["remote", "physical"]),
+    "hardware-control-stub": ("hardware", ["hardware.power_control"], ["physical"]),
+    "console-access-stub": ("console", ["console.open_session", "console.read", "console.write"], ["remote", "physical"]),
+    "real-boot-stub": ("boot", ["hardware.boot_kernel", "workflow.reserve_provision_boot"], ["remote", "physical"]),
+}
+
+stub_names = {n for n, c in caps.items() if c.implementation_state.value == "stub"}
+assert stub_names == set(expected), f"stub set mismatch: {stub_names ^ set(expected)}"
+
+for name, (family, ops, targets) in expected.items():
+    c = caps[name]
+    assert c.provider_family == family, f"{name} family {c.provider_family!r} != {family!r}"
+    assert c.implementation_state.value == "stub", f"{name} state {c.implementation_state.value!r}"
+    assert c.architectures == ["x86_64", "ppc64le"], f"{name} archs {c.architectures}"
+    assert [t.value for t in c.target_kinds] == targets, f"{name} targets {[t.value for t in c.target_kinds]} != {targets}"
+    assert c.operations == ops, f"{name} ops {c.operations} != {ops}"
+
+print("all 7 stub providers match the Discovery-only stubs table")
+PY
+```
+Expected: the script prints `all 7 stub providers match the Discovery-only stubs
+table`. Any drift between the code and the README's **Discovery-only stubs** table
+— a renamed provider, changed family, added/removed/reordered operation, different
+architecture set, or different target_kinds — raises an `AssertionError` naming the
+offending provider. The expected `operations` lists above are the full operation
+set for each stub (the README's "Representative operations" column lists them all),
+and every stub uses `architectures == ["x86_64", "ppc64le"]`.
 
 - [ ] **Step 4: Verify implementation states and the orphan orchestration tools**
 
@@ -237,9 +284,34 @@ Run:
 ```bash
 rg -n "class ImplementationState" -A4 src/linux_debug_mcp/domain.py
 rg -n "ProviderRegistry.with_defaults\(\)" src/linux_debug_mcp/server.py
-rg -n "artifacts\.collect|workflow\.build_boot_test|providers\.list" src/linux_debug_mcp/providers/
+rg -n '@app\.tool\(name="(providers\.list|artifacts\.collect|workflow\.build_boot_test)"\)' \
+  src/linux_debug_mcp/server.py
+uv run python - <<'PY'
+from linux_debug_mcp.providers.registry import ProviderRegistry
+
+caps = {cap.provider_name: set(cap.operations) for cap in ProviderRegistry.with_defaults().list_capabilities()}
+all_ops = {op for ops in caps.values() for op in ops}
+
+orphans = {"providers.list", "artifacts.collect", "workflow.build_boot_test"}
+assert orphans.isdisjoint(all_ops), f"orphan tool wrongly listed as provider operation: {orphans & all_ops}"
+
+metadata_only = {
+    "local-prereqs": {"host.check_prerequisites"},
+    "local-artifacts": {"kernel.create_run", "artifacts.get_manifest"},
+}
+for name, expected in metadata_only.items():
+    missing = expected - caps.get(name, set())
+    assert not missing, f"{name} missing metadata-only ops: {missing}"
+
+print("orphans ABSENT from provider operations:", sorted(orphans))
+print("metadata-only ops PRESENT under local-prereqs / local-artifacts")
+PY
 ```
-Expected: states are `implemented`, `stub`, `external_reserved`; `with_defaults()` is called only inside `list_providers_handler` and `_future_stub_handler` (per-call, not at startup); the third command shows `artifacts.collect` / `workflow.build_boot_test` / `providers.list` appear in `providers/` only as `suggested_next_actions`, never as a provider's `operations` — confirming they belong in the orchestration-tools list, not a provider row.
+Expected:
+- States are `implemented`, `stub`, `external_reserved`.
+- `with_defaults()` appears only at the two call sites inside `list_providers_handler` and `_future_stub_handler` (per-call, not at startup).
+- The third command prints exactly three lines — `@app.tool(name="providers.list")`, `@app.tool(name="artifacts.collect")`, `@app.tool(name="workflow.build_boot_test")` — proving the server registers all three orchestration tools directly, not through a provider.
+- The fourth command prints both lines — `orphans ABSENT from provider operations: ['artifacts.collect', 'providers.list', 'workflow.build_boot_test']` and `metadata-only ops PRESENT under local-prereqs / local-artifacts`. Enumerated from the live `ProviderRegistry.with_defaults()`, this proves both halves of the README's orchestration claim: the three orchestration tools are no provider's operation (so they belong in the orchestration-tools list, not a provider row), while the three metadata-only operations *are* advertised by the `local-prereqs` / `local-artifacts` providers (so they correctly appear in the Implemented table).
 
 - [ ] **Step 5: If any mismatch was found, fix the README table cell to match the code, then re-run the relevant check.** Otherwise proceed.
 
@@ -260,12 +332,27 @@ Expected: five `OK` lines, no `MISSING`.
 - [ ] **Step 2: Confirm the README contains no "sprint" terminology**
 
 Run: `rg -n "sprin[t]|Sprin[t]|SPRIN[T]" README.md || echo "CLEAN"`
-Expected: `CLEAN`. (The `check-docs` justfile target also scans `docs/`, where pre-existing matches in `docs/superpowers/` are unrelated to this work and out of scope.)
+Expected: `CLEAN`. The scan is a deliberately broad substring match (it also flags
+`sprints`, `SPRINT_4`, etc.). Run against the verbatim README payload in Task 1 it
+returns `CLEAN` — no word in that payload contains the `sprint` substring (in
+particular `progress` does not).
+
+Note on the repo-wide gate: the `check-docs` justfile target runs the same scan
+over `README.md` **and** all of `docs/`, and is already red on `main` from a
+pre-existing match in
+`docs/superpowers/plans/2026-05-25-dynamic-profile-overrides-phase-2.md`. The only
+sprint tokens this branch adds live in its own planning artifacts — this plan and
+its design spec under `docs/superpowers/` — which legitimately reference the code
+constant `SPRINT_4_DEBUG_OPERATIONS` and quote this very regex; they are not
+product-doc terminology. This plan therefore scopes its hygiene gate to
+`README.md`, the only product doc it changes. Repairing or excluding
+`docs/superpowers/` planning artifacts from `check-docs` is a separate, pre-existing
+repo concern and is out of scope here.
 
 - [ ] **Step 3: Confirm the Mermaid block is well-formed**
 
 Run: `rg -n '```mermaid' README.md && rg -n "^flowchart TD" README.md`
-Expected: one ```` ```mermaid ```` fence and one `flowchart TD` line. Then open the README on the GitHub branch (or paste the block into <https://mermaid.live>) and confirm it renders four arrows from `MCP tool` (concrete provider, server handler, future stub) plus the `providers.list` and dashed registration edges into the registry. Mermaid node labels here avoid `(`, `)`, and `<br/>` to stay GitHub-safe — do not reintroduce them.
+Expected: one ```` ```mermaid ```` fence and one `flowchart TD` line. Then open the README on the GitHub branch (or paste the block into <https://mermaid.live>) and confirm it renders three labeled arrows *out of* `MCP tool` — concrete provider, server handler, future stub — plus the inbound `MCP client --> MCP tool` edge, the separate `providers.list --> registry` edge, and the dashed `Plugins -.-> registry` registration edge. Mermaid node labels here avoid `(`, `)`, and `<br/>` to stay GitHub-safe — do not reintroduce them.
 
 - [ ] **Step 4: Confirm section structure**
 
