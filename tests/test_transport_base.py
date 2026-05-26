@@ -289,6 +289,34 @@ def test_target_handle_rejects_unknown_architecture():
         )
 
 
+def test_transport_capability_rejects_unknown_operation():
+    # operations is the providers.list surface; advertising an unallowlisted op would
+    # show agents a phantom operation that no gate honors.
+    with pytest.raises(ValidationError):
+        TransportCapability(
+            provider_name="qemu-gdbstub",
+            locality=TransportLocality.LOCAL,
+            provides_console=False,
+            provides_rsp=True,
+            supports_uart_break=False,
+            endpoint_exposure=EndpointExposure.LOOPBACK_LOCAL,
+            operations=["transport.nuke"],
+        )
+
+
+def test_transport_capability_accepts_allowlisted_operations():
+    cap = TransportCapability(
+        provider_name="qemu-gdbstub",
+        locality=TransportLocality.LOCAL,
+        provides_console=False,
+        provides_rsp=True,
+        supports_uart_break=False,
+        endpoint_exposure=EndpointExposure.LOOPBACK_LOCAL,
+        operations=["transport.open", "transport.close"],
+    )
+    assert "transport.open" in cap.operations
+
+
 def test_transport_capability_rejects_unknown_architecture():
     with pytest.raises(ValidationError):
         TransportCapability(
@@ -347,6 +375,47 @@ def test_transport_session_carries_brokered_unix_rsp_endpoint():
             rsp_endpoint=TcpEndpoint(host="10.0.0.5", port=1234),
             created_at=datetime.now(UTC),
         )
+
+
+def _valid_session(**overrides):
+    fields = {
+        "session_id": new_session_id(),
+        "target_key": TargetKey(provisioner="local-qemu", target_id="run-1"),
+        "generation": 0,
+        "provider": "qemu-gdbstub",
+        "channel_id": "rsp-0",
+        "created_at": datetime.now(UTC),
+    }
+    fields.update(overrides)
+    return TransportSession(**fields)
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    ["../etc/passwd", "transport-../../evil", "evil", "transport-ABC", "transport-deadbeef", ""],
+)
+def test_transport_session_rejects_malformed_session_id(bad_id):
+    # session_id is the persisted record's filename key; a traversal/odd value must not
+    # be able to escape or collide the <session_id>.json record path.
+    with pytest.raises(ValidationError):
+        _valid_session(session_id=bad_id)
+
+
+def test_transport_session_accepts_generated_session_id():
+    assert _valid_session(session_id=new_session_id()).record_state is RecordState.PENDING
+
+
+@pytest.mark.parametrize("bad_pid", [0, -1, -1234])
+def test_transport_session_rejects_unsafe_backend_pid(bad_pid):
+    # A reaper that signals backend_pid must never see 0 (process group) or a negative
+    # value (e.g. -1 → every process); only real pids (>=1) are valid.
+    with pytest.raises(ValidationError):
+        _valid_session(backend_pid=bad_pid)
+
+
+def test_transport_session_rejects_negative_attach_epoch():
+    with pytest.raises(ValidationError):
+        _valid_session(attach_epoch=-1)
 
 
 def test_break_plan_method_enum():

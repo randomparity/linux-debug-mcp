@@ -188,8 +188,11 @@ choices made here are called out.
   are provider-declared, the trust **bottoms out at registration**: `TransportRegistry`
   rejects any `loopback_local` capability whose `provider_name` is not in the closed
   `LOCAL_TRANSPORT_PROVIDERS` allowlist (`qemu-gdbstub`, `serial-local`), so a remote
-  transport cannot self-certify as local to win raw-TCP exposure. **Choice:** a dedicated
-  model rather than overloading `ProviderCapability`, so these flags are first-class.
+  transport cannot self-certify as local to win raw-TCP exposure. `operations` entries
+  are validated against the §7.3 `TRANSPORT_OPERATIONS` allowlist at construction, so a
+  capability surfaced in `providers.list` cannot advertise a phantom operation no gate
+  honors. **Choice:** a dedicated model rather than overloading `ProviderCapability`, so
+  these flags are first-class.
 - `BreakPlan` — `method: gdbstub_native|uart_break|agent_proxy_break|sysrq_g`,
   `channel_id`, `rationale: str`.
 - `TransportSession` — `session_id, target_key, generation, provider, channel_id,
@@ -201,7 +204,11 @@ choices made here are called out.
   list[ArtifactRef]`. **Choice:** `session_id = "transport-{uuid4hex}"`; the record
   is the write-ahead durable ownership record (§4.7), persisted as JSON under
   `<run>/debug/transports/<session_id>.json`; liveness is owned by the in-process
-  registry while the server runs.
+  registry while the server runs. Because `session_id` is the record's filename key,
+  it is schema-validated against `^transport-[0-9a-f]{32}$` so a corrupted/crafted value
+  cannot escape or collide that path; `backend_pid` is `≥1` and `attach_epoch` is `≥0`
+  so a reaper signalling `backend_pid` can never hit pid `0` (process group) or a
+  negative (all-process) target.
 
 ### 3.3 Coordination schemas
 

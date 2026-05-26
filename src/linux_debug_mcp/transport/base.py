@@ -13,6 +13,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import ConfigDict, Field, field_serializer, field_validator, model_validator
 
+from linux_debug_mcp.config import validate_transport_operation
 from linux_debug_mcp.domain import ArtifactRef, Model
 from linux_debug_mcp.seams.target import (
     Arch,
@@ -240,6 +241,13 @@ class TransportCapability(Model):
             )
         return self
 
+    @field_validator("operations")
+    @classmethod
+    def _operations_are_allowlisted(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for operation in value:
+            validate_transport_operation(operation)
+        return value
+
 
 class BreakPlan(Model):
     method: BreakMethod
@@ -279,7 +287,7 @@ class TransportSession(Model):
     change downstream layers or schema consumers would reject. Which shape is admissible
     per provider is enforced by the §8.4 runtime gate, not by narrowing this field."""
 
-    session_id: str
+    session_id: str = Field(pattern=r"^transport-[0-9a-f]{32}$")
     target_key: TargetKey
     generation: int = Field(ge=0)
     provider: str
@@ -289,10 +297,10 @@ class TransportSession(Model):
     record_state: RecordState = RecordState.PENDING
     console_lease_token: str | None = None
     stop_guard_token: str | None = None
-    attach_epoch: int = 0
+    attach_epoch: int = Field(default=0, ge=0)
     break_plan: BreakPlan | None = None
     execution_state: ExecutionState = ExecutionState.UNKNOWN
-    backend_pid: int | None = None
+    backend_pid: int | None = Field(default=None, ge=1)
     backend_start_time: str | None = None
     created_at: datetime
     ended_at: datetime | None = None
