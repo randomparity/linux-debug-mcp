@@ -103,6 +103,22 @@ def test_unix_socket_rejects_out_of_range_mode(mode):
         UnixSocketEndpoint(path="/tmp/c.sock", mode=mode)
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["relative/x.sock", "../escape.sock", "/run/../etc/evil", "/run/a\x00b.sock", "/run/a\nb.sock", ""],
+)
+def test_unix_socket_rejects_unsafe_paths(path):
+    # The socket path is returned to clients and later connected to / cleaned up under
+    # the server uid; a relative, traversing, or control-character path is the §8.4
+    # path-confusion hazard the boundary must reject.
+    with pytest.raises(ValidationError):
+        UnixSocketEndpoint(path=path)
+
+
+def test_unix_socket_accepts_absolute_safe_path():
+    assert UnixSocketEndpoint(path="/run/ldm/transports/s.sock").path == "/run/ldm/transports/s.sock"
+
+
 def test_open_request_default_ttl_and_optional_lease():
     req = OpenRequest(
         target_key=TargetKey(provisioner="local-qemu", target_id="run-1"),

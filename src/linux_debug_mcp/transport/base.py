@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import math
 import threading
+import unicodedata
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
@@ -143,6 +144,19 @@ class UnixSocketEndpoint(Model):
     kind: Literal["unix"] = "unix"
     path: str
     mode: int = 0o600
+
+    @field_validator("path")
+    @classmethod
+    def _path_must_be_safe(cls, value: str) -> str:
+        if not value:
+            raise ValueError("unix socket path must not be empty")
+        if any(unicodedata.category(char) == "Cc" for char in value):
+            raise ValueError("unix socket path must not contain control characters")
+        if not value.startswith("/"):
+            raise ValueError(f"unix socket path must be absolute, got {value!r}")
+        if ".." in value.split("/"):
+            raise ValueError(f"unix socket path must not contain '..' traversal segments, got {value!r}")
+        return value
 
     @field_validator("mode")
     @classmethod

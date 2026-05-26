@@ -135,8 +135,11 @@ choices made here are called out.
   broker an endpoint-construction swap rather than a wire-schema change. Which shape is
   admissible per provider is the §8.4 *runtime gate's* job, not a narrowing of the field;
   the schema only enforces that a `TcpEndpoint` is loopback-pinned and a
-  `UnixSocketEndpoint` is owner-only (mode `0600`/no group-other bits). Tool responses
-  and the permissioned-console test (§9.1) consume the union.
+  `UnixSocketEndpoint` is owner-only (mode `0600`/no group-other bits) with an absolute,
+  control-character-free, traversal-free `path` (the socket is returned to clients and
+  later connected to / cleaned up under the server uid, so the boundary rejects path
+  confusion; runtime root-confinement is the Layer-4 gate's job). Tool responses and the
+  permissioned-console test (§9.1) consume the union.
 - `TransportRef` — **exactly the settled-contract shape, unchanged**: `provider,
   channel_id, line_role: shared_console|dedicated_debug|rsp, caps: list[str],
   target_ref: dict, opts: dict, secret_refs: list[str]`. `(provider, channel_id)` is
