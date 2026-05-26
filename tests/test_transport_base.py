@@ -18,6 +18,7 @@ from linux_debug_mcp.transport.base import (
     TcpEndpoint,
     Transport,
     TransportCapability,
+    TransportLocality,
     TransportRef,
     TransportRegistry,
     TransportSession,
@@ -148,6 +149,7 @@ def test_open_request_has_no_recovery_field():
 def test_transport_capability_family_is_fixed():
     cap = TransportCapability(
         provider_name="qemu-gdbstub",
+        locality=TransportLocality.LOCAL,
         architectures=["x86_64"],
         provides_console=False,
         provides_rsp=True,
@@ -159,9 +161,50 @@ def test_transport_capability_family_is_fixed():
         TransportCapability(
             provider_name="x",
             provider_family="provisioning",
+            locality=TransportLocality.LOCAL,
             provides_console=False,
             provides_rsp=True,
             supports_uart_break=False,
+            endpoint_exposure=EndpointExposure.LOOPBACK_LOCAL,
+        )
+
+
+def test_local_provider_may_declare_either_exposure():
+    for exposure in (EndpointExposure.LOOPBACK_LOCAL, EndpointExposure.BROKERED_REQUIRED):
+        cap = TransportCapability(
+            provider_name="serial-local",
+            locality=TransportLocality.LOCAL,
+            provides_console=True,
+            provides_rsp=False,
+            supports_uart_break=True,
+            endpoint_exposure=exposure,
+        )
+        assert cap.endpoint_exposure is exposure
+
+
+def test_capability_defaults_to_remote_locality():
+    # Safe default: a capability that omits locality is treated as remote, so it cannot
+    # silently qualify for loopback_local.
+    cap = TransportCapability(
+        provider_name="remote-sol",
+        provides_console=True,
+        provides_rsp=False,
+        supports_uart_break=True,
+        endpoint_exposure=EndpointExposure.BROKERED_REQUIRED,
+    )
+    assert cap.locality is TransportLocality.REMOTE
+
+
+def test_remote_provider_cannot_declare_loopback_local():
+    # The §8.4 rule made structural: a remote provider declaring loopback_local is the
+    # exact misregistration that would let the gate authorize a raw TCP endpoint.
+    with pytest.raises(ValidationError):
+        TransportCapability(
+            provider_name="ipmi-sol",
+            locality=TransportLocality.REMOTE,
+            provides_console=True,
+            provides_rsp=False,
+            supports_uart_break=True,
             endpoint_exposure=EndpointExposure.LOOPBACK_LOCAL,
         )
 
@@ -209,6 +252,32 @@ def test_transport_session_defaults():
     assert session.rsp_endpoint is None
 
 
+def test_transport_session_carries_brokered_unix_rsp_endpoint():
+    # The #08 broker fronts RSP with a permissioned unix socket; the session must be able
+    # to persist that endpoint now so the broker swap is not a later wire-schema change.
+    session = TransportSession(
+        session_id=new_session_id(),
+        target_key=TargetKey(provisioner="remote-sol", target_id="run-1"),
+        generation=0,
+        provider="ipmi-sol",
+        channel_id="rsp-0",
+        rsp_endpoint=UnixSocketEndpoint(path="/run/ldm/rsp.sock"),
+        created_at=datetime.now(UTC),
+    )
+    assert isinstance(session.rsp_endpoint, UnixSocketEndpoint)
+    # A raw TCP RSP endpoint is still constrained to loopback by the schema.
+    with pytest.raises(ValidationError):
+        TransportSession(
+            session_id=new_session_id(),
+            target_key=TargetKey(provisioner="remote-sol", target_id="run-1"),
+            generation=0,
+            provider="ipmi-sol",
+            channel_id="rsp-0",
+            rsp_endpoint=TcpEndpoint(host="10.0.0.5", port=1234),
+            created_at=datetime.now(UTC),
+        )
+
+
 def test_break_plan_method_enum():
     plan = BreakPlan(method=BreakMethod.GDBSTUB_NATIVE, channel_id="rsp-0", rationale="rsp")
     assert plan.method == "gdbstub_native"
@@ -251,6 +320,7 @@ def test_transport_registry_register_lookup_and_duplicate():
     registry = TransportRegistry()
     cap = TransportCapability(
         provider_name="qemu-gdbstub",
+        locality=TransportLocality.LOCAL,
         provides_console=False,
         provides_rsp=True,
         supports_uart_break=False,

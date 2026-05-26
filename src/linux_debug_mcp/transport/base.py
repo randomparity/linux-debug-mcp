@@ -9,7 +9,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from linux_debug_mcp.domain import ArtifactRef, Model
 from linux_debug_mcp.seams.target import (
@@ -40,6 +40,15 @@ class BreakMethod(StrEnum):
 class EndpointExposure(StrEnum):
     LOOPBACK_LOCAL = "loopback_local"
     BROKERED_REQUIRED = "brokered_required"
+
+
+class TransportLocality(StrEnum):
+    """Where a transport's backing source lives. Trusted registry metadata: a `REMOTE`
+    or out-of-band transport is structurally `brokered_required` and may never declare
+    `loopback_local` (§3.2, §8.4)."""
+
+    LOCAL = "local"
+    REMOTE = "remote"
 
 
 class RecordState(StrEnum):
@@ -135,26 +144,39 @@ class TransportCapability(Model):
     """01-owned capability surfaced in providers.list. `endpoint_exposure` drives the
     §8.4 endpoint-safety gate and is trusted registry metadata, never caller-supplied.
 
-    The §7.2 startup check that rejects a *remote-family* provider declaring
-    `loopback_local` is Layer-5-owned (see the Layer-1 plan self-review); deriving the
-    remote/local family is a registration-time concern, not a frozen-shape field added
-    here. Independently, `TcpEndpoint`'s loopback-only constraint structurally prevents
-    any provider — correctly declared or not — from emitting a routable TCP endpoint.
+    `locality` makes the §8.4 endpoint-exposure rule structurally verifiable rather than
+    a provider-name convention: a `REMOTE` transport that declares `loopback_local` is
+    rejected at construction (and therefore at registration), so a misregistered remote
+    provider can never present trusted metadata that would authorize a raw TCP endpoint.
+    `locality` defaults to `REMOTE`, the safe value — a provider must opt in to `LOCAL`
+    to be eligible for `loopback_local`. `TcpEndpoint`'s loopback-only constraint is the
+    independent second line of defense.
 
     Frozen and tuple-valued so the registry can hold a capability the gate trusts: once
-    registered, no caller-retained reference can flip `endpoint_exposure` or widen the
-    `operations`/`architectures` surface."""
+    registered, no caller-retained reference can flip `endpoint_exposure`/`locality` or
+    widen the `operations`/`architectures` surface."""
 
     model_config = ConfigDict(frozen=True)
 
     provider_name: str
     provider_family: Literal["transport"] = "transport"
+    locality: TransportLocality = TransportLocality.REMOTE
     architectures: tuple[str, ...] = ()
     provides_console: bool
     provides_rsp: bool
     supports_uart_break: bool
     endpoint_exposure: EndpointExposure
     operations: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _remote_must_be_brokered(self) -> TransportCapability:
+        if self.locality is TransportLocality.REMOTE and self.endpoint_exposure is EndpointExposure.LOOPBACK_LOCAL:
+            raise ValueError(
+                f"remote transport {self.provider_name!r} cannot declare loopback_local "
+                "endpoint exposure; remote/out-of-band transports are structurally "
+                "brokered_required (§3.2, §8.4)"
+            )
+        return self
 
 
 class BreakPlan(Model):
@@ -188,10 +210,12 @@ class TransportSession(Model):
     """Write-ahead durable ownership record (spec §3.2, §4.7). Persisted as JSON;
     liveness is owned by the in-process registry (Layer 4) while the server runs.
 
-    `rsp_endpoint` is a `TcpEndpoint` because gdb's RSP transport and agent-proxy are
-    TCP-only (§6.1, §8.4). The #08 broker swap widens this to the `Endpoint` union;
-    because `TcpEndpoint` stays a union member, records persisted now still validate
-    after the widening, so that swap is additive rather than a contract break (§8.4)."""
+    `rsp_endpoint` is the `Endpoint` union: a loopback `TcpEndpoint` for `loopback_local`
+    providers (gdb/agent-proxy are TCP-only, §6.1) and the brokered `UnixSocketEndpoint`
+    that a `brokered_required` transport must use (the #08 broker, §8.4). Carrying both
+    shapes now means the #08 broker is an endpoint-construction swap, not a wire-schema
+    change downstream layers or schema consumers would reject. Which shape is admissible
+    per provider is enforced by the §8.4 runtime gate, not by narrowing this field."""
 
     session_id: str
     target_key: TargetKey
@@ -199,7 +223,7 @@ class TransportSession(Model):
     provider: str
     channel_id: str
     console_endpoint: Endpoint | None = None
-    rsp_endpoint: TcpEndpoint | None = None
+    rsp_endpoint: Endpoint | None = None
     record_state: RecordState = RecordState.PENDING
     console_lease_token: str | None = None
     stop_guard_token: str | None = None

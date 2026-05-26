@@ -128,10 +128,15 @@ choices made here are called out.
     only, port `1..65535` (the existing qemu-gdbstub convention).
   - `UnixSocketEndpoint` — `{kind: "unix", path: str, mode: int}`; a per-session
     unix-domain socket owned by the server user, `mode` `0600` by default.
-  RSP endpoints are always `TcpEndpoint` (gdb/agent-proxy constraint, §6.1, §8.4);
-  a console endpoint is a `UnixSocketEndpoint` when exposed without agent-proxy
-  (§8.4) and a `TcpEndpoint` otherwise. Tool responses and the permissioned-console
-  test (§9.1) consume the union.
+  `console_endpoint` and `rsp_endpoint` are both typed as the `Endpoint` union. For a
+  `loopback_local` provider an RSP endpoint is a loopback `TcpEndpoint` (gdb/agent-proxy
+  are TCP-only, §6.1); a `brokered_required` transport's RSP endpoint is the brokered
+  `UnixSocketEndpoint` (the #08 broker, §8.4). Carrying both shapes now keeps the #08
+  broker an endpoint-construction swap rather than a wire-schema change. Which shape is
+  admissible per provider is the §8.4 *runtime gate's* job, not a narrowing of the field;
+  the schema only enforces that a `TcpEndpoint` is loopback-pinned and a
+  `UnixSocketEndpoint` is owner-only (mode `0600`/no group-other bits). Tool responses
+  and the permissioned-console test (§9.1) consume the union.
 - `TransportRef` — **exactly the settled-contract shape, unchanged**: `provider,
   channel_id, line_role: shared_console|dedicated_debug|rsp, caps: list[str],
   target_ref: dict, opts: dict, secret_refs: list[str]`. `(provider, channel_id)` is
@@ -155,24 +160,28 @@ choices made here are called out.
   — it mints an ordinary `OpenRequest`, and the recovery exception lives entirely
   inside the 01 admission service.
 - `TransportCapability` — surfaced in `providers.list`; `provider_name`,
-  `provider_family="transport"`, `architectures`, the three bool flags
+  `provider_family="transport"`, a **`locality`** enum (`local | remote`,
+  default `remote`), `architectures`, the three bool flags
   `provides_console / provides_rsp / supports_uart_break`, and an
   **`endpoint_exposure`** enum (`loopback_local | brokered_required`) that drives the
   §8.4 gate. `loopback_local` means the transport binds a loopback endpoint on the
   server's own host against a local source (`qemu-gdbstub`, `serial-local` on a local
   device); every remote/out-of-band transport (`ipmi-sol`, `redfish-serial`,
   `ser2net`, `hmc-vterm`, …) is **structurally `brokered_required`** and cannot
-  declare `loopback_local`. `endpoint_exposure` is a **registry property of the
-  provider**, not a per-channel field on the contract's `TransportRef` (§3.2): the
-  §8.4 gate reads it by looking up the selected channel's `provider` in this 01-owned
-  registry, which is trusted metadata. **Layer-1 startup validation** (§7.2) rejects
-  any transport whose family is remote yet declares `loopback_local`. **Choice:** a
-  dedicated model rather than overloading `ProviderCapability`, so these flags are
-  first-class.
+  declare `loopback_local`. `endpoint_exposure` and `locality` are **registry
+  properties of the provider**, not per-channel fields on the contract's `TransportRef`
+  (§3.2): the §8.4 gate reads them by looking up the selected channel's `provider` in
+  this 01-owned registry, which is trusted metadata. The rule that a remote family may
+  not declare `loopback_local` is enforced **structurally at capability construction**
+  (a `locality=remote` + `endpoint_exposure=loopback_local` capability is rejected),
+  so a misregistered remote provider cannot present trusted metadata that the §8.4 gate
+  would read as authorizing a raw TCP endpoint; `locality` defaults to `remote` (the
+  safe value) so a provider must opt in to `local`. **Choice:** a dedicated model
+  rather than overloading `ProviderCapability`, so these flags are first-class.
 - `BreakPlan` — `method: gdbstub_native|uart_break|agent_proxy_break|sysrq_g`,
   `channel_id`, `rationale: str`.
 - `TransportSession` — `session_id, target_key, generation, provider, channel_id,
-  console_endpoint: Endpoint|None, rsp_endpoint: TcpEndpoint|None, record_state:
+  console_endpoint: Endpoint|None, rsp_endpoint: Endpoint|None, record_state:
   pending|opening|ready|degraded|closing|abandoned|closed (§4.7), console_lease_token:
   str|None, stop_guard_token: str|None, attach_epoch: int (§4.7 fence), break_plan:
   BreakPlan|None, execution_state: EXECUTING|HALTED|unknown (§4.6), backend_pid:
@@ -791,16 +800,18 @@ authoritative snapshot (§4.2), then its registry `endpoint_exposure` is looked 
 `transport.open()` returns a `TcpEndpoint` only when that is `loopback_local` **and**
 the bound address is loopback; otherwise it fails `READINESS_FAILURE` /
 `code=endpoint_unsafe`. Because every
-remote/out-of-band transport is structurally `brokered_required` (§3.2) and startup
-validation forbids a remote family from declaring `loopback_local`, a remote
-transport can **never** return an unauthenticated RSP — it MUST provide a brokered/
-`UnixSocketEndpoint` (the #08 broker) — and the local exposure cannot escape to it. A
-permissioned `UnixSocketEndpoint` console is never gated (OS perms enforce access).
-The existing qemu-gdbstub flow is unchanged because that channel is `loopback_local`.
+remote/out-of-band transport is structurally `brokered_required` (§3.2) and a
+`locality=remote` + `loopback_local` capability is rejected at construction (§3.2), a
+remote transport can **never** return an unauthenticated RSP — it MUST provide a
+brokered/`UnixSocketEndpoint` (the #08 broker) — and the local exposure cannot escape
+to it. A permissioned `UnixSocketEndpoint` console is never gated (OS perms enforce
+access). The existing qemu-gdbstub flow is unchanged because that channel is
+`loopback_local`.
 
 The transport surface is shaped so the #08 broker is an **endpoint-construction
-swap** (replace `TcpEndpoint` with a brokered/tokenized endpoint variant in the
-`Endpoint` union), not a contract change.
+swap**: `rsp_endpoint`/`console_endpoint` are already the `Endpoint` union, so the
+broker supplies a brokered `UnixSocketEndpoint` variant without retyping the field —
+records persisted today keep validating, so it is not a contract change.
 
 This assumption is stated here so a reviewer evaluates the design against its actual
 threat model (local single-user) rather than an unstated multi-tenant one.
