@@ -90,7 +90,7 @@ src/linux_debug_mcp/
   seams/
     target.py        # TargetKey/TargetHandle/TargetState/PlatformMetadata/
                      #   KernelProvenance/LeaseInfo schemas + local-qemu adapter [prov]
-    secrets.py       # SecretsResolver Protocol (+ env/file impl)            [#08]
+    secrets.py       # SecretsResolver Protocol (#10 env-only; #08 file/external) [#08]
     guard.py         # StopCapableGuard / SessionGuard Protocol (+ impl)     [#08]
     break_policy.py  # BreakPolicy Protocol (facts -> method, §4.1) (+ impl) [#08]
     lifecycle.py     # LifecycleDispatcher Protocol (+ in-process impl)      [prov]
@@ -193,9 +193,11 @@ choices made here are called out.
 ### 3.4 Secrets (`seams/secrets.py`)
 
 Extends the existing `SecretReference`. `SecretsResolver` Protocol:
-`resolve(refs: list[str]) -> dict[str, str]`. The minimal impl resolves `env` and
-`file` kinds (not `external`). Resolved values are never returned in tool output,
-session JSON, or logs.
+`resolve(refs: list[str]) -> dict[str, str]`. #10 ships **env-only** resolution;
+`file` and `external` refs are rejected **without any filesystem access** and are
+deferred to #08, which later supplies the keyring/external/file backend behind the
+**same `SecretsResolver` Protocol**. Resolved values are never returned in tool
+output, session JSON, or logs.
 
 ## 4. The `open()` transaction, admission & lifecycle
 
@@ -414,11 +416,16 @@ ownership plus startup reconciliation.
   stop-capable record not probe-proven `EXECUTING`) is therefore gated. For such a
   record, reconciliation writes a **durable `recovery_required` tombstone** for the
   `TargetKey` — a small persisted record under `<artifact-root>/transport-recovery/`
-  whose **filename is a canonical hash** (`sha256(f"{provisioner}\0{target_id}")`,
-  not the raw components, so opaque `TargetKey` parts are never trusted as path
-  segments and cannot collide), with the full `TargetKey` **and the `generation` it
-  was minted at** stored inside the JSON. It is written **before** the session record
-  is closed, so the gate survives any number of further crashes. Startup
+  whose **filename is a canonical hash** — `sha256` of the **length-prefixed**
+  encoding `len(provisioner)||provisioner||len(target_id)||target_id` (each length a
+  4-byte big-endian prefix), not the raw components, so opaque `TargetKey` parts are
+  never trusted as path segments and the encoding is unambiguous (plain NUL-join
+  collides, e.g. `("a","b\0c")` vs `("a\0b","c")`). The full `TargetKey` **and the
+  `generation` it was minted at** are stored inside the JSON. **All** recovery-tombstone
+  readers and writers (the Layer-4 registry and startup reconciliation) MUST call
+  `TargetKey.recovery_key()` rather than reimplementing the hash, so the on-disk
+  filename can never diverge from the helper. It is written **before** the session
+  record is closed, so the gate survives any number of further crashes. Startup
   reconciliation **loads recovery tombstones first**, before scanning session
   records, and admission consults them.
 
@@ -512,7 +519,7 @@ absence never blocks a contract-admissible attach.)
 
 ## 5. Seams (Protocols + minimal local impls)
 
-- `SecretsResolver` (#08) — env/file resolution; values never surfaced.
+- `SecretsResolver` — #10 ships env-only resolution; #08 owns file/external. Values never surfaced.
 - `StopCapableGuard` / `SessionGuard` (#08) — in-process single-holder fenced token.
 - `BreakPolicy` (#08) — evaluates the §4.1 predicates against the selected
   channel's `line_role` + `caps` and `platform` facts to produce a `BreakPlan`;
