@@ -5,9 +5,18 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from linux_debug_mcp.seams.target import TargetKey
-from linux_debug_mcp.transport.base import TransportSession
+from linux_debug_mcp.transport.base import ExecutionState, TransportSession
+
+
+class _ReapProxy(Protocol):
+    def stop_by_identity(self, pid: int, start_time: str | None) -> None: ...
+
+
+class _RecoveryMarker(Protocol):
+    def mark_recovery_required(self, target_key: TargetKey, generation: int) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -113,3 +122,30 @@ class SessionRegistry:
         existing = self.read_tombstone(target_key)
         if existing is not None and existing.generation == expected_generation:
             self._tomb_path(target_key).unlink(missing_ok=True)
+
+    def reconcile(self, *, proxy: _ReapProxy, admission: _RecoveryMarker) -> None:
+        """Crash reconciliation (ADR 0005, spec §4.7/§10.2). MUST run after
+        acquire_instance_lock() and BEFORE admission accepts its first admit. Reaps live
+        orphan backends (start-time fenced — never a foreign pid), re-asserts every durable
+        tombstone into admission, and tombstones any record left HALTED/UNKNOWN."""
+        # 1. re-assert persisted tombstones (durable across restarts)
+        for path in self._dir.glob("tomb-*.json"):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            key = TargetKey(provisioner=data["provisioner"], target_id=data["target_id"])
+            admission.mark_recovery_required(key, data["generation"])
+        # 2. reap orphan records
+        for record in self.list_records():
+            if record.backend_pid is not None:
+                # start-time fence lives inside stop_by_identity (ADR 0004): a pid whose live
+                # start-time != record.backend_start_time is never signalled.
+                proxy.stop_by_identity(record.backend_pid, record.backend_start_time)
+            if record.execution_state in (ExecutionState.HALTED, ExecutionState.UNKNOWN):
+                self.write_tombstone(
+                    RecoveryTombstone(
+                        target_key=record.target_key,
+                        generation=record.generation,
+                        reason=f"reconciled_{record.execution_state.value}",
+                    )
+                )
+                admission.mark_recovery_required(record.target_key, record.generation)
+            self.delete_record(record.target_key)

@@ -5,7 +5,7 @@ import pytest
 
 from linux_debug_mcp.coordination.registry import InstanceLockError, RecoveryTombstone, SessionRegistry
 from linux_debug_mcp.seams.target import TargetKey
-from linux_debug_mcp.transport.base import RecordState, TransportSession, new_session_id
+from linux_debug_mcp.transport.base import ExecutionState, RecordState, TransportSession, new_session_id
 
 
 def _key() -> TargetKey:
@@ -81,3 +81,57 @@ def test_second_instance_fails_loud(tmp_path):
     third = SessionRegistry(directory=tmp_path)
     third.acquire_instance_lock()
     third.release_instance_lock()
+
+
+class _FakeProxy:
+    def __init__(self) -> None:
+        self.reaped: list[tuple[int, str | None]] = []
+
+    def stop_by_identity(self, pid: int, start_time: str | None) -> None:
+        self.reaped.append((pid, start_time))
+
+
+class _RecordingAdmission:
+    def __init__(self) -> None:
+        self.marked: list[tuple[TargetKey, int]] = []
+
+    def mark_recovery_required(self, target_key: TargetKey, generation: int) -> None:
+        self.marked.append((target_key, generation))
+
+
+def test_reconcile_reaps_live_orphan_and_clears_record(tmp_path):
+    reg = SessionRegistry(directory=tmp_path)
+    key = _key()
+    reg.write_record(
+        _session(key, backend_pid=4321, backend_start_time="999", execution_state=ExecutionState.EXECUTING)
+    )
+    proxy, admission = _FakeProxy(), _RecordingAdmission()
+    reg.reconcile(proxy=proxy, admission=admission)
+    assert proxy.reaped == [(4321, "999")]
+    assert reg.read_record(key) is None
+    assert admission.marked == []  # EXECUTING/no-halt → no recovery tombstone
+
+
+def test_reconcile_tombstones_halted_record(tmp_path):
+    reg = SessionRegistry(directory=tmp_path)
+    key = _key()
+    reg.write_record(_session(key, generation=7, backend_pid=None, execution_state=ExecutionState.HALTED))
+    proxy, admission = _FakeProxy(), _RecordingAdmission()
+    reg.reconcile(proxy=proxy, admission=admission)
+    tomb = reg.read_tombstone(key)
+    assert tomb is not None and tomb.generation == 7
+    assert admission.marked == [(key, 7)]
+    assert reg.read_record(key) is None
+
+
+def test_reconcile_is_idempotent_across_two_restarts(tmp_path):
+    reg = SessionRegistry(directory=tmp_path)
+    key = _key()
+    reg.write_record(_session(key, generation=7, execution_state=ExecutionState.HALTED))
+    reg.reconcile(proxy=_FakeProxy(), admission=_RecordingAdmission())
+    # second "restart": fresh registry, same dir; tombstone persists, no record to re-tombstone
+    reg2 = SessionRegistry(directory=tmp_path)
+    admission2 = _RecordingAdmission()
+    reg2.reconcile(proxy=_FakeProxy(), admission=admission2)
+    assert reg2.read_tombstone(key) is not None
+    assert admission2.marked == [(key, 7)]  # re-marked from the durable tombstone, idempotent
