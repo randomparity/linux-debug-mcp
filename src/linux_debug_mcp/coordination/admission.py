@@ -775,16 +775,23 @@ class AdmissionService:
         handle._state = terminal
         bindings.remove(handle)
 
-    def close_admission(self, target_key: TargetKey) -> list[AdmissionHandle]:
+    def close_admission(self, target_key: TargetKey, generation: int) -> list[AdmissionHandle]:
         """§4.5 step 1: reject new admit() for the key and set the cancel fence on every live
-        binding. Records the generation being torn down so admission cannot be reopened until a
-        strictly-newer incarnation appears. **Idempotent**: a duplicate close while already
-        closed preserves the FIRST closed-at generation (a later close at N+1 must not push the
-        reopen bar to N+2 and strand a recovered target). Returns the cancelled handles."""
+        binding. `generation` is the incarnation being torn down. Records it so admission cannot
+        be reopened until a strictly-newer incarnation appears. **Idempotent**: a duplicate close
+        while already closed preserves the FIRST closed-at generation (a later close must not push
+        the reopen bar forward and strand a recovered target). **Generation-fenced against a stale
+        retry (§5.4/§5.5):** if the target is not currently closed but its authoritative snapshot
+        has already advanced PAST `generation` (a newer incarnation was published and reopened),
+        this is a delayed retry of a prior incarnation's invalidation — it is a complete no-op and
+        does NOT close admission or cancel the new incarnation's bindings. Returns the cancelled
+        handles."""
         with self._key_lock(target_key):
             if target_key not in self._closed_at:
                 snapshot = self._store.get(target_key)
-                self._closed_at[target_key] = snapshot.generation if snapshot is not None else -1
+                if snapshot is not None and snapshot.generation > generation:
+                    return []  # stale retry: the target already advanced/reopened past `generation`
+                self._closed_at[target_key] = generation
             handles = list(self._bindings.get(target_key, ()))
             for handle in handles:
                 handle._cancel.set()  # monotonic private fence; only the service signals it
@@ -842,16 +849,21 @@ class AdmissionService:
             if self._recovery_required.get(target_key) == expected_generation:
                 del self._recovery_required[target_key]
 
-    def invalidate_lifecycle(self, event: LifecycleEvent, dispatcher: LifecycleDispatcher) -> InvalidationResult:
+    def invalidate_lifecycle(
+        self, event: LifecycleEvent, dispatcher: LifecycleDispatcher, generation: int
+    ) -> InvalidationResult:
         """§4.5 steps 1→2 in the **mandatory** order, enforced in one place so teardown can never
-        run while admission is still open. Step 1: `close_admission(event.target_key)` — set the
-        cancel fence on every live binding and reject new admit() for the key. This is a confirmed,
-        synchronous, non-blocking primitive (lock-guarded flag flips only, no IO, no callbacks), so
-        it always completes here before step 2 begins — there is no best-effort hook that could
-        leave admission open. Step 2: `dispatcher.emit(event)` — the bounded teardown. Because the
-        fence is provably set before any subscriber runs, no concurrent admit() can enter the
+        run while admission is still open. `generation` is the incarnation this transition tears
+        down. Step 1: `close_admission(event.target_key, generation)` — set the cancel fence on
+        every live binding and reject new admit() for the key. This is a confirmed, synchronous,
+        non-blocking primitive (lock-guarded flag flips only, no IO, no callbacks), so it always
+        completes here before step 2 begins — there is no best-effort hook that could leave
+        admission open. It is generation-fenced, so a delayed retry of a prior incarnation's
+        invalidation (after the target reopened past it) is a no-op and cannot tear down the new
+        incarnation (§5.4/§5.5). Step 2: `dispatcher.emit(event)` — the bounded teardown. Because
+        the fence is provably set before any subscriber runs, no concurrent admit() can enter the
         owner-free window and seize a freed lease against the not-yet-bumped generation. The
         Layer-4 lifecycle transaction wraps this with §4.5 steps 3–5 (revoke lease/guard via the
         subscribers, bump generation)."""
-        self.close_admission(event.target_key)  # step 1: mandatory, confirmed, before any teardown
+        self.close_admission(event.target_key, generation)  # step 1: mandatory, generation-fenced
         return dispatcher.emit(event)  # step 2: teardown only — admission already closed

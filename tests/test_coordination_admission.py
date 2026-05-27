@@ -438,7 +438,7 @@ def test_ssh_tier_complete_deregisters_handle():
     service.complete(handle)
     assert handle.state is AdmissionState.COMPLETED
     # a completed handle is deregistered: a later invalidation does not re-touch it
-    assert service.close_admission(_key()) == []
+    assert service.close_admission(_key(), 0) == []
 
 
 def test_promote_after_rollback_is_rejected():
@@ -479,7 +479,7 @@ def test_admission_handle_cancellation_is_read_only_and_monotonic():
         handle.cancelled = False  # read-only property
     with pytest.raises(AttributeError):
         handle.state = AdmissionState.PROMOTED  # read-only property
-    service.close_admission(_key())
+    service.close_admission(_key(), 0)
     assert handle.cancelled is True
     with pytest.raises(AdmissionError):
         service.promote(handle)  # a cancelled handle cannot be promoted
@@ -490,7 +490,7 @@ def test_close_admission_cancels_pending_and_promoted_and_blocks_new():
     pending = service.admit_ssh_tier(_key(), 0, _platform())
     promoted = service.admit_ssh_tier(_key(), 0, _platform())
     service.promote(promoted)
-    cancelled = service.close_admission(_key())
+    cancelled = service.close_admission(_key(), 0)
     assert pending.cancelled and promoted.cancelled
     assert {pending.handle_id, promoted.handle_id} == {h.handle_id for h in cancelled}
     with pytest.raises(AdmissionError) as excinfo:
@@ -501,7 +501,7 @@ def test_close_admission_cancels_pending_and_promoted_and_blocks_new():
 def test_promote_after_cancel_is_rejected():
     service = _service(_snapshot())
     handle = service.admit(_key(), _request())
-    service.close_admission(_key())
+    service.close_admission(_key(), 0)
     with pytest.raises(AdmissionError):
         service.promote(handle)
 
@@ -530,7 +530,7 @@ def test_invalidate_lifecycle_closes_admission_before_any_teardown():
 
     dispatcher.subscribe(_key(), "transport", _ProbingSubscriber())
     pending = service.admit_ssh_tier(_key(), 0, _platform())
-    service.invalidate_lifecycle(LifecycleEvent(target_key=_key(), kind=LifecycleKind.CRASHED), dispatcher)
+    service.invalidate_lifecycle(LifecycleEvent(target_key=_key(), kind=LifecycleKind.CRASHED), dispatcher, 0)
     assert pending.cancelled  # step 1 cancelled the in-flight handle
     assert observed_closed == [True]  # admission was already closed when teardown ran
 
@@ -539,7 +539,7 @@ def test_reopen_after_generation_bump_allows_admission():
     store = SnapshotStore()
     store.put(_key(), _snapshot(generation=0))
     service = AdmissionService(store)
-    service.close_admission(_key())  # records closed-at generation 0
+    service.close_admission(_key(), 0)  # records closed-at generation 0
     # provisioning publishes the new-incarnation snapshot, THEN admission reopens
     store.put(_key(), _snapshot(generation=1))
     service.reopen(_key())
@@ -554,7 +554,7 @@ def test_early_reopen_before_new_snapshot_stays_closed():
     store = SnapshotStore()
     store.put(_key(), _snapshot(generation=0))
     service = AdmissionService(store)
-    service.close_admission(_key())
+    service.close_admission(_key(), 0)
     with pytest.raises(AdmissionError) as excinfo:
         service.reopen(_key())  # store still has generation 0
     assert excinfo.value.code == "generation_not_advanced"
@@ -570,7 +570,7 @@ def test_reopen_blocked_while_prior_bindings_outstanding():
     store.put(_key(), _snapshot(generation=0))
     service = AdmissionService(store)
     handle = service.admit(_key(), _request())
-    service.close_admission(_key())  # handle cancelled but still a registered PENDING binding
+    service.close_admission(_key(), 0)  # handle cancelled but still a registered PENDING binding
     store.put(_key(), _snapshot(generation=1))
     with pytest.raises(AdmissionError) as excinfo:
         service.reopen(_key())
@@ -585,7 +585,7 @@ def test_abandon_force_drops_overdue_handle_so_reopen_can_proceed():
     store.put(_key(), _snapshot(generation=0))
     service = AdmissionService(store)
     handle = service.admit(_key(), _request())
-    service.close_admission(_key())
+    service.close_admission(_key(), 0)
     service.confirm_reaped(handle)  # the Layer-4 reaper reclaimed its resources
     service.abandon(handle)  # owner could not roll it back -> explicit force-drop
     assert handle.state is AdmissionState.ABANDONED
@@ -603,7 +603,7 @@ def test_abandon_requires_reaper_confirmation_before_reopen():
     service = AdmissionService(store)
     handle = service.admit(_key(), _request())
     service.promote(handle)
-    service.close_admission(_key())  # cancelled, but resources not yet reaped
+    service.close_admission(_key(), 0)  # cancelled, but resources not yet reaped
     with pytest.raises(AdmissionError) as not_reaped:
         service.abandon(handle)
     assert not_reaped.value.code == "reaper_confirmation_required"
@@ -715,7 +715,7 @@ def test_ordinary_lifecycle_close_blocks_even_admit_recovery():
     # During an ordinary reset/release teardown, NO new work registers — not even recovery —
     # before leases/guards are revoked. (close_admission is the lifecycle gate.)
     service = _service(_snapshot(state=TargetState.DEBUGGING))
-    service.close_admission(_key())
+    service.close_admission(_key(), 0)
     with pytest.raises(AdmissionError) as ordinary:
         service.admit_ssh_tier(_key(), 0, _platform())
     assert ordinary.value.code == "admission_closed"
@@ -778,11 +778,36 @@ def test_close_admission_is_idempotent_across_generation_publication():
     store = SnapshotStore()
     store.put(_key(), _snapshot(generation=0))
     service = AdmissionService(store)
-    service.close_admission(_key())  # closed at generation 0
+    service.close_admission(_key(), 0)  # closed at generation 0
     store.put(_key(), _snapshot(generation=1))
-    service.close_admission(_key())  # duplicate close after N+1 published -> still closed-at 0
+    service.close_admission(_key(), 0)  # duplicate close after N+1 published -> still closed-at 0
     service.reopen(_key())  # 1 > 0 -> succeeds
     assert service.admit(_key(), _request(generation=1)).state is AdmissionState.PENDING
+
+
+def test_stale_prior_generation_close_after_reopen_does_not_cancel_new_incarnation():
+    # §5.4/§5.5: close_admission is generation-fenced against a stale retry. A gen-0 reset closes
+    # admission; gen 1 is published and reopened; a new gen-1 session is admitted; then a DELAYED
+    # retry of the gen-0 invalidation must be a complete no-op — it must not re-close admission for
+    # gen 1 or cancel the new incarnation's binding (teardown is idempotent on retry, and the
+    # generation fence stops a prior incarnation tearing down the next one). No ADR-0002 dependency.
+    store = SnapshotStore()
+    store.put(_key(), _snapshot(generation=0))
+    service = AdmissionService(store)
+    service.close_admission(_key(), 0)  # gen-0 reset closes admission
+    store.put(_key(), _snapshot(generation=1))
+    service.reopen(_key())  # gen-1 snapshot published, admission reopened
+    new = service.admit(_key(), _request(generation=1))  # the new incarnation's session
+    cancelled = service.close_admission(_key(), 0)  # DELAYED/retried gen-0 invalidation
+    assert cancelled == []  # no-op: the target already advanced past generation 0
+    assert not new.cancelled  # the new gen-1 binding is untouched
+    # admission stayed OPEN for gen 1 (the stale close did not re-close it): another op admits
+    second = service.admit(_key(), _request(generation=1))
+    assert second.state is AdmissionState.PENDING
+    # a CURRENT-generation close DOES fire and cancels the live gen-1 bindings
+    closed = service.close_admission(_key(), 1)
+    assert {new.handle_id, second.handle_id} == {h.handle_id for h in closed}
+    assert new.cancelled and second.cancelled
 
 
 def test_publish_snapshot_serializes_with_the_admission_key_lock():
@@ -820,7 +845,7 @@ def test_complete_on_cancelled_handle_is_rejected():
     service = AdmissionService(store)
     handle = service.admit(_key(), _request())
     service.promote(handle)
-    service.close_admission(_key())  # cancels the live binding
+    service.close_admission(_key(), 0)  # cancels the live binding
     with pytest.raises(AdmissionError) as excinfo:
         service.complete(handle)
     assert excinfo.value.code == "admission_cancelled"
@@ -845,7 +870,7 @@ def test_rollback_of_promoted_handle_on_closed_target_requires_reaper_confirmati
     service = AdmissionService(store)
     handle = service.admit(_key(), _request())
     service.promote(handle)  # backend/lease/guard now live
-    service.close_admission(_key())  # reset cancels the live binding
+    service.close_admission(_key(), 0)  # reset cancels the live binding
     with pytest.raises(AdmissionError) as excinfo:
         service.rollback(handle)  # owner tries to unwind before teardown is proven
     assert excinfo.value.code == "reaper_confirmation_required"
@@ -867,7 +892,7 @@ def test_rollback_of_pending_handle_on_closed_target_needs_no_reaper():
     store.put(_key(), _snapshot(generation=0))
     service = AdmissionService(store)
     handle = service.admit(_key(), _request())  # PENDING, nothing committed
-    service.close_admission(_key())
+    service.close_admission(_key(), 0)
     service.rollback(handle)  # disposes freely
     assert handle.state is AdmissionState.ROLLED_BACK
     store.put(_key(), _snapshot(generation=1))
