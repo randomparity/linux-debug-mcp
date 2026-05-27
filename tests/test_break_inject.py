@@ -68,7 +68,7 @@ def test_sysrq_g_writes_g_to_sysrq_trigger_over_ssh(tmp_path):
         work_dir=tmp_path,
     )
     assert any("/proc/sysrq-trigger" in part for part in ssh.argv)
-    assert any(part == "g" or part.endswith("g") for part in ssh.argv)
+    assert "g" in ssh.argv
 
 
 def test_requested_method_not_in_admitted_plan_is_rejected():

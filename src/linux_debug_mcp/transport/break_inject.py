@@ -43,7 +43,9 @@ def inject_break(
         return
     if resolved is BreakMethod.SYSRQ_G:
         base = work_dir or Path(".")
-        argv = [*ssh_argv_prefix, "sh", "-c", 'echo "$1" > /proc/sysrq-trigger', "--", "g"]
+        # sh -c SCRIPT $0 $1 ...: pass "g" as a discrete argv token ($1), not embedded in the
+        # script string, so the trigger char is never shell-interpolated. $0 is just a label.
+        argv = [*ssh_argv_prefix, "sh", "-c", 'echo "$1" > /proc/sysrq-trigger', "sysrq-g", "g"]
         result = ssh_runner.run(argv, timeout=10, stdout_path=base / "sysrq.out", stderr_path=base / "sysrq.err")
         if getattr(result, "returncode", 0) != 0:
             raise InjectBreakError("sysrq-g write failed", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
