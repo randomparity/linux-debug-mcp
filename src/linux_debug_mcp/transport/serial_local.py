@@ -382,8 +382,14 @@ class SerialLocalTransport(Transport):
     ) -> BackendAttachment:
         bridge = SerialConsoleBridge.open(socket_dir=self._socket_dir, device=device, deadline=deadline, cancel=cancel)
         # Record the resolved socket path so Layer-4 reconciliation can find the inode even on
-        # the mkdtemp fallback branch, where it lives outside <run>/debug/ (F4).
-        on_partial("console_socket", {"socket_path": bridge.socket_path, "session_dir": bridge.session_dir})
+        # the mkdtemp fallback branch, where it lives outside <run>/debug/ (F4). on_partial may
+        # raise (a durable-record fsync); if it does, tear the bridge down before propagating so
+        # the freed source lock cannot be re-acquired against a still-live line (§4.7, F1).
+        try:
+            on_partial("console_socket", {"socket_path": bridge.socket_path, "session_dir": bridge.session_dir})
+        except BaseException:
+            bridge.stop()
+            raise
         self._bridges[bridge.socket_path] = bridge
         self._bridge_lock_fds[bridge.socket_path] = lock_fd
         return BackendAttachment(

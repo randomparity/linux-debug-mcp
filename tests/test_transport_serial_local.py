@@ -147,6 +147,38 @@ def test_console_only_open_failure_after_listen_leaves_no_socket_or_session_dir(
         os.close(peripheral_fd)
 
 
+def test_console_only_attach_cleans_up_when_console_socket_partial_raises(tmp_path):
+    """on_partial may raise (e.g. a Layer-4 durable fsync). If the console_socket partial
+    raises, attach must tear the bridge down — release the source fd + listener + socket inode
+    + session dir + pump thread — before propagating, or a later attach re-acquires the freed
+    source lock and double-drives the line (§4.7, the F1 invariant the F4 fix regressed on)."""
+    import pty
+
+    controller_fd, peripheral_fd = pty.openpty()
+    peripheral_name = os.ttyname(peripheral_fd)
+    transport = SerialLocalTransport(socket_dir=tmp_path, lock_dir=tmp_path / "locks")
+    request = _request(LineRole.SHARED_CONSOLE, {"device": peripheral_name}, tmp_path)
+    captured = {}
+
+    def _on_partial(kind, value):
+        if kind == "console_socket":
+            captured["socket_path"] = value["socket_path"]
+            captured["session_dir"] = value["session_dir"]
+            raise RuntimeError("simulated durable-record fsync failure")
+
+    try:
+        with pytest.raises(RuntimeError):
+            transport.attach(
+                request, cancel=threading.Event(), deadline=Deadline.after(2.0), on_partial=_on_partial
+            )
+        assert not os.path.exists(captured["socket_path"])  # socket inode unlinked
+        assert not os.path.exists(captured["session_dir"])  # session dir removed
+        assert transport._bridges == {}  # bridge not registered / not leaked
+    finally:
+        os.close(controller_fd)
+        os.close(peripheral_fd)
+
+
 class _RecordingProxy:
     def __init__(self):
         from linux_debug_mcp.transport.proxy import ProxyHandle
