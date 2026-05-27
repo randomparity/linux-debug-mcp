@@ -168,9 +168,7 @@ def test_console_only_attach_cleans_up_when_console_socket_partial_raises(tmp_pa
 
     try:
         with pytest.raises(RuntimeError):
-            transport.attach(
-                request, cancel=threading.Event(), deadline=Deadline.after(2.0), on_partial=_on_partial
-            )
+            transport.attach(request, cancel=threading.Event(), deadline=Deadline.after(2.0), on_partial=_on_partial)
         assert not os.path.exists(captured["socket_path"])  # socket inode unlinked
         assert not os.path.exists(captured["session_dir"])  # session dir removed
         assert transport._bridges == {}  # bridge not registered / not leaked
