@@ -319,7 +319,10 @@ class SerialLocalTransport(Transport):
         except RuntimeLockError as exc:
             raise SerialLocalConfigError(str(exc), category=ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
         lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        lock_path = lock_dir / device_lock_filename(device)
+        # Key the lock on the canonical path so symlink aliases and "/.." segments collapse to
+        # one lock (§4.7). realpath resolves the filesystem name, not hardware identity: two
+        # genuinely distinct nodes for one chip still slip through. device stays the open target.
+        lock_path = lock_dir / device_lock_filename(os.path.realpath(device))
         lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

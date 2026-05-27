@@ -328,6 +328,42 @@ def test_same_device_different_socket_dir_still_conflicts(tmp_path):
         os.close(slave)
 
 
+def test_symlinked_device_alias_conflicts_with_canonical_path(tmp_path):
+    """A device reached by a symlink alias (e.g. /dev/serial/by-id/...) must collapse to the
+    same source lock as its canonical path; otherwise both flocks succeed and the one physical
+    line is double-driven (spec §4.7). The lock key is os.path.realpath(device)."""
+    import pty
+
+    from linux_debug_mcp.transport.serial_local import SerialLocalConflictError
+
+    master, slave = pty.openpty()
+    name = os.ttyname(slave)
+    alias = tmp_path / "ttyAlias"
+    os.symlink(name, alias)
+    shared_lock_dir = tmp_path / "locks"
+    t1 = SerialLocalTransport(socket_dir=tmp_path / "run-a", lock_dir=shared_lock_dir)
+    r1 = t1.attach(
+        _request(LineRole.SHARED_CONSOLE, {"device": name}, tmp_path),
+        cancel=threading.Event(),
+        deadline=Deadline.after(2.0),
+        on_partial=lambda *_: None,
+    )
+    try:
+        t2 = SerialLocalTransport(socket_dir=tmp_path / "run-b", lock_dir=shared_lock_dir)
+        with pytest.raises(SerialLocalConflictError) as exc:
+            t2.attach(
+                _request(LineRole.SHARED_CONSOLE, {"device": str(alias)}, tmp_path),
+                cancel=threading.Event(),
+                deadline=Deadline.after(2.0),
+                on_partial=lambda *_: None,
+            )
+        assert exc.value.category == ErrorCategory.TRANSPORT_CONFLICT
+    finally:
+        t1.close(_StubSession(r1.console_endpoint))
+        os.close(master)
+        os.close(slave)
+
+
 def test_different_devices_do_not_conflict(tmp_path):
     """Distinct physical lines hash to distinct lock files in the shared lock_dir, so
     both attaches succeed; the source lock is per-device, not a global mutex."""
