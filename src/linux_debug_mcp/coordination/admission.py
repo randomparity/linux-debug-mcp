@@ -687,6 +687,18 @@ class AdmissionService:
                     category=ErrorCategory.READINESS_FAILURE,
                     code="admission_cancelled",
                 )
+            if handle.op is AdmissionOp.SSH_TIER and handle.admit_epoch != self._exec_epoch.get(handle.target_key, 0):
+                # Epoch backstop for the window between a halt being RECORDED
+                # (note_execution_transition bumps the epoch synchronously) and the halt-cancel
+                # being DELIVERED (cancel_ssh_tier may be delayed). An ssh op is always admitted at
+                # an EXECUTING epoch, so any later epoch means a transition — i.e. a halt — occurred
+                # during its lifetime; it spanned a HALTED window and MUST roll back rather than
+                # report success, even if its cancel fence has not been set yet (§5.6 rule 2).
+                raise AdmissionError(
+                    "ssh-tier op spanned an execution-state transition (halt) since admission; roll back, not complete",
+                    category=ErrorCategory.READINESS_FAILURE,
+                    code="execution_state_changed",
+                )
             if handle.state is AdmissionState.PENDING and handle.op is AdmissionOp.TRANSPORT_OPEN:
                 raise AdmissionError(
                     "a pending transport.open must promote or roll back, not complete",

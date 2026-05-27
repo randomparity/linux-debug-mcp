@@ -964,6 +964,47 @@ def test_cancelled_ssh_tier_op_cannot_be_completed():
     service.rollback(ssh)  # the correct path for a cancelled op
 
 
+def test_ssh_tier_op_that_spanned_a_halt_cannot_complete_before_delayed_cancel():
+    # Round-10: complete() is fenced by execution epoch, not only by the cancel Event. An ssh op
+    # admitted while EXECUTING that then spans a RECORDED halt (and resume) before its DELAYED
+    # cancel_ssh_tier worker runs must NOT report success — it crossed a HALTED window and must
+    # roll back (§5.6 rule 2). The epoch backstop covers the gap between the halt being recorded
+    # (note_execution_transition) and the cancel being delivered.
+    service = _service(_snapshot(generation=1, state=TargetState.DEBUGGING))
+    op = service.admit_ssh_tier(
+        _key(),
+        1,
+        _platform(),
+        execution_proof=ExecutionProof(
+            generation=1, epoch=service.current_execution_epoch(_key()), state=ExecutionState.EXECUTING
+        ),
+    )
+    service.note_execution_transition(_key(), 1)  # EXECUTING->HALTED recorded; cancel worker delayed
+    service.note_execution_transition(_key(), 1)  # resume; epoch is now past the op's admit epoch
+    assert not op.cancelled  # the delayed cancel_ssh_tier has NOT run yet
+    with pytest.raises(AdmissionError) as excinfo:
+        service.complete(op)  # the op tries to report success before the cancel reaches it
+    assert excinfo.value.code == "execution_state_changed"
+    service.rollback(op)  # it must roll back instead
+    assert op.state is AdmissionState.ROLLED_BACK
+
+
+def test_ssh_tier_op_completes_when_no_transition_occurred():
+    # The positive case: an ssh op on a DEBUGGING target that completes within the same EXECUTING
+    # window (no execution-state transition since admission) completes successfully.
+    service = _service(_snapshot(generation=1, state=TargetState.DEBUGGING))
+    op = service.admit_ssh_tier(
+        _key(),
+        1,
+        _platform(),
+        execution_proof=ExecutionProof(
+            generation=1, epoch=service.current_execution_epoch(_key()), state=ExecutionState.EXECUTING
+        ),
+    )
+    service.complete(op)  # no transition -> admit_epoch == current epoch -> completes
+    assert op.state is AdmissionState.COMPLETED
+
+
 def test_stale_generation_cancel_does_not_advance_the_current_execution_epoch():
     # A late HALTED from a prior incarnation must be a FULL no-op: it cancels no current handle
     # AND must not bump the current execution epoch. A leaked epoch bump would invalidate a fresh
