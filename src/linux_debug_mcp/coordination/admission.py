@@ -535,11 +535,28 @@ class AdmissionService:
         proof: ExecutionProof | None,
     ) -> None:
         # §4.6/§5.6: ssh-tier against a DEBUGGING target is admitted ONLY on a fresh, generation-
-        # AND epoch-current EXECUTING proof from the Layer-4 probe. No proof (incl. probe_timeout)
-        # or an UNKNOWN proof fails closed; a proof from a prior incarnation (generation) or from
-        # before an execution-state transition (epoch) is stale and refused — re-probe rather than
-        # admit against a possibly-HALTED kernel; a current HALTED proof is rejected immediately.
-        if proof is None or proof.state is ExecutionState.UNKNOWN:
+        # AND epoch-current proof that is POSITIVELY EXECUTING. The gate is fail-closed: a missing
+        # proof, an UNKNOWN/unrecognized state, a stale generation/epoch, or a HALTED state are all
+        # rejected — admission requires a positive EXECUTING, never merely "not UNKNOWN/HALTED".
+        if proof is None:
+            raise AdmissionError(
+                "ssh-tier op against a DEBUGGING target requires a fresh EXECUTING probe (Layer 4)",
+                category=ErrorCategory.READINESS_FAILURE,
+                code="execution_state_unknown",
+            )
+        # ExecutionProof is a plain dataclass, so `state` is NOT type-enforced at runtime: a
+        # Layer-4 caller may hand us a raw decoded value (e.g. the string "halted"). Normalize to
+        # the enum and fail closed on anything unrecognized, so a malformed state can never slip
+        # past the `is`-identity checks below and be admitted into a halted/unknown kernel.
+        try:
+            state = ExecutionState(proof.state)
+        except ValueError:
+            raise AdmissionError(
+                f"unrecognized execution-proof state {proof.state!r}; fail closed",
+                category=ErrorCategory.READINESS_FAILURE,
+                code="execution_state_unknown",
+            ) from None
+        if state is ExecutionState.UNKNOWN:
             raise AdmissionError(
                 "ssh-tier op against a DEBUGGING target requires a fresh EXECUTING probe (Layer 4)",
                 category=ErrorCategory.READINESS_FAILURE,
@@ -557,13 +574,21 @@ class AdmissionService:
                 category=ErrorCategory.READINESS_FAILURE,
                 code="execution_state_unknown",
             )
-        if proof.state is ExecutionState.HALTED:
+        if state is ExecutionState.HALTED:
             raise AdmissionError(
                 "target halted in debugger; resume or detach first",
                 category=ErrorCategory.READINESS_FAILURE,
                 code="target_halted",
             )
-        # proof.state is EXECUTING, generation-current, epoch-current -> admit.
+        if state is not ExecutionState.EXECUTING:
+            # Defensive positive gate: only EXECUTING admits. Any other state (incl. a future enum
+            # member) fails closed rather than falling through to admit.
+            raise AdmissionError(
+                f"ssh-tier op requires a positively-EXECUTING proof; got {state}",
+                category=ErrorCategory.READINESS_FAILURE,
+                code="execution_state_unknown",
+            )
+        # state is EXECUTING, generation-current, epoch-current -> admit.
 
     def cancel_ssh_tier(self, target_key: TargetKey, generation: int, halt_epoch: int) -> list[AdmissionHandle]:
         """§5.6 async-halt cancellation: when the kernel halts under the stop-capable controller,

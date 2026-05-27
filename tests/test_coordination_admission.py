@@ -979,3 +979,27 @@ def test_cancel_ssh_tier_fires_for_the_current_halt():
     halt_epoch = service.note_execution_transition(_key(), 1)  # the kernel halts now
     assert service.cancel_ssh_tier(_key(), 1, halt_epoch) == [ssh]
     assert ssh.cancelled
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_code"),
+    [
+        (ExecutionState.HALTED, "target_halted"),
+        ("halted", "target_halted"),  # raw decoded string, not the enum
+        (ExecutionState.UNKNOWN, "execution_state_unknown"),
+        ("unknown", "execution_state_unknown"),
+        ("bogus", "execution_state_unknown"),  # unrecognized -> fail closed
+    ],
+)
+def test_ssh_tier_proof_must_be_positively_executing(state, expected_code):
+    # ExecutionProof is a plain dataclass, so `state` is not type-enforced. The DEBUGGING gate
+    # admits ONLY a positively-EXECUTING proof — a HALTED/UNKNOWN/unrecognized state (including a
+    # raw decoded string that is not the enum member) must be rejected and never fall through to
+    # admit an ssh op into a halted/unknown kernel (§5.6 rule 2).
+    service = _service(_snapshot(generation=0, state=TargetState.DEBUGGING))
+    epoch = service.current_execution_epoch(_key())
+    with pytest.raises(AdmissionError) as excinfo:
+        service.admit_ssh_tier(
+            _key(), 0, _platform(), execution_proof=ExecutionProof(generation=0, epoch=epoch, state=state)
+        )
+    assert excinfo.value.code == expected_code
