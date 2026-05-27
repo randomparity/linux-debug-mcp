@@ -47,6 +47,7 @@ def check_prerequisites(
     checks.extend(_python_package_checks())
     for tool in ["make", "bash", "git", "qemu-system-x86_64", "virsh", "gdb"]:
         checks.append(_tool_check(tool, runner))
+    checks.append(_agent_proxy_check(runner))
     checks.append(_compiler_check(runner))
     checks.append(_artifact_root_check(artifact_root, source_path))
     checks.append(_source_tree_check(source_path))
@@ -155,6 +156,30 @@ def _source_tree_check(source_path: Path | None) -> PrerequisiteCheck:
         check_id="source.linux_tree",
         status=PrerequisiteStatus.PASSED,
         message="source path looks like a Linux tree",
+    )
+
+
+AGENT_PROXY_REMEDIATION = (
+    "agent-proxy is optional (needed only for serial/console transports). Build it from the "
+    "pinned source: git clone https://git.kernel.org/pub/scm/utils/kernel/kgdb/agent-proxy.git "
+    "&& make -C agent-proxy, then put it on PATH."
+)
+
+
+def _agent_proxy_check(runner: PrerequisiteRunner) -> PrerequisiteCheck:
+    path = runner.which("agent-proxy")
+    if path:
+        return PrerequisiteCheck(
+            check_id="tool.agent-proxy",
+            status=PrerequisiteStatus.PASSED,
+            message="agent-proxy found",
+            details={"path": path},
+        )
+    return PrerequisiteCheck(
+        check_id="tool.agent-proxy",
+        status=PrerequisiteStatus.WARNING,
+        message="agent-proxy was not found",
+        suggested_fix=AGENT_PROXY_REMEDIATION,
     )
 
 
