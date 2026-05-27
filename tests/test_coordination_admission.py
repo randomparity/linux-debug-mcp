@@ -296,12 +296,13 @@ def test_ssh_tier_on_debugging_rejected_when_proof_is_stale_generation():
 def test_ssh_tier_executing_proof_is_rejected_after_a_same_generation_halt():
     # §4.6/§5.6 replay defense: an EXECUTING proof taken before an EXECUTING->HALTED transition
     # MUST NOT be replayable afterwards. A halt does not bump generation, so the epoch fence is
-    # what catches it: cancel_ssh_tier (the halt) bumps the execution epoch, so the pre-halt proof
-    # no longer matches and a new admit must re-probe rather than attach to a halted kernel.
+    # what catches it: note_execution_transition (the halt) bumps the execution epoch, so the
+    # pre-halt proof no longer matches and a new admit must re-probe rather than attach to a halt.
     service = _service(_snapshot(generation=1, state=TargetState.DEBUGGING))
     proof = ExecutionProof(generation=1, epoch=service.current_execution_epoch(_key()), state=ExecutionState.EXECUTING)
     op = service.admit_ssh_tier(_key(), 1, _platform(), execution_proof=proof)
-    service.cancel_ssh_tier(_key(), 1)  # the kernel halted: cancel in-flight ops AND bump the epoch
+    halt_epoch = service.note_execution_transition(_key(), 1)  # the kernel halted: records the transition
+    service.cancel_ssh_tier(_key(), 1, halt_epoch)  # cancel in-flight ops for this halt
     service.rollback(op)
     with pytest.raises(AdmissionError) as excinfo:
         service.admit_ssh_tier(_key(), 1, _platform(), execution_proof=proof)  # SAME pre-halt proof
@@ -323,9 +324,11 @@ def test_cancel_ssh_tier_cancels_in_flight_without_closing_admission():
             generation=1, epoch=service.current_execution_epoch(_key()), state=ExecutionState.EXECUTING
         ),
     )
-    cancelled = service.cancel_ssh_tier(_key(), 1)
+    halt_epoch = service.note_execution_transition(_key(), 1)  # the kernel halted
+    cancelled = service.cancel_ssh_tier(_key(), 1, halt_epoch)
     assert ssh.cancelled and [h.handle_id for h in cancelled] == [ssh.handle_id]
     service.rollback(ssh)  # the op owner unwinds its cancelled handle
+    service.note_execution_transition(_key(), 1)  # the kernel resumed (another transition)
     # admission was NOT closed: a fresh EXECUTING proof (current epoch) admits after the resume
     resumed = service.admit_ssh_tier(
         _key(),
@@ -351,10 +354,12 @@ def test_stale_generation_cancel_leaves_newer_generation_ssh_handle_untouched():
             generation=5, epoch=service.current_execution_epoch(_key()), state=ExecutionState.EXECUTING
         ),
     )
-    cancelled = service.cancel_ssh_tier(_key(), 4)  # stale controller, prior generation
+    stale_epoch = service.current_execution_epoch(_key())
+    cancelled = service.cancel_ssh_tier(_key(), 4, stale_epoch)  # stale controller, prior generation
     assert cancelled == []
     assert fresh.cancelled is False  # the newer-generation ssh op is untouched
-    assert service.cancel_ssh_tier(_key(), 5) == [fresh]  # the matching-generation cancel does fire
+    halt_epoch = service.note_execution_transition(_key(), 5)  # the current-generation kernel halts
+    assert service.cancel_ssh_tier(_key(), 5, halt_epoch) == [fresh]  # the matching cancel fires
 
 
 def test_ssh_only_target_with_no_transports_admits_ssh_tier():
@@ -893,7 +898,8 @@ def test_cancelled_ssh_tier_op_cannot_be_completed():
             generation=1, epoch=service.current_execution_epoch(_key()), state=ExecutionState.EXECUTING
         ),
     )
-    service.cancel_ssh_tier(_key(), 1)
+    halt_epoch = service.note_execution_transition(_key(), 1)  # the kernel halted
+    service.cancel_ssh_tier(_key(), 1, halt_epoch)
     assert ssh.cancelled
     with pytest.raises(AdmissionError) as excinfo:
         service.complete(ssh)
@@ -909,7 +915,7 @@ def test_stale_generation_cancel_does_not_advance_the_current_execution_epoch():
     service = _service(_snapshot(generation=5, state=TargetState.DEBUGGING))
     epoch = service.current_execution_epoch(_key())
     proof = ExecutionProof(generation=5, epoch=epoch, state=ExecutionState.EXECUTING)
-    cancelled = service.cancel_ssh_tier(_key(), 4)  # stale prior-incarnation cancel
+    cancelled = service.cancel_ssh_tier(_key(), 4, epoch)  # stale prior-incarnation cancel
     assert cancelled == []
     assert service.current_execution_epoch(_key()) == epoch  # epoch did NOT advance
     # the fresh current-generation EXECUTING proof still admits
@@ -933,3 +939,43 @@ def test_note_execution_transition_is_generation_fenced():
     with pytest.raises(AdmissionError) as excinfo:
         service.admit_ssh_tier(_key(), 5, _platform(), execution_proof=stale)
     assert excinfo.value.code == "execution_state_unknown"
+
+
+def test_delayed_halt_cancel_after_resume_does_not_cancel_newly_admitted_ssh():
+    # §5.6 rule 2: a DELAYED halt-cancel from the CURRENT controller must not cancel ssh work that
+    # was legitimately admitted after a subsequent resume. C halts (epoch e_halt), C resumes
+    # (epoch advances), Layer 4 admits H while EXECUTING; then C's delayed cancel worker fires for
+    # the OLD halt. The halt-epoch fence makes it a no-op — H, executing, survives. This is a
+    # current-controller temporal ordering hole, not an ADR-0002 stale-token case.
+    service = _service(_snapshot(generation=1, state=TargetState.DEBUGGING))
+    halt_epoch = service.note_execution_transition(_key(), 1)  # C halts; its cancel worker is delayed
+    service.note_execution_transition(_key(), 1)  # C resumes the kernel (epoch advances past halt_epoch)
+    new = service.admit_ssh_tier(
+        _key(),
+        1,
+        _platform(),
+        execution_proof=ExecutionProof(
+            generation=1, epoch=service.current_execution_epoch(_key()), state=ExecutionState.EXECUTING
+        ),
+    )
+    assert new.state is AdmissionState.PENDING and not new.cancelled
+    cancelled = service.cancel_ssh_tier(_key(), 1, halt_epoch)  # the DELAYED worker, for the old halt
+    assert cancelled == []  # no-op: a resume advanced the epoch past the halt it was raised for
+    assert not new.cancelled  # ssh work admitted after the resume, while EXECUTING, is untouched
+
+
+def test_cancel_ssh_tier_fires_for_the_current_halt():
+    # The positive case: a timely cancel whose halt_epoch is still current DOES cancel the
+    # in-flight ssh ops of the generation (the kernel really is HALTED right now).
+    service = _service(_snapshot(generation=1, state=TargetState.DEBUGGING))
+    ssh = service.admit_ssh_tier(
+        _key(),
+        1,
+        _platform(),
+        execution_proof=ExecutionProof(
+            generation=1, epoch=service.current_execution_epoch(_key()), state=ExecutionState.EXECUTING
+        ),
+    )
+    halt_epoch = service.note_execution_transition(_key(), 1)  # the kernel halts now
+    assert service.cancel_ssh_tier(_key(), 1, halt_epoch) == [ssh]
+    assert ssh.cancelled

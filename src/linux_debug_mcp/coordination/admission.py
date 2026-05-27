@@ -565,33 +565,41 @@ class AdmissionService:
             )
         # proof.state is EXECUTING, generation-current, epoch-current -> admit.
 
-    def cancel_ssh_tier(self, target_key: TargetKey, generation: int) -> list[AdmissionHandle]:
+    def cancel_ssh_tier(self, target_key: TargetKey, generation: int, halt_epoch: int) -> list[AdmissionHandle]:
         """§5.6 async-halt cancellation: when the kernel halts under the stop-capable controller,
         in-flight ssh-tier ops would hang on a dead network stack. Cancel the fence on every live
         SSH_TIER binding **of the given generation** (their owners then roll back) WITHOUT closing
         admission — the target is still DEBUGGING, not torn down, so once it resumes a fresh
-        EXECUTING proof can admit ssh work again. **Generation-fenced:** a late HALTED from a prior
-        incarnation (an old controller/stale worker) carries that incarnation's generation and is
-        a **complete no-op** when it does not match the authoritative snapshot generation — it
-        cancels no handle AND does NOT bump the execution epoch, so it cannot invalidate a fresh
-        current-generation EXECUTING proof and spuriously reject ssh-tier admission while EXECUTING
-        (§5.6). transport.open (stop-capable) bindings are untouched. Only a current-generation
-        halt **bumps the execution epoch** — an `EXECUTING` proof stamped before that halt can
-        never be replayed to admit a new ssh op afterwards. Returns the cancelled handles.
+        EXECUTING proof can admit ssh work again. transport.open (stop-capable) bindings are
+        untouched. Returns the cancelled handles. **Does not bump the epoch** — recording the
+        EXECUTING→HALTED transition is `note_execution_transition`'s job (the single epoch bumper);
+        this primitive only acts on the binding table.
+
+        Two fences:
+        - **Generation:** a late HALTED from a PRIOR incarnation carries that incarnation's
+          generation and is a complete no-op when it does not match the authoritative snapshot
+          (it cannot touch work admitted after a reset/reopen).
+        - **Halt epoch:** `halt_epoch` is the execution epoch the caller recorded the halt at (the
+          value `note_execution_transition` returned for THIS `EXECUTING→HALTED`). The cancel is a
+          no-op unless it still equals the current epoch — so a **delayed** cancel worker whose
+          halt was already followed by a resume (which bumped the epoch) does NOT cancel ssh work
+          legitimately admitted against that newer EXECUTING epoch (§5.6 rule 2: ssh-tier is
+          permitted while EXECUTING). The cancel applies only to the specific halt it was raised for.
 
         **Caller precondition (Layer 4, [ADR 0002]):** the caller MUST be the current stop-capable
         controller acting under its **live `StopCapableGuard` token**. Because a debug session
         attaches/detaches WITHIN a generation (§3.1/§5.1), the generation fence cannot reject a
-        stale SAME-generation controller (e.g. a detached session A's late `HALTED` worker
-        cancelling session B's ssh work); the guard token is the contract's single authority for
-        that (§5.6 rule 1, "a stale token is a no-op", guard "never outlives the session"). A
-        detached controller released its token and MUST NOT drive this. Layer 2 deliberately does
-        not model a parallel stop-session authority in the admission service (ADR 0002)."""
+        stale SAME-controller-slot session (e.g. a detached session A's late `HALTED` worker); the
+        guard token is the contract's single authority for that (§5.6 rule 1, "a stale token is a
+        no-op", guard "never outlives the session"). Layer 2 does not model a parallel stop-session
+        authority (ADR 0002); the halt-epoch fence above additionally bounds a *current* controller's
+        own delayed cancel to the halt it was raised for."""
         with self._key_lock(target_key):
             snapshot = self._store.get(target_key)
             if snapshot is None or generation != snapshot.generation:
-                return []  # stale/unknown generation: prior-incarnation event, no epoch bump
-            self._exec_epoch[target_key] = self._exec_epoch.get(target_key, 0) + 1  # current-gen halt is a transition
+                return []  # stale/unknown generation: prior-incarnation event
+            if halt_epoch != self._exec_epoch.get(target_key, 0):
+                return []  # a later transition (resume/another halt) advanced the epoch: stale cancel
             cancelled = [
                 h
                 for h in self._bindings.get(target_key, ())
