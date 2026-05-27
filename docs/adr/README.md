@@ -10,3 +10,6 @@ Each ADR captures one non-trivial design decision — especially decisions the s
 | [0004](0004-process-identity-is-an-injectable-seam.md) | Process/listener identity is an injectable `ProcessIdentityProbe` seam (`/proc` default) | Accepted |
 | [0005](0005-layer4-registry-durability-host-global-json-flock.md) | Layer-4 durable registry: host-global runtime dir, JSON record per `TargetKey`, flock single-instance | Accepted |
 | [0006](0006-layer4-unified-cancel-epoch-state-machine.md) | Layer-4 unifies the async-halt cancel/epoch protocol into one modelled state machine | Accepted |
+| [0007](0007-local-qemu-target-identity-and-snapshot-producer.md) | local-qemu target identity (`TargetKey`, `generation=BootAttempt.attempt`, `PlatformMetadata`) + boot-to-READY snapshot producer | Accepted |
+
+**Layer-4 plan amendments (2026-05-27, addressing the `/challenge` review findings):** ADR 0002 amended with the in-process fenced guard token + post-restart `revoke()` soundness (Finding #4); ADR 0005 amended with the `on_partial` `backend_pid` write-through invariant (Finding #1) and the `recovery_required` single-source-of-truth / write-through-cache rule (Finding #5); ADR 0006 amended with the halt→runner cancel-bridge delivery mechanism + RUNNING-step terminalization (Finding #2).
