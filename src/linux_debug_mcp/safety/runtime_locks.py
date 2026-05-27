@@ -17,21 +17,18 @@ class RuntimeLockError(RuntimeError):
 def private_runtime_lock_dir(*, base: Path | None = None) -> Path:
     """Resolve the host-global, uid-isolated lock directory.
 
-    Prefers ``$XDG_RUNTIME_DIR/linux-debug-mcp/locks`` (already private to the
-    session). Otherwise falls back to ``<base>/linux-debug-mcp-<uid>/locks`` with
-    symlink, ownership, and ``0700`` validation. ``base`` defaults to the system
-    temp dir; callers inject it so the resolution can be tested in isolation.
+    Prefers ``$XDG_RUNTIME_DIR/linux-debug-mcp/locks``; otherwise falls back to
+    ``<base>/linux-debug-mcp-<uid>/locks``. Both branches enforce the same symlink,
+    ownership, and ``0700`` validation, because a safety-critical device lock now
+    depends on the result. ``base`` defaults to the system temp dir; callers inject
+    it so the resolution can be tested in isolation.
     """
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
     if runtime_dir:
-        lock_dir = Path(runtime_dir) / "linux-debug-mcp" / "locks"
-        try:
-            lock_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise RuntimeLockError(f"failed to create runtime lock directory: {exc}") from exc
-        return lock_dir
-    root = base if base is not None else Path(tempfile.gettempdir())
-    base_dir = root / f"linux-debug-mcp-{os.getuid()}"
+        base_dir = Path(runtime_dir) / "linux-debug-mcp"
+    else:
+        root = base if base is not None else Path(tempfile.gettempdir())
+        base_dir = root / f"linux-debug-mcp-{os.getuid()}"
     _ensure_private(base_dir)
     lock_dir = base_dir / "locks"
     _ensure_private(lock_dir)
@@ -52,7 +49,10 @@ def _ensure_private(lock_dir: Path) -> None:
         raise RuntimeLockError("unsafe runtime lock directory")
     existed = lock_dir.exists()
     try:
-        lock_dir.mkdir(mode=0o700, exist_ok=True)
+        # parents=True so a missing $XDG_RUNTIME_DIR (or temp base) is created, mirroring the
+        # prior XDG `mkdir(parents=True)`. The leaf is forced to 0700 and validated below;
+        # intermediates inherit the umask default, same as before this dir was validated.
+        lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError as exc:
         raise RuntimeLockError(f"failed to create runtime lock directory: {exc}") from exc
     if lock_dir.is_symlink():

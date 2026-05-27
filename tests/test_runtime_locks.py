@@ -22,6 +22,20 @@ def test_prefers_xdg_runtime_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert lock_dir.is_dir()
 
 
+def test_validates_xdg_runtime_subdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A safety-critical device lock now depends on the XDG-derived dir, so it must get the
+    same symlink/ownership/0700 validation the fallback branch enforces — not a bare mkdir."""
+    xdg = tmp_path / "xdg"
+    xdg.mkdir()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(xdg))
+    subdir = xdg / "linux-debug-mcp"
+    subdir.mkdir()
+    subdir.chmod(0o777)
+
+    with pytest.raises(RuntimeLockError):
+        private_runtime_lock_dir()
+
+
 def test_falls_back_to_private_uid_dir_under_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
 
