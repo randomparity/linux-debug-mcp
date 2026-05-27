@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+import contextlib
+import threading
+import time
+from datetime import UTC, datetime
+
+from linux_debug_mcp.coordination.admission import AdmissionHandle, AdmissionService
+from linux_debug_mcp.coordination.endpoint_safety import assert_loopback_endpoint, refuse_unsafe_exposure
+from linux_debug_mcp.coordination.lease import ConsoleLeaseManager, LeaseOwner
+from linux_debug_mcp.coordination.registry import RecoveryTombstone, SessionRegistry
+from linux_debug_mcp.coordination.selection import select_stop_capable_channel
+from linux_debug_mcp.seams.break_policy import BreakPolicy
+from linux_debug_mcp.seams.guard import GuardToken, StopCapableGuard
+from linux_debug_mcp.seams.secrets import SecretsResolver
+from linux_debug_mcp.seams.target import TargetKey
+from linux_debug_mcp.transport.base import (
+    ExecutionState,
+    OpenRequest,
+    RecordState,
+    Transport,
+    TransportSession,
+    new_session_id,
+)
+
+_ATTACH_DEADLINE_SECONDS = 30.0
+
+
+class TransportTransaction:
+    """The §4.3 open()/close() write-ahead transaction (ADR 0003/0005). Owns TransportSession
+    end-to-end; rolls back in reverse at every step, leaking no guard/lease/record/backend."""
+
+    def __init__(
+        self,
+        *,
+        admission: AdmissionService,
+        registry: SessionRegistry,
+        guard: StopCapableGuard,
+        leases: ConsoleLeaseManager,
+        secrets: SecretsResolver,
+        break_policy: BreakPolicy,
+        transports: dict[str, Transport],
+    ) -> None:
+        self._admission = admission
+        self._registry = registry
+        self._guard = guard
+        self._leases = leases
+        self._secrets = secrets
+        self._break_policy = break_policy
+        self._transports = transports
+        # Finding #4: the fenced GuardToken is held in-process (the frozen stop_guard_token: str
+        # cannot carry the fence — ADR 0003); close()/lifecycle release by this token, not revoke().
+        self._tokens: dict[str, GuardToken] = {}
+
+    def open(
+        self,
+        request: OpenRequest,
+        *,
+        recovery: bool = False,
+        crash_after: frozenset[str] = frozenset(),
+    ) -> TransportSession:
+        transport = self._transports[request.transport_ref.provider]
+        capability = transport.capability
+        # (1) pre-attach endpoint-safety refusal — trusted metadata, before any acquisition.
+        refuse_unsafe_exposure(capability, op="transport.open")
+        # (2) admission.
+        admit = self._admission.admit_recovery if recovery else self._admission.admit
+        handle = admit(request.target_key, request)
+        guard_token: GuardToken | None = None
+        lease_token: str | None = None
+        session_id: str | None = None
+        backend_pid: int | None = None
+        backend_start: str | None = None
+        try:
+            # (3) break-plan selection (authoritative channel from the handle).
+            selection = select_stop_capable_channel(
+                target_key=request.target_key,
+                transports=(handle.channel,),
+                required_caps=request.required_caps,
+                platform=handle.platform,
+                break_policy=self._break_policy,
+            )
+            _crash(crash_after, "selected")
+            # (4) stop-capable guard (target-wide single holder).
+            guard_token = self._guard.acquire(request.target_key)
+            _crash(crash_after, "guard")
+            # (5) console lease (only providers that own a console).
+            if capability.provides_console:
+                lease_token = self._leases.acquire(request.target_key, LeaseOwner.TRANSPORT)
+            _crash(crash_after, "lease")
+            # (6) secrets (never persisted/logged).
+            self._secrets.resolve(list(handle.channel.secret_refs))
+            # (7) write-ahead OPENING record. The fenced token is held in-process keyed by
+            # session_id (stop_guard_token persists only its secret as an audit marker — ADR 0003).
+            session_id = new_session_id()
+            self._tokens[session_id] = guard_token
+            record = TransportSession(
+                session_id=session_id,
+                target_key=request.target_key,
+                generation=request.generation,
+                provider=capability.provider_name,
+                channel_id=handle.channel.channel_id,
+                record_state=RecordState.OPENING,
+                console_lease_token=lease_token,
+                stop_guard_token=guard_token.secret,
+                attach_epoch=handle.admit_epoch,
+                break_plan=selection.break_plan,
+                execution_state=ExecutionState.EXECUTING,
+                created_at=datetime.now(UTC),
+            )
+            self._registry.write_record(record)
+            _crash(crash_after, "record_written")
+
+            # (8) attach. The on_partial closure WRITES THROUGH backend_pid/start-time into the
+            # durable OPENING record the instant "backend_process" is reported — before attach()
+            # returns — so a death before READY is reapable (Finding #1).
+            def on_partial(label: str, resource: object) -> None:
+                nonlocal backend_pid, backend_start
+                if label == "backend_process" and isinstance(resource, dict):
+                    backend_pid, backend_start = resource["pid"], resource.get("start_time")
+                    self._registry.write_record(
+                        record.model_copy(update=dict(backend_pid=backend_pid, backend_start_time=backend_start))
+                    )
+
+            attachment = transport.attach(
+                request,
+                cancel=threading.Event(),
+                deadline=time.monotonic() + _ATTACH_DEADLINE_SECONDS,
+                on_partial=on_partial,
+            )
+            if attachment.backend_pid is not None:
+                backend_pid, backend_start = attachment.backend_pid, attachment.backend_start_time
+            # (9) assemble + loopback assert + READY record.
+            for endpoint in (attachment.console_endpoint, attachment.rsp_endpoint):
+                if endpoint is not None:
+                    assert_loopback_endpoint(endpoint)
+            session = record.model_copy(
+                update=dict(
+                    record_state=RecordState.READY,
+                    console_endpoint=attachment.console_endpoint,
+                    rsp_endpoint=attachment.rsp_endpoint,
+                    backend_pid=backend_pid,
+                    backend_start_time=backend_start,
+                    artifacts=[attachment.console_artifact] if attachment.console_artifact else [],
+                )
+            )
+            self._registry.write_record(session)
+            _crash(crash_after, "ready")
+            # (10) commit. A recovery attach clears the recovery gate through the DUAL-WRITE
+            # helper (Finding #5) — durable tombstone + admission cache together, never one alone.
+            self._admission.promote(handle)
+            if recovery:
+                self._clear_recovery(request.target_key, request.generation)
+            return session
+        except BaseException:
+            self._rollback(
+                request.target_key, handle, guard_token, lease_token, session_id, backend_pid, backend_start, transport
+            )
+            raise
+
+    def _rollback(
+        self,
+        target_key: TargetKey,
+        handle: AdmissionHandle,
+        guard_token: GuardToken | None,
+        lease_token: str | None,
+        session_id: str | None,
+        backend_pid: int | None,
+        backend_start: str | None,
+        transport: Transport,
+    ) -> None:
+        # reverse order; each guarded so a partial rollback still completes.
+        if backend_pid is not None:
+            proxy = getattr(transport, "_proxy", None)
+            if proxy is not None:
+                # rollback is best-effort; a reap failure must never mask the original error.
+                with contextlib.suppress(Exception):
+                    proxy.stop_by_identity(backend_pid, backend_start)
+        if session_id is not None:
+            self._tokens.pop(session_id, None)
+            self._registry.delete_record(target_key)
+        if lease_token is not None:
+            self._leases.release(target_key, lease_token)
+        if guard_token is not None:
+            self._guard.release(target_key, guard_token)  # FENCED by-token release (ADR 0002)
+        # rollback is best-effort; an admission-rollback failure must never mask the original error.
+        with contextlib.suppress(Exception):
+            self._admission.rollback(handle)
+
+    def close(self, session_id: str, *, force: bool = False) -> None:
+        # load the durable record by scanning (close is keyed by session_id; the record is by
+        # TargetKey, so resolve via list_records — small set).
+        record = next((r for r in self._registry.list_records() if r.session_id == session_id), None)
+        if record is None:
+            return
+        transport = self._transports[record.provider]
+        closing = record.model_copy(update=dict(record_state=RecordState.CLOSING))
+        self._registry.write_record(closing)
+        transport.close(closing)
+        if record.console_lease_token is not None:
+            self._leases.release(record.target_key, record.console_lease_token)
+        # FENCED by-token release (Finding #4): the in-memory GuardToken, never revoke().
+        token = self._tokens.pop(session_id, None)
+        if token is not None:
+            self._guard.release(record.target_key, token)
+        # close-while-halted marks recovery via the DUAL-WRITE helper (Finding #5): durable
+        # tombstone + admission cache together, never one alone. Otherwise delete cleanly.
+        if record.execution_state in (ExecutionState.HALTED, ExecutionState.UNKNOWN) and not force:
+            self._mark_recovery(record.target_key, record.generation, reason="closed_while_halted")
+        self._registry.delete_record(record.target_key)
+
+    def _mark_recovery(self, target_key: TargetKey, generation: int, *, reason: str) -> None:
+        """Single source of truth is the durable tombstone; admission's `_recovery_required` is a
+        write-through cache (Finding #5 / ADR 0005). Always write BOTH atomically."""
+        self._registry.write_tombstone(RecoveryTombstone(target_key=target_key, generation=generation, reason=reason))
+        self._admission.mark_recovery_required(target_key, generation)
+
+    def _clear_recovery(self, target_key: TargetKey, generation: int) -> None:
+        """Clearance counterpart of `_mark_recovery`: every clearance path (recovery attach, reset
+        advancing generation, probe→EXECUTING) routes here so the tombstone and the cache clear
+        together — never one without the other."""
+        self._registry.clear_tombstone(target_key, expected_generation=generation)
+        self._admission.clear_recovery_required(target_key, generation)
+
+
+def _crash(crash_after: frozenset[str], label: str) -> None:
+    """Write-ahead crash-point seam (ADR 0005): tests pass `crash_after={label}` to simulate a
+    process death immediately after a labeled durable stage, exercising rollback/reconciliation."""
+    if label in crash_after:
+        raise _SimulatedCrash(label)
+
+
+class _SimulatedCrash(RuntimeError):
+    pass
