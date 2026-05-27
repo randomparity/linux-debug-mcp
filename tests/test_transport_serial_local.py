@@ -37,6 +37,73 @@ def _read_until(fd: int, needle: bytes, timeout: float = 2.0) -> bytes:
     return buf
 
 
+def _write_all(fd: int, data: bytes, stop: threading.Event, timeout: float = 10.0) -> int:
+    """Write every byte of `data` to a (possibly back-pressured) fd, waiting for writability via
+    select so the relay's upstream backpressure stalls — not busy-spins — the writer. Returns
+    early on `stop` so teardown never strands the writer thread."""
+    import select as _select
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    view = memoryview(data)
+    sent = 0
+    while sent < len(data):
+        if stop.is_set() or _time.monotonic() >= deadline:
+            return sent
+        _, writable, _ = _select.select([], [fd], [], 0.2)
+        if not writable:
+            continue
+        try:
+            sent += os.write(fd, view[sent : sent + 65536])
+        except BlockingIOError:
+            continue
+    return sent
+
+
+def _recv_exactly(sock: socket.socket, n: int, timeout: float = 10.0) -> bytes:
+    """Drain `n` bytes from a stream socket, returning short on EOF/timeout so a pump that
+    evicts the client (closing the conn) makes the caller's length assertion fail."""
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    buf = b""
+    while len(buf) < n:
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0:
+            return buf
+        sock.settimeout(remaining)
+        try:
+            chunk = sock.recv(65536)
+        except OSError:
+            return buf
+        if not chunk:
+            return buf
+        buf += chunk
+    return buf
+
+
+def _read_exactly_fd(fd: int, n: int, timeout: float = 10.0) -> bytes:
+    """Read `n` bytes from a blocking fd, polling via select so a torn-down pump (no further
+    device writes) fails the caller's assertion on a bounded timeout rather than hanging."""
+    import select as _select
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    buf = b""
+    while len(buf) < n:
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0:
+            return buf
+        readable, _, _ = _select.select([fd], [], [], min(remaining, 0.2))
+        if not readable:
+            continue
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            return buf
+        buf += chunk
+    return buf
+
+
 def _platform() -> PlatformMetadata:
     return PlatformMetadata(
         console_kind=ConsoleKind.UART,
@@ -144,55 +211,150 @@ def test_console_only_bridge_survives_client_reconnect(tmp_path):
         os.close(peripheral_fd)
 
 
-def test_failed_client_send_classifies_as_client_gone_not_source_death(tmp_path):
-    """Source output that fails to reach the client (the client vanished mid-output) is a
-    client disconnect → re-accept, not source death → stop. Classifying it as source death
-    strands the line whenever a client leaves while the device is emitting (F1 race)."""
+def test_console_only_bridge_does_not_evict_a_slow_client_and_loses_no_bytes(tmp_path):
+    """Device→client backpressure (plan §F1): a client that reads slowly during a burst must not
+    be evicted, and not one console byte may be dropped. A payload larger than the socket send
+    buffer is written to the pty controller while the client drains lazily; the bridge buffers and
+    applies upstream backpressure rather than misreading a full send buffer as a client departure.
+    Pre-fix `sendall` on the non-blocking socket raises BlockingIOError → CLIENT_GONE → the slow
+    client is evicted (conn closed) and the in-flight chunk is lost."""
     import pty
-    import select as _select
-
-    from linux_debug_mcp.transport.serial_local import SerialConsoleBridge, _PumpStep
 
     controller_fd, peripheral_fd = pty.openpty()
-    source_fd = os.open(os.ttyname(peripheral_fd), os.O_RDWR | os.O_NONBLOCK | os.O_NOCTTY)
-    bridge = SerialConsoleBridge(socket_path=str(tmp_path / "c.sock"), session_dir=str(tmp_path), source_fd=source_fd)
-
-    class _GoneClient:
-        def sendall(self, data):
-            raise BrokenPipeError("client closed mid-output")
-
+    peripheral_name = os.ttyname(peripheral_fd)
+    transport = SerialLocalTransport(socket_dir=tmp_path, lock_dir=tmp_path / "locks")
+    request = _request(LineRole.SHARED_CONSOLE, {"device": peripheral_name}, tmp_path)
+    result = transport.attach(
+        request, cancel=threading.Event(), deadline=Deadline.after(2.0), on_partial=lambda *_: None
+    )
+    session = _StubSession(result.console_endpoint)
+    payload = bytes(range(256)) * 4096  # 1 MiB: larger than the socket send buffer and the relay cap
+    stop = threading.Event()
+    # Non-blocking master: the writer stalls in select (not in os.write) so it observes `stop` and
+    # exits promptly at teardown — otherwise a write wedged on a full pty buffer would block the
+    # later os.close(controller_fd) forever on the pre-fix (eviction) path.
+    os.set_blocking(controller_fd, False)
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    writer = threading.Thread(target=_write_all, args=(controller_fd, payload, stop), daemon=True)
     try:
-        os.write(controller_fd, b"device-output\n")  # pending source data to drain
-        _select.select([source_fd], [], [], 1.0)  # ensure the source read will not block
-        assert bridge._device_to_client(_GoneClient()) is _PumpStep.CLIENT_GONE
+        client.connect(result.console_endpoint.path)
+        writer.start()
+        # Let the writer saturate the socket send buffer before draining. Pre-fix this is exactly
+        # the moment the pump's sendall raises BlockingIOError and evicts the (merely slow) client;
+        # post-fix the relay caps its buffer and back-pressures the writer with no eviction or loss.
+        import time as _time
+
+        _time.sleep(0.5)
+        received = _recv_exactly(client, len(payload))
+        assert received == payload  # in order, nothing dropped
+        assert transport.health(session) == "ready"  # not evicted
     finally:
-        os.close(source_fd)
+        stop.set()
+        writer.join(timeout=2.0)
+        transport.close(session)
+        client.close()
+        os.close(peripheral_fd)  # close the slave before the master so the master close cannot drain-block
         os.close(controller_fd)
-        os.close(peripheral_fd)
 
 
-def test_source_eof_classifies_as_source_death(tmp_path):
-    """The other half of the state machine: when the source itself hits EOF, the step is
-    SOURCE_DEAD (→ stop), so a genuinely dead line does not spin re-accepting (F1)."""
+def test_console_only_bridge_handles_partial_writes_to_a_busy_device(tmp_path):
+    """Client→device backpressure (plan §F1): a busy device (its consumer not draining) must not
+    tear the whole line down, and no typed input may be dropped on a short write. The client sends
+    a payload larger than the pty buffer while the controller is drained lazily; the bridge buffers
+    and back-pressures the client. Pre-fix `os.write` to the non-blocking device raises EAGAIN →
+    SOURCE_DEAD (teardown) or returns a short count whose tail is silently discarded."""
     import pty
-    import select as _select
-
-    from linux_debug_mcp.transport.serial_local import SerialConsoleBridge, _PumpStep
 
     controller_fd, peripheral_fd = pty.openpty()
-    source_fd = os.open(os.ttyname(peripheral_fd), os.O_RDWR | os.O_NONBLOCK | os.O_NOCTTY)
-    bridge = SerialConsoleBridge(socket_path=str(tmp_path / "c.sock"), session_dir=str(tmp_path), source_fd=source_fd)
+    peripheral_name = os.ttyname(peripheral_fd)
+    transport = SerialLocalTransport(socket_dir=tmp_path, lock_dir=tmp_path / "locks")
+    request = _request(LineRole.SHARED_CONSOLE, {"device": peripheral_name}, tmp_path)
+    result = transport.attach(
+        request, cancel=threading.Event(), deadline=Deadline.after(2.0), on_partial=lambda *_: None
+    )
+    session = _StubSession(result.console_endpoint)
+    payload = bytes(range(256)) * 4096  # 1 MiB
+    writer_error: list[BaseException] = []
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 
-    class _LiveClient:
-        def sendall(self, data): ...
+    def _send_payload():
+        try:
+            client.sendall(payload)
+        except OSError as exc:  # the bridge closed the conn underneath us (pre-fix teardown / cleanup)
+            writer_error.append(exc)
 
+    writer = threading.Thread(target=_send_payload, daemon=True)
     try:
-        os.close(controller_fd)  # source EOF: the controller end is gone
-        _select.select([source_fd], [], [], 1.0)
-        assert bridge._device_to_client(_LiveClient()) is _PumpStep.SOURCE_DEAD
+        client.connect(result.console_endpoint.path)
+        writer.start()
+        received = _read_exactly_fd(controller_fd, len(payload))
+        assert received == payload  # in order, nothing dropped
+        assert transport.health(session) == "ready"  # line not torn down
     finally:
-        os.close(source_fd)
-        os.close(peripheral_fd)
+        transport.close(session)  # closes the bridge conn → unblocks a client.sendall stalled on backpressure
+        writer.join(timeout=2.0)
+        client.close()
+        os.close(peripheral_fd)  # close the slave before the master so the master close cannot drain-block
+        os.close(controller_fd)
+
+
+def test_write_client_retries_on_ewouldblock(tmp_path):
+    """`_write_client` honors non-blocking socket semantics: EWOULDBLOCK is a retry (CONTINUE,
+    buffer unchanged), a real OSError is a client departure (CLIENT_GONE), and a partial send
+    trims only the bytes actually written so the unsent tail is retried (plan §F1)."""
+    from linux_debug_mcp.transport.serial_local import SerialConsoleBridge, _PumpStep
+
+    bridge = SerialConsoleBridge(socket_path=str(tmp_path / "c.sock"), session_dir=str(tmp_path), source_fd=-1)
+
+    class _WouldBlock:
+        def send(self, data):
+            raise BlockingIOError("send buffer full")
+
+    class _Broken:
+        def send(self, data):
+            raise BrokenPipeError("client closed")
+
+    class _Partial:
+        def send(self, data):
+            return 2
+
+    assert bridge._write_client(_WouldBlock(), b"abcde") == (b"abcde", _PumpStep.CONTINUE)
+    assert bridge._write_client(_Broken(), b"abcde") == (b"abcde", _PumpStep.CLIENT_GONE)
+    assert bridge._write_client(_Partial(), b"abcde") == (b"cde", _PumpStep.CONTINUE)
+
+
+def test_read_source_eof_is_source_death(tmp_path):
+    """`_read_source` maps a source EOF (`os.read` → b"") to SOURCE_DEAD so a genuinely dead
+    line stops the pump rather than spinning re-accepting (plan §F1)."""
+    from linux_debug_mcp.transport.serial_local import SerialConsoleBridge, _PumpStep
+
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)  # the source end is gone → EOF on the next read
+    bridge = SerialConsoleBridge(socket_path=str(tmp_path / "c.sock"), session_dir=str(tmp_path), source_fd=read_fd)
+    try:
+        assert bridge._read_source(b"") == (b"", _PumpStep.SOURCE_DEAD)
+    finally:
+        os.close(read_fd)
+
+
+def test_write_source_eagain_retries(tmp_path):
+    """`_write_source` treats EAGAIN on a full non-blocking device as a retry (CONTINUE, buffer
+    unchanged) — never SOURCE_DEAD — so device backpressure does not tear the line down (plan §F1)."""
+    from linux_debug_mcp.transport.serial_local import SerialConsoleBridge, _PumpStep
+
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(write_fd, False)
+    bridge = SerialConsoleBridge(socket_path=str(tmp_path / "c.sock"), session_dir=str(tmp_path), source_fd=write_fd)
+    try:
+        try:
+            while True:
+                os.write(write_fd, b"x" * 65536)  # fill the pipe until it would block
+        except BlockingIOError:
+            pass
+        assert bridge._write_source(b"pending") == (b"pending", _PumpStep.CONTINUE)
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
 
 
 def test_console_only_bridge_stops_when_source_device_closes(tmp_path):

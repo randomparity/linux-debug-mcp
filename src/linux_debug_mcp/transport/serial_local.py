@@ -41,6 +41,10 @@ from linux_debug_mcp.transport.proxy import (
 OnPartial = Callable[[str, object], None]
 
 _BRIDGE_BUFFER = 4096
+# Per-direction outbound buffer ceiling. The relay stops reading a source once its outbound
+# buffer reaches this cap, so memory is bounded and the kernel/tty applies upstream backpressure
+# to the producer instead of the bridge dropping bytes or evicting a slow peer (plan §F1).
+_RELAY_CAP = 262144
 _ACCEPT_GRACE_SECONDS = 86400.0
 _THREAD_JOIN_TIMEOUT = 2.0
 _SOCKET_NAME = "c.sock"
@@ -181,63 +185,108 @@ class SerialConsoleBridge:
                 return  # source EOF/error: the line is gone, do not spin re-accepting
 
     def _copy_loop(self, conn: socket.socket) -> bool:
-        """Pump until the client leaves or the source dies. Return True if the source is still
-        healthy (client left → caller re-accepts), False if the source fd hit EOF/error or a
-        watched fd became unusable (caller stops)."""
+        """Buffered, EAGAIN-tolerant bidirectional relay. Hold one bounded outbound buffer per
+        direction; each iteration select on the fds that have room to read or bytes to flush, then
+        service whichever are ready. EWOULDBLOCK on a write is a retry, never fatal; partial
+        transfers trim only the bytes moved; the per-direction cap bounds memory and lets the
+        kernel/tty back-pressure the producer (plan §F1). Return True if the source is still
+        healthy (client left → caller re-accepts), False on source EOF/error or stop."""
         conn.setblocking(False)
+        to_client = b""  # device output buffered toward the client
+        to_device = b""  # client input buffered toward the source
         while not self._stop.is_set():
+            rlist, wlist = self._select_lists(conn, to_client, to_device)
             try:
-                readable, _, _ = select.select([self._source_fd, conn], [], [], 0.2)
+                readable, writable, _ = select.select(rlist, wlist, [], 0.2)
             except (OSError, ValueError):
                 return False
+            steps: list[_PumpStep] = []
             if self._source_fd in readable:
-                step = self._device_to_client(conn)
-                if step is _PumpStep.SOURCE_DEAD:
-                    return False  # source EOF/error → device gone, stop
-                if step is _PumpStep.CLIENT_GONE:
-                    return True  # could not deliver to the client → re-accept a new client
+                to_client, step = self._read_source(to_client)
+                steps.append(step)
             if conn in readable:
-                step = self._client_to_device(conn)
-                if step is _PumpStep.SOURCE_DEAD:
-                    return False
-                if step is _PumpStep.CLIENT_GONE:
-                    return True  # client EOF/error/clean close → re-accept a new client
+                to_device, step = self._read_client(conn, to_device)
+                steps.append(step)
+            if conn in writable:
+                to_client, step = self._write_client(conn, to_client)
+                steps.append(step)
+            if self._source_fd in writable:
+                to_device, step = self._write_source(to_device)
+                steps.append(step)
+            outcome = self._outcome(steps)
+            if outcome is not None:
+                return outcome
         return False  # stop requested
+
+    def _select_lists(self, conn: socket.socket, to_client: bytes, to_device: bytes) -> tuple[list, list]:
+        # Read a source only while its outbound buffer has room (gates memory + applies upstream
+        # backpressure); watch a peer for writability only while we have bytes to flush, so a stuck
+        # peer makes select block on the 0.2 s slice rather than spin.
+        rlist: list = []
+        if len(to_client) < _RELAY_CAP:
+            rlist.append(self._source_fd)
+        if len(to_device) < _RELAY_CAP:
+            rlist.append(conn)
+        wlist: list = []
+        if to_client:
+            wlist.append(conn)
+        if to_device:
+            wlist.append(self._source_fd)
+        return rlist, wlist
+
+    @staticmethod
+    def _outcome(steps: list[_PumpStep]) -> bool | None:
+        # Source death wins over a client departure: a dead line must stop, not re-accept.
+        if _PumpStep.SOURCE_DEAD in steps:
+            return False
+        if _PumpStep.CLIENT_GONE in steps:
+            return True
+        return None
 
     def _close_conn(self, conn: socket.socket) -> None:
         self._conn = None
         with contextlib.suppress(OSError):
             conn.close()
 
-    def _device_to_client(self, conn: socket.socket) -> _PumpStep:
+    def _read_source(self, to_client: bytes) -> tuple[bytes, _PumpStep]:
         try:
             data = os.read(self._source_fd, _BRIDGE_BUFFER)
         except BlockingIOError:
-            return _PumpStep.CONTINUE
+            return to_client, _PumpStep.CONTINUE
         except OSError:
-            return _PumpStep.SOURCE_DEAD
+            return to_client, _PumpStep.SOURCE_DEAD
         if not data:
-            return _PumpStep.SOURCE_DEAD
-        try:
-            conn.sendall(data)
-        except OSError:
-            return _PumpStep.CLIENT_GONE
-        return _PumpStep.CONTINUE
+            return to_client, _PumpStep.SOURCE_DEAD
+        return to_client + data, _PumpStep.CONTINUE
 
-    def _client_to_device(self, conn: socket.socket) -> _PumpStep:
+    def _read_client(self, conn: socket.socket, to_device: bytes) -> tuple[bytes, _PumpStep]:
         try:
             data = conn.recv(_BRIDGE_BUFFER)
         except BlockingIOError:
-            return _PumpStep.CONTINUE
+            return to_device, _PumpStep.CONTINUE
         except OSError:
-            return _PumpStep.CLIENT_GONE
+            return to_device, _PumpStep.CLIENT_GONE
         if not data:
-            return _PumpStep.CLIENT_GONE
+            return to_device, _PumpStep.CLIENT_GONE
+        return to_device + data, _PumpStep.CONTINUE
+
+    def _write_client(self, conn: socket.socket, to_client: bytes) -> tuple[bytes, _PumpStep]:
         try:
-            os.write(self._source_fd, data)
+            sent = conn.send(to_client)  # send (not sendall) to honor partials on a non-blocking socket
+        except BlockingIOError:
+            return to_client, _PumpStep.CONTINUE
         except OSError:
-            return _PumpStep.SOURCE_DEAD
-        return _PumpStep.CONTINUE
+            return to_client, _PumpStep.CLIENT_GONE
+        return to_client[sent:], _PumpStep.CONTINUE
+
+    def _write_source(self, to_device: bytes) -> tuple[bytes, _PumpStep]:
+        try:
+            sent = os.write(self._source_fd, to_device)
+        except BlockingIOError:
+            return to_device, _PumpStep.CONTINUE
+        except OSError:
+            return to_device, _PumpStep.SOURCE_DEAD
+        return to_device[sent:], _PumpStep.CONTINUE
 
     def stop(self) -> None:
         self._stop.set()
