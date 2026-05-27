@@ -1783,7 +1783,9 @@ def test_tombstone_ahead_of_snapshot_fails_closed():
 
 def test_stale_recovery_clear_does_not_free_a_newer_tombstone():
     # A stale actor clearing generation N must NOT free a newer N+1 recovery_required mark.
-    service = _service(_snapshot(generation=1, state=TargetState.DEBUGGING))
+    # READY (not DEBUGGING): this test is about the tombstone-clear gate, and the final
+    # assertion does an ordinary admit() — which requires READY (test_transport_open_requires_ready_state).
+    service = _service(_snapshot(generation=1, state=TargetState.READY))
     service.mark_recovery_required(_key(), 1)
     service.clear_recovery_required(_key(), 0)  # stale clear for the old generation -> no-op
     with pytest.raises(AdmissionError) as excinfo:
@@ -2612,7 +2614,8 @@ class AdmissionService:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run python -m pytest tests/test_coordination_admission.py -q`
-Expected: PASS (57 passed).
+Expected: PASS (62 passed — 57 test functions, but the 6-way parametrized
+`test_non_live_state_rejected` expands to 6 cases, so pytest collects 62).
 
 - [ ] **Step 5: Commit**
 
