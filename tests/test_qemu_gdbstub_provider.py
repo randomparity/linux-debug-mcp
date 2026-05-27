@@ -1,3 +1,4 @@
+import os
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -14,6 +15,38 @@ from linux_debug_mcp.providers.qemu_gdbstub import (
     QemuGdbstubProvider,
     SubprocessGdbRunner,
 )
+from linux_debug_mcp.seams.process_identity import ProcessIdentity, ProcProcessIdentityProbe
+
+
+class _FakeIdentityProbe:
+    """Host-independent identity: deterministic start_time and looks_like verdict, but
+    REAL liveness (so the real spawned process's death/survival is observed correctly)."""
+
+    def __init__(self, *, looks_like: bool, start_time: str = "match") -> None:
+        self._looks = looks_like
+        self._start = start_time
+        self._real = ProcProcessIdentityProbe()
+
+    def identity(self, pid: int) -> ProcessIdentity:
+        return ProcessIdentity(pid=pid, start_time=self._start, argv0="gdb")
+
+    def is_alive(self, pid: int) -> bool:
+        # Reap a terminated child first so its zombie does not read as alive on hosts
+        # without /proc (macOS): os.kill(zombie, 0) succeeds until the child is waited
+        # on. On Linux ProcProcessIdentityProbe catches the zombie via /proc instead.
+        try:
+            reaped, _status = os.waitpid(pid, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            reaped = 0
+        if reaped == pid:
+            return False
+        return self._real.is_alive(pid)
+
+    def looks_like(self, pid: int, name_substr: str) -> bool:
+        return self._looks
+
+    def owns_listener(self, pid: int, host: str, port: int) -> bool | None:
+        return None
 
 
 class FakeGdbRunner:
@@ -677,7 +710,7 @@ def test_end_session_finalizes_batch_session_without_controller(tmp_path: Path) 
 def test_end_session_terminates_recorded_live_controller_pid(tmp_path: Path) -> None:
     process = subprocess.Popen(["gdb-test-controller", "30"], executable="/bin/sleep")
     try:
-        provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+        provider = QemuGdbstubProvider(runner=FakeGdbRunner(), identity_probe=_FakeIdentityProbe(looks_like=True))
         session = write_session_for_test(
             provider,
             tmp_path,
@@ -704,7 +737,7 @@ def test_end_session_terminates_recorded_live_controller_pid(tmp_path: Path) -> 
 def test_end_session_rejects_live_pid_that_is_not_controller_process(tmp_path: Path) -> None:
     process = subprocess.Popen(["sleep", "30"])
     try:
-        provider = QemuGdbstubProvider(runner=FakeGdbRunner())
+        provider = QemuGdbstubProvider(runner=FakeGdbRunner(), identity_probe=_FakeIdentityProbe(looks_like=False))
         session = write_session_for_test(
             provider,
             tmp_path,
