@@ -16,6 +16,7 @@ from linux_debug_mcp.artifacts.manifest import BootAttempt, RunManifest
 from linux_debug_mcp.config import BuildProfile, RootfsProfile, TargetProfile
 from linux_debug_mcp.domain import ErrorCategory, RunRequest, StepResult
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_artifact_root, validate_run_id
+from linux_debug_mcp.safety.runtime_locks import RuntimeLockError, private_runtime_lock_dir
 
 
 class ManifestStateError(RuntimeError):
@@ -206,41 +207,15 @@ class ArtifactStore:
         return f"run-{uuid.uuid4().hex[:16]}"
 
     def _target_lock_dir(self) -> Path:
-        runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
-        if runtime_dir:
-            lock_dir = Path(runtime_dir) / "linux-debug-mcp" / "locks"
-            try:
-                lock_dir.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                raise ManifestStateError(f"failed to create target lock directory: {exc}") from exc
-        else:
-            base_dir = Path(tempfile.gettempdir()) / f"linux-debug-mcp-{os.getuid()}"
-            self._ensure_private_target_lock_dir(base_dir)
-            lock_dir = base_dir / "locks"
-            self._ensure_private_target_lock_dir(lock_dir)
-        return lock_dir
-
-    def _ensure_private_target_lock_dir(self, lock_dir: Path) -> None:
-        if lock_dir.is_symlink():
-            raise ManifestStateError("unsafe target lock directory")
-        existed = lock_dir.exists()
+        # Resolve the base via this module's tempfile so tests that monkeypatch
+        # store.tempfile.gettempdir still steer the fallback path. The shared helper
+        # raises with a "runtime lock directory" noun; rewrite it to the historical
+        # "target lock directory" wording so this taxonomy's messages are unchanged.
         try:
-            lock_dir.mkdir(mode=0o700, exist_ok=True)
-        except OSError as exc:
-            raise ManifestStateError(f"failed to create target lock directory: {exc}") from exc
-        if lock_dir.is_symlink():
-            raise ManifestStateError("unsafe target lock directory")
-        if not existed:
-            try:
-                lock_dir.chmod(0o700)
-            except OSError as exc:
-                raise ManifestStateError(f"failed to create target lock directory: {exc}") from exc
-        try:
-            stat_result = lock_dir.stat()
-        except OSError as exc:
-            raise ManifestStateError(f"failed to inspect target lock directory: {exc}") from exc
-        if stat_result.st_uid != os.getuid() or stat_result.st_mode & 0o022:
-            raise ManifestStateError("unsafe target lock directory")
+            return private_runtime_lock_dir(base=Path(tempfile.gettempdir()))
+        except RuntimeLockError as exc:
+            message = str(exc).replace("runtime lock directory", "target lock directory")
+            raise ManifestStateError(message) from exc
 
     def _safe_lock_name(self, value: str) -> str:
         safe_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
