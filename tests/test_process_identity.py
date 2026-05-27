@@ -1,3 +1,4 @@
+import dataclasses
 import os
 import sys
 
@@ -12,7 +13,7 @@ from linux_debug_mcp.seams.process_identity import (
 
 def test_process_identity_is_frozen():
     identity = ProcessIdentity(pid=1234, start_time="999", argv0="agent-proxy")
-    with pytest.raises(Exception):  # noqa: B017 — frozen dataclass raises FrozenInstanceError, not a specific public type
+    with pytest.raises(dataclasses.FrozenInstanceError):
         identity.pid = 5  # type: ignore[misc]
 
 
@@ -113,3 +114,23 @@ def test_listen_inode_matches_the_exact_address_not_any_loopback(monkeypatch):
     probe = ProcProcessIdentityProbe()
     assert probe._listen_inode("127.0.0.1", port) == "1001"
     assert probe._listen_inode("127.0.1.1", port) == "2002"
+
+
+def test_listen_inode_does_not_match_a_wildcard_row_for_a_specific_address(monkeypatch):
+    from pathlib import Path as _Path
+
+    port = 5556
+    ph = f"{port:04X}"
+    tcp = (
+        "  sl  local_address rem_address   st ... inode\n"
+        f"   0: 00000000:{ph} 00000000:0000 0A 0 0 0 0 0 4004\n"  # 0.0.0.0 only
+    )
+
+    def _read(self, **_):
+        if self.name == "tcp":
+            return tcp
+        raise OSError
+
+    monkeypatch.setattr(_Path, "read_text", _read)
+    probe = ProcProcessIdentityProbe()
+    assert probe._listen_inode("127.0.0.1", port) is None

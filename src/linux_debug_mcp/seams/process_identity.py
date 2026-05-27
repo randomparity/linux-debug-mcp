@@ -120,7 +120,11 @@ class ProcProcessIdentityProbe:
             if len(fields) < 10:
                 continue
             addr_hex, _sep, port_hex = fields[1].rpartition(":")
-            if fields[3] != "0A" or int(port_hex, 16) != port:
+            try:
+                listening = fields[3] == "0A" and int(port_hex, 16) == port
+            except ValueError:
+                continue  # malformed /proc/net row — skip, never crash the probe
+            if not listening:
                 continue
             if addr_hex.upper() != expected:
                 continue  # exact advertised address only (F2: 127.0.0.1 ≠ 127.0.1.1, ≠ 0.0.0.0)
