@@ -85,13 +85,21 @@ class SerialConsoleBridge:
         try:
             cls._raw_if_tty(source_fd)
             session_dir = cls._make_session_dir(socket_dir)
-            socket_path = str(session_dir / _SOCKET_NAME)
-            bridge = cls(socket_path=socket_path, session_dir=str(session_dir), source_fd=source_fd)
+        except BaseException:
+            os.close(source_fd)
+            raise
+        socket_path = str(session_dir / _SOCKET_NAME)
+        bridge = cls(socket_path=socket_path, session_dir=str(session_dir), source_fd=source_fd)
+        try:
             bridge._listen()
             bridge._start_pump()
             return bridge
         except BaseException:
-            os.close(source_fd)
+            # The bridge now owns source_fd + session_dir, and may own a bound listener and
+            # on-disk socket inode. stop() closes conn/listener/source and removes both the
+            # socket file and the session dir, suppressing double-close; it is the single
+            # cleanup path for any failure after the bridge exists (listen, chmod, thread start).
+            bridge.stop()
             raise
 
     @staticmethod

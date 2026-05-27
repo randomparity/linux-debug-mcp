@@ -86,6 +86,39 @@ def test_console_only_path_bridges_a_pty_device_to_an_owner_only_unix_socket(tmp
         os.close(peripheral_fd)
 
 
+def test_console_only_open_failure_after_listen_leaves_no_socket_or_session_dir(tmp_path, monkeypatch):
+    """If the post-_listen step (thread start) raises, open() must route through stop():
+    no leaked listener fd, no orphan socket inode, no leftover session dir, not registered."""
+    import pty
+
+    from linux_debug_mcp.transport import serial_local
+
+    controller_fd, peripheral_fd = pty.openpty()
+    peripheral_name = os.ttyname(peripheral_fd)
+    captured = {}
+
+    def _boom(self):
+        # The listener is bound and the 0600 socket + 0700 session dir exist on disk here.
+        captured["socket_path"] = self.socket_path
+        captured["session_dir"] = self._session_dir
+        raise RuntimeError("simulated thread-start failure")
+
+    monkeypatch.setattr(serial_local.SerialConsoleBridge, "_start_pump", _boom)
+    transport = SerialLocalTransport(socket_dir=tmp_path)
+    request = _request(LineRole.SHARED_CONSOLE, {"device": peripheral_name}, tmp_path)
+    try:
+        with pytest.raises(RuntimeError):
+            transport.attach(
+                request, cancel=threading.Event(), deadline=Deadline.after(2.0), on_partial=lambda *_: None
+            )
+        assert not os.path.exists(captured["socket_path"])  # socket inode unlinked
+        assert not os.path.exists(captured["session_dir"])  # session dir removed
+        assert transport._bridges == {}  # never registered
+    finally:
+        os.close(controller_fd)
+        os.close(peripheral_fd)
+
+
 class _RecordingProxy:
     def __init__(self):
         from linux_debug_mcp.transport.proxy import ProxyHandle
