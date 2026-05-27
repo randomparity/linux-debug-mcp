@@ -40,7 +40,7 @@ def test_serial_local_demux_over_pty_yields_endpoints_emits_break_and_reaps(tmp_
     peripheral_name = os.ttyname(peripheral_fd)
 
     backend = AgentProxyBackend()
-    transport = SerialLocalTransport(socket_dir=tmp_path, proxy=backend)
+    transport = SerialLocalTransport(socket_dir=tmp_path, lock_dir=tmp_path / "locks", proxy=backend)
     request = OpenRequest(
         target_key=TargetKey(provisioner="local-qemu", target_id="vm1"),
         generation=0,

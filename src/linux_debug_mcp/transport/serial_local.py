@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import hashlib
 import os
 import secrets
 import select
@@ -17,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from linux_debug_mcp.domain import ErrorCategory
+from linux_debug_mcp.safety.runtime_locks import RuntimeLockError, device_lock_filename, private_runtime_lock_dir
 from linux_debug_mcp.transport.base import (
     BackendAttachment,
     EndpointExposure,
@@ -236,8 +236,19 @@ class SerialLocalTransport(Transport):
     """Bridges a local serial source to a per-session owner-only unix socket
     (console-only) or delegates to agent-proxy for console+gdb demux (§6.1, §8.4)."""
 
-    def __init__(self, *, socket_dir, proxy: ProxyBackend | None = None, identity_probe=None) -> None:
+    def __init__(
+        self,
+        *,
+        socket_dir,
+        proxy: ProxyBackend | None = None,
+        identity_probe=None,
+        lock_dir: Path | None = None,
+    ) -> None:
         self._socket_dir = Path(socket_dir)
+        # Source-exclusivity locks live in a host-global, uid-isolated dir so two runs
+        # targeting the same physical line serialize across runs (§4.7). Tests inject a
+        # per-test dir to avoid touching the shared host dir; prod resolves it lazily.
+        self._lock_dir = Path(lock_dir) if lock_dir is not None else None
         self._proxy = proxy if proxy is not None else AgentProxyBackend(identity_probe=identity_probe)
         self._bridges: dict[str, SerialConsoleBridge] = {}
         self._proxy_handles: dict[tuple[int, str | None], ProxyHandle] = {}
@@ -299,10 +310,12 @@ class SerialLocalTransport(Transport):
         return device
 
     def _acquire_source_lock(self, device: str) -> int:
-        lock_dir = self._socket_dir / ".locks"
+        try:
+            lock_dir = self._lock_dir or private_runtime_lock_dir()
+        except RuntimeLockError as exc:
+            raise SerialLocalConfigError(str(exc), category=ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
         lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        digest = hashlib.sha256(device.encode()).hexdigest()
-        lock_path = lock_dir / f"{digest}.lock"
+        lock_path = lock_dir / device_lock_filename(device)
         lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

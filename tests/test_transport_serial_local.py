@@ -55,7 +55,7 @@ def test_console_only_path_bridges_a_pty_device_to_an_owner_only_unix_socket(tmp
 
     controller_fd, peripheral_fd = pty.openpty()
     peripheral_name = os.ttyname(peripheral_fd)
-    transport = SerialLocalTransport(socket_dir=tmp_path)
+    transport = SerialLocalTransport(socket_dir=tmp_path, lock_dir=tmp_path / "locks")
     request = _request(LineRole.SHARED_CONSOLE, {"device": peripheral_name}, tmp_path)
     result = transport.attach(
         request, cancel=threading.Event(), deadline=Deadline.after(2.0), on_partial=lambda *_: None
@@ -104,7 +104,7 @@ def test_console_only_open_failure_after_listen_leaves_no_socket_or_session_dir(
         raise RuntimeError("simulated thread-start failure")
 
     monkeypatch.setattr(serial_local.SerialConsoleBridge, "_start_pump", _boom)
-    transport = SerialLocalTransport(socket_dir=tmp_path)
+    transport = SerialLocalTransport(socket_dir=tmp_path, lock_dir=tmp_path / "locks")
     request = _request(LineRole.SHARED_CONSOLE, {"device": peripheral_name}, tmp_path)
     try:
         with pytest.raises(RuntimeError):
@@ -146,7 +146,7 @@ class _RecordingProxy:
 
 
 def test_console_plus_gdb_path_delegates_to_proxy_and_returns_tcp_endpoints(tmp_path):
-    transport = SerialLocalTransport(socket_dir=tmp_path, proxy=_RecordingProxy())
+    transport = SerialLocalTransport(socket_dir=tmp_path, lock_dir=tmp_path / "locks", proxy=_RecordingProxy())
     request = _request(LineRole.DEDICATED_DEBUG, {"device": "/dev/ttyUSB0", "baud": 115200}, tmp_path)
     result = transport.attach(
         request, cancel=threading.Event(), deadline=Deadline.after(2.0), on_partial=lambda *_: None
@@ -160,7 +160,7 @@ def test_demux_close_stops_the_exact_proxy_handle_and_is_idempotent(tmp_path):
     """The demux ProxyHandle must be retained at attach so close() can reap agent-proxy
     (round-2 review F3). close() passes the SAME handle start() returned, and is idempotent."""
     proxy = _RecordingProxy()
-    transport = SerialLocalTransport(socket_dir=tmp_path, proxy=proxy)
+    transport = SerialLocalTransport(socket_dir=tmp_path, lock_dir=tmp_path / "locks", proxy=proxy)
     request = _request(LineRole.DEDICATED_DEBUG, {"device": "/dev/ttyUSB0", "baud": 115200}, tmp_path)
     result = transport.attach(
         request, cancel=threading.Event(), deadline=Deadline.after(2.0), on_partial=lambda *_: None
@@ -180,7 +180,7 @@ def test_close_for_a_reused_pid_does_not_stop_a_different_live_session(tmp_path)
     """Session A (pid P, start_time sA) closed and removed; session B reuses pid P with a
     different start_time. A stale close for A must NOT pop/stop B (round-9 F2)."""
     proxy = _RecordingProxy()
-    transport = SerialLocalTransport(socket_dir=tmp_path, proxy=proxy)
+    transport = SerialLocalTransport(socket_dir=tmp_path, lock_dir=tmp_path / "locks", proxy=proxy)
     # B is the only live handle: same pid, different start_time.
     transport._proxy_handles[(proxy.handle.backend_pid, "B-start")] = proxy.handle
     stale_a = _StubSession(
@@ -194,7 +194,7 @@ def test_close_for_a_reused_pid_does_not_stop_a_different_live_session(tmp_path)
 
 
 def test_rejects_target_ref_with_control_characters(tmp_path):
-    transport = SerialLocalTransport(socket_dir=tmp_path)
+    transport = SerialLocalTransport(socket_dir=tmp_path, lock_dir=tmp_path / "locks")
     request = _request(LineRole.SHARED_CONSOLE, {"device": "/dev/tty\n0"}, tmp_path)
     with pytest.raises(SerialLocalConfigError) as exc:
         transport.attach(request, cancel=threading.Event(), deadline=Deadline.after(2.0), on_partial=lambda *_: None)
@@ -210,7 +210,8 @@ def test_concurrent_attach_to_the_same_source_is_refused(tmp_path):
 
     master, slave = pty.openpty()
     name = os.ttyname(slave)
-    t1 = SerialLocalTransport(socket_dir=tmp_path)
+    shared_lock_dir = tmp_path / "locks"
+    t1 = SerialLocalTransport(socket_dir=tmp_path, lock_dir=shared_lock_dir)
     r1 = t1.attach(
         _request(LineRole.SHARED_CONSOLE, {"device": name}, tmp_path),
         cancel=threading.Event(),
@@ -218,7 +219,7 @@ def test_concurrent_attach_to_the_same_source_is_refused(tmp_path):
         on_partial=lambda *_: None,
     )
     try:
-        t2 = SerialLocalTransport(socket_dir=tmp_path)
+        t2 = SerialLocalTransport(socket_dir=tmp_path, lock_dir=shared_lock_dir)
         with pytest.raises(SerialLocalConflictError) as exc:
             t2.attach(
                 _request(LineRole.SHARED_CONSOLE, {"device": name}, tmp_path),
@@ -233,10 +234,76 @@ def test_concurrent_attach_to_the_same_source_is_refused(tmp_path):
         os.close(slave)
 
 
+def test_same_device_different_socket_dir_still_conflicts(tmp_path):
+    """Two runs target the same physical line from different per-run socket_dirs. The
+    source lock is host-global (shared lock_dir), so the second attach is refused even
+    though the socket_dirs differ — the cross-run guarantee F1 regressed on (spec §4.7)."""
+    import pty
+
+    from linux_debug_mcp.transport.serial_local import SerialLocalConflictError
+
+    master, slave = pty.openpty()
+    name = os.ttyname(slave)
+    shared_lock_dir = tmp_path / "locks"
+    t1 = SerialLocalTransport(socket_dir=tmp_path / "run-a", lock_dir=shared_lock_dir)
+    r1 = t1.attach(
+        _request(LineRole.SHARED_CONSOLE, {"device": name}, tmp_path),
+        cancel=threading.Event(),
+        deadline=Deadline.after(2.0),
+        on_partial=lambda *_: None,
+    )
+    try:
+        t2 = SerialLocalTransport(socket_dir=tmp_path / "run-b", lock_dir=shared_lock_dir)
+        with pytest.raises(SerialLocalConflictError) as exc:
+            t2.attach(
+                _request(LineRole.SHARED_CONSOLE, {"device": name}, tmp_path),
+                cancel=threading.Event(),
+                deadline=Deadline.after(2.0),
+                on_partial=lambda *_: None,
+            )
+        assert exc.value.category == ErrorCategory.TRANSPORT_CONFLICT
+    finally:
+        t1.close(_StubSession(r1.console_endpoint))
+        os.close(master)
+        os.close(slave)
+
+
+def test_different_devices_do_not_conflict(tmp_path):
+    """Distinct physical lines hash to distinct lock files in the shared lock_dir, so
+    both attaches succeed; the source lock is per-device, not a global mutex."""
+    import pty
+
+    master_a, slave_a = pty.openpty()
+    master_b, slave_b = pty.openpty()
+    shared_lock_dir = tmp_path / "locks"
+    t1 = SerialLocalTransport(socket_dir=tmp_path / "run-a", lock_dir=shared_lock_dir)
+    t2 = SerialLocalTransport(socket_dir=tmp_path / "run-b", lock_dir=shared_lock_dir)
+    r1 = t1.attach(
+        _request(LineRole.SHARED_CONSOLE, {"device": os.ttyname(slave_a)}, tmp_path),
+        cancel=threading.Event(),
+        deadline=Deadline.after(2.0),
+        on_partial=lambda *_: None,
+    )
+    r2 = t2.attach(
+        _request(LineRole.SHARED_CONSOLE, {"device": os.ttyname(slave_b)}, tmp_path),
+        cancel=threading.Event(),
+        deadline=Deadline.after(2.0),
+        on_partial=lambda *_: None,
+    )
+    try:
+        assert isinstance(r1.console_endpoint, UnixSocketEndpoint)
+        assert isinstance(r2.console_endpoint, UnixSocketEndpoint)
+    finally:
+        t1.close(_StubSession(r1.console_endpoint))
+        t2.close(_StubSession(r2.console_endpoint))
+        for fd in (master_a, slave_a, master_b, slave_b):
+            os.close(fd)
+
+
 def test_demux_health_is_degraded_when_the_in_memory_handle_is_lost(tmp_path):
     """A durable demux session with backend_pid but an empty handle map (post-restart)
     reports 'degraded', it does not raise KeyError (round-7 F3)."""
-    transport = SerialLocalTransport(socket_dir=tmp_path, proxy=_RecordingProxy())
+    transport = SerialLocalTransport(socket_dir=tmp_path, lock_dir=tmp_path / "locks", proxy=_RecordingProxy())
     session = _StubSession(
         console_endpoint=TcpEndpoint(host="127.0.0.1", port=5001),
         rsp_endpoint=TcpEndpoint(host="127.0.0.1", port=5002),
