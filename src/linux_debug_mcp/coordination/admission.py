@@ -96,6 +96,7 @@ class AdmissionHandle:
         "_handle_id",
         "_target_key",
         "_generation",
+        "_admit_epoch",
         "_op",
         "_channel",
         "_platform",
@@ -111,6 +112,7 @@ class AdmissionHandle:
         handle_id: str,
         target_key: TargetKey,
         generation: int,
+        admit_epoch: int,
         op: AdmissionOp,
         channel: TransportRef | None,
         platform: PlatformMetadata,
@@ -122,6 +124,11 @@ class AdmissionHandle:
         # registration so targeted async operations (cancel_ssh_tier) can fence on it: a late
         # cancel from a prior incarnation must never touch a handle admitted after a reset/reopen.
         self._generation = generation
+        # The per-target execution epoch at admission. For an ssh-tier op against a DEBUGGING
+        # target this equals the proof's (epoch-current) value, so it pins which EXECUTING window
+        # the op belongs to: a halt-cancel cancels ops admitted at or before the halt epoch and
+        # leaves ops admitted after a later resume (a newer epoch) untouched.
+        self._admit_epoch = admit_epoch
         self._op = op
         self._channel = channel
         self._platform = platform
@@ -145,6 +152,10 @@ class AdmissionHandle:
     @property
     def generation(self) -> int:
         return self._generation
+
+    @property
+    def admit_epoch(self) -> int:
+        return self._admit_epoch
 
     @property
     def op(self) -> AdmissionOp:
@@ -454,6 +465,9 @@ class AdmissionService:
             handle_id=uuid.uuid4().hex,
             target_key=target_key,
             generation=snapshot.generation,  # bind the admitted generation for async fencing
+            # bind the admitted execution epoch (== a DEBUGGING ssh proof's epoch-current value)
+            # so a halt-cancel can target only the EXECUTING window this op belongs to
+            admit_epoch=self._exec_epoch.get(target_key, 0),
             op=op,
             channel=channel,
             platform=snapshot.platform,  # authoritative facts bound from the snapshot copy
@@ -604,12 +618,14 @@ class AdmissionService:
         - **Generation:** a late HALTED from a PRIOR incarnation carries that incarnation's
           generation and is a complete no-op when it does not match the authoritative snapshot
           (it cannot touch work admitted after a reset/reopen).
-        - **Halt epoch:** `halt_epoch` is the execution epoch the caller recorded the halt at (the
-          value `note_execution_transition` returned for THIS `EXECUTING→HALTED`). The cancel is a
-          no-op unless it still equals the current epoch — so a **delayed** cancel worker whose
-          halt was already followed by a resume (which bumped the epoch) does NOT cancel ssh work
-          legitimately admitted against that newer EXECUTING epoch (§5.6 rule 2: ssh-tier is
-          permitted while EXECUTING). The cancel applies only to the specific halt it was raised for.
+        - **Halt epoch (per handle):** `halt_epoch` is the execution epoch the caller recorded the
+          halt at (the value `note_execution_transition` returned for THIS `EXECUTING→HALTED`). The
+          cancel targets exactly the SSH_TIER bindings whose admitted execution epoch is `<=
+          halt_epoch` — i.e. those that were in flight across the halt — and leaves alone any op
+          admitted at a LATER epoch (after a subsequent resume), which is legitimately EXECUTING
+          (§5.6 rule 2). So a **delayed** cancel still cancels the pre-halt op it was raised for
+          (§5.4) without touching post-resume work, even if the epoch has since advanced. This is
+          a per-handle filter, NOT a whole-call gate on `halt_epoch == current`.
 
         **Caller precondition (Layer 4, [ADR 0002]):** the caller MUST be the current stop-capable
         controller acting under its **live `StopCapableGuard` token**. Because a debug session
@@ -617,18 +633,16 @@ class AdmissionService:
         stale SAME-controller-slot session (e.g. a detached session A's late `HALTED` worker); the
         guard token is the contract's single authority for that (§5.6 rule 1, "a stale token is a
         no-op", guard "never outlives the session"). Layer 2 does not model a parallel stop-session
-        authority (ADR 0002); the halt-epoch fence above additionally bounds a *current* controller's
-        own delayed cancel to the halt it was raised for."""
+        authority (ADR 0002); the per-handle halt-epoch filter additionally bounds a *current*
+        controller's own delayed cancel to the ops that were in flight across the halt."""
         with self._key_lock(target_key):
             snapshot = self._store.get(target_key)
             if snapshot is None or generation != snapshot.generation:
                 return []  # stale/unknown generation: prior-incarnation event
-            if halt_epoch != self._exec_epoch.get(target_key, 0):
-                return []  # a later transition (resume/another halt) advanced the epoch: stale cancel
             cancelled = [
                 h
                 for h in self._bindings.get(target_key, ())
-                if h.op is AdmissionOp.SSH_TIER and h.generation == generation
+                if h.op is AdmissionOp.SSH_TIER and h.generation == generation and h.admit_epoch <= halt_epoch
             ]
             for handle in cancelled:
                 handle._cancel.set()  # monotonic private fence; only the service signals it

@@ -960,8 +960,37 @@ def test_delayed_halt_cancel_after_resume_does_not_cancel_newly_admitted_ssh():
     )
     assert new.state is AdmissionState.PENDING and not new.cancelled
     cancelled = service.cancel_ssh_tier(_key(), 1, halt_epoch)  # the DELAYED worker, for the old halt
-    assert cancelled == []  # no-op: a resume advanced the epoch past the halt it was raised for
+    assert cancelled == []  # nothing was in flight at/before the halt; post-resume work is untouched
     assert not new.cancelled  # ssh work admitted after the resume, while EXECUTING, is untouched
+
+
+def test_delayed_halt_cancel_cancels_pre_halt_op_but_not_post_resume_op():
+    # §5.4 + §5.6 rule 2: a DELAYED halt-cancel must STILL cancel the ssh op that was in flight
+    # across the halt (admitted at/before the halt epoch) while leaving an op admitted after a
+    # later resume (a newer EXECUTING epoch) untouched. Per-handle epoch filter, not a whole-call
+    # gate — this is the round-7 refinement of the round-5 fix (which wrongly dropped the whole cancel).
+    service = _service(_snapshot(generation=1, state=TargetState.DEBUGGING))
+    h0 = service.admit_ssh_tier(  # admitted while EXECUTING at epoch 0, pre-halt
+        _key(),
+        1,
+        _platform(),
+        execution_proof=ExecutionProof(
+            generation=1, epoch=service.current_execution_epoch(_key()), state=ExecutionState.EXECUTING
+        ),
+    )
+    halt_epoch = service.note_execution_transition(_key(), 1)  # kernel halts; its cancel worker is delayed
+    service.note_execution_transition(_key(), 1)  # kernel resumes (epoch advances past the halt)
+    h2 = service.admit_ssh_tier(  # admitted after the resume, at the newer EXECUTING epoch
+        _key(),
+        1,
+        _platform(),
+        execution_proof=ExecutionProof(
+            generation=1, epoch=service.current_execution_epoch(_key()), state=ExecutionState.EXECUTING
+        ),
+    )
+    cancelled = service.cancel_ssh_tier(_key(), 1, halt_epoch)  # the delayed worker for the halt
+    assert cancelled == [h0]  # only the op that was in flight across the halt
+    assert h0.cancelled and not h2.cancelled
 
 
 def test_cancel_ssh_tier_fires_for_the_current_halt():
