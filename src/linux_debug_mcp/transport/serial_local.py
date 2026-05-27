@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import enum
 import fcntl
 import os
 import secrets
@@ -48,6 +49,16 @@ _SOCKET_NAME = "c.sock"
 # dir falls back to a short runtime tempdir. Either way the parent dir is owner-only (0700)
 # and the socket is owner-only (0600), so the access boundary is unchanged (§8.4).
 _AF_UNIX_MAX = 100
+
+
+class _PumpStep(enum.Enum):
+    """Outcome of one direction of a bridge pump step. The pump must tell a client
+    disconnect (re-accept a fresh client) apart from source-device death (stop): a failed
+    transfer is attributed to the side that broke, never conflated (plan §3, F1 race)."""
+
+    CONTINUE = "continue"
+    CLIENT_GONE = "client_gone"
+    SOURCE_DEAD = "source_dead"
 
 
 class SerialLocalConfigError(Exception):
@@ -179,10 +190,18 @@ class SerialConsoleBridge:
                 readable, _, _ = select.select([self._source_fd, conn], [], [], 0.2)
             except (OSError, ValueError):
                 return False
-            if self._source_fd in readable and not self._device_to_client(conn):
-                return False  # source EOF/error → device gone
-            if conn in readable and not self._client_to_device(conn):
-                return True  # client EOF/error/clean close → re-accept a new client
+            if self._source_fd in readable:
+                step = self._device_to_client(conn)
+                if step is _PumpStep.SOURCE_DEAD:
+                    return False  # source EOF/error → device gone, stop
+                if step is _PumpStep.CLIENT_GONE:
+                    return True  # could not deliver to the client → re-accept a new client
+            if conn in readable:
+                step = self._client_to_device(conn)
+                if step is _PumpStep.SOURCE_DEAD:
+                    return False
+                if step is _PumpStep.CLIENT_GONE:
+                    return True  # client EOF/error/clean close → re-accept a new client
         return False  # stop requested
 
     def _close_conn(self, conn: socket.socket) -> None:
@@ -190,35 +209,35 @@ class SerialConsoleBridge:
         with contextlib.suppress(OSError):
             conn.close()
 
-    def _device_to_client(self, conn: socket.socket) -> bool:
+    def _device_to_client(self, conn: socket.socket) -> _PumpStep:
         try:
             data = os.read(self._source_fd, _BRIDGE_BUFFER)
         except BlockingIOError:
-            return True
+            return _PumpStep.CONTINUE
         except OSError:
-            return False
+            return _PumpStep.SOURCE_DEAD
         if not data:
-            return False
+            return _PumpStep.SOURCE_DEAD
         try:
             conn.sendall(data)
         except OSError:
-            return False
-        return True
+            return _PumpStep.CLIENT_GONE
+        return _PumpStep.CONTINUE
 
-    def _client_to_device(self, conn: socket.socket) -> bool:
+    def _client_to_device(self, conn: socket.socket) -> _PumpStep:
         try:
             data = conn.recv(_BRIDGE_BUFFER)
         except BlockingIOError:
-            return True
+            return _PumpStep.CONTINUE
         except OSError:
-            return False
+            return _PumpStep.CLIENT_GONE
         if not data:
-            return False
+            return _PumpStep.CLIENT_GONE
         try:
             os.write(self._source_fd, data)
         except OSError:
-            return False
-        return True
+            return _PumpStep.SOURCE_DEAD
+        return _PumpStep.CONTINUE
 
     def stop(self) -> None:
         self._stop.set()

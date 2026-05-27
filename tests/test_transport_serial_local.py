@@ -19,6 +19,24 @@ from linux_debug_mcp.transport.bounded import Deadline
 from linux_debug_mcp.transport.serial_local import SerialLocalConfigError, SerialLocalTransport
 
 
+def _read_until(fd: int, needle: bytes, timeout: float = 2.0) -> bytes:
+    """Read from a (blocking) fd until `needle` appears or the deadline passes, polling via
+    select so a stalled pump fails the test on a bounded timeout rather than hanging."""
+    import select as _select
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    buf = b""
+    while needle not in buf:
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0:
+            return buf
+        readable, _, _ = _select.select([fd], [], [], remaining)
+        if readable:
+            buf += os.read(fd, 64)
+    return buf
+
+
 def _platform() -> PlatformMetadata:
     return PlatformMetadata(
         console_kind=ConsoleKind.UART,
@@ -112,6 +130,10 @@ def test_console_only_bridge_survives_client_reconnect(tmp_path):
         client2 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         client2.connect(path)
         client2.settimeout(2.0)
+        # Sync on client->device first: a console drops device output written while no client
+        # is attached, so confirm the pump has re-accepted client2 before asserting delivery.
+        client2.sendall(b"ping\n")
+        assert b"ping" in _read_until(controller_fd, b"ping")
         os.write(controller_fd, b"hello-2\n")
         assert b"hello-2" in client2.recv(64)
         assert transport.health(session) == "ready"
@@ -119,6 +141,57 @@ def test_console_only_bridge_survives_client_reconnect(tmp_path):
     finally:
         transport.close(session)
         os.close(controller_fd)
+        os.close(peripheral_fd)
+
+
+def test_failed_client_send_classifies_as_client_gone_not_source_death(tmp_path):
+    """Source output that fails to reach the client (the client vanished mid-output) is a
+    client disconnect → re-accept, not source death → stop. Classifying it as source death
+    strands the line whenever a client leaves while the device is emitting (F1 race)."""
+    import pty
+    import select as _select
+
+    from linux_debug_mcp.transport.serial_local import SerialConsoleBridge, _PumpStep
+
+    controller_fd, peripheral_fd = pty.openpty()
+    source_fd = os.open(os.ttyname(peripheral_fd), os.O_RDWR | os.O_NONBLOCK | os.O_NOCTTY)
+    bridge = SerialConsoleBridge(socket_path=str(tmp_path / "c.sock"), session_dir=str(tmp_path), source_fd=source_fd)
+
+    class _GoneClient:
+        def sendall(self, data):
+            raise BrokenPipeError("client closed mid-output")
+
+    try:
+        os.write(controller_fd, b"device-output\n")  # pending source data to drain
+        _select.select([source_fd], [], [], 1.0)  # ensure the source read will not block
+        assert bridge._device_to_client(_GoneClient()) is _PumpStep.CLIENT_GONE
+    finally:
+        os.close(source_fd)
+        os.close(controller_fd)
+        os.close(peripheral_fd)
+
+
+def test_source_eof_classifies_as_source_death(tmp_path):
+    """The other half of the state machine: when the source itself hits EOF, the step is
+    SOURCE_DEAD (→ stop), so a genuinely dead line does not spin re-accepting (F1)."""
+    import pty
+    import select as _select
+
+    from linux_debug_mcp.transport.serial_local import SerialConsoleBridge, _PumpStep
+
+    controller_fd, peripheral_fd = pty.openpty()
+    source_fd = os.open(os.ttyname(peripheral_fd), os.O_RDWR | os.O_NONBLOCK | os.O_NOCTTY)
+    bridge = SerialConsoleBridge(socket_path=str(tmp_path / "c.sock"), session_dir=str(tmp_path), source_fd=source_fd)
+
+    class _LiveClient:
+        def sendall(self, data): ...
+
+    try:
+        os.close(controller_fd)  # source EOF: the controller end is gone
+        _select.select([source_fd], [], [], 1.0)
+        assert bridge._device_to_client(_LiveClient()) is _PumpStep.SOURCE_DEAD
+    finally:
+        os.close(source_fd)
         os.close(peripheral_fd)
 
 
