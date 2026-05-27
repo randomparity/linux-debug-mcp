@@ -1,3 +1,5 @@
+import dataclasses
+import threading
 from datetime import UTC, datetime
 
 import pytest
@@ -6,6 +8,7 @@ from pydantic import TypeAdapter, ValidationError
 from linux_debug_mcp.seams.target import Arch, ConsoleKind, PlatformMetadata, TargetKey
 from linux_debug_mcp.transport.base import (
     DEFAULT_MIN_LEASE_TTL_SECONDS,
+    BackendAttachment,
     BreakMethod,
     BreakPlan,
     Endpoint,
@@ -578,3 +581,61 @@ def test_transport_ref_accepts_nested_json_routing_data():
 def test_transport_abc_cannot_be_instantiated_without_methods():
     with pytest.raises(TypeError):
         Transport()  # abstract
+
+
+def test_backend_attachment_is_frozen_and_carries_only_wire_fields():
+    attachment = BackendAttachment(
+        console_endpoint=None,
+        rsp_endpoint=TcpEndpoint(host="127.0.0.1", port=1234),
+        backend_pid=4321,
+        backend_start_time="999",
+        console_artifact=None,
+    )
+    assert attachment.rsp_endpoint.port == 1234
+    assert attachment.backend_pid == 4321
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        attachment.backend_pid = 1  # type: ignore[misc]
+    # BackendAttachment must not carry identity/token/record_state fields (ADR 0003).
+    for forbidden in ("session_id", "console_lease_token", "stop_guard_token", "record_state"):
+        assert not hasattr(attachment, forbidden)
+
+
+def test_concrete_transport_attach_returns_backend_attachment():
+    class _StubTransport(Transport):
+        @property
+        def capability(self) -> TransportCapability:
+            return TransportCapability(
+                provider_name="qemu-gdbstub",
+                locality=TransportLocality.LOCAL,
+                provides_console=False,
+                provides_rsp=True,
+                supports_uart_break=False,
+                endpoint_exposure=EndpointExposure.LOOPBACK_LOCAL,
+            )
+
+        def attach(self, request, *, cancel, deadline, on_partial) -> BackendAttachment:
+            return BackendAttachment(
+                console_endpoint=None,
+                rsp_endpoint=TcpEndpoint(host="127.0.0.1", port=request.transport_ref.opts["port"]),
+                backend_pid=None,
+                backend_start_time=None,
+                console_artifact=None,
+            )
+
+        def close(self, session) -> None: ...
+
+        def health(self, session) -> str:
+            return "ready"
+
+    transport = _StubTransport()
+    request = OpenRequest(
+        target_key=TargetKey(provisioner="local-qemu", target_id="vm1"),
+        generation=0,
+        transport_ref=TransportRef(
+            provider="qemu-gdbstub", channel_id="rsp0", line_role=LineRole.RSP, opts={"port": 7000}
+        ),
+        platform=_platform(),
+    )
+    result = transport.attach(request, cancel=threading.Event(), deadline=1.0, on_partial=lambda *_: None)
+    assert isinstance(result, BackendAttachment)
+    assert result.rsp_endpoint.port == 7000

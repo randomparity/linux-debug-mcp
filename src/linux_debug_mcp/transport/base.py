@@ -7,6 +7,7 @@ import unicodedata
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
@@ -325,6 +326,19 @@ def new_session_id() -> str:
     return f"transport-{uuid.uuid4().hex}"
 
 
+@dataclass(frozen=True)
+class BackendAttachment:
+    """A Layer-3 backend's terminal success value (ADR 0003): only fields the wire work
+    discovers. Layer 4 owns TransportSession and assembles it from its durable record +
+    this attachment. Backends never mint session_id, tokens, or record_state."""
+
+    console_endpoint: Endpoint | None
+    rsp_endpoint: Endpoint | None
+    backend_pid: int | None
+    backend_start_time: str | None
+    console_artifact: ArtifactRef | None = None
+
+
 class Transport(ABC):
     """Abstract transport provider. Concrete transports (serial-local, qemu-gdbstub)
     land in Layer 3; the open() transaction (Layer 4) drives attach/close/health."""
@@ -341,7 +355,12 @@ class Transport(ABC):
         cancel: threading.Event,
         deadline: float,
         on_partial: Callable[[str, object], None],
-    ) -> TransportSession: ...
+    ) -> BackendAttachment:
+        """Wire-level attach: connect to the target channel and return the discovered
+        endpoint(s) and process identity as a BackendAttachment (ADR 0003). Layer 4
+        owns the durable TransportSession and assembles it from its existing record
+        plus this attachment; backends never mint session_id, tokens, or record_state."""
+        ...
 
     @abstractmethod
     def close(self, session: TransportSession) -> None: ...
