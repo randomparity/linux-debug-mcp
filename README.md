@@ -159,3 +159,13 @@ documented in [Fedora Libvirt User Guide](docs/fedora-libvirt-user-guide.md).
 just test
 just lint
 ```
+
+## Continuous integration
+
+`.github/workflows/transport-integration.yml` builds `agent-proxy` from a pinned
+commit and runs the serial-local transport integration test un-skipped
+(`LDM_REQUIRE_AGENT_PROXY=1`). The unit suite gates most behavior, but the UART
+BREAK escape and the console/gdb demux are only proven end-to-end against a real
+`agent-proxy`. That job must therefore be configured as a required status check on
+`main` so the transport cannot regress unnoticed. Enabling the required check is a
+one-time branch-protection setting the maintainer applies in the repository.
