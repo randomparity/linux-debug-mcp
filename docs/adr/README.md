@@ -5,3 +5,4 @@ Each ADR captures one non-trivial design decision — especially decisions the s
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-layer2-layer4-execution-state-gate-split.md) | Layer-2/Layer-4 split for the execution-state gate (ssh-tier admission) | Accepted |
+| [0002](0002-stop-controller-execution-authority-is-the-guard-token.md) | Stop-controller execution-event authority is the guard token (a Layer-4 precondition) | Accepted |

@@ -270,7 +270,15 @@ class AdmissionService:
         the transition was observed at; the bump fires only when it matches the authoritative
         snapshot generation, so a transition from a PRIOR incarnation (a stale/late controller)
         cannot poison the current epoch and spuriously reject a fresh current-generation EXECUTING
-        proof (§5.6). Returns the (possibly unchanged) current epoch."""
+        proof (§5.6). Returns the (possibly unchanged) current epoch.
+
+        **Caller precondition (Layer 4, [ADR 0002]):** the caller MUST be the current stop-capable
+        controller acting under its **live `StopCapableGuard` token**. A debug session attaches and
+        detaches WITHIN a generation (§3.1/§5.1 — detach does not bump generation), so the
+        generation fence alone cannot distinguish a stale same-generation controller; the guard
+        token is the contract's single authority for that (§5.6 rule 1, "a stale token is a
+        no-op"). A detached session released its token, so its late event worker is non-authoritative
+        and MUST NOT call this. Layer 2 does not duplicate the guard (ADR 0002, rejected option 1)."""
         with self._key_lock(target_key):
             snapshot = self._store.get(target_key)
             if snapshot is None or generation != snapshot.generation:
@@ -562,7 +570,16 @@ class AdmissionService:
         current-generation EXECUTING proof and spuriously reject ssh-tier admission while EXECUTING
         (§5.6). transport.open (stop-capable) bindings are untouched. Only a current-generation
         halt **bumps the execution epoch** — an `EXECUTING` proof stamped before that halt can
-        never be replayed to admit a new ssh op afterwards. Returns the cancelled handles."""
+        never be replayed to admit a new ssh op afterwards. Returns the cancelled handles.
+
+        **Caller precondition (Layer 4, [ADR 0002]):** the caller MUST be the current stop-capable
+        controller acting under its **live `StopCapableGuard` token**. Because a debug session
+        attaches/detaches WITHIN a generation (§3.1/§5.1), the generation fence cannot reject a
+        stale SAME-generation controller (e.g. a detached session A's late `HALTED` worker
+        cancelling session B's ssh work); the guard token is the contract's single authority for
+        that (§5.6 rule 1, "a stale token is a no-op", guard "never outlives the session"). A
+        detached controller released its token and MUST NOT drive this. Layer 2 deliberately does
+        not model a parallel stop-session authority in the admission service (ADR 0002)."""
         with self._key_lock(target_key):
             snapshot = self._store.get(target_key)
             if snapshot is None or generation != snapshot.generation:
