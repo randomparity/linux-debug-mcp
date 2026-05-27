@@ -86,6 +86,76 @@ def test_console_only_path_bridges_a_pty_device_to_an_owner_only_unix_socket(tmp
         os.close(peripheral_fd)
 
 
+def test_console_only_bridge_survives_client_reconnect(tmp_path):
+    """The console-only pump is a session-lifetime worker (plan §3): a client disconnect must
+    not strand the line. After client1 leaves, the bridge stays 'ready' and a fresh client2 on
+    the same socket path round-trips bytes again. Pre-fix the pump dies after one accept (F1)."""
+    import pty
+
+    controller_fd, peripheral_fd = pty.openpty()
+    peripheral_name = os.ttyname(peripheral_fd)
+    transport = SerialLocalTransport(socket_dir=tmp_path, lock_dir=tmp_path / "locks")
+    request = _request(LineRole.SHARED_CONSOLE, {"device": peripheral_name}, tmp_path)
+    result = transport.attach(
+        request, cancel=threading.Event(), deadline=Deadline.after(2.0), on_partial=lambda *_: None
+    )
+    session = _StubSession(result.console_endpoint)
+    try:
+        path = result.console_endpoint.path
+        client1 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client1.connect(path)
+        client1.settimeout(2.0)
+        os.write(controller_fd, b"hello-1\n")
+        assert b"hello-1" in client1.recv(64)
+        client1.close()
+
+        client2 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client2.connect(path)
+        client2.settimeout(2.0)
+        os.write(controller_fd, b"hello-2\n")
+        assert b"hello-2" in client2.recv(64)
+        assert transport.health(session) == "ready"
+        client2.close()
+    finally:
+        transport.close(session)
+        os.close(controller_fd)
+        os.close(peripheral_fd)
+
+
+def test_console_only_bridge_stops_when_source_device_closes(tmp_path):
+    """Source-device death (not a client disconnect) must exit the pump cleanly rather than
+    spin re-accepting on a dead fd. Closing the pty controller drives the source to EOF; the
+    bridge then reports 'degraded' and stays registered until Layer-4 close() (§4.7, F1)."""
+    import pty
+    import time
+
+    controller_fd, peripheral_fd = pty.openpty()
+    peripheral_name = os.ttyname(peripheral_fd)
+    transport = SerialLocalTransport(socket_dir=tmp_path, lock_dir=tmp_path / "locks")
+    request = _request(LineRole.SHARED_CONSOLE, {"device": peripheral_name}, tmp_path)
+    result = transport.attach(
+        request, cancel=threading.Event(), deadline=Deadline.after(2.0), on_partial=lambda *_: None
+    )
+    session = _StubSession(result.console_endpoint)
+    closed: set[int] = set()
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(result.console_endpoint.path)
+        client.settimeout(2.0)
+        os.close(controller_fd)  # source EOF: the physical line is gone
+        closed.add(controller_fd)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and transport.health(session) != "degraded":
+            time.sleep(0.05)
+        assert transport.health(session) == "degraded"
+        client.close()
+    finally:
+        transport.close(session)
+        if controller_fd not in closed:
+            os.close(controller_fd)
+        os.close(peripheral_fd)
+
+
 def test_console_only_attach_emits_a_console_socket_partial(tmp_path):
     """Reconciliation (Layer 4) scans the run dir, but the console socket can fall back to a
     tempdir outside it (F4). attach must emit a console_socket partial recording the resolved

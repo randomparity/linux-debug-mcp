@@ -154,24 +154,41 @@ class SerialConsoleBridge:
         listener = self._listener
         if listener is None:
             return
-        try:
-            conn = await_accept(listener, deadline=Deadline.after(_ACCEPT_GRACE_SECONDS), cancel=self._stop)
-        except BaseException:
-            return
-        self._conn = conn
-        self._copy_loop(conn)
+        # Session-lifetime worker: re-accept across client reconnects until the source dies or
+        # stop() is requested (matches the agent-proxy listeners; plan §3 "session-lifetime worker").
+        while not self._stop.is_set():
+            try:
+                conn = await_accept(listener, deadline=Deadline.after(_ACCEPT_GRACE_SECONDS), cancel=self._stop)
+            except BaseException:
+                return
+            self._conn = conn
+            try:
+                source_alive = self._copy_loop(conn)
+            finally:
+                self._close_conn(conn)
+            if not source_alive:
+                return  # source EOF/error: the line is gone, do not spin re-accepting
 
-    def _copy_loop(self, conn: socket.socket) -> None:
+    def _copy_loop(self, conn: socket.socket) -> bool:
+        """Pump until the client leaves or the source dies. Return True if the source is still
+        healthy (client left → caller re-accepts), False if the source fd hit EOF/error or a
+        watched fd became unusable (caller stops)."""
         conn.setblocking(False)
         while not self._stop.is_set():
             try:
                 readable, _, _ = select.select([self._source_fd, conn], [], [], 0.2)
             except (OSError, ValueError):
-                return
+                return False
             if self._source_fd in readable and not self._device_to_client(conn):
-                return
+                return False  # source EOF/error → device gone
             if conn in readable and not self._client_to_device(conn):
-                return
+                return True  # client EOF/error/clean close → re-accept a new client
+        return False  # stop requested
+
+    def _close_conn(self, conn: socket.socket) -> None:
+        self._conn = None
+        with contextlib.suppress(OSError):
+            conn.close()
 
     def _device_to_client(self, conn: socket.socket) -> bool:
         try:
