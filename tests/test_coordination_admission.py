@@ -824,9 +824,60 @@ def test_complete_on_cancelled_handle_is_rejected():
     with pytest.raises(AdmissionError) as outstanding:
         service.reopen(_key())
     assert outstanding.value.code == "bindings_outstanding"
-    service.rollback(handle)  # the correct cancel path disposes it
+    service.confirm_reaped(handle)  # reaper reclaimed the promoted session's resources
+    service.rollback(handle)  # the correct cancel path, once teardown is proven, disposes it
     service.reopen(_key())
     assert service.admit(_key(), _request(generation=1)).state is AdmissionState.PENDING
+
+
+def test_rollback_of_promoted_handle_on_closed_target_requires_reaper_confirmation():
+    # A PROMOTED transport session holds live backend/lease/guard. If reset closes admission and
+    # cancels it, the owner's rollback must NOT deregister it before the reaper proves those
+    # resources were reclaimed (confirm_reaped) — else reopen() would admit generation N+1
+    # alongside still-live prior-generation resources (§5.3/§5.4). Mirrors abandon()'s gate.
+    store = SnapshotStore()
+    store.put(_key(), _snapshot(generation=0))
+    service = AdmissionService(store)
+    handle = service.admit(_key(), _request())
+    service.promote(handle)  # backend/lease/guard now live
+    service.close_admission(_key())  # reset cancels the live binding
+    with pytest.raises(AdmissionError) as excinfo:
+        service.rollback(handle)  # owner tries to unwind before teardown is proven
+    assert excinfo.value.code == "reaper_confirmation_required"
+    store.put(_key(), _snapshot(generation=1))
+    with pytest.raises(AdmissionError) as outstanding:
+        service.reopen(_key())  # the live binding still blocks reopen
+    assert outstanding.value.code == "bindings_outstanding"
+    service.confirm_reaped(handle)  # reaper reclaimed backend/lease/guard
+    service.rollback(handle)  # now the owner may deregister it
+    assert handle.state is AdmissionState.ROLLED_BACK
+    service.reopen(_key())
+    assert service.admit(_key(), _request(generation=1)).state is AdmissionState.PENDING
+
+
+def test_rollback_of_pending_handle_on_closed_target_needs_no_reaper():
+    # A PENDING binding committed no resources (promote is the commit point, §5.3), so rolling it
+    # back on a closed target needs no reaper proof and may unblock reopen immediately.
+    store = SnapshotStore()
+    store.put(_key(), _snapshot(generation=0))
+    service = AdmissionService(store)
+    handle = service.admit(_key(), _request())  # PENDING, nothing committed
+    service.close_admission(_key())
+    service.rollback(handle)  # disposes freely
+    assert handle.state is AdmissionState.ROLLED_BACK
+    store.put(_key(), _snapshot(generation=1))
+    service.reopen(_key())
+    assert service.admit(_key(), _request(generation=1)).state is AdmissionState.PENDING
+
+
+def test_rollback_of_promoted_handle_on_live_target_needs_no_reaper():
+    # A promoted open that fails on its own while the target is NOT closed (no reset in flight)
+    # rolls back freely: the owner releases what it just acquired and there is no reopen race.
+    service = _service(_snapshot())
+    handle = service.admit(_key(), _request())
+    service.promote(handle)
+    service.rollback(handle)  # target not closed -> no reaper proof required
+    assert handle.state is AdmissionState.ROLLED_BACK
 
 
 def test_cancelled_ssh_tier_op_cannot_be_completed():

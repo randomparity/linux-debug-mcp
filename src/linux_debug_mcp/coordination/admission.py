@@ -487,6 +487,13 @@ class AdmissionService:
         # a lease, the request MUST carry the matching lease_id — a prior holder (or a
         # hand-crafted request that omits the lease) cannot replay a handle. An unleased target
         # (e.g. local qemu, snapshot.lease is None) has no lease requirement.
+        #
+        # Identity is matched on lease_id ONLY, never expires_at: §5.3 step 1 makes the snapshot's
+        # lease (lease_id + expires_at) authoritative and the request's lease "a cache ... never
+        # the source of truth". expires_at freshness is enforced separately against the SNAPSHOT in
+        # _check_lease_ttl. Comparing the request's cached expires_at for equality would wrongly
+        # reject a valid current holder whose lease was renewed (snapshot expires_at advanced while
+        # the request carries the older cached value) — the opposite of the contract's re-bind rule.
         if snapshot.lease is None:
             return
         if lease is None or lease.lease_id != snapshot.lease.lease_id:
@@ -642,8 +649,24 @@ class AdmissionService:
             self._dispose_locked(handle, AdmissionState.COMPLETED)
 
     def rollback(self, handle: AdmissionHandle) -> None:
-        """Failure/cancel terminal disposal (open transaction rollback)."""
+        """Failure/cancel terminal disposal (open transaction rollback). A **PENDING** binding
+        committed no resources (promote is the commit point, §5.3), so it disposes freely. But a
+        **PROMOTED** binding on a **closed** target holds live backend/lease/guard that the §5.4
+        teardown must reclaim, and deregistering it is what unblocks `reopen()`; so — exactly like
+        `abandon()` — it requires the reaper's `confirm_reaped` proof first. Otherwise an owner that
+        observed cancellation and rolled back before teardown completed would let `reopen()` admit
+        generation N+1 alongside the still-live prior-generation resources (§5.3/§5.4 lifecycle
+        fence). A promoted binding on a target that is NOT closed (an open that failed on its own,
+        no reset in flight) rolls back freely — the owner releases what it just acquired and no
+        reopen race exists."""
         with self._key_lock(handle.target_key):
+            if handle.state is AdmissionState.PROMOTED and handle.target_key in self._closed_at and not handle.reaped:
+                raise AdmissionError(
+                    "a promoted session on a closed target must be reaped (confirm_reaped) before "
+                    "rollback can deregister it; reopen stays blocked until teardown is proven",
+                    category=ErrorCategory.READINESS_FAILURE,
+                    code="reaper_confirmation_required",
+                )
             self._dispose_locked(handle, AdmissionState.ROLLED_BACK)
 
     def confirm_reaped(self, handle: AdmissionHandle) -> None:
