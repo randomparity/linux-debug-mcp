@@ -290,15 +290,24 @@ class SerialConsoleBridge:
 
     def stop(self) -> None:
         self._stop.set()
-        for closeable in (self._conn, self._listener):
-            if closeable is not None:
-                with contextlib.suppress(OSError):
-                    closeable.close()
-        with contextlib.suppress(OSError):
-            os.close(self._source_fd)
+        # Close only the listener: it unblocks an in-flight await_accept, but the data fds must
+        # stay open until the pump is gone. _stop + the 0.2 s select slice terminate _copy_loop on
+        # their own, so the join below cannot deadlock waiting on a closed source_fd/conn.
+        if self._listener is not None:
+            with contextlib.suppress(OSError):
+                self._listener.close()
+        # Join first: after this the pump can no longer touch source_fd or conn, so closing them
+        # cannot race a live read/recv/send/write on a recycled fd integer (plan §F2).
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=_THREAD_JOIN_TIMEOUT)
+        # The pump closes its own conn via _close_conn's finally, so self._conn is usually None;
+        # close it defensively in case the pump never accepted a client.
+        if self._conn is not None:
+            with contextlib.suppress(OSError):
+                self._conn.close()
+        with contextlib.suppress(OSError):
+            os.close(self._source_fd)
         for target in (self.socket_path, self._session_dir):
             self._unlink(target)
 

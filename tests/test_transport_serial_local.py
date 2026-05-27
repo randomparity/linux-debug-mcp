@@ -298,6 +298,64 @@ def test_console_only_bridge_handles_partial_writes_to_a_busy_device(tmp_path):
         os.close(controller_fd)
 
 
+def test_stop_joins_the_pump_before_closing_the_source_fd(tmp_path, monkeypatch):
+    """stop() must join the pump thread before it closes the data fds (plan §F2). Otherwise the
+    pump can run os.read/recv/send/os.write on a just-closed source_fd integer that a concurrent
+    attach on another device may have recycled → cross-session console cross-talk. We park the
+    pump in select, then record its liveness at the instant the source fd is closed: it must
+    already be dead. Pre-fix the source fd is closed before the join → pump still live → RED."""
+    import pty
+    import time as _time
+
+    from linux_debug_mcp.transport import serial_local
+
+    controller_fd, peripheral_fd = pty.openpty()
+    peripheral_name = os.ttyname(peripheral_fd)
+    transport = SerialLocalTransport(socket_dir=tmp_path, lock_dir=tmp_path / "locks")
+    request = _request(LineRole.SHARED_CONSOLE, {"device": peripheral_name}, tmp_path)
+    result = transport.attach(
+        request, cancel=threading.Event(), deadline=Deadline.after(2.0), on_partial=lambda *_: None
+    )
+    session = _StubSession(result.console_endpoint)
+    bridge = transport._bridges[result.console_endpoint.path]
+    source_fd = bridge._source_fd
+
+    real_close = serial_local.os.close
+    alive_at_source_close: list[bool] = []
+
+    def _recording_close(fd):
+        if fd == source_fd:
+            alive_at_source_close.append(bridge._thread.is_alive())
+        return real_close(fd)
+
+    # Park the pump in a deliberately slow select so it stays alive across stop()'s teardown
+    # window, making the join-vs-close ordering observable rather than a scheduling coin-flip.
+    # Closing the conn no longer wakes it (it is sleeping, not in a real select syscall).
+    real_select = serial_local.select.select
+    parked = threading.Event()
+
+    def _slow_select(rlist, wlist, xlist, timeout=None):
+        parked.set()
+        _time.sleep(0.5)
+        return real_select(rlist, wlist, xlist, 0)
+
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.connect(result.console_endpoint.path)
+        client.settimeout(2.0)
+        os.write(controller_fd, b"sync\n")  # confirm the pump has accepted and is in _copy_loop
+        assert b"sync" in client.recv(64)
+        monkeypatch.setattr(serial_local.select, "select", _slow_select)
+        monkeypatch.setattr(serial_local.os, "close", _recording_close)
+        assert parked.wait(2.0)  # the pump is now sleeping inside the patched select
+        transport.close(session)
+        assert alive_at_source_close == [False]  # pump joined before the source fd was closed
+    finally:
+        client.close()
+        os.close(peripheral_fd)
+        os.close(controller_fd)
+
+
 def test_write_client_retries_on_ewouldblock(tmp_path):
     """`_write_client` honors non-blocking socket semantics: EWOULDBLOCK is a retry (CONTINUE,
     buffer unchanged), a real OSError is a client departure (CLIENT_GONE), and a partial send
