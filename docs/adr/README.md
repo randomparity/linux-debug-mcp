@@ -6,3 +6,5 @@ Each ADR captures one non-trivial design decision — especially decisions the s
 |---|---|---|
 | [0001](0001-layer2-layer4-execution-state-gate-split.md) | Layer-2/Layer-4 split for the execution-state gate (ssh-tier admission) | Accepted |
 | [0002](0002-stop-controller-execution-authority-is-the-guard-token.md) | Stop-controller execution-event authority is the guard token (a Layer-4 precondition) | Accepted |
+| [0003](0003-layer3-backend-attachment-vs-transport-session-ownership.md) | Layer-3 backends return a `BackendAttachment`; Layer 4 owns the `TransportSession` | Accepted |
+| [0004](0004-process-identity-is-an-injectable-seam.md) | Process/listener identity is an injectable `ProcessIdentityProbe` seam (`/proc` default) | Accepted |
