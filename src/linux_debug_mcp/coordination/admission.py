@@ -775,6 +775,17 @@ class AdmissionService:
         handle._state = terminal
         bindings.remove(handle)
 
+    def _is_stale_lifecycle_close(self, target_key: TargetKey, generation: int) -> bool:
+        """Caller holds the key lock. True iff a lifecycle close for `generation` is a stale retry:
+        the target is NOT currently closed AND its authoritative snapshot has already advanced past
+        `generation` (a newer incarnation was published and reopened). An already-closed target is
+        not stale — re-closing the same generation is the idempotent retry the contract allows
+        (§5.5). Used to no-op BOTH the close and the teardown emit on a stale retry."""
+        if target_key in self._closed_at:
+            return False
+        snapshot = self._store.get(target_key)
+        return snapshot is not None and snapshot.generation > generation
+
     def close_admission(self, target_key: TargetKey, generation: int) -> list[AdmissionHandle]:
         """§4.5 step 1: reject new admit() for the key and set the cancel fence on every live
         binding. `generation` is the incarnation being torn down. Records it so admission cannot
@@ -788,8 +799,7 @@ class AdmissionService:
         handles."""
         with self._key_lock(target_key):
             if target_key not in self._closed_at:
-                snapshot = self._store.get(target_key)
-                if snapshot is not None and snapshot.generation > generation:
+                if self._is_stale_lifecycle_close(target_key, generation):
                     return []  # stale retry: the target already advanced/reopened past `generation`
                 self._closed_at[target_key] = generation
             handles = list(self._bindings.get(target_key, ()))
@@ -858,12 +868,20 @@ class AdmissionService:
         every live binding and reject new admit() for the key. This is a confirmed, synchronous,
         non-blocking primitive (lock-guarded flag flips only, no IO, no callbacks), so it always
         completes here before step 2 begins — there is no best-effort hook that could leave
-        admission open. It is generation-fenced, so a delayed retry of a prior incarnation's
-        invalidation (after the target reopened past it) is a no-op and cannot tear down the new
-        incarnation (§5.4/§5.5). Step 2: `dispatcher.emit(event)` — the bounded teardown. Because
-        the fence is provably set before any subscriber runs, no concurrent admit() can enter the
-        owner-free window and seize a freed lease against the not-yet-bumped generation. The
-        Layer-4 lifecycle transaction wraps this with §4.5 steps 3–5 (revoke lease/guard via the
-        subscribers, bump generation)."""
-        self.close_admission(event.target_key, generation)  # step 1: mandatory, generation-fenced
+        admission open. Step 2: `dispatcher.emit(event)` — the bounded teardown. Because the fence
+        is provably set before any subscriber runs, no concurrent admit() can enter the owner-free
+        window and seize a freed lease against the not-yet-bumped generation. The Layer-4 lifecycle
+        transaction wraps this with §4.5 steps 3–5 (revoke lease/guard via the subscribers, bump
+        generation).
+
+        **Generation-fenced end-to-end (§5.4/§5.5):** if this is a stale retry of a prior
+        incarnation's invalidation — the target already reopened past `generation` — BOTH steps are
+        skipped: no close, and crucially **no `emit`**, so a delayed gen-N retry cannot tear down a
+        gen-(N+1) subscriber/session that was admitted after reopen. The staleness decision and the
+        close happen atomically under the key lock; `emit` runs outside it (bounded teardown must
+        not hold the admission lock)."""
+        with self._key_lock(event.target_key):
+            if self._is_stale_lifecycle_close(event.target_key, generation):
+                return InvalidationResult(target_key=event.target_key, kind=event.kind)  # stale: no teardown
+            self.close_admission(event.target_key, generation)  # step 1: mandatory, generation-fenced
         return dispatcher.emit(event)  # step 2: teardown only — admission already closed

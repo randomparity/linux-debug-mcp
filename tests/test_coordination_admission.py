@@ -810,6 +810,38 @@ def test_stale_prior_generation_close_after_reopen_does_not_cancel_new_incarnati
     assert new.cancelled and second.cancelled
 
 
+def test_stale_invalidate_lifecycle_after_reopen_does_not_tear_down_new_incarnation():
+    # Round-9: the stale-retry fence must cover the WHOLE lifecycle, not just the close. A delayed
+    # gen-0 invalidate_lifecycle that arrives after reopen to gen 1 must neither close admission
+    # nor EMIT teardown to the gen-1 subscriber, nor cancel the gen-1 binding (§5.4/§5.5).
+    store = SnapshotStore()
+    store.put(_key(), _snapshot(generation=0))
+    service = AdmissionService(store)
+    dispatcher = InProcessLifecycleDispatcher()
+    service.close_admission(_key(), 0)  # gen-0 reset closes admission
+    store.put(_key(), _snapshot(generation=1))
+    service.reopen(_key())  # reopened to gen 1
+    new = service.admit(_key(), _request(generation=1))  # new incarnation's session
+
+    torn_down: list[LifecycleEvent] = []
+
+    class _RecordingSub:
+        def invalidate(self, event: LifecycleEvent, deadline: float) -> None:
+            torn_down.append(event)
+
+        def force_drop(self, event: LifecycleEvent) -> None:
+            pass
+
+    dispatcher.subscribe(_key(), "gen1", _RecordingSub())
+    result = service.invalidate_lifecycle(LifecycleEvent(target_key=_key(), kind=LifecycleKind.CRASHED), dispatcher, 0)
+    assert torn_down == []  # the stale gen-0 retry did NOT emit teardown to the gen-1 subscriber
+    assert result.errors == {} and result.overdue == ()
+    assert not new.cancelled  # the gen-1 binding is untouched
+    # a CURRENT-generation (gen 1) invalidate_lifecycle DOES close + emit teardown
+    service.invalidate_lifecycle(LifecycleEvent(target_key=_key(), kind=LifecycleKind.CRASHED), dispatcher, 1)
+    assert len(torn_down) == 1 and new.cancelled
+
+
 def test_publish_snapshot_serializes_with_the_admission_key_lock():
     # F3: a generation bump must not interleave between an admit's snapshot read and its handle
     # registration. publish_snapshot takes the SAME per-TargetKey lock as admit, so while that
