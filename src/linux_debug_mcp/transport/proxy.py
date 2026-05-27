@@ -1,16 +1,33 @@
 from __future__ import annotations
 
+import os
+import signal
 import socket
+import subprocess
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from linux_debug_mcp.seams.process_identity import ProcessIdentityProbe, ProcProcessIdentityProbe
-from linux_debug_mcp.transport.bounded import Deadline, allocate_loopback_ports, check_not_cancelled, spawn
+from linux_debug_mcp.transport.bounded import (
+    BoundedIOTimeout,
+    Deadline,
+    allocate_loopback_ports,
+    check_not_cancelled,
+    connect_tcp,
+    spawn,
+)
 
 AGENT_PROXY = "agent-proxy"
 ON_PARTIAL = Callable[[str, object], None]
+
+# Telnet IAC BREAK — what a client sends agent-proxy's console port to request a target
+# break. agent-proxy.c defaultBrkStr = {0xff, 0xf3}. Under -s003 agent-proxy emits the
+# alternate byte 0x03 to the *target* line instead of a real serial break.
+_BREAK_ESCAPE = b"\xff\xf3"
+_S003_TARGET_ALTERNATE = b"\x03"
 
 
 @dataclass(frozen=True)
@@ -177,29 +194,126 @@ class AgentProxyBackend:
             raise
 
     def _verify_identity(self, handle: ProxyHandle, *, deadline: Deadline, cancel: threading.Event) -> None:
-        """Verify that the spawned child owns the allocated listeners. Filled in Task 5."""
-        raise NotImplementedError("filled in Task 5")
+        # Confirm OUR spawned child is the listener on BOTH allocated ports. A foreign
+        # process that won the bind race (§6.1) answers TCP but does NOT own the socket,
+        # so listener ownership — not mere reachability — is the discriminator. (RSP
+        # framing is NOT a usable signal here: a live kernel behind agent-proxy is not in
+        # kgdb until broken in, so the gdb port stays silent.) FAIL CLOSED: require
+        # `owns_listener is True` for both ports. `None` (ownership unverifiable — no
+        # /proc/net, or /proc/<pid>/fd unreadable) is a REJECT, not a pass, so a foreign
+        # listener can never slip through on an indeterminable host. In prod agent-proxy
+        # is Linux-only (ownership is determinable); unit tests inject the verdict via a
+        # fake probe. A failure raises; start() reaps OUR child and retries on fresh ports.
+        if not self._identity.is_alive(handle.backend_pid):
+            raise ProxyIdentityError("spawned agent-proxy child is not alive")
+        if not self._identity.looks_like(handle.backend_pid, "agent-proxy"):
+            raise ProxyIdentityError("spawned child is not agent-proxy")
+        for port in (handle.console_port, handle.gdb_port):
+            try:
+                conn = connect_tcp("127.0.0.1", port, deadline=deadline, cancel=cancel)
+            except (BoundedIOTimeout, OSError) as exc:
+                raise ProxyIdentityError(f"allocated port {port} has no listener") from exc
+            conn.close()
+            # Address-specific (F2): prove ownership of the exact 127.0.0.1:port we advertise.
+            if self._identity.owns_listener(handle.backend_pid, "127.0.0.1", port) is not True:
+                raise ProxyIdentityError(
+                    f"cannot positively confirm our child owns 127.0.0.1:{port} "
+                    "(foreign bind or ownership unverifiable) — failing closed"
+                )
+
+    TERM_GRACE = 5.0
+    KILL_GRACE = 2.0
 
     def _reap(self, process: object) -> None:
-        """Terminate and wait for the given process. Filled in Task 5."""
-        raise NotImplementedError("filled in Task 5")
+        # Terminate → wait → kill → wait an OWNED Popen (no fingerprint gate — the caller
+        # holds this exact Popen, so it is unambiguously ours). Reaps the child: no zombie,
+        # no CPU-spinning poll loop, and a foreign pid can never be signalled.
+        try:
+            process.terminate()
+            process.wait(timeout=self.TERM_GRACE)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        except (ProcessLookupError, OSError):
+            return
+        try:
+            process.kill()
+            process.wait(timeout=self.KILL_GRACE)
+        except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
+            pass
 
     def health(self, handle: ProxyHandle) -> str:
-        """Return a health string for the given handle. Filled in Task 5."""
-        raise NotImplementedError("filled in Task 5")
+        if not self._identity_current(handle):
+            return "degraded"
+        for port in (handle.console_port, handle.gdb_port):
+            # Re-run the SAME address-specific ownership check as attach (round-8 F2): the
+            # child may still be alive but a foreign process may now own the loopback port.
+            # False/None ⇒ degraded, so health never blesses a stolen endpoint.
+            if self._identity.owns_listener(handle.backend_pid, "127.0.0.1", port) is not True:
+                return "degraded"
+            try:
+                conn = connect_tcp("127.0.0.1", port, deadline=Deadline.after(2.0), cancel=threading.Event())
+                conn.close()
+            except (BoundedIOTimeout, OSError):
+                return "degraded"
+        return "ready"
 
     def send_break(self, handle: ProxyHandle) -> None:
-        """Send a UART break signal through the proxy. Filled in Task 5."""
-        raise NotImplementedError("filled in Task 5")
+        # Revalidate ownership at SEND time (round-9 F1): never write BREAK control bytes to
+        # a recycled/foreign listener. Fail closed if our child is no longer current or no
+        # longer owns the console port. The exact escape is pinned by the PTY test (§6.4).
+        if not self._identity_current(handle):
+            raise ProxyIdentityError("send_break: agent-proxy child is no longer current")
+        if self._identity.owns_listener(handle.backend_pid, "127.0.0.1", handle.console_port) is not True:
+            raise ProxyIdentityError(f"send_break: child no longer owns console 127.0.0.1:{handle.console_port}")
+        conn = connect_tcp("127.0.0.1", handle.console_port, deadline=Deadline.after(2.0), cancel=threading.Event())
+        try:
+            conn.sendall(_BREAK_ESCAPE)
+        finally:
+            conn.close()
 
     def stop(self, handle: ProxyHandle) -> None:
-        """Stop the agent-proxy child gracefully. Filled in Task 5."""
-        raise NotImplementedError("filled in Task 5")
+        # Public close path (called much later, when pid reuse is possible): gate on the
+        # start-time fingerprint so a REUSED pid is never signalled, then reap. If this is
+        # no longer our child (exited / pid reused), just poll() to reap our own exited
+        # child if present. Idempotent.
+        if not self._identity_current(handle):
+            handle.process.poll()
+            return
+        self._reap(handle.process)
 
     def stop_by_identity(self, pid: int, start_time: str | None) -> None:
-        """Stop a process identified by pid + start-time fingerprint. Filled in Task 5."""
-        raise NotImplementedError("filled in Task 5")
+        # Stateless fenced reaper for crash recovery (round-6 F1): used by Layer-4
+        # reconciliation when the in-memory ProxyHandle/Popen is gone and only the durable
+        # (pid, start_time) survives. Signal by pid ONLY when the live start-time fingerprint
+        # matches — a reused pid is never signalled; a None fingerprint is unfenceable and
+        # refuses to signal (leak > kill-wrong-process). os.kill is safe here precisely
+        # because the fingerprint match proves it is still our old child.
+        if start_time is None:
+            return
+        observed = self._identity.identity(pid)
+        if observed is None or observed.start_time != start_time:
+            return
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = Deadline.after(self.TERM_GRACE)
+        while not deadline.expired():
+            if not self._identity.is_alive(pid):
+                return
+            time.sleep(0.05)
+        recheck = self._identity.identity(pid)
+        if recheck is not None and recheck.start_time == start_time:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                return
 
     def _identity_current(self, handle: ProxyHandle) -> bool:
-        """Check whether the handle's pid + start_time still matches the live process. Filled in Task 5."""
-        raise NotImplementedError("filled in Task 5")
+        if not self._identity.is_alive(handle.backend_pid):
+            return False
+        observed = self._identity.identity(handle.backend_pid)
+        if observed is None or observed.start_time is None:
+            return False
+        return observed.start_time == handle.backend_start_time
