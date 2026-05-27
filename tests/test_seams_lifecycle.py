@@ -233,3 +233,43 @@ def test_unsubscribe_stops_delivery():
     dispatcher.unsubscribe(_key(), "s")
     dispatcher.emit(LifecycleEvent(target_key=_key(), kind=LifecycleKind.BOOTING))
     assert sub.events == []
+
+
+def test_concurrent_emits_start_one_invalidate_per_subscriber_instance():
+    # Single-flight must hold even under CONCURRENT emits for the same target_key: two
+    # simultaneous lifecycle events against one wedged subscriber instance must start exactly
+    # ONE invalidate worker and leave exactly ONE outstanding overdue record — not two clobbering
+    # the same _overdue key, which would double-run teardown and hide a wedged worker from the
+    # Layer-4 reaper backstop. emit() is serialized per target_key to make this hold.
+    dispatcher = InProcessLifecycleDispatcher(teardown_deadline=0.2)
+    starts: list[int] = []
+    starts_lock = threading.Lock()
+    release = threading.Event()
+
+    class _CountingStuck:
+        def __init__(self) -> None:
+            self.force_dropped = threading.Event()
+
+        def invalidate(self, event: LifecycleEvent, deadline: float) -> None:
+            with starts_lock:
+                starts.append(1)
+            release.wait(30)  # wedge past the deadline; freed only at test teardown
+
+        def force_drop(self, event: LifecycleEvent) -> None:
+            self.force_dropped.set()
+
+    dispatcher.subscribe(_key(), "s", _CountingStuck())
+
+    def run() -> None:
+        dispatcher.emit(LifecycleEvent(target_key=_key(), kind=LifecycleKind.CRASHED))
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    try:
+        assert sum(starts) == 1  # exactly one invalidate worker, despite two concurrent emits
+        assert dispatcher.outstanding_overdue() == 1  # one wedged worker tracked, not zero or two
+    finally:
+        release.set()  # let the wedged worker exit

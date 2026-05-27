@@ -113,6 +113,13 @@ class InProcessLifecycleDispatcher:
         # name never overwrites/hides its still-stuck predecessor) and is single-flight per
         # instance. id() is stable while the worker is alive (it references the subscriber).
         self._overdue: dict[tuple[TargetKey, str, int], threading.Thread] = {}
+        # Per-TargetKey emit serialization: the single-flight check ("is this instance already
+        # overdue?") and the overdue-recording happen in two separate self._lock critical sections
+        # with worker starts in between, so two CONCURRENT emits for the same target could both
+        # pass the check and each start an invalidate() for the same wedged instance, clobbering
+        # one _overdue record and hiding a stuck worker from the reaper. Serializing emit() per
+        # target closes that window; different targets still emit concurrently.
+        self._emit_locks: dict[TargetKey, threading.Lock] = {}
 
     def subscribe(self, target_key: TargetKey, name: str, subscriber: LifecycleSubscriber) -> None:
         with self._lock:
@@ -123,6 +130,14 @@ class InProcessLifecycleDispatcher:
             subscribers = self._subscribers.get(target_key)
             if subscribers is not None:
                 subscribers.pop(name, None)
+
+    def _emit_lock(self, target_key: TargetKey) -> threading.Lock:
+        with self._lock:
+            lock = self._emit_locks.get(target_key)
+            if lock is None:
+                lock = threading.Lock()
+                self._emit_locks[target_key] = lock
+            return lock
 
     def _prune_overdue(self) -> None:  # caller holds self._lock
         self._overdue = {key: worker for key, worker in self._overdue.items() if worker.is_alive()}
@@ -172,55 +187,59 @@ class InProcessLifecycleDispatcher:
     def emit(self, event: LifecycleEvent) -> InvalidationResult:
         # §4.5 step 2 (teardown). The caller (AdmissionService.invalidate_lifecycle) has already
         # run step 1 — admission is closed for this target_key, so no new admit can enter the
-        # owner-free window while subscribers release leases/guards below.
-        with self._lock:
-            targeted = dict(self._subscribers.get(event.target_key, {}))
-            self._prune_overdue()
-            # Single-flight is keyed on the *subscriber instance*: a name is skipped only if the
-            # currently-registered subscriber instance for it is the one still wedged. A new
-            # subscriber registered under a reused name (its predecessor still overdue) has a
-            # different id, so it is NOT skipped — its new live binding is still torn down, and
-            # the predecessor's worker stays separately tracked/observable.
-            already_overdue = {
-                name for name, sub in targeted.items() if (event.target_key, name, id(sub)) in self._overdue
-            }
-        errors: dict[str, str] = {}
-        overdue: list[str] = list(already_overdue)
-        for name in already_overdue:
-            errors[name] = "subscriber still overdue from a prior event; not re-invoked (single-flight)"
-        runnable = {name: sub for name, sub in targeted.items() if name not in already_overdue}
-        # Phase 1: invalidate() the runnable subscribers, concurrently under one shared deadline.
-        inv_boxes, inv_alive, inv_workers = self._run_bounded(
-            {name: (lambda s=sub: s.invalidate(event, self._teardown_deadline)) for name, sub in runnable.items()}
-        )
-        with self._lock:
-            for name in inv_alive:
-                self._overdue[(event.target_key, name, id(runnable[name]))] = inv_workers[name]  # per-instance
-        for name in runnable:
-            if name not in inv_alive and "error" in inv_boxes[name]:
-                errors[name] = inv_boxes[name]["error"]
-        # Phase 2: force_drop() the newly-overdue ones, concurrently under one shared deadline.
-        force_dropped: list[str] = []
-        if inv_alive:
-            for name in inv_alive:
-                overdue.append(name)
-                errors[name] = f"invalidate exceeded {self._teardown_deadline}s; force_drop invoked"
-            fd_boxes, fd_alive, _ = self._run_bounded(
-                {name: (lambda s=runnable[name]: s.force_drop(event)) for name in inv_alive}
+        # owner-free window while subscribers release leases/guards below. Serialized per
+        # target_key so the single-flight check below cannot race a concurrent emit for the same
+        # target (which would start two invalidate workers for one instance); other targets are
+        # unaffected. Holding this across the deadline keeps each emit bounded at ~2×deadline.
+        with self._emit_lock(event.target_key):
+            with self._lock:
+                targeted = dict(self._subscribers.get(event.target_key, {}))
+                self._prune_overdue()
+                # Single-flight is keyed on the *subscriber instance*: a name is skipped only if
+                # the currently-registered subscriber instance for it is the one still wedged. A
+                # new subscriber registered under a reused name (its predecessor still overdue)
+                # has a different id, so it is NOT skipped — its new live binding is still torn
+                # down, and the predecessor's worker stays separately tracked/observable.
+                already_overdue = {
+                    name for name, sub in targeted.items() if (event.target_key, name, id(sub)) in self._overdue
+                }
+            errors: dict[str, str] = {}
+            overdue: list[str] = list(already_overdue)
+            for name in already_overdue:
+                errors[name] = "subscriber still overdue from a prior event; not re-invoked (single-flight)"
+            runnable = {name: sub for name, sub in targeted.items() if name not in already_overdue}
+            # Phase 1: invalidate() the runnable subscribers, concurrently under one shared deadline.
+            inv_boxes, inv_alive, inv_workers = self._run_bounded(
+                {name: (lambda s=sub: s.invalidate(event, self._teardown_deadline)) for name, sub in runnable.items()}
             )
-            for name in inv_alive:
-                if name in fd_alive:
-                    errors[name] = (
-                        "invalidate and force_drop both exceeded the deadline; registry reaper is the backstop"
-                    )
-                elif "error" in fd_boxes[name]:
-                    errors[name] = f"force_drop error: {fd_boxes[name]['error']}"
-                else:
-                    force_dropped.append(name)
-        return InvalidationResult(
-            target_key=event.target_key,
-            kind=event.kind,
-            errors=errors,
-            overdue=tuple(overdue),
-            force_dropped=tuple(force_dropped),
-        )
+            with self._lock:
+                for name in inv_alive:
+                    self._overdue[(event.target_key, name, id(runnable[name]))] = inv_workers[name]  # per-instance
+            for name in runnable:
+                if name not in inv_alive and "error" in inv_boxes[name]:
+                    errors[name] = inv_boxes[name]["error"]
+            # Phase 2: force_drop() the newly-overdue ones, concurrently under one shared deadline.
+            force_dropped: list[str] = []
+            if inv_alive:
+                for name in inv_alive:
+                    overdue.append(name)
+                    errors[name] = f"invalidate exceeded {self._teardown_deadline}s; force_drop invoked"
+                fd_boxes, fd_alive, _ = self._run_bounded(
+                    {name: (lambda s=runnable[name]: s.force_drop(event)) for name in inv_alive}
+                )
+                for name in inv_alive:
+                    if name in fd_alive:
+                        errors[name] = (
+                            "invalidate and force_drop both exceeded the deadline; registry reaper is the backstop"
+                        )
+                    elif "error" in fd_boxes[name]:
+                        errors[name] = f"force_drop error: {fd_boxes[name]['error']}"
+                    else:
+                        force_dropped.append(name)
+            return InvalidationResult(
+                target_key=event.target_key,
+                kind=event.kind,
+                errors=errors,
+                overdue=tuple(overdue),
+                force_dropped=tuple(force_dropped),
+            )

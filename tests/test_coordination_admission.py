@@ -802,3 +802,49 @@ def test_publish_snapshot_serializes_with_the_admission_key_lock():
     worker.join(2.0)
     assert published.is_set()  # released once the critical section ended
     assert store.get(_key()).generation == 1
+
+
+def test_complete_on_cancelled_handle_is_rejected():
+    # A handle cancelled by close_admission must NOT be completable as success: complete()
+    # deregisters the binding, and a cancelled binding deregistered before the reaper proves
+    # teardown would let reopen() admit new work alongside still-live backend/lease/guard
+    # (§4.5/§5.4 teardown-before-reopen). A cancelled handle must roll back (or abandon after
+    # confirm_reaped), never complete. Mirrors the cancel guard promote() already enforces.
+    store = SnapshotStore()
+    store.put(_key(), _snapshot(generation=0))
+    service = AdmissionService(store)
+    handle = service.admit(_key(), _request())
+    service.promote(handle)
+    service.close_admission(_key())  # cancels the live binding
+    with pytest.raises(AdmissionError) as excinfo:
+        service.complete(handle)
+    assert excinfo.value.code == "admission_cancelled"
+    # the binding is still registered, so reopen stays blocked until it is rolled back
+    store.put(_key(), _snapshot(generation=1))
+    with pytest.raises(AdmissionError) as outstanding:
+        service.reopen(_key())
+    assert outstanding.value.code == "bindings_outstanding"
+    service.rollback(handle)  # the correct cancel path disposes it
+    service.reopen(_key())
+    assert service.admit(_key(), _request(generation=1)).state is AdmissionState.PENDING
+
+
+def test_cancelled_ssh_tier_op_cannot_be_completed():
+    # An async-halt-cancelled ssh-tier op must not be marked completed — completing it would
+    # report success for an op whose result is invalid against the halted/torn-down kernel
+    # (§5.6). It rolls back instead.
+    service = _service(_snapshot(generation=1, state=TargetState.DEBUGGING))
+    ssh = service.admit_ssh_tier(
+        _key(),
+        1,
+        _platform(),
+        execution_proof=ExecutionProof(
+            generation=1, epoch=service.current_execution_epoch(_key()), state=ExecutionState.EXECUTING
+        ),
+    )
+    service.cancel_ssh_tier(_key(), 1)
+    assert ssh.cancelled
+    with pytest.raises(AdmissionError) as excinfo:
+        service.complete(ssh)
+    assert excinfo.value.code == "admission_cancelled"
+    service.rollback(ssh)  # the correct path for a cancelled op

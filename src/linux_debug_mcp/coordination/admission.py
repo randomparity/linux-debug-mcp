@@ -586,11 +586,24 @@ class AdmissionService:
             return handle
 
     def complete(self, handle: AdmissionHandle) -> None:
-        """Normal terminal disposal: a finished ssh-tier op or a cleanly-closed (already
-        PROMOTED) session. A **PENDING transport.open may NOT be completed** — it must promote
-        on success or rollback on failure; completing it straight from PENDING would deregister
-        an in-flight open without rolling back its partial guard/lease/backend resources."""
+        """Normal **success** terminal disposal: a finished ssh-tier op or a cleanly-closed
+        (already PROMOTED) session. A **cancelled handle may NOT be completed** — close_admission
+        / cancel_ssh_tier set the cancel fence to tear the binding down, and completing it would
+        deregister the binding (mirroring abandon/rollback) before the reaper has proven its
+        backend/lease/guard were reclaimed, letting reopen() admit a new incarnation alongside
+        still-live resources (§4.5/§5.4) or report success for an op invalid against a
+        halted/torn-down kernel (§5.6). A cancelled handle must rollback, or abandon after
+        confirm_reaped. This mirrors the cancel guard promote() already enforces. A **PENDING
+        transport.open may NOT be completed** either — it must promote on success or rollback on
+        failure; completing it straight from PENDING would deregister an in-flight open without
+        rolling back its partial guard/lease/backend resources."""
         with self._key_lock(handle.target_key):
+            if handle.cancelled:
+                raise AdmissionError(
+                    "a cancelled handle must roll back (or abandon after confirm_reaped), not complete",
+                    category=ErrorCategory.READINESS_FAILURE,
+                    code="admission_cancelled",
+                )
             if handle.state is AdmissionState.PENDING and handle.op is AdmissionOp.TRANSPORT_OPEN:
                 raise AdmissionError(
                     "a pending transport.open must promote or roll back, not complete",
