@@ -35,6 +35,26 @@ def private_runtime_lock_dir(*, base: Path | None = None) -> Path:
     return lock_dir
 
 
+def private_runtime_registry_dir(*, base: Path | None = None) -> Path:
+    """Resolve the host-global, uid-isolated durable-registry directory (ADR 0005).
+
+    Sibling of the lock dir: ``$XDG_RUNTIME_DIR/linux-debug-mcp/registry`` (or the
+    ``<base>/linux-debug-mcp-<uid>/registry`` fallback), with the same symlink/owner/0700
+    validation. Holds one ``TransportSession`` JSON record per TargetKey, the recovery
+    tombstones, and the single-instance ``instance.lock`` flock.
+    """
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        base_dir = Path(runtime_dir) / "linux-debug-mcp"
+    else:
+        root = base if base is not None else Path(tempfile.gettempdir())
+        base_dir = root / f"linux-debug-mcp-{os.getuid()}"
+    _ensure_private(base_dir)
+    registry_dir = base_dir / "registry"
+    _ensure_private(registry_dir)
+    return registry_dir
+
+
 def device_lock_filename(device: str) -> str:
     """Return the host-global source-exclusivity lock filename for ``device``.
 

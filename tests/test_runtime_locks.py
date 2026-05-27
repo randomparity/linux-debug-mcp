@@ -8,6 +8,7 @@ from linux_debug_mcp.safety.runtime_locks import (
     RuntimeLockError,
     device_lock_filename,
     private_runtime_lock_dir,
+    private_runtime_registry_dir,
 )
 
 
@@ -63,6 +64,30 @@ def test_rejects_world_writable_fallback_dir(tmp_path: Path, monkeypatch: pytest
 
     with pytest.raises(RuntimeLockError):
         private_runtime_lock_dir(base=tmp_path)
+
+
+def test_registry_dir_prefers_xdg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    result = private_runtime_registry_dir()
+    assert result == tmp_path / "linux-debug-mcp" / "registry"
+    assert result.is_dir()
+    assert (result.stat().st_mode & 0o777) == 0o700
+
+
+def test_registry_dir_fallback_when_no_xdg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    result = private_runtime_registry_dir(base=tmp_path)
+    assert result == tmp_path / f"linux-debug-mcp-{os.getuid()}" / "registry"
+    assert result.is_dir()
+
+
+def test_registry_dir_rejects_symlink(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    base = tmp_path / "linux-debug-mcp"
+    base.mkdir(parents=True)
+    (base / "registry").symlink_to(tmp_path)
+    with pytest.raises(RuntimeLockError):
+        private_runtime_registry_dir()
 
 
 def test_device_lock_filename_is_sha256_namespaced() -> None:
