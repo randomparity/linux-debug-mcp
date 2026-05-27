@@ -74,8 +74,12 @@ def allocate_loopback_ports(count: int) -> list[tuple[int, socket.socket]]:
     try:
         for _ in range(count):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(("127.0.0.1", 0))
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("127.0.0.1", 0))
+            except OSError:
+                sock.close()
+                raise
             holders.append((sock.getsockname()[1], sock))
     except OSError:
         for _port, sock in holders:
@@ -119,4 +123,5 @@ def spawn(argv: list[str], *, deadline: Deadline, cancel: threading.Event, **pop
     cancelled attach never spawns.
     """
     _slice(deadline, cancel)
-    return subprocess.Popen(argv, shell=False, **popen_kwargs)  # noqa: S603 - list argv, never a shell
+    # list argv, never a shell — not a shell injection vector
+    return subprocess.Popen(argv, shell=False, **popen_kwargs)

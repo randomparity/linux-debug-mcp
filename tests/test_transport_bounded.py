@@ -1,4 +1,5 @@
 import socket
+import sys
 import threading
 import time
 
@@ -13,6 +14,7 @@ from linux_debug_mcp.transport.bounded import (
     check_not_cancelled,
     connect_tcp,
     open_device,
+    spawn,
 )
 
 
@@ -45,7 +47,7 @@ def test_connect_tcp_succeeds_to_a_live_loopback_listener():
         listener.close()
 
 
-def test_connect_tcp_times_out_against_a_dead_port():
+def test_connect_tcp_raises_on_refused_or_dead_port():
     # Bind+close to obtain a port nothing is listening on.
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     probe.bind(("127.0.0.1", 0))
@@ -109,6 +111,48 @@ def test_open_device_opens_a_pty_slave():
         fd = open_device(name, deadline=Deadline.after(1.0), cancel=threading.Event())
         assert fd >= 0
         _os.close(fd)
+    finally:
+        _os.close(master)
+        _os.close(slave)
+
+
+def test_spawn_raises_when_cancelled_and_never_spawns():
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(BoundedIOCancelled):
+        spawn([sys.executable, "-c", "pass"], deadline=Deadline.after(1.0), cancel=cancel)
+
+
+def test_spawn_starts_a_subprocess_to_completion():
+    proc = spawn([sys.executable, "-c", "pass"], deadline=Deadline.after(5.0), cancel=threading.Event())
+    proc.wait(timeout=5)
+    assert proc.returncode == 0
+
+
+def test_await_accept_raises_when_cancelled_before_start():
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    cancel = threading.Event()
+    cancel.set()
+    try:
+        with pytest.raises(BoundedIOCancelled):
+            await_accept(listener, deadline=Deadline.after(1.0), cancel=cancel)
+    finally:
+        listener.close()
+
+
+def test_open_device_raises_when_cancelled_before_start():
+    import os as _os
+    import pty
+
+    master, slave = pty.openpty()
+    name = _os.ttyname(slave)
+    cancel = threading.Event()
+    cancel.set()
+    try:
+        with pytest.raises(BoundedIOCancelled):
+            open_device(name, deadline=Deadline.after(1.0), cancel=cancel)
     finally:
         _os.close(master)
         _os.close(slave)
