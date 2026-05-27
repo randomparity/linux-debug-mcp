@@ -86,6 +86,34 @@ def test_console_only_path_bridges_a_pty_device_to_an_owner_only_unix_socket(tmp
         os.close(peripheral_fd)
 
 
+def test_console_only_attach_emits_a_console_socket_partial(tmp_path):
+    """Reconciliation (Layer 4) scans the run dir, but the console socket can fall back to a
+    tempdir outside it (F4). attach must emit a console_socket partial recording the resolved
+    socket path so the durable record links the inode back regardless of the fallback."""
+    import pty
+
+    controller_fd, peripheral_fd = pty.openpty()
+    peripheral_name = os.ttyname(peripheral_fd)
+    transport = SerialLocalTransport(socket_dir=tmp_path, lock_dir=tmp_path / "locks")
+    request = _request(LineRole.SHARED_CONSOLE, {"device": peripheral_name}, tmp_path)
+    partials: list[tuple[str, object]] = []
+    result = transport.attach(
+        request,
+        cancel=threading.Event(),
+        deadline=Deadline.after(2.0),
+        on_partial=lambda kind, value: partials.append((kind, value)),
+    )
+    try:
+        console_events = [value for kind, value in partials if kind == "console_socket"]
+        assert console_events, "expected a console_socket partial for Layer-4 reconciliation"
+        assert console_events[0]["socket_path"] == result.console_endpoint.path
+        assert console_events[0]["session_dir"] == os.path.dirname(result.console_endpoint.path)
+    finally:
+        transport.close(_StubSession(result.console_endpoint))
+        os.close(controller_fd)
+        os.close(peripheral_fd)
+
+
 def test_console_only_open_failure_after_listen_leaves_no_socket_or_session_dir(tmp_path, monkeypatch):
     """If the post-_listen step (thread start) raises, open() must route through stop():
     no leaked listener fd, no orphan socket inode, no leftover session dir, not registered."""

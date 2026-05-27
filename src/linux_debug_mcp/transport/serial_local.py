@@ -227,6 +227,10 @@ class SerialConsoleBridge:
         except OSError:
             pass
 
+    @property
+    def session_dir(self) -> str:
+        return self._session_dir
+
     def is_alive(self) -> bool:
         thread = self._thread
         return thread is not None and thread.is_alive() and os.path.exists(self.socket_path)
@@ -284,7 +288,7 @@ class SerialLocalTransport(Transport):
                 return self._attach_demux(
                     request, device, lock_fd, cancel=cancel, deadline=bounded, on_partial=on_partial
                 )
-            return self._attach_console_only(device, lock_fd, cancel=cancel, deadline=bounded)
+            return self._attach_console_only(device, lock_fd, cancel=cancel, deadline=bounded, on_partial=on_partial)
         except BaseException:
             self._close_fd(lock_fd)
             raise
@@ -374,8 +378,12 @@ class SerialLocalTransport(Transport):
         *,
         cancel: threading.Event,
         deadline: Deadline,
+        on_partial: OnPartial,
     ) -> BackendAttachment:
         bridge = SerialConsoleBridge.open(socket_dir=self._socket_dir, device=device, deadline=deadline, cancel=cancel)
+        # Record the resolved socket path so Layer-4 reconciliation can find the inode even on
+        # the mkdtemp fallback branch, where it lives outside <run>/debug/ (F4).
+        on_partial("console_socket", {"socket_path": bridge.socket_path, "session_dir": bridge.session_dir})
         self._bridges[bridge.socket_path] = bridge
         self._bridge_lock_fds[bridge.socket_path] = lock_fd
         return BackendAttachment(
