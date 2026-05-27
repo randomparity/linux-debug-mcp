@@ -262,12 +262,19 @@ class AdmissionService:
         with self._key_lock(target_key):
             return self._exec_epoch.get(target_key, 0)
 
-    def note_execution_transition(self, target_key: TargetKey) -> int:
+    def note_execution_transition(self, target_key: TargetKey, generation: int) -> int:
         """Layer 4 calls this on EVERY execution-state transition the stop-capable controller
         causes (`EXECUTING→HALTED`, `HALTED→EXECUTING`, `→UNKNOWN`). It bumps the execution epoch so
         any `ExecutionProof` stamped before the transition no longer matches — a stale `EXECUTING`
-        can never be replayed across a halt. Returns the new epoch."""
+        can never be replayed across a halt. **Generation-fenced:** `generation` is the incarnation
+        the transition was observed at; the bump fires only when it matches the authoritative
+        snapshot generation, so a transition from a PRIOR incarnation (a stale/late controller)
+        cannot poison the current epoch and spuriously reject a fresh current-generation EXECUTING
+        proof (§5.6). Returns the (possibly unchanged) current epoch."""
         with self._key_lock(target_key):
+            snapshot = self._store.get(target_key)
+            if snapshot is None or generation != snapshot.generation:
+                return self._exec_epoch.get(target_key, 0)
             epoch = self._exec_epoch.get(target_key, 0) + 1
             self._exec_epoch[target_key] = epoch
             return epoch
@@ -549,13 +556,18 @@ class AdmissionService:
         SSH_TIER binding **of the given generation** (their owners then roll back) WITHOUT closing
         admission — the target is still DEBUGGING, not torn down, so once it resumes a fresh
         EXECUTING proof can admit ssh work again. **Generation-fenced:** a late HALTED from a prior
-        incarnation (an old controller/stale worker) carries that incarnation's generation and so
-        cannot cancel ssh work admitted after a reset/reopen on a newer generation. transport.open
-        (stop-capable) bindings are untouched. The halt that triggers this IS an execution-state
-        transition, so it **bumps the execution epoch** — an `EXECUTING` proof stamped before the
-        halt can never be replayed to admit a new ssh op afterwards. Returns the cancelled handles."""
+        incarnation (an old controller/stale worker) carries that incarnation's generation and is
+        a **complete no-op** when it does not match the authoritative snapshot generation — it
+        cancels no handle AND does NOT bump the execution epoch, so it cannot invalidate a fresh
+        current-generation EXECUTING proof and spuriously reject ssh-tier admission while EXECUTING
+        (§5.6). transport.open (stop-capable) bindings are untouched. Only a current-generation
+        halt **bumps the execution epoch** — an `EXECUTING` proof stamped before that halt can
+        never be replayed to admit a new ssh op afterwards. Returns the cancelled handles."""
         with self._key_lock(target_key):
-            self._exec_epoch[target_key] = self._exec_epoch.get(target_key, 0) + 1  # the halt is a transition
+            snapshot = self._store.get(target_key)
+            if snapshot is None or generation != snapshot.generation:
+                return []  # stale/unknown generation: prior-incarnation event, no epoch bump
+            self._exec_epoch[target_key] = self._exec_epoch.get(target_key, 0) + 1  # current-gen halt is a transition
             cancelled = [
                 h
                 for h in self._bindings.get(target_key, ())

@@ -848,3 +848,37 @@ def test_cancelled_ssh_tier_op_cannot_be_completed():
         service.complete(ssh)
     assert excinfo.value.code == "admission_cancelled"
     service.rollback(ssh)  # the correct path for a cancelled op
+
+
+def test_stale_generation_cancel_does_not_advance_the_current_execution_epoch():
+    # A late HALTED from a prior incarnation must be a FULL no-op: it cancels no current handle
+    # AND must not bump the current execution epoch. A leaked epoch bump would invalidate a fresh
+    # current-generation EXECUTING proof and spuriously reject ssh-tier admission while EXECUTING,
+    # contradicting §5.6 (ssh-tier is permitted while EXECUTING, rejected only while HALTED).
+    service = _service(_snapshot(generation=5, state=TargetState.DEBUGGING))
+    epoch = service.current_execution_epoch(_key())
+    proof = ExecutionProof(generation=5, epoch=epoch, state=ExecutionState.EXECUTING)
+    cancelled = service.cancel_ssh_tier(_key(), 4)  # stale prior-incarnation cancel
+    assert cancelled == []
+    assert service.current_execution_epoch(_key()) == epoch  # epoch did NOT advance
+    # the fresh current-generation EXECUTING proof still admits
+    handle = service.admit_ssh_tier(_key(), 5, _platform(), execution_proof=proof)
+    assert handle.state is AdmissionState.PENDING
+
+
+def test_note_execution_transition_is_generation_fenced():
+    # note_execution_transition bumps the epoch only for the CURRENT authoritative generation: a
+    # transition observed at a prior incarnation must not poison the current epoch (else a fresh
+    # current-generation EXECUTING proof would be rejected though no current-generation halt
+    # occurred). A current-generation transition does bump and invalidate pre-transition proofs.
+    service = _service(_snapshot(generation=5, state=TargetState.DEBUGGING))
+    epoch = service.current_execution_epoch(_key())
+    assert service.note_execution_transition(_key(), 4) == epoch  # stale generation -> no bump
+    assert service.current_execution_epoch(_key()) == epoch
+    bumped = service.note_execution_transition(_key(), 5)  # current generation -> bumps
+    assert bumped == epoch + 1
+    assert service.current_execution_epoch(_key()) == epoch + 1
+    stale = ExecutionProof(generation=5, epoch=epoch, state=ExecutionState.EXECUTING)
+    with pytest.raises(AdmissionError) as excinfo:
+        service.admit_ssh_tier(_key(), 5, _platform(), execution_proof=stale)
+    assert excinfo.value.code == "execution_state_unknown"
