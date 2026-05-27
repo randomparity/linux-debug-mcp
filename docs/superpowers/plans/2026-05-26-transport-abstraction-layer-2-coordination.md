@@ -62,6 +62,37 @@ Layer 2 produces working, unit-tested primitives that Layer 4 wires to real reso
 
 ---
 
+## Decisions & rejected alternatives
+
+These are settled; do not relitigate them in implementation or in a re-review round
+without new evidence (see `CLAUDE.md` → "Design decisions (ADRs)").
+
+- **Execution-state gate ownership — [ADR 0001](../../adr/0001-layer2-layer4-execution-state-gate-split.md).**
+  Layer 4 owns the bounded liveness *probe*; Layer 2 owns ssh-tier admission
+  binding/fence/lifecycle and admits a `DEBUGGING` target only on a fresh, **generation-
+  and epoch-fenced** `ExecutionProof`. *Rejected:* a Layer-2 `ExecutionStateStore` cached
+  flag (stale-`EXECUTING` hazard), full Layer-2 fail-closed (loses the shared
+  binding/cancel/lifecycle for `DEBUGGING` ssh ops), and an `ExecutionStateGate` callback
+  under the admission lock (could wedge `close_admission`).
+- **§4.5 close-before-teardown ordering.** Enforced by
+  `AdmissionService.invalidate_lifecycle` (run `close_admission` to completion, *then*
+  `dispatcher.emit`); the dispatcher is step-2 (teardown) only. *Rejected:* admission close
+  as a `LifecycleSubscriber`/pre-close hook inside `emit` — concurrent with teardown
+  (owner-free window), and a best-effort/bounded hook can fail open.
+- **Break disproof scope is method-aware.** Line-bound methods
+  (`gdbstub_native`/`uart_break`/`agent_proxy_break`) are per-channel; `SYSRQ_G` is
+  target-wide (ssh-issued, kernel-scoped preconditions). *Rejected:* a single
+  channel-scoped key for all methods — lets a sibling channel rescue a target-wide SysRq
+  disproof.
+- **Snapshot publication shares the admission key-lock** (`publish_snapshot`); guard
+  `release(target_key, token)` is TargetKey-fenced; `abandon` requires reaper
+  `confirm_reaped`; overdue subscribers are reported per instance. *Rejected:* raw
+  `SnapshotStore.put` on the live path (generation bump can split an admit), `release(token)`
+  (a misrouted token frees the wrong target), and disposing a cancelled binding before
+  teardown is proven.
+
+---
+
 ## File Structure
 
 - Create: `src/linux_debug_mcp/coordination/__init__.py` — empty package marker.

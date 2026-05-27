@@ -70,6 +70,22 @@ the `TransportSession` it produces.
    adapter registers the `TargetKey` snapshot at `READY` so those ops can resolve a
    key and be execution-state-gated.
 
+### 1.4 Design decisions (ADRs)
+
+This issue ships across five layers (see the roadmap layer map); Layer 1 is merged and
+Layer 2 is planned, but **Layers 3 (backends), 4 (the `open()` transaction + registry +
+recovery + endpoint-safety + ssh gating), and 5 (auxiliary tools/discovery) are not yet
+designed.** Decisions this design does **not** dictate — layer boundaries, ownership
+splits, concurrency invariants with viable alternatives — are recorded as ADRs under
+[`docs/adr/`](../../adr/README.md) before implementation, each with a mandatory
+"Considered & rejected" list so a later layer (or an adversarial-review round) does not
+relitigate a settled choice. Decisions already recorded:
+
+- [ADR 0001](../../adr/0001-layer2-layer4-execution-state-gate-split.md) — the
+  Layer-2/Layer-4 split for the execution-state gate: Layer 4 owns the bounded liveness
+  *probe*; Layer 2 owns ssh-tier admission *binding/fence/lifecycle* and admits a
+  `DEBUGGING` target only on a fresh, generation- and epoch-fenced `ExecutionProof`.
+
 ## 2. Package layout
 
 ```
