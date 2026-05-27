@@ -1,7 +1,9 @@
 # tests/test_session_registry.py
 from datetime import UTC, datetime
 
-from linux_debug_mcp.coordination.registry import RecoveryTombstone, SessionRegistry
+import pytest
+
+from linux_debug_mcp.coordination.registry import InstanceLockError, RecoveryTombstone, SessionRegistry
 from linux_debug_mcp.seams.target import TargetKey
 from linux_debug_mcp.transport.base import RecordState, TransportSession, new_session_id
 
@@ -66,3 +68,16 @@ def test_clear_tombstone_is_generation_fenced(tmp_path):
     reg.write_tombstone(RecoveryTombstone(target_key=key, generation=5, reason="halted"))
     reg.clear_tombstone(key, expected_generation=4)  # stale clear → no-op
     assert reg.read_tombstone(key) is not None
+
+
+def test_second_instance_fails_loud(tmp_path):
+    first = SessionRegistry(directory=tmp_path)
+    first.acquire_instance_lock()
+    second = SessionRegistry(directory=tmp_path)
+    with pytest.raises(InstanceLockError):
+        second.acquire_instance_lock()
+    first.release_instance_lock()
+    # once released, a new instance may acquire
+    third = SessionRegistry(directory=tmp_path)
+    third.acquire_instance_lock()
+    third.release_instance_lock()

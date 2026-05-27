@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from dataclasses import dataclass
@@ -32,6 +33,11 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
     os.replace(tmp, path)
 
 
+class InstanceLockError(RuntimeError):
+    """Raised when the host-global single-instance flock is already held — a second server
+    process must fail loud, never admit alongside the first (ADR 0005, spec §10.2)."""
+
+
 class SessionRegistry:
     """Durable, host-global ownership store (ADR 0005). One JSON record + optional tombstone
     per TargetKey, filenames derived from `TargetKey.recovery_key()` so opaque key parts are
@@ -39,6 +45,23 @@ class SessionRegistry:
 
     def __init__(self, *, directory: Path) -> None:
         self._dir = directory
+        self._lock_fd: int | None = None
+
+    def acquire_instance_lock(self) -> None:
+        path = self._dir / "instance.lock"
+        self._lock_fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(self._lock_fd)
+            self._lock_fd = None
+            raise InstanceLockError("another linux-debug-mcp server already holds the registry instance lock") from exc
+
+    def release_instance_lock(self) -> None:
+        if self._lock_fd is not None:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            os.close(self._lock_fd)
+            self._lock_fd = None
 
     def _record_path(self, target_key: TargetKey) -> Path:
         return self._dir / f"owner-{target_key.recovery_key()}.json"
