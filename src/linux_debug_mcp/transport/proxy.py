@@ -268,6 +268,11 @@ class AgentProxyBackend:
             raise ProxyIdentityError(f"send_break: child no longer owns console 127.0.0.1:{handle.console_port}")
         conn = connect_tcp("127.0.0.1", handle.console_port, deadline=Deadline.after(2.0), cancel=threading.Event())
         try:
+            # Re-verify ownership of the connected port immediately before the write, shrinking
+            # the check-then-write window to this adjacency. The residual race cannot be fully
+            # eliminated; the start-time fingerprint + this double check is the mitigation (§8.4).
+            if self._identity.owns_listener(handle.backend_pid, "127.0.0.1", handle.console_port) is not True:
+                raise ProxyIdentityError(f"send_break: child no longer owns console 127.0.0.1:{handle.console_port}")
             conn.sendall(_BREAK_ESCAPE)
         finally:
             conn.close()

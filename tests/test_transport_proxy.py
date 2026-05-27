@@ -424,6 +424,55 @@ def test_send_break_writes_the_pinned_escape_to_the_console_port():
     assert received and _BREAK_ESCAPE in received[0]
 
 
+def test_send_break_rechecks_ownership_after_connect_and_writes_nothing():
+    """The port can be stolen in the window between the pre-connect ownership check and the
+    write (F2). send_break must re-verify ownership AFTER connect, immediately before the
+    write, and refuse — writing no BREAK bytes to the now-foreign listener."""
+    from linux_debug_mcp.transport.proxy import _BREAK_ESCAPE
+
+    class _OwnsThenLoses:
+        def __init__(self):
+            self.owns_calls = 0
+
+        def identity(self, pid):
+            return ProcessIdentity(pid=pid, start_time="t", argv0="agent-proxy")
+
+        def is_alive(self, pid):
+            return True
+
+        def looks_like(self, pid, name_substr):
+            return True
+
+        def owns_listener(self, pid, host, port):
+            self.owns_calls += 1
+            return self.owns_calls == 1  # owned pre-connect, stolen by the post-connect re-check
+
+    listener, port = _live_listener()
+    received = []
+    accepted = threading.Event()
+
+    def _accept():
+        conn, _ = listener.accept()
+        accepted.set()
+        received.append(conn.recv(64))
+        conn.close()
+
+    threading.Thread(target=_accept, daemon=True).start()
+    probe = _OwnsThenLoses()
+    backend = AgentProxyBackend(spawner=_FakeSpawner(), identity_probe=probe)
+    handle = ProxyHandle(
+        process=_FakeProc(pid=1), backend_pid=1, backend_start_time="t", console_port=port, gdb_port=port
+    )
+    try:
+        with pytest.raises(ProxyIdentityError):
+            backend.send_break(handle)
+        assert probe.owns_calls == 2  # ownership was re-checked after connect
+        accepted.wait(timeout=2.0)
+        assert all(_BREAK_ESCAPE not in chunk for chunk in received)  # no BREAK bytes written
+    finally:
+        listener.close()
+
+
 def test_send_break_refuses_when_child_no_longer_owns_the_console_port():
     """A live listener answers, but our child no longer owns the port (owns_listener False):
     send_break must refuse rather than write BREAK bytes to a foreign listener (round-9 F1)."""
