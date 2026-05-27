@@ -266,6 +266,41 @@ class AdmissionService:
                 self._key_locks[target_key] = lock
             return lock
 
+    # --- ADR 0006: the (generation, execution_epoch) fence model -------------------------
+    # The async-halt gate is ONE state machine. `generation` rejects prior-incarnation events;
+    # `execution_epoch` (bumped by note_execution_transition on EVERY exec-state transition)
+    # rejects any ssh-tier op whose admitted epoch is stale relative to a halt. Two fences,
+    # applied uniformly:
+    #
+    #   transition            | generation fence            | epoch fence
+    #   ----------------------|-----------------------------|-----------------------------
+    #   note_execution_*      | bump only if gen == current | (defines the epoch)
+    #   admit_ssh_tier (DBG)  | proof.generation == current | proof.epoch == current
+    #   cancel_ssh_tier       | gen == current snapshot     | per-handle admit_epoch<=halt
+    #   complete (ssh-tier)   | (n/a)                       | admit_epoch == current (backstop)
+    #
+    # Authority to drive note_*/cancel_* is the live StopCapableGuard token (ADR 0002), not
+    # modelled here. The property pass (test_exec_state_machine.py) drives this table.
+    #
+    # `_generation_current` and `_epoch_stale_for_op` read the same key lock the callers already
+    # hold; both centralize a predicate that previously appeared inline in note_execution_transition,
+    # cancel_ssh_tier, and complete. The per-handle epoch FILTER in cancel_ssh_tier (admit_epoch <=
+    # halt_epoch) is intentionally NOT one of these named fences — it is a delayed-cancel window
+    # filter, not the "stale relative to current" equality the backstop expresses (§5.6 rule 2).
+    def _generation_current(self, target_key: TargetKey, generation: int) -> bool:
+        """Caller holds the key lock. True iff an authoritative snapshot exists for the key and its
+        generation equals `generation` — the generation fence shared by note_execution_transition
+        and cancel_ssh_tier to reject a prior-incarnation event (ADR 0006)."""
+        snapshot = self._store.get(target_key)
+        return snapshot is not None and generation == snapshot.generation
+
+    def _epoch_stale_for_op(self, handle: AdmissionHandle) -> bool:
+        """Caller holds the key lock. True iff `handle` is an ssh-tier op whose admitted execution
+        epoch no longer matches the target's current epoch — i.e. a transition (a halt) occurred
+        during its lifetime. The complete() backstop that rejects an op spanning a HALTED window
+        even before its cancel fence is delivered (ADR 0006, §5.6 rule 2)."""
+        return handle.op is AdmissionOp.SSH_TIER and handle.admit_epoch != self._exec_epoch.get(handle.target_key, 0)
+
     def current_execution_epoch(self, target_key: TargetKey) -> int:
         """The per-target execution epoch Layer 4 stamps onto an `ExecutionProof` right after it
         probes `EXECUTING` (§4.6). admit_ssh_tier admits only if the proof's epoch still matches,
@@ -291,8 +326,7 @@ class AdmissionService:
         no-op"). A detached session released its token, so its late event worker is non-authoritative
         and MUST NOT call this. Layer 2 does not duplicate the guard (ADR 0002, rejected option 1)."""
         with self._key_lock(target_key):
-            snapshot = self._store.get(target_key)
-            if snapshot is None or generation != snapshot.generation:
+            if not self._generation_current(target_key, generation):
                 return self._exec_epoch.get(target_key, 0)
             epoch = self._exec_epoch.get(target_key, 0) + 1
             self._exec_epoch[target_key] = epoch
@@ -636,8 +670,7 @@ class AdmissionService:
         authority (ADR 0002); the per-handle halt-epoch filter additionally bounds a *current*
         controller's own delayed cancel to the ops that were in flight across the halt."""
         with self._key_lock(target_key):
-            snapshot = self._store.get(target_key)
-            if snapshot is None or generation != snapshot.generation:
+            if not self._generation_current(target_key, generation):
                 return []  # stale/unknown generation: prior-incarnation event
             cancelled = [
                 h
@@ -687,7 +720,7 @@ class AdmissionService:
                     category=ErrorCategory.READINESS_FAILURE,
                     code="admission_cancelled",
                 )
-            if handle.op is AdmissionOp.SSH_TIER and handle.admit_epoch != self._exec_epoch.get(handle.target_key, 0):
+            if self._epoch_stale_for_op(handle):
                 # Epoch backstop for the window between a halt being RECORDED
                 # (note_execution_transition bumps the epoch synchronously) and the halt-cancel
                 # being DELIVERED (cancel_ssh_tier may be delayed). An ssh op is always admitted at
