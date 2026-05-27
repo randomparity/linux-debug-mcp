@@ -336,10 +336,7 @@ class SerialLocalTransport(Transport):
         except RuntimeLockError as exc:
             raise SerialLocalConfigError(str(exc), category=ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
         lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        # Key the lock on the canonical path so symlink aliases and "/.." segments collapse to
-        # one lock (§4.7). realpath resolves the filesystem name, not hardware identity: two
-        # genuinely distinct nodes for one chip still slip through. device stays the open target.
-        lock_path = lock_dir / device_lock_filename(os.path.realpath(device))
+        lock_path = lock_dir / device_lock_filename(self._source_lock_key(device))
         lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -351,6 +348,23 @@ class SerialLocalTransport(Transport):
             ) from exc
         os.set_inheritable(lock_fd, True)
         return lock_fd
+
+    @staticmethod
+    def _source_lock_key(device: str) -> str:
+        """Source-exclusivity identity. For a local character device, the device number
+        (major/minor) so every path to one node — symlink, hardlink, distinct mknod node,
+        bind mount — collapses to a single lock. Falls back to the canonical path for paths
+        that are not a local char device (a remote-terminal-server placeholder, or a device
+        that does not exist yet). The stat-vs-open window (a symlink swapped between this stat
+        and the later open) needs an untrusted writer in /dev (root/udev) and is out of scope
+        for the local-only threat model (§8.4)."""
+        try:
+            info = os.stat(device)
+        except OSError:
+            return os.path.realpath(device)
+        if not stat.S_ISCHR(info.st_mode):
+            return os.path.realpath(device)
+        return f"rdev:{info.st_rdev}"
 
     def _attach_demux(
         self,

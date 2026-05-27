@@ -464,6 +464,35 @@ def test_different_devices_do_not_conflict(tmp_path):
             os.close(fd)
 
 
+def test_source_lock_key_uses_device_number_for_char_devices(tmp_path):
+    """The source-exclusivity lock keys on the device number (st_rdev) for a local char device,
+    so every path to one node — symlink, hardlink, distinct mknod node, bind mount — collapses
+    to a single lock (F2). A symlink alias yields the identical key as its canonical name."""
+    import pty
+
+    master, slave = pty.openpty()
+    name = os.ttyname(slave)
+    try:
+        expected = f"rdev:{os.stat(name).st_rdev}"
+        assert SerialLocalTransport._source_lock_key(name) == expected
+        alias = tmp_path / "ttyAlias"
+        os.symlink(name, alias)
+        assert SerialLocalTransport._source_lock_key(str(alias)) == expected
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_source_lock_key_falls_back_for_non_char_and_missing_paths(tmp_path):
+    """Non-char devices (a remote-terminal-server placeholder) and paths that do not exist yet
+    have no device number, so the key falls back to the canonical path, never an rdev: key (F2)."""
+    regular = tmp_path / "regular.txt"
+    regular.write_text("not a device")
+    missing = tmp_path / "does-not-exist"
+    assert SerialLocalTransport._source_lock_key(str(regular)) == os.path.realpath(str(regular))
+    assert SerialLocalTransport._source_lock_key(str(missing)) == os.path.realpath(str(missing))
+
+
 def test_demux_health_is_degraded_when_the_in_memory_handle_is_lost(tmp_path):
     """A durable demux session with backend_pid but an empty handle map (post-restart)
     reports 'degraded', it does not raise KeyError (round-7 F3)."""

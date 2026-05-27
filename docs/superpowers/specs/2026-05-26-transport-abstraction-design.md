@@ -442,6 +442,10 @@ ownership plus startup reconciliation.
   (`/dev/tty*`, a unix socket), the backend takes an OS lock on it (`flock` /
   open-exclusive) so an orphaned agent-proxy still holding the line is *detectable*
   and a duplicate open fails fast instead of silently double-driving the line.
+  The per-device lock is keyed on the device number (`st_rdev`) so aliases
+  (symlink/hardlink/distinct mknod node/bind mount) collapse to one lock; the
+  residual stat-vs-open symlink-swap window assumes `/dev` is not concurrently
+  mutable by an untrusted party (§8.4).
 - **Startup reconciliation (before admission opens).** On `create_app()` the
   registry scans persisted records for the artifact root and, for every record that
   is **not `closed`** — `pending`/`opening` write-ahead records from a mid-open
