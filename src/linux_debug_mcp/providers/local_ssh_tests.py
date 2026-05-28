@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -87,6 +88,7 @@ class SshRunner(Protocol):
         stdout_path: Path,
         stderr_path: Path,
         cancel: threading.Event | None = None,
+        stdin: str | None = None,
     ) -> SshCommandResult:
         raise NotImplementedError
 
@@ -103,6 +105,7 @@ class SubprocessSshRunner:
         stdout_path: Path,
         stderr_path: Path,
         cancel: threading.Event | None = None,
+        stdin: str | None = None,
     ) -> SshCommandResult:
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
         stderr_path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,10 +119,28 @@ class SubprocessSshRunner:
                 argv,
                 stdout=stdout_file,
                 stderr=stderr_file,
+                stdin=subprocess.PIPE if stdin is not None else None,
                 text=True,
                 shell=False,
                 start_new_session=True,
             )
+            # R6-F4: write the wrapper on stdin and close so the remote can
+            # EOF and begin executing. The wrapper is bounded by
+            # SCRIPT_BYTE_CAP (~264 KiB worst case); Linux's default 64 KiB
+            # pipe buffer accommodates the typical payload non-blockingly,
+            # and the existing poll-and-cancel loop below remains the single
+            # source of truth for cancel/timeout. BrokenPipeError is
+            # suppressed so the polling loop reports the real process
+            # outcome instead of masking it with a stdin error.
+            if stdin is not None:
+                assert proc.stdin is not None
+                try:
+                    proc.stdin.write(stdin)
+                except BrokenPipeError:
+                    pass
+                finally:
+                    with contextlib.suppress(Exception):
+                        proc.stdin.close()
             ticks = 0
             while True:
                 try:

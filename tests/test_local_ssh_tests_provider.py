@@ -36,8 +36,17 @@ class FakeSshRunner:
         stdout_path: Path,
         stderr_path: Path,
         cancel: threading.Event | None = None,
+        stdin: str | None = None,
     ) -> SshCommandResult:
-        self.calls.append({"argv": argv, "timeout": timeout, "stdout_path": stdout_path, "stderr_path": stderr_path})
+        self.calls.append(
+            {
+                "argv": argv,
+                "timeout": timeout,
+                "stdout_path": stdout_path,
+                "stderr_path": stderr_path,
+                "stdin": stdin,
+            }
+        )
         result = self.results.pop(0) if self.results else SshCommandResult(exit_status=0, stdout="ok\n", stderr="")
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
         stderr_path.parent.mkdir(parents=True, exist_ok=True)
