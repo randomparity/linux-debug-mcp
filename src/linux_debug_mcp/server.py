@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -80,6 +81,7 @@ from linux_debug_mcp.safety.redaction import Redactor
 from linux_debug_mcp.safety.runtime_locks import private_runtime_registry_dir
 from linux_debug_mcp.seams.break_policy import ReferenceBreakPolicy
 from linux_debug_mcp.seams.guard import GuardConflict, InProcessStopCapableGuard
+from linux_debug_mcp.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleDispatcher
 from linux_debug_mcp.seams.secrets import EnvSecretsResolver
 from linux_debug_mcp.seams.target import (
     BreakHint,
@@ -1522,6 +1524,15 @@ def target_run_tests_handler(
             try:
                 execution = _execute_tests_under_gate(provider=provider, plan=plan, admission=admission, handle=handle)
             except AdmissionError as exc:
+                # The op spanned a halt (cancel_ssh_tier set the fence). The PROMOTED ssh-tier
+                # handle is cancelled but undisposed; without rollback it lingers in
+                # admission._bindings and would block reopen()/admit (`bindings_outstanding`). The
+                # target is NOT torn down by cancel_ssh_tier (admission stays open, §5.6), so the
+                # standard rollback path applies (no confirm_reaped gate). Guarded so a disposal
+                # hiccup never masks the original AdmissionError.
+                if handle is not None and admission is not None:
+                    with contextlib.suppress(Exception):
+                        admission.rollback(handle)
                 terminal = StepResult(
                     step_name="run_tests",
                     status=StepStatus.FAILED,
@@ -1537,6 +1548,12 @@ def target_run_tests_handler(
                     suggested_next_actions=["artifacts.collect"],
                 )
             except Exception as exc:
+                # The provider blew up after admit but before complete(). Symmetric to the halt path
+                # above: the PROMOTED handle is undisposed and would linger; rollback deregisters it
+                # cleanly. Guarded so the cleanup never masks the original exception detail.
+                if handle is not None and admission is not None:
+                    with contextlib.suppress(Exception):
+                        admission.rollback(handle)
                 terminal = StepResult(
                     step_name="run_tests",
                     status=StepStatus.FAILED,
@@ -1598,16 +1615,17 @@ def target_run_tests_handler(
 
 
 def _require_snapshot(admission: AdmissionService, target_key: TargetKey) -> TargetSnapshot:
-    """Read the authoritative snapshot for a target, raising the standard `stale_handle`
-    AdmissionError when boot has not published one yet. Single source of the
-    `current_snapshot(...) → raise if None` check shared by every snapshot-reading path
-    (transport.open request builders + inject_break)."""
+    """Read the authoritative snapshot for a target, raising `snapshot_missing` when boot has
+    not published one yet. `stale_handle` means a caller's handle/request is bound to a
+    now-superseded incarnation; "no snapshot exists at all" is a distinct precondition failure,
+    so it carries its own code. Single source of the `current_snapshot(...) → raise if None`
+    check shared by every snapshot-reading path (transport.open request builders + inject_break)."""
     snapshot = admission.current_snapshot(target_key)
     if snapshot is None:
         raise AdmissionError(
             "no authoritative snapshot for target; boot must publish a READY snapshot first",
             category=ErrorCategory.READINESS_FAILURE,
-            code="stale_handle",
+            code="snapshot_missing",
         )
     return snapshot
 
@@ -1766,19 +1784,34 @@ def debug_start_session_handler(
                     boot_metadata=boot_metadata,
                 )
             except ProviderDebugError as exc:
+                # The gdb attach failed AFTER transaction.open() committed a READY record + promoted
+                # the admission handle, and AFTER _halt_debug_transport persisted HALTED. Without
+                # closing, the guard stays held / record stays live / handle stays PROMOTED —
+                # so a subsequent debug.start_session on the same target would refuse with
+                # stop_capable_conflict and run_tests would stay gated `target_halted` forever.
+                # transaction.close(force=False) is the proper recovery path here: the attach
+                # FAILED mid-halt, so leaving a `closed_while_halted` tombstone is the right
+                # tombstone semantics (a future recovery=True reattach clears it). Guarded so a
+                # close hiccup never masks the original ProviderDebugError.
+                if transport_session is not None and transaction is not None:
+                    with contextlib.suppress(Exception):
+                        transaction.close(transport_session.session_id, force=False)
+                exc_details = dict(exc.details)
+                if transport_session is not None:
+                    exc_details["transport_session_id"] = transport_session.session_id
                 failed = StepResult(
                     step_name="debug",
                     status=StepStatus.FAILED,
                     summary=str(exc),
                     artifacts=exc.artifacts,
-                    details=redactor.redact_value(exc.details),
+                    details=redactor.redact_value(exc_details),
                 )
                 store.record_step_result(run_id, failed, replace_succeeded=replace_existing_debug)
                 return ToolResponse.failure(
                     category=exc.category,
                     message=redactor.redact_text(str(exc)),
                     run_id=run_id,
-                    details=redactor.redact_value(exc.details),
+                    details=redactor.redact_value(exc_details),
                     artifacts=_redacted_artifacts(exc.artifacts, redactor),
                     suggested_next_actions=["artifacts.get_manifest"],
                 )
@@ -1916,8 +1949,11 @@ def _fence_legacy_debug_session(
 ) -> None:
     """Version-skew fence (§4.7/B7). A DebugSession persisted before the transport-ownership model
     carries a raw gdbstub_endpoint but NO durable SessionRegistry record. On a WIRED server a
-    stateful debug.* op must NOT silently resume it — that would bypass the durable model and leave
-    target.run_tests blind to a kernel a stale session already halted.
+    stateful mutating debug.* op must NOT silently resume it — that would bypass the durable model
+    and leave target.run_tests blind to a kernel a stale session already halted. Per the B4
+    invariant, debug.* reads run under the StopCapableGuard (not the ssh-tier admission gate) and
+    do NOT take admission, so this fence's scope is the stateful mutating debug.* ops only;
+    pure-read debug.* paths are not routed through here.
 
     Additive: inert unless BOTH `admission` and `session_registry` are injected (every legacy caller
     passes neither). When wired:
@@ -3117,12 +3153,16 @@ class _TransportMachinery:
     """The Layer-4 coordination collaborators create_app threads into the transport/debug/run_tests
     tool wrappers (ADR 0005). One AdmissionService over one SnapshotStore so the boot snapshot
     producer and the transport gates share authoritative facts; one durable SessionRegistry holding
-    the host-global single-instance flock + ownership records."""
+    the host-global single-instance flock + ownership records. The `lifecycle_dispatcher` is the
+    shared §4.5 dispatcher bound into the transaction at construction; an out-of-band event source
+    drives `admission.invalidate_lifecycle(..., dispatcher, ...)` against this instance so the
+    transaction's _SessionSubscriber.force_drop() path is reachable from production."""
 
     session_registry: SessionRegistry
     admission: AdmissionService
     transaction: TransportTransaction
     transport_registry: TransportRegistry
+    lifecycle_dispatcher: LifecycleDispatcher
 
 
 def _default_local_transports() -> dict[str, Transport]:
@@ -3190,6 +3230,14 @@ def _build_transport_machinery(
         break_policy=ReferenceBreakPolicy(),
         transports=transports,
     )
+    # Bind the §4.5 lifecycle dispatcher so each opened session subscribes its
+    # _SessionSubscriber; an out-of-band event source can then drive
+    # `admission.invalidate_lifecycle(event, dispatcher, generation)` against this same instance and
+    # the transaction's force_drop teardown (FENCED guard/lease release + backend reap + record
+    # delete + handle deregistration) is reachable from production. There is no current production
+    # source of lifecycle events; binding is enough to make the path live when one arrives.
+    lifecycle_dispatcher = InProcessLifecycleDispatcher()
+    transaction.bind_lifecycle(lifecycle_dispatcher)
 
     # Single-instance flock + reconcile-before-serve: acquire the host-global lock, then reap orphan
     # backends / re-assert durable tombstones BEFORE any tool can admit. acquire_instance_lock()
@@ -3206,6 +3254,7 @@ def _build_transport_machinery(
         admission=admission,
         transaction=transaction,
         transport_registry=transport_registry,
+        lifecycle_dispatcher=lifecycle_dispatcher,
     )
 
 
@@ -3231,6 +3280,11 @@ def create_app(
     transport_transaction = machinery.transaction
     admission_service = machinery.admission
     durable_registry = machinery.session_registry
+    # Stash the assembled machinery on the FastMCP instance so test-injection and any future
+    # in-process lifecycle event source can reach the SAME admission/transaction/dispatcher trio
+    # the tool wrappers close over (rather than constructing a parallel set that would not share
+    # state with the live wrappers). Private attribute by convention; not part of the wire surface.
+    app._transport_machinery = machinery  # type: ignore[attr-defined]
 
     @app.tool(name="host.check_prerequisites")
     def host_check_prerequisites(
