@@ -301,6 +301,14 @@ class AdmissionService:
         even before its cancel fence is delivered (ADR 0006, §5.6 rule 2)."""
         return handle.op is AdmissionOp.SSH_TIER and handle.admit_epoch != self._exec_epoch.get(handle.target_key, 0)
 
+    def current_snapshot(self, target_key: TargetKey) -> TargetSnapshot | None:
+        """The authoritative TargetSnapshot for a key (or None if none was published). Read under
+        the same per-TargetKey lock as admit/publish so a caller (e.g. the ssh-tier gate in
+        target.run_tests) reads `generation`/`platform` consistently — never re-derives them — and
+        feeds them straight back into admit_ssh_tier without a publish interleaving in between."""
+        with self._key_lock(target_key):
+            return self._store.get(target_key)
+
     def current_execution_epoch(self, target_key: TargetKey) -> int:
         """The per-target execution epoch Layer 4 stamps onto an `ExecutionProof` right after it
         probes `EXECUTING` (§4.6). admit_ssh_tier admits only if the proof's epoch still matches,

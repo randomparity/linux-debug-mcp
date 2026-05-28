@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -28,7 +29,9 @@ from linux_debug_mcp.config import (
     merge_config_lines,
     merge_kernel_args,
 )
-from linux_debug_mcp.coordination.admission import AdmissionService
+from linux_debug_mcp.coordination.admission import AdmissionError, AdmissionService
+from linux_debug_mcp.coordination.exec_probe import probe_execution_state
+from linux_debug_mcp.coordination.registry import SessionRegistry
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
@@ -69,7 +72,7 @@ from linux_debug_mcp.seams.target import (
     TargetKey,
     publish_ready_snapshot,
 )
-from linux_debug_mcp.transport.base import LineRole, TransportRef
+from linux_debug_mcp.transport.base import ExecutionState, LineRole, TransportRef
 
 DEFAULT_ARTIFACT_ROOT = Path(".linux-debug-mcp/runs")
 SERVER_CONFIG_ENV_VAR = "LINUX_DEBUG_MCP_CONFIG"
@@ -212,6 +215,98 @@ def _recorded_test_success_response(*, run_id: str, result: StepResult) -> ToolR
         summary=redactor.redact_text(result.summary),
         run_id=run_id,
         data=redactor.redact_value(result.details),
+        artifacts=result.artifacts,
+        suggested_next_actions=["artifacts.collect"],
+    )
+
+
+def _admit_run_tests_ssh_tier(
+    *,
+    run_id: str,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+):
+    """The §5.6 ssh-tier execution-state gate for target.run_tests. Returns an AdmissionHandle when
+    both `admission` and `session_registry` are supplied, else None — when either is absent the gate
+    is inert and the caller runs ungated (every legacy caller passes neither). Reads `generation` and
+    `platform` from the authoritative snapshot the boot step published (never re-derives them), takes
+    a FRESH execution-state probe, and admits the ssh tier against it. A HALTED target makes
+    admit_ssh_tier raise AdmissionError(READINESS_FAILURE/target_halted); the caller maps it to a
+    failure response and never writes a RUNNING step."""
+    if admission is None or session_registry is None:
+        return None
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    snapshot = admission.current_snapshot(target_key)
+    if snapshot is None:
+        raise AdmissionError(
+            "no authoritative snapshot for target; boot must publish a READY snapshot first",
+            category=ErrorCategory.READINESS_FAILURE,
+            code="stale_handle",
+        )
+    proof = probe_execution_state(
+        registry=session_registry, admission=admission, target_key=target_key, generation=snapshot.generation
+    )
+    if proof.state is ExecutionState.HALTED:
+        # Fail-closed before admission: a HALTED kernel cannot serve an ssh test run, and admit_ssh_tier
+        # only inspects the proof for a DEBUGGING-state snapshot. The probe read the authoritative
+        # execution_state the stop-capable controller persisted, so a HALTED probe rejects regardless
+        # of the snapshot's coarse READY/DEBUGGING state (§5.6).
+        raise AdmissionError(
+            "target halted in debugger; resume or detach before running tests",
+            category=ErrorCategory.READINESS_FAILURE,
+            code="target_halted",
+        )
+    return admission.admit_ssh_tier(target_key, snapshot.generation, snapshot.platform, execution_proof=proof)
+
+
+def _execute_tests_under_gate(
+    *,
+    provider: LocalSshTestProvider,
+    plan: Any,
+    admission: AdmissionService | None,
+    handle: Any,
+):
+    """Run the ssh-tier test execution under the admission handle's cancel fence (§5.6) and dispose
+    the handle. When `handle` is None the gate is inert: run ungated, no cancel. Otherwise bridge the
+    handle's private halt-cancel into the runner's own Event with a TEARDOWN-BOUNDED daemon watcher
+    that POLLS `wait_cancelled` and is JOINED on every exit path — a fire-and-forget unbounded
+    `wait_cancelled(None)` would leak the thread and pin the completed handle on a clean run, because
+    complete()/_dispose_locked() never set `_cancel`. `admission.complete(handle)` raises
+    AdmissionError(execution_state_changed) when the op spanned a halt; that propagates so the caller
+    terminalizes the RUNNING step to FAILED instead of recording the (invalid) execution outcome."""
+    if handle is None or admission is None:
+        return provider.execute_tests(plan)
+
+    runner_cancel = threading.Event()
+    watch_done = threading.Event()
+
+    def _watch() -> None:
+        # bounded poll, NOT an unbounded park: complete()/_dispose_locked() never set the handle's
+        # _cancel, so wait_cancelled(None) would block forever on a clean run and leak the thread +
+        # the pinned completed handle + this closure.
+        while not watch_done.is_set():
+            if handle.wait_cancelled(0.1):
+                runner_cancel.set()
+                return
+
+    watcher = threading.Thread(target=_watch, daemon=True)
+    watcher.start()
+    try:
+        result = provider.execute_tests(plan, cancel=runner_cancel)
+        admission.complete(handle)  # may raise AdmissionError(execution_state_changed)
+        return result
+    finally:
+        watch_done.set()  # stop the poll loop on EVERY exit path
+        watcher.join(timeout=2)  # …and reap it before returning — no parked thread
+
+
+def _recorded_test_failure_response(*, run_id: str, result: StepResult) -> ToolResponse:
+    redactor = Redactor()
+    return ToolResponse.failure(
+        category=ErrorCategory.TEST_FAILURE,
+        message=redactor.redact_text(result.summary),
+        run_id=run_id,
+        details=redactor.redact_value(result.details),
         artifacts=result.artifacts,
         suggested_next_actions=["artifacts.collect"],
     )
@@ -1286,6 +1381,8 @@ def target_run_tests_handler(
     provider: LocalSshTestProvider | None = None,
     rootfs_profiles: dict[str, RootfsProfile] | None = None,
     test_suites: dict[str, TestSuiteProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -1342,6 +1439,8 @@ def target_run_tests_handler(
     existing = manifest.step_results.get("run_tests")
     if existing and existing.status == StepStatus.SUCCEEDED and not force_rerun:
         return _recorded_test_success_response(run_id=run_id, result=existing)
+    if existing and existing.status == StepStatus.FAILED and not force_rerun:
+        return _recorded_test_failure_response(run_id=run_id, result=existing)
 
     provider = provider or LocalSshTestProvider()
     try:
@@ -1350,6 +1449,8 @@ def target_run_tests_handler(
             existing = locked_manifest.step_results.get("run_tests")
             if existing and existing.status == StepStatus.SUCCEEDED and not force_rerun:
                 return _recorded_test_success_response(run_id=run_id, result=existing)
+            if existing and existing.status == StepStatus.FAILED and not force_rerun:
+                return _recorded_test_failure_response(run_id=run_id, result=existing)
             if existing and existing.status == StepStatus.RUNNING:
                 stale_failed = StepResult(
                     step_name="run_tests",
@@ -1372,6 +1473,18 @@ def target_run_tests_handler(
                 )
             except ValueError as exc:
                 return _configuration_failure(run_id=run_id, message=str(exc))
+            try:
+                handle = _admit_run_tests_ssh_tier(
+                    run_id=run_id, admission=admission, session_registry=session_registry
+                )
+            except AdmissionError as exc:
+                return ToolResponse.failure(
+                    category=exc.category,
+                    message=str(exc),
+                    run_id=run_id,
+                    details={"code": exc.code},
+                    suggested_next_actions=["artifacts.collect"],
+                )
             running = StepResult(
                 step_name="run_tests",
                 status=StepStatus.RUNNING,
@@ -1384,7 +1497,22 @@ def target_run_tests_handler(
             )
             store.record_step_result(run_id, running, replace_succeeded=force_rerun)
             try:
-                execution = provider.execute_tests(plan)
+                execution = _execute_tests_under_gate(provider=provider, plan=plan, admission=admission, handle=handle)
+            except AdmissionError as exc:
+                terminal = StepResult(
+                    step_name="run_tests",
+                    status=StepStatus.FAILED,
+                    summary="test run spanned an execution-state transition (target halted)",
+                    details={"provider": provider.name, "code": exc.code, "error": str(exc)},
+                )
+                store.record_step_result(run_id, terminal, replace_succeeded=True)
+                return ToolResponse.failure(
+                    category=exc.category,
+                    message=str(exc),
+                    run_id=run_id,
+                    details={"code": exc.code},
+                    suggested_next_actions=["artifacts.collect"],
+                )
             except Exception as exc:
                 terminal = StepResult(
                     step_name="run_tests",
