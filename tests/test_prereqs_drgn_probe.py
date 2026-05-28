@@ -1,8 +1,13 @@
 """Unit tests for the host-side drgn-probe core (spec §4-§5)."""
 
-from linux_debug_mcp.domain import PrerequisiteStatus
+from typing import Any
+
+from linux_debug_mcp.domain import PrerequisiteCheck, PrerequisiteStatus
 from linux_debug_mcp.prereqs.drgn_probe import (
+    UNKNOWN,
     UNUSABLE,
+    USABLE,
+    build_probe_checks,
     install_hint,
     normalize_build_id,
     python_missing_checks,
@@ -38,3 +43,117 @@ def test_python_missing_checks() -> None:
     assert by_id["target.drgn"].status == PrerequisiteStatus.SKIPPED
     assert by_id["target.vmlinux_debuginfo"].status == PrerequisiteStatus.SKIPPED
     assert verdict == UNUSABLE
+
+
+HOST = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
+OTHER = "ffffffffffffffffffffffffffffffffffffffff"  # pragma: allowlist secret
+
+
+def _probe(**over: object) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "python_version": "3.11.2",
+        "python_executable": "/usr/bin/python3",
+        "drgn_present": True,
+        "drgn_version": "0.0.27",
+        "distro_id": "fedora",
+        "distro_version": "39",
+        "kernel_release": "6.7.0",
+        "running_build_id": HOST,
+        "vmlinux_debuginfo": {
+            "candidates": [{"path": "/usr/lib/debug/boot/vmlinux-6.7.0", "file_build_id": HOST}],
+            "btf": True,
+            "module_debuginfo": True,
+            "module_path": "/usr/lib/debug/lib/modules/6.7.0/kernel",
+        },
+    }
+    base.update(over)
+    return base
+
+
+def _ids(checks: list[PrerequisiteCheck]) -> dict[str, PrerequisiteCheck]:
+    return {c.check_id: c for c in checks}
+
+
+def test_verdict_usable_when_all_agree() -> None:
+    checks, verdict = build_probe_checks(_probe(), host_build_id=HOST)
+    assert verdict == USABLE
+    by = _ids(checks)
+    assert by["target.vmlinux_debuginfo"].status == PrerequisiteStatus.PASSED
+    assert by["target.vmlinux_debuginfo"].details["build_id_verified"] is True
+    assert by["target.kernel_buildid"].status == PrerequisiteStatus.PASSED
+
+
+def test_drgn_missing_is_unusable_with_hint() -> None:
+    checks, verdict = build_probe_checks(_probe(drgn_present=False, drgn_version=None), host_build_id=HOST)
+    by = _ids(checks)
+    assert by["target.drgn"].status == PrerequisiteStatus.FAILED
+    assert "dnf install drgn" in by["target.drgn"].suggested_fix
+    assert by["target.drgn"].details["executable"] == "/usr/bin/python3"
+    assert verdict == UNUSABLE
+
+
+def test_proven_provenance_mismatch_is_unusable() -> None:
+    probe = _probe(running_build_id=OTHER)
+    probe["vmlinux_debuginfo"]["candidates"] = [{"path": "/boot/vmlinux-6.7.0", "file_build_id": OTHER}]
+    checks, verdict = build_probe_checks(probe, host_build_id=HOST)
+    assert _ids(checks)["target.kernel_buildid"].status == PrerequisiteStatus.WARNING
+    assert verdict == UNUSABLE
+
+
+def test_wrong_debuginfo_is_unusable() -> None:
+    probe = _probe()
+    probe["vmlinux_debuginfo"]["candidates"] = [{"path": "/boot/vmlinux-6.7.0", "file_build_id": OTHER}]
+    _, verdict = build_probe_checks(probe, host_build_id=HOST)
+    assert verdict == UNUSABLE
+
+
+def test_set_based_match_avoids_false_unusable() -> None:
+    probe = _probe()
+    probe["vmlinux_debuginfo"]["candidates"] = [
+        {"path": "/usr/lib/debug/boot/vmlinux-6.7.0", "file_build_id": OTHER},
+        {"path": "/lib/modules/6.7.0/build/vmlinux", "file_build_id": HOST},
+    ]
+    checks, verdict = build_probe_checks(probe, host_build_id=HOST)
+    assert verdict == USABLE
+    assert _ids(checks)["target.vmlinux_debuginfo"].details["path"] == "/lib/modules/6.7.0/build/vmlinux"
+
+
+def test_running_build_id_null_is_unknown_and_buildid_skipped() -> None:
+    probe = _probe(running_build_id=None)
+    probe["vmlinux_debuginfo"]["candidates"] = [{"path": "/boot/vmlinux-6.7.0", "file_build_id": HOST}]
+    checks, verdict = build_probe_checks(probe, host_build_id=HOST)
+    by = _ids(checks)
+    assert by["target.kernel_buildid"].status == PrerequisiteStatus.SKIPPED
+    assert by["target.vmlinux_debuginfo"].status == PrerequisiteStatus.WARNING
+    assert by["target.vmlinux_debuginfo"].details["file_matches_host"] is True
+    assert verdict == UNKNOWN
+
+
+def test_host_build_id_absent_is_unknown() -> None:
+    checks, verdict = build_probe_checks(_probe(), host_build_id=None)
+    assert _ids(checks)["target.kernel_buildid"].status == PrerequisiteStatus.SKIPPED
+    assert verdict == UNKNOWN
+
+
+def test_no_dwarf_but_btf_is_unknown_warning() -> None:
+    probe = _probe()
+    probe["vmlinux_debuginfo"]["candidates"] = []
+    checks, verdict = build_probe_checks(probe, host_build_id=HOST)
+    assert _ids(checks)["target.vmlinux_debuginfo"].status == PrerequisiteStatus.WARNING
+    assert verdict == UNKNOWN
+
+
+def test_no_dwarf_no_btf_is_unusable_failed() -> None:
+    probe = _probe()
+    probe["vmlinux_debuginfo"] = {"candidates": [], "btf": False}
+    checks, verdict = build_probe_checks(probe, host_build_id=HOST)
+    assert _ids(checks)["target.vmlinux_debuginfo"].status == PrerequisiteStatus.FAILED
+    assert verdict == UNUSABLE
+
+
+def test_module_debuginfo_absent_is_warning_only() -> None:
+    probe = _probe()
+    probe["vmlinux_debuginfo"]["module_debuginfo"] = False
+    checks, verdict = build_probe_checks(probe, host_build_id=HOST)
+    assert _ids(checks)["target.module_debuginfo"].status == PrerequisiteStatus.WARNING
+    assert verdict == USABLE
