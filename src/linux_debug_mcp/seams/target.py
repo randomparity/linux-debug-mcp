@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from linux_debug_mcp.domain import Model
+
+if TYPE_CHECKING:
+    # annotation-only: importing these at runtime would invert the layer dependency
+    # (admission imports seams.target; transport.base imports seams.target).
+    from linux_debug_mcp.coordination.admission import AdmissionService
+    from linux_debug_mcp.transport.base import TransportRef
 
 
 class Arch(StrEnum):
@@ -98,3 +106,29 @@ class LeaseInfo(Model):
         if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
             raise ValueError("LeaseInfo.expires_at must be timezone-aware")
         return value.astimezone(UTC)
+
+
+def publish_ready_snapshot(
+    admission: AdmissionService,
+    *,
+    target_key: TargetKey,
+    generation: int,
+    transports: Iterable[TransportRef],
+    platform: PlatformMetadata,
+    lease: LeaseInfo | None = None,
+) -> None:
+    """Local-qemu adapter: publish the authoritative TargetSnapshot when a run boots READY, so
+    admission can re-bind/validate transport.open requests against it (§4.1). Provisioning later
+    owns this writer; the local-qemu path ships it now behind the same call."""
+    from linux_debug_mcp.coordination.admission import TargetSnapshot
+
+    admission.publish_snapshot(
+        target_key,
+        TargetSnapshot(
+            generation=generation,
+            transports=tuple(transports),
+            platform=platform,
+            state=TargetState.READY,
+            lease=lease,
+        ),
+    )

@@ -13,6 +13,7 @@ from linux_debug_mcp.coordination.registry import RecoveryTombstone, SessionRegi
 from linux_debug_mcp.coordination.selection import select_stop_capable_channel
 from linux_debug_mcp.seams.break_policy import BreakPolicy
 from linux_debug_mcp.seams.guard import GuardToken, StopCapableGuard
+from linux_debug_mcp.seams.lifecycle import LifecycleDispatcher, LifecycleEvent
 from linux_debug_mcp.seams.secrets import SecretsResolver
 from linux_debug_mcp.seams.target import TargetKey
 from linux_debug_mcp.transport.base import (
@@ -65,6 +66,46 @@ class TransportTransaction:
         # Finding #4: the fenced GuardToken is held in-process (the frozen stop_guard_token: str
         # cannot carry the fence — ADR 0003); close()/lifecycle release by this token, not revoke().
         self._tokens: dict[str, GuardToken] = {}
+        self._dispatcher: LifecycleDispatcher | None = None
+
+    def bind_lifecycle(self, dispatcher: LifecycleDispatcher) -> None:
+        """Bind the §4.5 lifecycle dispatcher every subsequently-opened session subscribes to, so a
+        RESETTING/CRASHED/RELEASING invalidation tears the session down out-of-band (force_drop:
+        FENCED guard/lease release + backend reap + record delete), independently of any in-flight
+        owner. Optional — an unbound transaction simply skips subscription."""
+        self._dispatcher = dispatcher
+
+    def _subscribe_session(self, session: TransportSession, state: _OpenState) -> None:
+        """Register the just-opened session with the bound lifecycle dispatcher. The subscriber's
+        force_drop() is the §4.5 out-of-band release path: it drops the guard/lease/backend/record
+        this open committed, keyed off the frozen `_OpenState`, so a lifecycle transition completes
+        even when no owner is around to close() — exactly the resources `_rollback` would unwind."""
+        if self._dispatcher is None:
+            return
+        transaction = self
+
+        class _Sub:
+            def invalidate(self, event: LifecycleEvent, deadline: float) -> None:
+                self.force_drop(event)
+
+            def force_drop(self, event: LifecycleEvent) -> None:
+                # out-of-band release of the recorded resources (lifecycle force_drop contract):
+                # reap the backend by identity, then FENCED-release lease + guard, then delete the
+                # durable record — mirroring _rollback, each guarded so a partial drop completes.
+                transport = transaction._transports[session.provider]
+                if state.backend_pid is not None:
+                    proxy = getattr(transport, "_proxy", None)
+                    if proxy is not None:
+                        with contextlib.suppress(Exception):
+                            proxy.stop_by_identity(state.backend_pid, state.backend_start)
+                if state.lease_token is not None:
+                    transaction._leases.release(session.target_key, state.lease_token)
+                if state.guard_token is not None:
+                    transaction._guard.release(session.target_key, state.guard_token)  # FENCED (ADR 0002)
+                transaction._tokens.pop(session.session_id, None)
+                transaction._registry.delete_record(session.target_key)
+
+        self._dispatcher.subscribe(session.target_key, session.session_id, _Sub())
 
     def open(
         self,
@@ -196,6 +237,7 @@ class TransportTransaction:
             self._admission.promote(handle)
             if recovery:
                 self._clear_recovery(request.target_key, request.generation)
+            self._subscribe_session(session, state)
             return session
         except BaseException:
             self._rollback(request.target_key, state, transport, handle)

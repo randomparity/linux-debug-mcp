@@ -11,6 +11,7 @@ from linux_debug_mcp.coordination.endpoint_safety import EndpointSafetyError
 from linux_debug_mcp.coordination.lease import ConsoleLeaseManager, LeaseOwner
 from linux_debug_mcp.coordination.registry import SessionRegistry
 from linux_debug_mcp.seams.guard import GuardConflict, InProcessStopCapableGuard
+from linux_debug_mcp.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleEvent, LifecycleKind
 from linux_debug_mcp.transport.base import RecordState, TcpEndpoint
 
 
@@ -78,3 +79,17 @@ def test_close_reaps_and_clears(tmp_path):
     txn.close(session.session_id)
     assert transport.closed == [session.session_id]
     assert reg.read_record(KEY) is None
+
+
+def test_lifecycle_invalidation_revokes_guard_and_reaps(tmp_path):
+    transport = FakeQemuTransport()
+    guard, leases, reg = InProcessStopCapableGuard(), ConsoleLeaseManager(), SessionRegistry(directory=tmp_path)
+    dispatcher = InProcessLifecycleDispatcher()
+    txn, admission = build_txn(transport, guard=guard, leases=leases, registry=reg)
+    txn.bind_lifecycle(dispatcher)
+    txn.open(make_request())
+    # an invalidation tears the session down: admission closed, guard freed (FENCED release), record gone
+    admission.invalidate_lifecycle(LifecycleEvent(target_key=KEY, kind=LifecycleKind.CRASHED), dispatcher, generation=1)
+    assert reg.read_record(KEY) is None
+    # guard is free → a new incarnation (after a generation bump) could acquire
+    assert guard.acquire(KEY) is not None
