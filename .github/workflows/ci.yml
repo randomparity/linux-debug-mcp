@@ -112,3 +112,16 @@ jobs:
           set -euo pipefail
           uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > /tmp/runtime-reqs.txt
           uv run --with 'pip-audit==2.10.0' pip-audit --strict -r /tmp/runtime-reqs.txt
+
+  supply-chain-dev:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+      - run: |
+          set -euo pipefail
+          uv export --no-emit-project --extra dev --extra test --format requirements-txt > /tmp/dev-reqs.txt
+          uv run --with 'pip-audit==2.10.0' pip-audit --strict -r /tmp/dev-reqs.txt
