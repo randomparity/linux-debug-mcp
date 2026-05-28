@@ -1892,6 +1892,22 @@ def _load_active_debug_session(
     return session
 
 
+def _mark_legacy_session_recovery_required(
+    *, run_id: str, admission: AdmissionService, session_registry: SessionRegistry
+) -> None:
+    """Dual-write the `legacy_session_no_ownership` tombstone for a legacy DebugSession's target
+    (Finding #5): durable `write_tombstone` + admission cache `mark_recovery_required`, never one
+    alone. Generation is the authoritative snapshot's when one exists, else 0 (fail-closed at bare
+    startup — admission's gate treats a tombstone-not-strictly-older-than-the-snapshot as live)."""
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    snapshot = admission.current_snapshot(target_key)
+    generation = snapshot.generation if snapshot is not None else 0
+    session_registry.write_tombstone(
+        RecoveryTombstone(target_key=target_key, generation=generation, reason="legacy_session_no_ownership")
+    )
+    admission.mark_recovery_required(target_key, generation)
+
+
 def _fence_legacy_debug_session(
     *,
     run_id: str,
@@ -1899,35 +1915,27 @@ def _fence_legacy_debug_session(
     session_registry: SessionRegistry | None,
 ) -> None:
     """Version-skew fence (§4.7/B7). A DebugSession persisted before the transport-ownership model
-    carries a raw gdbstub_endpoint but NO durable SessionRegistry record. On a WIRED server it must
-    NOT be silently resumed — that would bypass the durable model and leave target.run_tests blind to
-    a kernel a stale session already halted.
+    carries a raw gdbstub_endpoint but NO durable SessionRegistry record. On a WIRED server a
+    stateful debug.* op must NOT silently resume it — that would bypass the durable model and leave
+    target.run_tests blind to a kernel a stale session already halted.
 
     Additive: inert unless BOTH `admission` and `session_registry` are injected (every legacy caller
     passes neither). When wired:
-    - A record EXISTS for TargetKey("local-qemu", run_id) ⇒ a Layer-4-owned session ⇒ proceed.
-    - NO record ⇒ legacy. Take a FRESH execution-state probe (generation from the authoritative
-      snapshot when one exists). If it proves EXECUTING the kernel resumed, so a force-end is safe —
-      proceed. Otherwise (HALTED/UNKNOWN/no snapshot/no proof) REFUSE with DEBUG_ATTACH_FAILURE /
-      `legacy_session_no_ownership` and dual-write a recovery_required tombstone (durable
-      write_tombstone + admission.mark_recovery_required) so the gate stays consistent (Finding #5)."""
+    - A record EXISTS for TargetKey("local-qemu", run_id) ⇒ Layer-4-owned ⇒ proceed.
+    - NO record ⇒ legacy: dual-write a recovery_required tombstone and REFUSE with
+      DEBUG_ATTACH_FAILURE / `legacy_session_no_ownership`.
+
+    A probe-permits-force-end branch is intentionally NOT implemented in #10: the probe reads the
+    same SessionRegistry record this fence already confirmed absent, so it can only return UNKNOWN.
+    An out-of-band EXECUTING source could permit force-ending a legacy session in a future layer —
+    but #10 always refuses + tombstones. (`debug.end_session` is the one operation that must still
+    detach a legacy session; it bypasses this fence and writes the tombstone post-detach instead.)"""
     if admission is None or session_registry is None:
         return
     target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
     if session_registry.read_record(target_key) is not None:
         return  # Layer-4-owned session; the durable record governs it.
-    snapshot = admission.current_snapshot(target_key)
-    if snapshot is not None:
-        proof = probe_execution_state(
-            registry=session_registry, admission=admission, target_key=target_key, generation=snapshot.generation
-        )
-        if proof.state is ExecutionState.EXECUTING:
-            return  # the kernel is provably running again; force-ending the legacy session is safe.
-    generation = snapshot.generation if snapshot is not None else 0
-    session_registry.write_tombstone(
-        RecoveryTombstone(target_key=target_key, generation=generation, reason="legacy_session_no_ownership")
-    )
-    admission.mark_recovery_required(target_key, generation)
+    _mark_legacy_session_recovery_required(run_id=run_id, admission=admission, session_registry=session_registry)
     raise ProviderDebugError(
         "legacy debug session predates the transport-ownership model and has no durable record; "
         "it cannot be silently resumed. The target is now recovery_required.",
@@ -2299,11 +2307,25 @@ def debug_end_session_handler(
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     transaction: TransportTransaction | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     # Capture the transport binding BEFORE the provider detach rewrites the debug step (end_session
     # records `current_execution_state="ended"` and may drop the start_session details).
     transport_session_id = (
         _recorded_transport_session_id(artifact_root=artifact_root, run_id=run_id) if transaction is not None else None
+    )
+    # B7 review: end_session is the one stateful op that must still detach a LEGACY session (force-end
+    # is the operation here), so the pre-detach fence is bypassed (admission/session_registry passed
+    # as None to `_debug_stateful_response`). A legacy session is one whose target has no
+    # SessionRegistry ownership record; detect it BEFORE the detach so the post-detach tombstone path
+    # below runs even though end_session rewrites the manifest's debug step. A Layer-4-owned session
+    # has a record AND a `transport_session_id` — the transaction.close() branch governs it.
+    is_legacy_session = (
+        admission is not None
+        and session_registry is not None
+        and transport_session_id is None
+        and session_registry.read_record(TargetKey(provisioner="local-qemu", target_id=run_id)) is None
     )
     response = _debug_stateful_response(
         artifact_root=artifact_root,
@@ -2323,6 +2345,13 @@ def debug_end_session_handler(
     # would otherwise leave the next attach `recovery_required`.
     if response.ok and transaction is not None and transport_session_id is not None:
         transaction.close(transport_session_id, force=True)
+    # B7 review (#10): a LEGACY session bypassed the pre-detach fence so end_session could force-end
+    # the unmanaged stop, but target.run_tests would otherwise stay BLIND to that detach — exactly the
+    # failure mode B7 fences against. Dual-write a recovery_required tombstone AFTER the successful
+    # detach so run_tests stays gated until a `transport.open(recovery=True)` (or reset) clears it.
+    if response.ok and is_legacy_session:
+        assert admission is not None and session_registry is not None  # narrowed by is_legacy_session
+        _mark_legacy_session_recovery_required(run_id=run_id, admission=admission, session_registry=session_registry)
     return response
 
 
@@ -3759,6 +3788,8 @@ def create_app(
             run_id=run_id,
             debug_session_id=debug_session_id,
             transaction=transport_transaction,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="transport.open")

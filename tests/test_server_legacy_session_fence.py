@@ -25,7 +25,7 @@ from linux_debug_mcp.coordination.admission import AdmissionService
 from linux_debug_mcp.coordination.registry import SessionRegistry
 from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from linux_debug_mcp.providers.qemu_gdbstub import DebugSession
+from linux_debug_mcp.providers.qemu_gdbstub import DebugProviderResult, DebugSession
 from linux_debug_mcp.seams.target import (
     BreakHint,
     ConsoleKind,
@@ -33,7 +33,7 @@ from linux_debug_mcp.seams.target import (
     TargetKey,
     publish_ready_snapshot,
 )
-from linux_debug_mcp.server import debug_continue_handler
+from linux_debug_mcp.server import debug_continue_handler, debug_end_session_handler
 from linux_debug_mcp.transport.base import LineRole, TransportRef
 
 RUN_ID = "run-1"
@@ -247,8 +247,6 @@ def test_legacy_fence_inert_without_injected_deps(tmp_path: Path) -> None:
 
         def continue_execution(self, **kwargs):  # noqa: ANN003
             self.calls += 1
-            from linux_debug_mcp.providers.qemu_gdbstub import DebugProviderResult
-
             return DebugProviderResult(
                 status=StepStatus.SUCCEEDED,
                 summary="continued",
@@ -266,3 +264,73 @@ def test_legacy_fence_inert_without_injected_deps(tmp_path: Path) -> None:
 
     assert response.ok is True
     assert provider.calls == 1
+
+
+class _DetachingEndSessionProvider:
+    """End_session detach: returns the session with execution_state=ended, mirroring a successful
+    gdb detach. The fence MUST allow the detach to run (force-end) but tombstone the target after."""
+
+    name = "local-qemu-gdbstub"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def end_session(self, **kwargs):  # noqa: ANN003
+        self.calls += 1
+        session = kwargs["session"].model_copy(
+            update={"current_execution_state": "ended", "ended_at": "2026-05-27T00:01:00+00:00"}
+        )
+        return DebugProviderResult(
+            status=StepStatus.SUCCEEDED,
+            summary="debug session ended",
+            session=session,
+            details={"debug_session_id": session.session_id, "current_execution_state": "ended"},
+        )
+
+
+def test_legacy_session_end_session_writes_tombstone_after_detach(tmp_path: Path) -> None:
+    """B7 review: end_session must NOT be silently allowed on a legacy session — force-end runs (gdb
+    detach is the operation), but the target gets a recovery_required tombstone afterwards so
+    target.run_tests stays gated and is not blind to the unmanaged stop that just got detached."""
+    artifact_root = _seed_legacy_debug_session(tmp_path)
+    registry = _make_registry(tmp_path)
+    _txn, admission = _build_transaction(registry=registry)
+    # No ownership record — legacy shape — so the pre-detach fence would otherwise refuse;
+    # end_session bypasses it to permit force-end, then tombstones post-detach.
+    assert registry.read_record(KEY) is None
+    provider = _DetachingEndSessionProvider()
+
+    end = debug_end_session_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        provider=provider,
+        debug_profiles=_profiles(),
+        admission=admission,
+        session_registry=registry,
+    )
+
+    # (a) the gdb detach succeeded (force-end ran).
+    assert end.ok is True
+    assert provider.calls == 1
+    # (b) a recovery_required tombstone now exists for the target (dual-write).
+    tombstone = registry.read_tombstone(KEY)
+    assert tombstone is not None
+    assert tombstone.target_key == KEY
+    assert admission._recovery_required.get(KEY) == tombstone.generation
+
+    # (c) target.run_tests is now gated, not blind to the just-detached unmanaged stop.
+    from conftest import FakeTestProvider
+
+    from linux_debug_mcp.server import target_run_tests_handler
+
+    rootfs_profile: RootfsProfile = rootfs(tmp_path)
+    tests = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        provider=FakeTestProvider(),
+        rootfs_profiles={"minimal": rootfs_profile},
+        admission=admission,
+        session_registry=registry,
+    )
+    assert tests.ok is False
+    assert tests.error.category == ErrorCategory.READINESS_FAILURE
