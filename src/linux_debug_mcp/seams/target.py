@@ -119,7 +119,7 @@ def publish_ready_snapshot(
 ) -> None:
     """Local-qemu adapter: publish the authoritative TargetSnapshot when a run boots READY, so
     admission can re-bind/validate transport.open requests against it (§4.1). Provisioning later
-    owns this writer; the local-qemu path ships it now behind the same call."""
+    owns this writer; this adapter is used until provisioning provides its own snapshot publisher."""
     from linux_debug_mcp.coordination.admission import TargetSnapshot
 
     admission.publish_snapshot(

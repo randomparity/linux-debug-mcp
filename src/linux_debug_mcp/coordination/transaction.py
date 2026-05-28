@@ -41,6 +41,44 @@ class _OpenState:
     backend_start: str | None = None
 
 
+class _SessionSubscriber:
+    """The §4.5 lifecycle subscriber for one open session — a long-lived object held by the
+    dispatcher (not an ephemeral callback), so it is a named module-level class. On invalidation it
+    releases the guard/lease/backend/record the session holds, keyed off the frozen `_OpenState`, so
+    a RESETTING/CRASHED/RELEASING transition completes even when no owner is around to close()."""
+
+    def __init__(self, transaction: TransportTransaction, session: TransportSession, state: _OpenState) -> None:
+        self._transaction = transaction
+        self._session = session
+        self._state = state
+
+    def invalidate(self, event: LifecycleEvent, deadline: float) -> None:
+        # No graceful-stop signal for the backend yet, so perform the full drop immediately; the
+        # dispatcher's force_drop fast-path is only for the invalidate-timed-out case.
+        self.force_drop(event)
+
+    def force_drop(self, event: LifecycleEvent) -> None:
+        # out-of-band release of the recorded resources (lifecycle force_drop contract): reap the
+        # backend by identity, then FENCED-release lease + guard, then delete the durable record —
+        # mirroring _rollback, each guarded so a partial drop completes.
+        transport = self._transaction._transports[self._session.provider]
+        if self._state.backend_pid is not None:
+            proxy = getattr(transport, "_proxy", None)
+            if proxy is not None:
+                # TODO: a Transport.reap_backend() hook would avoid the private-attribute reach
+                # (out of scope here).
+                with contextlib.suppress(Exception):
+                    proxy.stop_by_identity(self._state.backend_pid, self._state.backend_start)
+        if self._state.lease_token is not None:
+            self._transaction._leases.release(self._session.target_key, self._state.lease_token)
+        if self._state.guard_token is not None:
+            self._transaction._guard.release(self._session.target_key, self._state.guard_token)  # FENCED (ADR 0002)
+        self._transaction._tokens.pop(self._session.session_id, None)
+        # state.session_id is always set here: the READY record is committed before
+        # _subscribe_session is called, so the unconditional delete is safe.
+        self._transaction._registry.delete_record(self._session.target_key)
+
+
 class TransportTransaction:
     """The §4.3 open()/close() write-ahead transaction (ADR 0003/0005). Owns TransportSession
     end-to-end; rolls back in reverse at every step, leaking no guard/lease/record/backend."""
@@ -77,35 +115,11 @@ class TransportTransaction:
 
     def _subscribe_session(self, session: TransportSession, state: _OpenState) -> None:
         """Register the just-opened session with the bound lifecycle dispatcher. The subscriber's
-        force_drop() is the §4.5 out-of-band release path: it drops the guard/lease/backend/record
-        this open committed, keyed off the frozen `_OpenState`, so a lifecycle transition completes
-        even when no owner is around to close() — exactly the resources `_rollback` would unwind."""
+        force_drop() is the §4.5 out-of-band release path: it releases the guard/lease/backend/record
+        this session holds — admission is closed separately by the lifecycle transition."""
         if self._dispatcher is None:
             return
-        transaction = self
-
-        class _Sub:
-            def invalidate(self, event: LifecycleEvent, deadline: float) -> None:
-                self.force_drop(event)
-
-            def force_drop(self, event: LifecycleEvent) -> None:
-                # out-of-band release of the recorded resources (lifecycle force_drop contract):
-                # reap the backend by identity, then FENCED-release lease + guard, then delete the
-                # durable record — mirroring _rollback, each guarded so a partial drop completes.
-                transport = transaction._transports[session.provider]
-                if state.backend_pid is not None:
-                    proxy = getattr(transport, "_proxy", None)
-                    if proxy is not None:
-                        with contextlib.suppress(Exception):
-                            proxy.stop_by_identity(state.backend_pid, state.backend_start)
-                if state.lease_token is not None:
-                    transaction._leases.release(session.target_key, state.lease_token)
-                if state.guard_token is not None:
-                    transaction._guard.release(session.target_key, state.guard_token)  # FENCED (ADR 0002)
-                transaction._tokens.pop(session.session_id, None)
-                transaction._registry.delete_record(session.target_key)
-
-        self._dispatcher.subscribe(session.target_key, session.session_id, _Sub())
+        self._dispatcher.subscribe(session.target_key, session.session_id, _SessionSubscriber(self, session, state))
 
     def open(
         self,
