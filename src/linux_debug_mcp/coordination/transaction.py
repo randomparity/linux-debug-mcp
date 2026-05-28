@@ -5,6 +5,7 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from typing import cast
 
 from linux_debug_mcp.coordination.admission import AdmissionHandle, AdmissionService
 from linux_debug_mcp.coordination.endpoint_safety import assert_loopback_endpoint, refuse_unsafe_exposure
@@ -230,10 +231,15 @@ class TransportTransaction:
         handle = admit(request.target_key, request)
         state = _OpenState()
         try:
+            # The open path always admits with an authoritative channel; admission rejects open
+            # requests without one. Bind a narrowed local for the rest of the transaction.
+            channel = handle.channel
+            if channel is None:
+                raise RuntimeError("open transaction requires an authoritative channel on the handle")
             # (3) break-plan selection (authoritative channel from the handle).
             selection = select_stop_capable_channel(
                 target_key=request.target_key,
-                transports=(handle.channel,),
+                transports=(channel,),
                 required_caps=request.required_caps,
                 platform=handle.platform,
                 break_policy=self._break_policy,
@@ -248,7 +254,7 @@ class TransportTransaction:
                 state = replace(state, lease_token=self._leases.acquire(request.target_key, LeaseOwner.TRANSPORT))
             _crash(crash_after, "lease")
             # (6) secrets (never persisted/logged).
-            self._secrets.resolve(list(handle.channel.secret_refs))
+            self._secrets.resolve(list(channel.secret_refs))
             # (7) write-ahead OPENING record. The fenced token is held in-process keyed by
             # session_id (stop_guard_token persists only its secret as an audit marker — ADR 0003).
             session_id = new_session_id()
@@ -259,7 +265,7 @@ class TransportTransaction:
                 target_key=request.target_key,
                 generation=request.generation,
                 provider=capability.provider_name,
-                channel_id=handle.channel.channel_id,
+                channel_id=channel.channel_id,
                 record_state=RecordState.OPENING,
                 console_lease_token=state.lease_token,
                 stop_guard_token=guard_token.secret,
@@ -281,7 +287,12 @@ class TransportTransaction:
             def on_partial(label: str, resource: object) -> None:
                 nonlocal backend_pid, backend_start, state
                 if label == "backend_process" and isinstance(resource, dict):
-                    backend_pid, backend_start = resource["pid"], resource.get("start_time")
+                    backend_process = cast(dict[str, object], resource)
+                    pid_val = backend_process["pid"]
+                    start_val = backend_process.get("start_time")
+                    if not isinstance(pid_val, int) or (start_val is not None and not isinstance(start_val, str)):
+                        return
+                    backend_pid, backend_start = pid_val, start_val
                     state = replace(state, backend_pid=backend_pid, backend_start=backend_start)
                     self._registry.write_record(
                         record.model_copy(update=dict(backend_pid=backend_pid, backend_start_time=backend_start))
