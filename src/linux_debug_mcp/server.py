@@ -42,7 +42,7 @@ from linux_debug_mcp.coordination.admission import (
 from linux_debug_mcp.coordination.endpoint_safety import EndpointSafetyError
 from linux_debug_mcp.coordination.exec_probe import probe_execution_state
 from linux_debug_mcp.coordination.lease import ConsoleLeaseManager
-from linux_debug_mcp.coordination.registry import SessionRegistry
+from linux_debug_mcp.coordination.registry import RecoveryTombstone, SessionRegistry
 from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from linux_debug_mcp.logging import configure_logging
@@ -1892,6 +1892,50 @@ def _load_active_debug_session(
     return session
 
 
+def _fence_legacy_debug_session(
+    *,
+    run_id: str,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+) -> None:
+    """Version-skew fence (§4.7/B7). A DebugSession persisted before the transport-ownership model
+    carries a raw gdbstub_endpoint but NO durable SessionRegistry record. On a WIRED server it must
+    NOT be silently resumed — that would bypass the durable model and leave target.run_tests blind to
+    a kernel a stale session already halted.
+
+    Additive: inert unless BOTH `admission` and `session_registry` are injected (every legacy caller
+    passes neither). When wired:
+    - A record EXISTS for TargetKey("local-qemu", run_id) ⇒ a Layer-4-owned session ⇒ proceed.
+    - NO record ⇒ legacy. Take a FRESH execution-state probe (generation from the authoritative
+      snapshot when one exists). If it proves EXECUTING the kernel resumed, so a force-end is safe —
+      proceed. Otherwise (HALTED/UNKNOWN/no snapshot/no proof) REFUSE with DEBUG_ATTACH_FAILURE /
+      `legacy_session_no_ownership` and dual-write a recovery_required tombstone (durable
+      write_tombstone + admission.mark_recovery_required) so the gate stays consistent (Finding #5)."""
+    if admission is None or session_registry is None:
+        return
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    if session_registry.read_record(target_key) is not None:
+        return  # Layer-4-owned session; the durable record governs it.
+    snapshot = admission.current_snapshot(target_key)
+    if snapshot is not None:
+        proof = probe_execution_state(
+            registry=session_registry, admission=admission, target_key=target_key, generation=snapshot.generation
+        )
+        if proof.state is ExecutionState.EXECUTING:
+            return  # the kernel is provably running again; force-ending the legacy session is safe.
+    generation = snapshot.generation if snapshot is not None else 0
+    session_registry.write_tombstone(
+        RecoveryTombstone(target_key=target_key, generation=generation, reason="legacy_session_no_ownership")
+    )
+    admission.mark_recovery_required(target_key, generation)
+    raise ProviderDebugError(
+        "legacy debug session predates the transport-ownership model and has no durable record; "
+        "it cannot be silently resumed. The target is now recovery_required.",
+        category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+        details={"code": "legacy_session_no_ownership", "debug_session_id": None},
+    )
+
+
 def _debug_operation_response(
     *,
     artifact_root: Path,
@@ -1903,6 +1947,8 @@ def _debug_operation_response(
     persist_manifest: bool,
     allow_ended: bool = False,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -1916,6 +1962,7 @@ def _debug_operation_response(
     try:
         with store.debug_lock(run_id):
             session = _load_active_debug_session(store, run_id, debug_session_id, allow_ended=allow_ended)
+            _fence_legacy_debug_session(run_id=run_id, admission=admission, session_registry=session_registry)
             profile = _resolve_debug_profile(
                 profile_name=session.selected_debug_profile,
                 debug_profiles=debug_profiles,
@@ -2090,6 +2137,8 @@ def _debug_stateful_response(
     kwargs: dict[str, object],
     allow_ended: bool = False,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_operation_response(
         artifact_root=artifact_root,
@@ -2101,6 +2150,8 @@ def _debug_stateful_response(
         persist_manifest=True,
         allow_ended=allow_ended,
         debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
     )
 
 
@@ -2112,6 +2163,8 @@ def debug_set_breakpoint_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -2121,6 +2174,8 @@ def debug_set_breakpoint_handler(
         method_name="set_breakpoint",
         kwargs={"symbol": symbol},
         debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
     )
 
 
@@ -2132,6 +2187,8 @@ def debug_clear_breakpoint_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -2141,6 +2198,8 @@ def debug_clear_breakpoint_handler(
         method_name="clear_breakpoint",
         kwargs={"breakpoint_id": breakpoint_id},
         debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
     )
 
 
@@ -2151,6 +2210,8 @@ def debug_list_breakpoints_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -2160,6 +2221,8 @@ def debug_list_breakpoints_handler(
         method_name="list_breakpoints",
         kwargs={},
         debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
     )
 
 
@@ -2171,6 +2234,8 @@ def debug_continue_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -2180,6 +2245,8 @@ def debug_continue_handler(
         method_name="continue_execution",
         kwargs={"timeout_seconds": timeout_seconds},
         debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
     )
 
 
@@ -2191,6 +2258,8 @@ def debug_interrupt_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -2200,6 +2269,8 @@ def debug_interrupt_handler(
         method_name="interrupt",
         kwargs={"timeout_seconds": timeout_seconds},
         debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
     )
 
 
@@ -3611,6 +3682,8 @@ def create_app(
             run_id=run_id,
             symbol=symbol,
             debug_session_id=debug_session_id,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.clear_breakpoint")
@@ -3625,6 +3698,8 @@ def create_app(
             run_id=run_id,
             breakpoint_id=breakpoint_id,
             debug_session_id=debug_session_id,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.list_breakpoints")
@@ -3637,6 +3712,8 @@ def create_app(
             artifact_root=Path(artifact_root),
             run_id=run_id,
             debug_session_id=debug_session_id,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.continue")
@@ -3651,6 +3728,8 @@ def create_app(
             run_id=run_id,
             debug_session_id=debug_session_id,
             timeout_seconds=timeout_seconds,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.interrupt")
@@ -3665,6 +3744,8 @@ def create_app(
             run_id=run_id,
             debug_session_id=debug_session_id,
             timeout_seconds=timeout_seconds,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.end_session")
