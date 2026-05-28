@@ -49,5 +49,5 @@ audit:
     uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
 
 lint-workflows: sync-dev
-    uv run --with 'zizmor==1.25.2' zizmor --persona=auditor .github/workflows
-    uv run --with 'actionlint-py' actionlint .github/workflows
+    uv run --with 'zizmor==1.25.2' zizmor .github/workflows
+    uv run --with 'actionlint-py' actionlint

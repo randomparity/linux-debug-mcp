@@ -343,7 +343,7 @@ audit:
 
 lint-workflows: sync-dev
     uv run --with 'zizmor==1.25.2' zizmor .github/workflows
-    uv run --with 'actionlint-py' actionlint .github/workflows
+    uv run --with 'actionlint-py' actionlint
 ```
 
 `audit` mirrors `supply-chain-runtime` step-for-step so a local pass is the
