@@ -357,7 +357,7 @@ audit:
 
 lint-workflows: sync-dev
     uv run --with 'zizmor==1.25.2' zizmor .github/workflows
-    uv run --with 'actionlint-py' actionlint
+    uv run --with 'actionlint-py==1.7.12.24' actionlint
 ```
 
 - [ ] **Step 2: List recipes to confirm `just` parses the file**
