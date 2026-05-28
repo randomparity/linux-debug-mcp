@@ -919,9 +919,10 @@ Append after `supply-chain-dev:`:
       - run: |
           set -euo pipefail
           uv build
-          uv pip install --system dist/*.whl
+          uv venv
+          uv pip install dist/*.whl
           # stdio server: succeeds, then we kill it on the 2s timeout.
-          timeout 2 linux-debug-mcp || test $? -eq 124
+          timeout 2 .venv/bin/linux-debug-mcp || test $? -eq 124
 ```
 
 - [ ] **Step 2: Lint the workflow**
