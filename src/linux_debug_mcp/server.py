@@ -30,8 +30,10 @@ from linux_debug_mcp.config import (
     merge_kernel_args,
 )
 from linux_debug_mcp.coordination.admission import AdmissionError, AdmissionHandle, AdmissionService
+from linux_debug_mcp.coordination.endpoint_safety import EndpointSafetyError
 from linux_debug_mcp.coordination.exec_probe import probe_execution_state
 from linux_debug_mcp.coordination.registry import SessionRegistry
+from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
@@ -65,6 +67,7 @@ from linux_debug_mcp.providers.stubs import (
 )
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_rootfs_source, validate_source_path
 from linux_debug_mcp.safety.redaction import Redactor
+from linux_debug_mcp.seams.guard import GuardConflict
 from linux_debug_mcp.seams.target import (
     BreakHint,
     ConsoleKind,
@@ -72,7 +75,7 @@ from linux_debug_mcp.seams.target import (
     TargetKey,
     publish_ready_snapshot,
 )
-from linux_debug_mcp.transport.base import ExecutionState, LineRole, TransportRef
+from linux_debug_mcp.transport.base import ExecutionState, LineRole, OpenRequest, TransportRef, TransportSession
 
 DEFAULT_ARTIFACT_ROOT = Path(".linux-debug-mcp/runs")
 SERVER_CONFIG_ENV_VAR = "LINUX_DEBUG_MCP_CONFIG"
@@ -1574,6 +1577,48 @@ def target_run_tests_handler(
     )
 
 
+def _debug_open_request(*, run_id: str, gdbstub_endpoint: dict[str, Any], admission: AdmissionService) -> OpenRequest:
+    """Build the §4.3 transport.open request for the recorded gdbstub endpoint, reading
+    `generation`/`platform` from the authoritative snapshot the boot step published (never
+    re-deriving them — ADR 0007). The RSP channel mirrors the boot snapshot producer."""
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    snapshot = admission.current_snapshot(target_key)
+    if snapshot is None:
+        raise AdmissionError(
+            "no authoritative snapshot for target; boot must publish a READY snapshot first",
+            category=ErrorCategory.READINESS_FAILURE,
+            code="stale_handle",
+        )
+    return OpenRequest(
+        target_key=target_key,
+        generation=snapshot.generation,
+        transport_ref=TransportRef(
+            provider="qemu-gdbstub",
+            channel_id="rsp0",
+            line_role=LineRole.RSP,
+            caps=("rsp",),
+            target_ref=gdbstub_endpoint,
+        ),
+        required_caps=["rsp"],
+        platform=snapshot.platform,
+    )
+
+
+def _halt_debug_transport(
+    *,
+    session: TransportSession,
+    admission: AdmissionService,
+    session_registry: SessionRegistry,
+) -> None:
+    """Persist the EXECUTING→HALTED transition BEFORE the gdb attach runs (the attach halts the
+    kernel). The durable HALTED record is what the run-tests probe reads, and
+    note_execution_transition bumps the execution epoch so a pre-halt EXECUTING ssh proof can never
+    be replayed across the halt. The ordering (durable write, then note) makes target.run_tests
+    reject with `target_halted` for the whole window the debugger owns the kernel."""
+    session_registry.write_record(session.model_copy(update={"execution_state": ExecutionState.HALTED}))
+    admission.note_execution_transition(session.target_key, session.generation)
+
+
 def debug_start_session_handler(
     *,
     artifact_root: Path,
@@ -1582,6 +1627,10 @@ def debug_start_session_handler(
     new_session: bool = False,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    transaction: TransportTransaction | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    recovery: bool = False,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -1650,6 +1699,33 @@ def debug_start_session_handler(
                         suggested_next_actions=["debug.interrupt", "debug.read_registers", "artifacts.get_manifest"],
                     )
                 replace_existing_debug = existing.status == StepStatus.SUCCEEDED
+            transport_enabled = transaction is not None and admission is not None and session_registry is not None
+            transport_session: TransportSession | None = None
+            if transport_enabled:
+                # mypy/ty narrowing: transport_enabled proves these are not None.
+                assert transaction is not None and admission is not None and session_registry is not None
+                try:
+                    request = _debug_open_request(run_id=run_id, gdbstub_endpoint=gdbstub_endpoint, admission=admission)
+                    transport_session = transaction.open(request, recovery=recovery)
+                except (GuardConflict, EndpointSafetyError) as exc:
+                    return ToolResponse.failure(
+                        category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                        message=str(exc),
+                        run_id=run_id,
+                        details={"code": getattr(exc, "code", "stop_capable_conflict")},
+                        suggested_next_actions=["artifacts.get_manifest"],
+                    )
+                except AdmissionError as exc:
+                    return ToolResponse.failure(
+                        category=exc.category,
+                        message=str(exc),
+                        run_id=run_id,
+                        details={"code": exc.code},
+                        suggested_next_actions=["artifacts.get_manifest"],
+                    )
+                # Persist HALTED + bump the execution epoch BEFORE the gdb attach halts the kernel,
+                # so target.run_tests rejects with target_halted for the debugger's whole window.
+                _halt_debug_transport(session=transport_session, admission=admission, session_registry=session_registry)
             try:
                 result = provider.start_session(
                     run_id=run_id,
@@ -1678,6 +1754,9 @@ def debug_start_session_handler(
                     suggested_next_actions=["artifacts.get_manifest"],
                 )
             details = _debug_session_manifest_details(store=store, run_id=run_id, session=result.session)
+            if transport_session is not None:
+                # bind the DebugSession to the transport-ownership record so close() can tear it down.
+                details["transport_session_id"] = transport_session.session_id
             terminal = StepResult(
                 step_name="debug",
                 status=result.status,
