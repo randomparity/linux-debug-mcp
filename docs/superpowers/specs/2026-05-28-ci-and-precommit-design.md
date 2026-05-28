@@ -471,6 +471,19 @@ runner branch coverage below the locally measured 89 %; the implementation
 plan owns re-measuring on the runner and adjusting `--cov-fail-under`
 accordingly (see "Coverage floor" above).
 
+**Resolution (2026-05-28):** The triage table and dispositions are
+captured in
+`docs/superpowers/runner-triage/2026-05-28-ubuntu-24.04-pytest-triage.md`.
+Only one disposition row was required (the anticipated
+`test_proc_probe_owns_listener_matches_our_own_listening_socket`
+fix-test); the other five environment-coupled skips were already
+governed by precise-condition predicates. Runner-measured branch
+coverage came in at 81.62 % on the binding 3.13 leg, so
+`--cov-fail-under` was ratcheted from the spec's nominal 85 to **77**
+(81.62 − 4 cushion, rounded down). `tests` is now suitable for
+inclusion in the GitHub branch-protection required-checks list — that
+final step is a repo-settings change, not a code change.
+
 ## Considered & rejected alternatives
 
 - **Single matrix job that also runs lint.** Rejected because pre-commit
