@@ -27,7 +27,11 @@ from linux_debug_mcp.seams.target import (
     TargetKey,
     publish_ready_snapshot,
 )
-from linux_debug_mcp.server import debug_start_session_handler, target_run_tests_handler
+from linux_debug_mcp.server import (
+    debug_end_session_handler,
+    debug_start_session_handler,
+    target_run_tests_handler,
+)
 from linux_debug_mcp.transport.base import ExecutionState, LineRole, TransportRef
 
 # build_txn seeds the snapshot for TargetKey("local-qemu", "run-1"); use that run_id so the
@@ -99,6 +103,25 @@ class FakeDebugProvider:
                 ArtifactRef(path=str(summary_path), kind="debug-summary"),
             ],
             details={"debug_session_id": "debug-1"},
+        )
+
+    def end_session(self, **kwargs):
+        self.calls += 1
+        self.call_kwargs.append(kwargs)
+        session = kwargs["session"].model_copy(
+            update={"current_execution_state": "ended", "ended_at": "2026-05-23T00:01:00+00:00"}
+        )
+        return DebugProviderResult(
+            status=StepStatus.SUCCEEDED,
+            summary="debug session ended",
+            session=session,
+            artifacts=[
+                ArtifactRef(
+                    path=str(kwargs["run_dir"] / "debug" / "sessions" / f"{session.session_id}.json"),
+                    kind="debug-session",
+                ),
+            ],
+            details={"debug_session_id": session.session_id, "current_execution_state": "ended"},
         )
 
 
@@ -304,3 +327,47 @@ def test_recovery_attach_clears_tombstone(tmp_path: Path) -> None:
 
     assert response.ok is True
     assert registry.read_tombstone(KEY) is None
+
+
+def test_end_session_closes_transaction_and_frees_guard(tmp_path: Path) -> None:
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path)
+    txn, admission = _build_transaction(registry=registry)
+    provider = FakeDebugProvider()
+
+    start = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        provider=provider,
+        debug_profiles=_profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+    )
+    assert start.ok is True
+    assert registry.read_record(KEY) is not None
+
+    end = debug_end_session_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        debug_session_id=start.data["debug_session_id"],
+        provider=provider,
+        transaction=txn,
+    )
+
+    assert end.ok is True
+    # close() released the guard/lease, deleted the durable record, and deregistered the handle.
+    assert registry.read_record(KEY) is None
+    assert admission._bindings.get(KEY, []) == []
+    # the guard is free: a fresh stop-capable session on the same target is admitted (no conflict).
+    reattach = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        new_session=True,
+        provider=FakeDebugProvider(),
+        debug_profiles=_profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+    )
+    assert reattach.ok is True

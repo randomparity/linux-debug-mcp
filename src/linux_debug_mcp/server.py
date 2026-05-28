@@ -2174,6 +2174,23 @@ def debug_interrupt_handler(
     )
 
 
+def _recorded_transport_session_id(*, artifact_root: Path, run_id: str) -> str | None:
+    """Read the transport-ownership binding `debug.start_session` persisted into the debug step
+    details (set only on the transaction-backed path). None when the run/manifest/step is absent or
+    no transport session was bound — the legacy ungated path records nothing, so close() is skipped."""
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        if not (store.run_dir(run_id) / "manifest.json").is_file():
+            return None
+        debug_result = store.load_manifest(run_id).step_results.get("debug")
+    except ManifestStateError:
+        return None
+    if debug_result is None:
+        return None
+    transport_session_id = debug_result.details.get("transport_session_id")
+    return transport_session_id if isinstance(transport_session_id, str) else None
+
+
 def debug_end_session_handler(
     *,
     artifact_root: Path,
@@ -2181,8 +2198,14 @@ def debug_end_session_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    transaction: TransportTransaction | None = None,
 ) -> ToolResponse:
-    return _debug_stateful_response(
+    # Capture the transport binding BEFORE the provider detach rewrites the debug step (end_session
+    # records `current_execution_state="ended"` and may drop the start_session details).
+    transport_session_id = (
+        _recorded_transport_session_id(artifact_root=artifact_root, run_id=run_id) if transaction is not None else None
+    )
+    response = _debug_stateful_response(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
@@ -2192,6 +2215,15 @@ def debug_end_session_handler(
         allow_ended=True,
         debug_profiles=debug_profiles,
     )
+    # Clean detach only: close the transaction (release guard/lease, delete the durable record,
+    # deregister the AdmissionHandle) AFTER the provider detach succeeded. A failed end leaves the
+    # session owned so a retry/recovery can act on it. No transport binding ⇒ nothing to close.
+    # force=True: a clean end_session resumed the kernel (the durable record was parked HALTED at
+    # attach), so the target needs no recovery gating — skip the close-while-halted tombstone that
+    # would otherwise leave the next attach `recovery_required`.
+    if response.ok and transaction is not None and transport_session_id is not None:
+        transaction.close(transport_session_id, force=True)
+    return response
 
 
 def _bundle_for_manifest(
