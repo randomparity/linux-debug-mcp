@@ -823,4 +823,3 @@ implementation from the GitHub issues does not re-open them.
 - Single-vterm constraint (PowerVM LPAR `hvc0`) — issue 07
 - SOL fragility / raw-TCP requirements — issue 06
 - agent-proxy / kdmx — `git.kernel.org/pub/scm/utils/kernel/kgdb/agent-proxy.git`
-
