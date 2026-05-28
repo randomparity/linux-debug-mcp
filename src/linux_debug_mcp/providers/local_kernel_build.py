@@ -263,7 +263,7 @@ class LocalKernelBuildProvider:
         started_at: datetime,
     ) -> BuildExecutionResult:
         ended_at = datetime.now(UTC)
-        details = {
+        details: dict[str, object] = {
             "argv": plan.argv,
             "source_revision": source_revision,
             "source_path": str(plan.source_path),

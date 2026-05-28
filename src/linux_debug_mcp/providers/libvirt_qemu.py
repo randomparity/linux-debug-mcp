@@ -338,9 +338,10 @@ class LibvirtQemuProvider:
                 )
         domain_name = target_profile.target_ref
         libvirt_uri = target_profile.libvirt_uri
-        if domain_name is None or libvirt_uri is None:
+        readiness_marker = rootfs_profile.readiness_marker
+        if domain_name is None or libvirt_uri is None or readiness_marker is None:
             # Kept for type narrowing; _validate_profiles rejects these before path resolution.
-            raise self._configuration_error("target_ref and libvirt_uri are required")
+            raise self._configuration_error("target_ref, libvirt_uri, and readiness_marker are required")
 
         attempt_dir = resolved_run_dir / "boot" / f"attempt-{attempt}"
         domain_xml_path = attempt_dir / "domain.xml"
@@ -364,7 +365,7 @@ class LibvirtQemuProvider:
             serial_device=self.serial_device,
             kernel_args=kernel_args,
             timeout_seconds=target_profile.timeout_seconds,
-            readiness_marker=rootfs_profile.readiness_marker,
+            readiness_marker=readiness_marker,
             domain_xml_path=domain_xml_path,
             console_log_path=console_log_path,
             boot_log_path=boot_log_path,
@@ -461,7 +462,7 @@ class LibvirtQemuProvider:
             timeout=plan.timeout_seconds,
             readiness_marker=plan.readiness_marker,
         )
-        details = {
+        details: dict[str, object] = {
             "domain": plan.domain_name,
             "console_status": console.status,
             "matched_marker": console.matched_marker,
@@ -750,7 +751,7 @@ class LibvirtQemuProvider:
         artifacts: list[ArtifactRef],
         details: dict[str, object] | None = None,
     ) -> BootExecutionResult:
-        result_details = {
+        result_details: dict[str, object] = {
             "command": command,
             "argv": result.argv,
             "exit_status": result.exit_status,
