@@ -4778,6 +4778,35 @@ def create_app(
             session_registry=durable_registry,
         ).model_dump(mode="json")
 
+    @app.tool(name="debug.introspect.run")
+    def debug_introspect_run(
+        run_id: str,
+        target_ref: str,
+        script: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        timeout_seconds: int = 30,
+        allow_write: bool = False,
+        debug_profile: str | None = None,
+        target_profile: str | None = None,
+        rootfs_profile: str | None = None,
+    ) -> dict[str, Any]:
+        request = DebugIntrospectRunRequest(
+            run_id=run_id,
+            target_ref=target_ref,
+            script=script,
+            timeout_seconds=timeout_seconds,
+            allow_write=allow_write,
+            debug_profile=debug_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+        )
+        return debug_introspect_run_handler(
+            request,
+            artifact_root=Path(artifact_root),
+            admission=admission_service,
+            session_registry=durable_registry,
+        ).model_dump(mode="json")
+
     @app.tool(name="artifacts.collect")
     def artifacts_collect(
         run_id: str,

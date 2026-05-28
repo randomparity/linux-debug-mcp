@@ -522,3 +522,11 @@ def test_create_run_tool_accepts_overrides_and_rejects_bad_args(tmp_path: Path):
     )
     assert bad["ok"] is False
     assert bad["error"]["category"] == "configuration_error"
+
+
+def test_introspect_tool_is_registered() -> None:
+    assert "debug.introspect.run" in tool_names()
+    tool = create_app()._tool_manager._tools["debug.introspect.run"]
+    assert tool.fn.__name__ == "debug_introspect_run"
+    assert "script" in tool.parameters["properties"]
+    assert "timeout_seconds" in tool.parameters["properties"]
