@@ -123,6 +123,16 @@ def validate_transport_operation(operation: str) -> str:
     return operation
 
 
+def missing_destructive_permissions(operation: str, acknowledged: list[str]) -> list[str]:
+    """Return the destructive permissions a transport operation requires that the caller has not
+    acknowledged. A non-destructive (or unknown) operation requires nothing, so the list is empty.
+    The tool layer refuses the call when this is non-empty so an agent never drops a kernel into
+    the debugger (or runs any future destructive transport op) without explicit acknowledgement."""
+    required = TRANSPORT_DESTRUCTIVE_PERMISSIONS.get(operation, [])
+    acknowledged_set = set(acknowledged)
+    return [permission for permission in required if permission not in acknowledged_set]
+
+
 def _has_control_character(value: str) -> bool:
     return any(unicodedata.category(char) == "Cc" for char in value)
 

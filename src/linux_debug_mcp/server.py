@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +29,7 @@ from linux_debug_mcp.config import (
     TestSuiteProfile,
     merge_config_lines,
     merge_kernel_args,
+    missing_destructive_permissions,
 )
 from linux_debug_mcp.coordination.admission import AdmissionError, AdmissionHandle, AdmissionService
 from linux_debug_mcp.coordination.endpoint_safety import EndpointSafetyError
@@ -76,6 +78,7 @@ from linux_debug_mcp.seams.target import (
     publish_ready_snapshot,
 )
 from linux_debug_mcp.transport.base import ExecutionState, LineRole, OpenRequest, TransportRef, TransportSession
+from linux_debug_mcp.transport.break_inject import InjectBreakError, inject_break
 
 DEFAULT_ARTIFACT_ROOT = Path(".linux-debug-mcp/runs")
 SERVER_CONFIG_ENV_VAR = "LINUX_DEBUG_MCP_CONFIG"
@@ -2226,6 +2229,184 @@ def debug_end_session_handler(
     return response
 
 
+def _transport_disabled_failure(*, run_id: str) -> ToolResponse:
+    """The Layer-4 coordination collaborators (transaction/admission/registry) are not wired.
+    create_app wiring is B6; until then a transport tool fails closed rather than acting."""
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        message="transport coordination is not available on this server instance",
+        run_id=run_id,
+        details={"code": "transport_unavailable"},
+    )
+
+
+def _transport_open_request(*, run_id: str, admission: AdmissionService) -> OpenRequest:
+    """Build the §4.3 transport.open request from the authoritative snapshot the boot step
+    published: it reads `generation`/`platform` and the RSP channel straight from the snapshot
+    (never re-derived — ADR 0007), so admission re-binds the request against its own facts and a
+    snapshot naming an unregistered provider flows through to the transaction's lookup (mapped to
+    CONFIGURATION_ERROR by the handler), not silently rewritten to qemu-gdbstub."""
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    snapshot = admission.current_snapshot(target_key)
+    if snapshot is None:
+        raise AdmissionError(
+            "no authoritative snapshot for target; boot must publish a READY snapshot first",
+            category=ErrorCategory.READINESS_FAILURE,
+            code="stale_handle",
+        )
+    rsp_channel = next((ref for ref in snapshot.transports if ref.line_role is LineRole.RSP), None)
+    if rsp_channel is None:
+        raise AdmissionError(
+            "authoritative snapshot exposes no RSP channel for a stop-capable open",
+            category=ErrorCategory.READINESS_FAILURE,
+            code="no_rsp_channel",
+        )
+    return OpenRequest(
+        target_key=target_key,
+        generation=snapshot.generation,
+        transport_ref=rsp_channel,
+        required_caps=["rsp"],
+        platform=snapshot.platform,
+    )
+
+
+def transport_open_handler(
+    *,
+    run_id: str,
+    recovery: bool = False,
+    transaction: TransportTransaction | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+) -> ToolResponse:
+    """transport.open: open a stop-capable transport session against the run's READY target,
+    returning the session id and the bound loopback RSP endpoint. `recovery=True` admits through
+    the recovery gate (clearing the recovery tombstone on commit) — the one path permitted while a
+    target is recovery_required."""
+    if transaction is None or admission is None or session_registry is None:
+        return _transport_disabled_failure(run_id=run_id)
+    try:
+        request = _transport_open_request(run_id=run_id, admission=admission)
+        session = transaction.open(request, recovery=recovery)
+    except KeyError:
+        # carried review note #1: a request naming a provider absent from the transaction's
+        # transports map raises a bare KeyError; surface it as CONFIGURATION_ERROR, not a crash.
+        return _configuration_failure(
+            run_id=run_id,
+            message=f"no transport provider registered for {request.transport_ref.provider!r}",
+            details={"code": "unknown_transport_provider"},
+        )
+    except (GuardConflict, EndpointSafetyError) as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            message=str(exc),
+            run_id=run_id,
+            details={"code": getattr(exc, "code", "stop_capable_conflict")},
+            suggested_next_actions=["transport.status"],
+        )
+    except AdmissionError as exc:
+        return ToolResponse.failure(
+            category=exc.category,
+            message=str(exc),
+            run_id=run_id,
+            details={"code": exc.code},
+            suggested_next_actions=["transport.status"],
+        )
+    return ToolResponse.success(
+        summary=f"transport session {session.session_id} open",
+        run_id=run_id,
+        data={
+            "session_id": session.session_id,
+            "provider": session.provider,
+            "channel_id": session.channel_id,
+            "generation": session.generation,
+            "rsp_endpoint": session.rsp_endpoint.model_dump(mode="json") if session.rsp_endpoint else None,
+            "console_endpoint": session.console_endpoint.model_dump(mode="json") if session.console_endpoint else None,
+        },
+        suggested_next_actions=["debug.start_session", "transport.status"],
+    )
+
+
+def transport_close_handler(
+    *,
+    run_id: str,
+    session_id: str,
+    transaction: TransportTransaction | None = None,
+    session_registry: SessionRegistry | None = None,
+) -> ToolResponse:
+    """transport.close: tear down an open transport session — close the backend, release the
+    guard/lease, deregister the admission binding, and delete the durable record. An unknown
+    session id is a no-op success (the record is already gone)."""
+    if transaction is None or session_registry is None:
+        return _transport_disabled_failure(run_id=run_id)
+    transaction.close(session_id)
+    return ToolResponse.success(
+        summary=f"transport session {session_id} closed",
+        run_id=run_id,
+        data={"session_id": session_id},
+        suggested_next_actions=["transport.open"],
+    )
+
+
+def transport_inject_break_handler(
+    *,
+    run_id: str,
+    session_id: str,
+    acknowledged_permissions: list[str] | None = None,
+    transaction: TransportTransaction | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    inject_break: Callable[..., None] = inject_break,
+) -> ToolResponse:
+    """transport.inject_break: drop the target kernel into the debugger over an open session.
+
+    This is DESTRUCTIVE — it is refused unless the caller acknowledges every permission in
+    `TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"]`. The durable record is written
+    `execution_state=HALTED` BEFORE the break mechanism runs (so a death during the break can never
+    strand the record as EXECUTING and let an ssh-tier op admit against a halted kernel), and the
+    execution epoch is bumped to invalidate any pre-halt EXECUTING proof. If the break is
+    unconfirmable (the mechanism raises/times out), the record is written `UNKNOWN` — never left
+    EXECUTING."""
+    if transaction is None or admission is None or session_registry is None:
+        return _transport_disabled_failure(run_id=run_id)
+    missing = missing_destructive_permissions("transport.inject_break", acknowledged_permissions or [])
+    if missing:
+        return _configuration_failure(
+            run_id=run_id,
+            message="transport.inject_break is destructive; acknowledge its required permissions to proceed",
+            details={"code": "permission_required", "required_permissions": missing},
+        )
+    record = next((r for r in session_registry.list_records() if r.session_id == session_id), None)
+    if record is None:
+        return _configuration_failure(
+            run_id=run_id,
+            message=f"no open transport session for break injection: {session_id}",
+            details={"code": "unknown_session"},
+        )
+    # Persist HALTED + bump the execution epoch BEFORE the break runs (the ordering target.run_tests
+    # depends on to reject `target_halted` for the whole window the debugger owns the kernel).
+    session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.HALTED}))
+    admission.note_execution_transition(record.target_key, record.generation)
+    try:
+        inject_break(method="auto", break_plan=record.break_plan)
+    except InjectBreakError as exc:
+        # An unconfirmable break must never leave a stale EXECUTING (it was already overwritten to
+        # HALTED above) — record UNKNOWN so admission fails closed until a fresh probe runs.
+        session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
+        return ToolResponse.failure(
+            category=exc.category,
+            message=str(exc),
+            run_id=run_id,
+            details={"code": "break_unconfirmed", "execution_state": ExecutionState.UNKNOWN.value},
+            suggested_next_actions=["transport.status"],
+        )
+    return ToolResponse.success(
+        summary=f"break injected on transport session {session_id}; target halted",
+        run_id=run_id,
+        data={"session_id": session_id, "execution_state": ExecutionState.HALTED.value},
+        suggested_next_actions=["debug.start_session", "transport.status"],
+    )
+
+
 def _bundle_for_manifest(
     *,
     manifest: RunManifest,
@@ -3344,6 +3525,26 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             artifact_root=Path(artifact_root),
             run_id=run_id,
             debug_session_id=debug_session_id,
+        ).model_dump(mode="json")
+
+    @app.tool(name="transport.open")
+    def transport_open(run_id: str, recovery: bool = False) -> dict[str, Any]:
+        return transport_open_handler(run_id=run_id, recovery=recovery).model_dump(mode="json")
+
+    @app.tool(name="transport.close")
+    def transport_close(run_id: str, session_id: str) -> dict[str, Any]:
+        return transport_close_handler(run_id=run_id, session_id=session_id).model_dump(mode="json")
+
+    @app.tool(name="transport.inject_break")
+    def transport_inject_break(
+        run_id: str,
+        session_id: str,
+        acknowledged_permissions: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return transport_inject_break_handler(
+            run_id=run_id,
+            session_id=session_id,
+            acknowledged_permissions=acknowledged_permissions,
         ).model_dump(mode="json")
 
     @app.tool(name="workflow.build_boot_test")
