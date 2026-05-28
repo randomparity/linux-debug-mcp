@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import errno
 import json
 import os
 import re
@@ -27,6 +26,7 @@ from linux_debug_mcp.domain import (
     TargetKind,
 )
 from linux_debug_mcp.safety.redaction import Redactor
+from linux_debug_mcp.seams.process_identity import ProcessIdentityProbe, ProcProcessIdentityProbe
 
 MAX_MEMORY_READ_BYTES = 4096
 MAX_RESPONSE_SNIPPET = 4096
@@ -223,9 +223,16 @@ class SubprocessGdbRunner:
 class QemuGdbstubProvider:
     name = "local-qemu-gdbstub"
 
-    def __init__(self, *, runner: GdbRunner | None = None, redactor: Redactor | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        runner: GdbRunner | None = None,
+        redactor: Redactor | None = None,
+        identity_probe: ProcessIdentityProbe | None = None,
+    ) -> None:
         self.runner = runner or SubprocessGdbRunner()
         self.redactor = redactor or Redactor()
+        self._identity = identity_probe or ProcProcessIdentityProbe()
 
     def start_session(
         self,
@@ -1009,63 +1016,20 @@ class QemuGdbstubProvider:
         return "alive_after_terminate"
 
     def _pid_is_alive(self, pid: int) -> bool:
-        if self._pid_is_zombie(pid):
-            return False
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        except OSError as exc:
-            return exc.errno != errno.ESRCH
-        return True
-
-    def _pid_is_zombie(self, pid: int) -> bool:
-        stat_path = Path("/proc") / str(pid) / "stat"
-        try:
-            stat_text = stat_path.read_text(encoding="utf-8")
-        except OSError:
-            return False
-        _prefix, separator, suffix = stat_text.rpartition(") ")
-        if not separator:
-            return False
-        fields = suffix.split()
-        return bool(fields and fields[0] == "Z")
+        return self._identity.is_alive(pid)
 
     def _pid_looks_like_controller(self, pid: int) -> bool:
-        cmdline_path = Path("/proc") / str(pid) / "cmdline"
-        try:
-            cmdline = cmdline_path.read_bytes()
-        except FileNotFoundError:
-            return False
-        except OSError:
-            return False
-        if not cmdline:
-            return False
-        argv0 = cmdline.split(b"\0", 1)[0].decode("utf-8", errors="ignore")
-        executable = Path(argv0).name
-        return "gdb" in executable
+        return self._identity.looks_like(pid, "gdb")
 
     def _controller_identity(self, pid: int) -> dict[str, object]:
         identity: dict[str, object] = {"pid": pid}
-        stat_path = Path("/proc") / str(pid) / "stat"
-        cmdline_path = Path("/proc") / str(pid) / "cmdline"
-        try:
-            stat_text = stat_path.read_text(encoding="utf-8")
-            _prefix, _separator, suffix = stat_text.rpartition(") ")
-            fields = suffix.split()
-            if len(fields) >= 20:
-                identity["start_time_ticks"] = fields[19]
-        except OSError:
+        observed = self._identity.identity(pid)
+        if observed is None:
             return identity
-        try:
-            cmdline = cmdline_path.read_bytes()
-        except OSError:
-            cmdline = b""
-        if cmdline:
-            argv0 = cmdline.split(b"\0", 1)[0].decode("utf-8", errors="replace")
-            identity["argv0"] = argv0
+        if observed.start_time is not None:
+            identity["start_time_ticks"] = observed.start_time
+        if observed.argv0 is not None:
+            identity["argv0"] = observed.argv0
         return identity
 
     def _controller_identity_matches(self, session: DebugSession) -> bool:

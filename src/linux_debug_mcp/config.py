@@ -104,7 +104,38 @@ SPRINT_4_DEBUG_OPERATIONS = [
     "debug.read_memory",
     "debug.evaluate",
     "debug.end_session",
+    # Finding F14: transport.inject_break is destructive (halts the kernel) — gate it through the
+    # same DebugProfile.enabled_operations contract as every other halting/mutating debug op so a
+    # read-only profile can refuse it. Kept in this list (not a transport-only list) because the
+    # gate is per-DebugProfile and the existing `_ensure_debug_operation_enabled` consumes it.
+    "transport.inject_break",
 ]
+TRANSPORT_OPERATIONS = [
+    "transport.open",
+    "transport.status",
+    "transport.health",
+    "transport.inject_break",
+    "transport.close",
+]
+TRANSPORT_DESTRUCTIVE_PERMISSIONS = {
+    "transport.inject_break": ["drop target kernel into the debugger"],
+}
+
+
+def validate_transport_operation(operation: str) -> str:
+    if operation not in TRANSPORT_OPERATIONS:
+        raise ValueError(f"unsupported transport operation: {operation}")
+    return operation
+
+
+def missing_destructive_permissions(operation: str, acknowledged: list[str]) -> list[str]:
+    """Return the destructive permissions a transport operation requires that the caller has not
+    acknowledged. A non-destructive (or unknown) operation requires nothing, so the list is empty.
+    The tool layer refuses the call when this is non-empty so an agent never drops a kernel into
+    the debugger (or runs any future destructive transport op) without explicit acknowledgement."""
+    required = TRANSPORT_DESTRUCTIVE_PERMISSIONS.get(operation, [])
+    acknowledged_set = set(acknowledged)
+    return [permission for permission in required if permission not in acknowledged_set]
 
 
 def _has_control_character(value: str) -> bool:

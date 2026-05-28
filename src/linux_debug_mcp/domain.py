@@ -27,6 +27,8 @@ class ErrorCategory(StrEnum):
     DEBUG_ATTACH_FAILURE = "debug_attach_failure"
     INFRASTRUCTURE_FAILURE = "infrastructure_failure"
     NOT_IMPLEMENTED = "not_implemented"
+    STALE_HANDLE = "stale_handle"
+    TRANSPORT_CONFLICT = "transport_conflict"
 
 
 class TargetKind(StrEnum):

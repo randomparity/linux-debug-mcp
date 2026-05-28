@@ -136,6 +136,7 @@ def test_default_debug_profile_matches_sprint_4_policy() -> None:
         "debug.read_memory",
         "debug.evaluate",
         "debug.end_session",
+        "transport.inject_break",
     ]
 
 

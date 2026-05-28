@@ -1,0 +1,73 @@
+name: transport-integration
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  serial-local-integration:
+    # Runs test_serial_local_transport_integration.py + the agent-proxy gate in
+    # test_transport_open_close_integration.py (Test 1: inject_break PTY path).
+    # LDM_REQUIRE_AGENT_PROXY=1 makes the skipif condition False so a missing
+    # agent-proxy binary fails the job instead of silently skipping the test.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build agent-proxy pinned to an immutable commit
+        env:
+          # Full commit SHA (NOT the mutable `agent-proxy-1.96` tag — round-5 review F3).
+          AGENT_PROXY_SHA: "e6c9d3d996bd55e7ab14dbd74deb7841e0c3a4f1"  # agent-proxy-1.96
+        run: |
+          set -euo pipefail
+          git clone https://git.kernel.org/pub/scm/utils/kernel/kgdb/agent-proxy.git
+          git -C agent-proxy checkout "$AGENT_PROXY_SHA"
+          test "$(git -C agent-proxy rev-parse HEAD)" = "$AGENT_PROXY_SHA"  # fail if the SHA moved
+          make -C agent-proxy
+          echo "$PWD/agent-proxy" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+      - name: Run the gated integration tests (must not skip)
+        env:
+          LDM_REQUIRE_AGENT_PROXY: "1"
+        run: |
+          set -euo pipefail
+          uv venv --allow-existing
+          uv pip install -e '.[dev,test]'
+          uv run python -m pytest \
+            tests/test_serial_local_transport_integration.py \
+            tests/test_transport_open_close_integration.py::test_inject_break_drops_kgdb_target_into_debugger \
+            -q
+
+  gdbstub-integration:
+    # Runs test_qemu_gdbstub_integration.py + the gdbstub gate in
+    # test_transport_open_close_integration.py (Test 2: migrated transaction wiring).
+    # Requires a self-hosted runner with a live kgdb-enabled QEMU guest managed by libvirt.
+    # LINUX_DEBUG_MCP_LIVE_GDBSTUB=1 + all companion envs must be set as repository secrets
+    # for this job to run the tests rather than skip them.  On a shared GitHub-hosted runner
+    # the secrets are absent so the job is skipped via the `if:` condition below — set
+    # GDBSTUB_RUNNER_AVAILABLE=true in repository variables to enable it on a self-hosted runner.
+    runs-on: ubuntu-24.04
+    if: ${{ vars.GDBSTUB_RUNNER_AVAILABLE == 'true' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+      - name: Run the live gdbstub integration tests (must not skip)
+        env:
+          LINUX_DEBUG_MCP_LIVE_GDBSTUB: "1"
+          LINUX_DEBUG_MCP_SOURCE: ${{ secrets.LINUX_DEBUG_MCP_SOURCE }}
+          LINUX_DEBUG_MCP_ROOTFS: ${{ secrets.LINUX_DEBUG_MCP_ROOTFS }}
+          LINUX_DEBUG_MCP_DOMAIN: ${{ secrets.LINUX_DEBUG_MCP_DOMAIN }}
+          LINUX_DEBUG_MCP_LIBVIRT_URI: ${{ secrets.LINUX_DEBUG_MCP_LIBVIRT_URI }}
+          LINUX_DEBUG_MCP_READINESS_MARKER: ${{ secrets.LINUX_DEBUG_MCP_READINESS_MARKER }}
+        run: |
+          set -euo pipefail
+          uv venv --allow-existing
+          uv pip install -e '.[dev,test]'
+          uv run python -m pytest \
+            tests/test_qemu_gdbstub_integration.py \
+            tests/test_transport_open_close_integration.py::test_qemu_gdbstub_flow_unchanged \
+            -q

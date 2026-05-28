@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import os
+import tempfile
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,7 +32,20 @@ from linux_debug_mcp.config import (
     TestSuiteProfile,
     merge_config_lines,
     merge_kernel_args,
+    missing_destructive_permissions,
 )
+from linux_debug_mcp.coordination.admission import (
+    AdmissionError,
+    AdmissionHandle,
+    AdmissionService,
+    SnapshotStore,
+    TargetSnapshot,
+)
+from linux_debug_mcp.coordination.endpoint_safety import EndpointSafetyError
+from linux_debug_mcp.coordination.exec_probe import probe_execution_state, probe_rsp_halted
+from linux_debug_mcp.coordination.lease import ConsoleLeaseManager
+from linux_debug_mcp.coordination.registry import OrphanReap, RecoveryTombstone, SessionRegistry
+from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
@@ -47,7 +65,7 @@ from linux_debug_mcp.providers.contracts import (
 )
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
-from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider
+from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider, TestExecutionResult, TestPlan
 from linux_debug_mcp.providers.qemu_gdbstub import (
     DebugProviderResult,
     DebugSession,
@@ -61,6 +79,39 @@ from linux_debug_mcp.providers.stubs import (
 )
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_rootfs_source, validate_source_path
 from linux_debug_mcp.safety.redaction import Redactor
+from linux_debug_mcp.safety.runtime_locks import private_runtime_registry_dir
+from linux_debug_mcp.seams.break_policy import ReferenceBreakPolicy
+from linux_debug_mcp.seams.guard import GuardConflict, InProcessStopCapableGuard
+from linux_debug_mcp.seams.lifecycle import (
+    InProcessLifecycleDispatcher,
+    LifecycleDispatcher,
+    LifecycleEvent,
+    LifecycleKind,
+)
+from linux_debug_mcp.seams.secrets import EnvSecretsResolver
+from linux_debug_mcp.seams.target import (
+    BreakHint,
+    ConsoleKind,
+    PlatformMetadata,
+    TargetKey,
+    publish_ready_snapshot,
+)
+from linux_debug_mcp.transport.base import (
+    EndpointExposure,
+    ExecutionState,
+    LineRole,
+    OpenRequest,
+    Transport,
+    TransportLocality,
+    TransportRef,
+    TransportRegistry,
+    TransportSession,
+)
+from linux_debug_mcp.transport.break_inject import InjectBreakError, inject_break
+from linux_debug_mcp.transport.proxy import AgentProxyBackend
+from linux_debug_mcp.transport.qemu_gdbstub import QemuGdbstubTransport
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_ARTIFACT_ROOT = Path(".linux-debug-mcp/runs")
 SERVER_CONFIG_ENV_VAR = "LINUX_DEBUG_MCP_CONFIG"
@@ -203,6 +254,92 @@ def _recorded_test_success_response(*, run_id: str, result: StepResult) -> ToolR
         summary=redactor.redact_text(result.summary),
         run_id=run_id,
         data=redactor.redact_value(result.details),
+        artifacts=result.artifacts,
+        suggested_next_actions=["artifacts.collect"],
+    )
+
+
+def _admit_run_tests_ssh_tier(
+    *,
+    run_id: str,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+) -> AdmissionHandle | None:
+    """The §5.6 ssh-tier execution-state gate for target.run_tests. Returns an AdmissionHandle when
+    both `admission` and `session_registry` are supplied, else None — when either is absent the gate
+    is inert and the caller runs ungated (every legacy caller passes neither). Reads `generation` and
+    `platform` from the authoritative snapshot the boot step published (never re-derives them), takes
+    a FRESH execution-state probe, and admits the ssh tier against it. A HALTED target makes
+    admit_ssh_tier raise AdmissionError(READINESS_FAILURE/target_halted); the caller maps it to a
+    failure response and never writes a RUNNING step."""
+    if admission is None or session_registry is None:
+        return None
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    snapshot = _require_snapshot(admission, target_key)
+    proof = probe_execution_state(
+        registry=session_registry, admission=admission, target_key=target_key, generation=snapshot.generation
+    )
+    if proof.state is ExecutionState.HALTED:
+        # Fail-closed before admission: a HALTED kernel cannot serve an ssh test run, and admit_ssh_tier
+        # only inspects the proof for a DEBUGGING-state snapshot. The probe read the authoritative
+        # execution_state the stop-capable controller persisted, so a HALTED probe rejects regardless
+        # of the snapshot's coarse READY/DEBUGGING state (§5.6).
+        raise AdmissionError(
+            "target halted in debugger; resume or detach before running tests",
+            category=ErrorCategory.READINESS_FAILURE,
+            code="target_halted",
+        )
+    return admission.admit_ssh_tier(target_key, snapshot.generation, snapshot.platform, execution_proof=proof)
+
+
+def _execute_tests_under_gate(
+    *,
+    provider: LocalSshTestProvider,
+    plan: TestPlan,
+    admission: AdmissionService | None,
+    handle: AdmissionHandle | None,
+) -> TestExecutionResult:
+    """Run the ssh-tier test execution under the admission handle's cancel fence (§5.6) and dispose
+    the handle. When `handle` is None the gate is inert: run ungated, no cancel. Otherwise bridge the
+    handle's private halt-cancel into the runner's own Event with a TEARDOWN-BOUNDED daemon watcher
+    that POLLS `wait_cancelled` and is JOINED on every exit path — a fire-and-forget unbounded
+    `wait_cancelled(None)` would leak the thread and pin the completed handle on a clean run, because
+    complete()/_dispose_locked() never set `_cancel`. `admission.complete(handle)` raises
+    AdmissionError(execution_state_changed) when the op spanned a halt; that propagates so the caller
+    terminalizes the RUNNING step to FAILED instead of recording the (invalid) execution outcome."""
+    if handle is None or admission is None:
+        return provider.execute_tests(plan)
+
+    runner_cancel = threading.Event()
+    watch_done = threading.Event()
+
+    def _watch() -> None:
+        # bounded poll, NOT an unbounded park: complete()/_dispose_locked() never set the handle's
+        # _cancel, so wait_cancelled(None) would block forever on a clean run and leak the thread +
+        # the pinned completed handle + this closure.
+        while not watch_done.is_set():
+            if handle.wait_cancelled(0.1):
+                runner_cancel.set()
+                return
+
+    watcher = threading.Thread(target=_watch, daemon=True)
+    watcher.start()
+    try:
+        result = provider.execute_tests(plan, cancel=runner_cancel)
+        admission.complete(handle)  # may raise AdmissionError(execution_state_changed)
+        return result
+    finally:
+        watch_done.set()  # stop the poll loop on EVERY exit path
+        watcher.join(timeout=2)  # …and reap it before returning — no parked thread
+
+
+def _recorded_test_failure_response(*, run_id: str, result: StepResult) -> ToolResponse:
+    redactor = Redactor()
+    return ToolResponse.failure(
+        category=ErrorCategory.TEST_FAILURE,
+        message=redactor.redact_text(result.summary),
+        run_id=run_id,
+        details=redactor.redact_value(result.details),
         artifacts=result.artifacts,
         suggested_next_actions=["artifacts.collect"],
     )
@@ -906,6 +1043,88 @@ def kernel_build_handler(
     )
 
 
+def _short_circuit_boot_success(
+    *,
+    run_id: str,
+    result: StepResult,
+    admission: AdmissionService | None,
+    manifest: RunManifest,
+    rootfs_profile: RootfsProfile,
+) -> ToolResponse:
+    """Republish the boot READY snapshot before returning the recorded-SUCCEEDED short-circuit.
+
+    A long-lived server boots a target, then restarts: `AdmissionService._store` is empty (the
+    in-memory snapshot doesn't survive the process). Re-invoking `target.boot` short-circuits on
+    the recorded SUCCEEDED step and returns immediately. Without this helper, the snapshot stays
+    empty and the next `target.run_tests` / `debug.start_session` fails at `_require_snapshot`.
+
+    Republishing the same `TargetSnapshot` to the same `TargetKey` is idempotent on
+    `SnapshotStore` (`put()` enforces non-regression but accepts equal-generation writes), so two
+    consecutive short-circuit calls in one process leave the store unchanged after the second.
+    `admission is None` (defensive — matches the optional-deps style elsewhere) is a no-op.
+    """
+    if admission is not None:
+        details = result.details if isinstance(result.details, dict) else {}
+        gdbstub_endpoint = details.get("gdbstub_endpoint") if isinstance(details, dict) else None
+        if gdbstub_endpoint is not None and not isinstance(gdbstub_endpoint, dict):
+            gdbstub_endpoint = None  # malformed recorded value → publish without gdbstub
+        # The generation passed to _publish_boot_ready_snapshot at first-boot time is the boot
+        # `attempt` counter (see execute_boot). For a short-circuit, the SUCCEEDED step
+        # corresponds to the last recorded boot_attempts entry — the same attempt number that
+        # produced the recorded snapshot, so the republish carries an IDENTICAL generation.
+        attempt = manifest.boot_attempts[-1].attempt if manifest.boot_attempts else 1
+        _publish_boot_ready_snapshot(
+            admission,
+            run_id=run_id,
+            generation=attempt,
+            gdbstub_endpoint=gdbstub_endpoint,
+            rootfs_profile=rootfs_profile,
+        )
+    return _recorded_boot_success_response(run_id=run_id, result=result)
+
+
+def _publish_boot_ready_snapshot(
+    admission: AdmissionService,
+    *,
+    run_id: str,
+    generation: int,
+    gdbstub_endpoint: dict[str, Any] | None,
+    rootfs_profile: RootfsProfile,
+) -> None:
+    """Publish the authoritative READY TargetSnapshot for a local-qemu boot (ADR 0007).
+
+    No provisioner exists on the local path, so the boot step is the snapshot producer: it mints
+    the RSP TransportRef from the recorded gdbstub endpoint (so admission can re-bind transport.open
+    requests) and the platform facts admission re-binds against. `generation` is the boot attempt
+    number, so a reboot bumps it and invalidates handles minted against the prior incarnation.
+    """
+    transports: list[TransportRef] = []
+    if gdbstub_endpoint is not None:
+        transports.append(
+            TransportRef(
+                provider="qemu-gdbstub",
+                channel_id="rsp0",
+                line_role=LineRole.RSP,
+                caps=("rsp",),
+                target_ref=gdbstub_endpoint,
+            )
+        )
+    platform = PlatformMetadata(
+        console_kind=ConsoleKind.UART,
+        console_count=1,
+        dedicated_debug_line=False,
+        ssh_reachable=rootfs_profile.ssh_host is not None,
+        break_hints=[BreakHint.GDBSTUB_NATIVE],
+    )
+    publish_ready_snapshot(
+        admission,
+        target_key=TargetKey(provisioner="local-qemu", target_id=run_id),
+        generation=generation,
+        transports=transports,
+        platform=platform,
+    )
+
+
 def target_boot_handler(
     *,
     artifact_root: Path,
@@ -919,6 +1138,7 @@ def target_boot_handler(
     default_libvirt_uri: str | None = None,
     boot_overrides: BootOverrides | None = None,
     sensitive_paths: list[Path] | None = None,
+    admission: AdmissionService | None = None,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -1030,7 +1250,13 @@ def target_boot_handler(
 
     existing = manifest.step_results.get("boot")
     if existing and existing.status == StepStatus.SUCCEEDED and not force_reboot and not has_new_boot_overrides:
-        return _recorded_boot_success_response(run_id=run_id, result=existing)
+        return _short_circuit_boot_success(
+            run_id=run_id,
+            result=existing,
+            admission=admission,
+            manifest=manifest,
+            rootfs_profile=resolved_rootfs_profile,
+        )
 
     provider = provider or LibvirtQemuProvider()
 
@@ -1124,6 +1350,14 @@ def target_boot_handler(
             status=execution.status,
         )
         store.record_boot_attempt(run_id, attempt=attempt_record, boot_result=terminal)
+        if execution.status == StepStatus.SUCCEEDED and admission is not None:
+            _publish_boot_ready_snapshot(
+                admission,
+                run_id=run_id,
+                generation=attempt,
+                gdbstub_endpoint=plan_gdbstub_endpoint,
+                rootfs_profile=resolved_rootfs_profile,
+            )
         if execution.status == StepStatus.SUCCEEDED:
             return ToolResponse.success(
                 summary=execution.summary,
@@ -1151,7 +1385,13 @@ def target_boot_handler(
                 and not force_reboot
                 and not has_new_boot_overrides
             ):
-                return _recorded_boot_success_response(run_id=run_id, result=locked_existing)
+                return _short_circuit_boot_success(
+                    run_id=run_id,
+                    result=locked_existing,
+                    admission=admission,
+                    manifest=locked_manifest,
+                    rootfs_profile=resolved_rootfs_profile,
+                )
             next_attempt = len(locked_manifest.boot_attempts) + 1
             retrying_after_failure = bool(locked_existing and locked_existing.status == StepStatus.FAILED)
             replace_succeeded = (
@@ -1226,6 +1466,8 @@ def target_run_tests_handler(
     provider: LocalSshTestProvider | None = None,
     rootfs_profiles: dict[str, RootfsProfile] | None = None,
     test_suites: dict[str, TestSuiteProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -1282,6 +1524,8 @@ def target_run_tests_handler(
     existing = manifest.step_results.get("run_tests")
     if existing and existing.status == StepStatus.SUCCEEDED and not force_rerun:
         return _recorded_test_success_response(run_id=run_id, result=existing)
+    if existing and existing.status == StepStatus.FAILED and not force_rerun:
+        return _recorded_test_failure_response(run_id=run_id, result=existing)
 
     provider = provider or LocalSshTestProvider()
     try:
@@ -1290,6 +1534,8 @@ def target_run_tests_handler(
             existing = locked_manifest.step_results.get("run_tests")
             if existing and existing.status == StepStatus.SUCCEEDED and not force_rerun:
                 return _recorded_test_success_response(run_id=run_id, result=existing)
+            if existing and existing.status == StepStatus.FAILED and not force_rerun:
+                return _recorded_test_failure_response(run_id=run_id, result=existing)
             if existing and existing.status == StepStatus.RUNNING:
                 stale_failed = StepResult(
                     step_name="run_tests",
@@ -1312,6 +1558,18 @@ def target_run_tests_handler(
                 )
             except ValueError as exc:
                 return _configuration_failure(run_id=run_id, message=str(exc))
+            try:
+                handle = _admit_run_tests_ssh_tier(
+                    run_id=run_id, admission=admission, session_registry=session_registry
+                )
+            except AdmissionError as exc:
+                return ToolResponse.failure(
+                    category=exc.category,
+                    message=str(exc),
+                    run_id=run_id,
+                    details={"code": exc.code},
+                    suggested_next_actions=["artifacts.collect"],
+                )
             running = StepResult(
                 step_name="run_tests",
                 status=StepStatus.RUNNING,
@@ -1324,8 +1582,38 @@ def target_run_tests_handler(
             )
             store.record_step_result(run_id, running, replace_succeeded=force_rerun)
             try:
-                execution = provider.execute_tests(plan)
+                execution = _execute_tests_under_gate(provider=provider, plan=plan, admission=admission, handle=handle)
+            except AdmissionError as exc:
+                # The op spanned a halt (cancel_ssh_tier set the fence). The PROMOTED ssh-tier
+                # handle is cancelled but undisposed; without rollback it lingers in
+                # admission._bindings and would block reopen()/admit (`bindings_outstanding`). The
+                # target is NOT torn down by cancel_ssh_tier (admission stays open, §5.6), so the
+                # standard rollback path applies (no confirm_reaped gate). Guarded so a disposal
+                # hiccup never masks the original AdmissionError.
+                if handle is not None and admission is not None:
+                    with contextlib.suppress(Exception):
+                        admission.rollback(handle)
+                terminal = StepResult(
+                    step_name="run_tests",
+                    status=StepStatus.FAILED,
+                    summary="test run spanned an execution-state transition (target halted)",
+                    details={"provider": provider.name, "code": exc.code, "error": str(exc)},
+                )
+                store.record_step_result(run_id, terminal, replace_succeeded=force_rerun)
+                return ToolResponse.failure(
+                    category=exc.category,
+                    message=str(exc),
+                    run_id=run_id,
+                    details={"code": exc.code},
+                    suggested_next_actions=["artifacts.collect"],
+                )
             except Exception as exc:
+                # The provider blew up after admit but before complete(). Symmetric to the halt path
+                # above: the PROMOTED handle is undisposed and would linger; rollback deregisters it
+                # cleanly. Guarded so the cleanup never masks the original exception detail.
+                if handle is not None and admission is not None:
+                    with contextlib.suppress(Exception):
+                        admission.rollback(handle)
                 terminal = StepResult(
                     step_name="run_tests",
                     status=StepStatus.FAILED,
@@ -1386,6 +1674,67 @@ def target_run_tests_handler(
     )
 
 
+def _require_snapshot(admission: AdmissionService, target_key: TargetKey) -> TargetSnapshot:
+    """Read the authoritative snapshot for a target, raising `snapshot_missing` when boot has
+    not published one yet. `stale_handle` means a caller's handle/request is bound to a
+    now-superseded incarnation; "no snapshot exists at all" is a distinct precondition failure,
+    so it carries its own code. Single source of the `current_snapshot(...) → raise if None`
+    check shared by every snapshot-reading path (transport.open request builders + inject_break)."""
+    snapshot = admission.current_snapshot(target_key)
+    if snapshot is None:
+        raise AdmissionError(
+            "no authoritative snapshot for target; boot must publish a READY snapshot first",
+            category=ErrorCategory.READINESS_FAILURE,
+            code="snapshot_missing",
+        )
+    return snapshot
+
+
+def _debug_open_request(*, run_id: str, gdbstub_endpoint: dict[str, Any], admission: AdmissionService) -> OpenRequest:
+    """Build the §4.3 transport.open request for the recorded gdbstub endpoint, reading
+    `generation`/`platform` from the authoritative snapshot the boot step published (never
+    re-deriving them — ADR 0007). The RSP channel mirrors the boot snapshot producer."""
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    snapshot = _require_snapshot(admission, target_key)
+    return OpenRequest(
+        target_key=target_key,
+        generation=snapshot.generation,
+        transport_ref=TransportRef(
+            provider="qemu-gdbstub",
+            channel_id="rsp0",
+            line_role=LineRole.RSP,
+            caps=("rsp",),
+            target_ref=gdbstub_endpoint,
+        ),
+        required_caps=["rsp"],
+        platform=snapshot.platform,
+    )
+
+
+def _halt_debug_transport(
+    *,
+    session: TransportSession,
+    admission: AdmissionService,
+    session_registry: SessionRegistry,
+) -> None:
+    """Persist the EXECUTING→HALTED transition BEFORE the gdb attach runs (the attach halts the
+    kernel). The durable HALTED record is what the run-tests probe reads, and
+    note_execution_transition bumps the execution epoch so a pre-halt EXECUTING ssh proof can never
+    be replayed across the halt. The ordering (durable write, then note) makes target.run_tests
+    reject with `target_halted` for the whole window the debugger owns the kernel.
+
+    Spec §4.6 / ADR-0006 async-halt cancellation: after recording the transition, immediately
+    cancel the fence on every in-flight ssh-tier binding admitted at-or-before this halt's epoch.
+    Without this call the run-tests watcher would poll until the SSH provider's per-command
+    timeout (default 30s); with it, an admitted run_tests racing the halt observes the cancel
+    fence and rolls back in <5s. The two calls are not atomic — a fresh `admit_ssh_tier` admitted
+    between them carries the post-bump epoch (so its stamped proof at the old epoch is already
+    stale and rejected) and is correctly left untouched here."""
+    session_registry.write_record(session.model_copy(update={"execution_state": ExecutionState.HALTED}))
+    halt_epoch = admission.note_execution_transition(session.target_key, session.generation)
+    admission.cancel_ssh_tier(session.target_key, session.generation, halt_epoch=halt_epoch)
+
+
 def debug_start_session_handler(
     *,
     artifact_root: Path,
@@ -1394,6 +1743,10 @@ def debug_start_session_handler(
     new_session: bool = False,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    transaction: TransportTransaction | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    recovery: bool = False,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -1462,6 +1815,36 @@ def debug_start_session_handler(
                         suggested_next_actions=["debug.interrupt", "debug.read_registers", "artifacts.get_manifest"],
                     )
                 replace_existing_debug = existing.status == StepStatus.SUCCEEDED
+            transport_enabled = transaction is not None and admission is not None and session_registry is not None
+            transport_session: TransportSession | None = None
+            if transport_enabled:
+                # mypy/ty narrowing: transport_enabled proves these are not None.
+                assert transaction is not None and admission is not None and session_registry is not None
+                try:
+                    request = _debug_open_request(run_id=run_id, gdbstub_endpoint=gdbstub_endpoint, admission=admission)
+                    transport_session = transaction.open(request, recovery=recovery)
+                except (GuardConflict, EndpointSafetyError) as exc:
+                    # Finding F13: these are transport-resource conflicts (guard already held,
+                    # or endpoint exposure refusal), not gdb attach failures. The dedicated
+                    # `TRANSPORT_CONFLICT` category was unreachable before this change.
+                    return ToolResponse.failure(
+                        category=ErrorCategory.TRANSPORT_CONFLICT,
+                        message=str(exc),
+                        run_id=run_id,
+                        details={"code": getattr(exc, "code", "stop_capable_conflict")},
+                        suggested_next_actions=["artifacts.get_manifest"],
+                    )
+                except AdmissionError as exc:
+                    return ToolResponse.failure(
+                        category=exc.category,
+                        message=str(exc),
+                        run_id=run_id,
+                        details={"code": exc.code},
+                        suggested_next_actions=["artifacts.get_manifest"],
+                    )
+                # Persist HALTED + bump the execution epoch BEFORE the gdb attach halts the kernel,
+                # so target.run_tests rejects with target_halted for the debugger's whole window.
+                _halt_debug_transport(session=transport_session, admission=admission, session_registry=session_registry)
             try:
                 result = provider.start_session(
                     run_id=run_id,
@@ -1473,23 +1856,41 @@ def debug_start_session_handler(
                     boot_metadata=boot_metadata,
                 )
             except ProviderDebugError as exc:
+                # The gdb attach failed AFTER transaction.open() committed a READY record + promoted
+                # the admission handle, and AFTER _halt_debug_transport persisted HALTED. Without
+                # closing, the guard stays held / record stays live / handle stays PROMOTED —
+                # so a subsequent debug.start_session on the same target would refuse with
+                # stop_capable_conflict and run_tests would stay gated `target_halted` forever.
+                # transaction.close(force=False) is the proper recovery path here: the attach
+                # FAILED mid-halt, so leaving a `closed_while_halted` tombstone is the right
+                # tombstone semantics (a future recovery=True reattach clears it). Guarded so a
+                # close hiccup never masks the original ProviderDebugError.
+                if transport_session is not None and transaction is not None:
+                    with contextlib.suppress(Exception):
+                        transaction.close(transport_session.session_id, force=False)
+                exc_details = dict(exc.details)
+                if transport_session is not None:
+                    exc_details["transport_session_id"] = transport_session.session_id
                 failed = StepResult(
                     step_name="debug",
                     status=StepStatus.FAILED,
                     summary=str(exc),
                     artifacts=exc.artifacts,
-                    details=redactor.redact_value(exc.details),
+                    details=redactor.redact_value(exc_details),
                 )
                 store.record_step_result(run_id, failed, replace_succeeded=replace_existing_debug)
                 return ToolResponse.failure(
                     category=exc.category,
                     message=redactor.redact_text(str(exc)),
                     run_id=run_id,
-                    details=redactor.redact_value(exc.details),
+                    details=redactor.redact_value(exc_details),
                     artifacts=_redacted_artifacts(exc.artifacts, redactor),
                     suggested_next_actions=["artifacts.get_manifest"],
                 )
             details = _debug_session_manifest_details(store=store, run_id=run_id, session=result.session)
+            if transport_session is not None:
+                # bind the DebugSession to the transport-ownership record so close() can tear it down.
+                details["transport_session_id"] = transport_session.session_id
             terminal = StepResult(
                 step_name="debug",
                 status=result.status,
@@ -1596,6 +1997,86 @@ def _load_active_debug_session(
     return session
 
 
+def _mark_legacy_session_recovery_required(
+    *, run_id: str, admission: AdmissionService, session_registry: SessionRegistry
+) -> None:
+    """Dual-write the `legacy_session_no_ownership` tombstone for a legacy DebugSession's target
+    (Finding #5): durable `write_tombstone` + admission cache `mark_recovery_required`, never one
+    alone. Generation is the authoritative snapshot's when one exists, else 0 (fail-closed at bare
+    startup — admission's gate treats a tombstone-not-strictly-older-than-the-snapshot as live)."""
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    snapshot = admission.current_snapshot(target_key)
+    generation = snapshot.generation if snapshot is not None else 0
+    session_registry.write_tombstone(
+        RecoveryTombstone(target_key=target_key, generation=generation, reason="legacy_session_no_ownership")
+    )
+    admission.mark_recovery_required(target_key, generation)
+
+
+def _assert_layer4_ownership(
+    *,
+    run_id: str,
+    session_registry: SessionRegistry | None,
+) -> None:
+    """Pure ownership check (Finding F8). When `session_registry` is wired, raise
+    `legacy_session_no_ownership` if no `TargetKey("local-qemu", run_id)` durable record exists.
+    Does NOT tombstone — that side-effect belongs to `_fence_legacy_debug_session`, which the
+    stateful mutating debug.* path uses; pure-read paths just need the assertion so they cannot
+    silently halt the kernel as a side-effect of `target remote` against a legacy session.
+
+    Inert (None) when no `session_registry` is supplied — every legacy caller passes none, so the
+    read paths stay unchanged on a non-wired server."""
+    if session_registry is None:
+        return
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    if session_registry.read_record(target_key) is not None:
+        return  # Layer-4-owned session; the durable record governs it.
+    raise ProviderDebugError(
+        "legacy debug session predates the transport-ownership model and has no durable record; "
+        "it cannot be silently resumed.",
+        category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+        details={"code": "legacy_session_no_ownership", "debug_session_id": None},
+    )
+
+
+def _fence_legacy_debug_session(
+    *,
+    run_id: str,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+) -> None:
+    """Version-skew fence (§4.7/B7). A DebugSession persisted before the transport-ownership model
+    carries a raw gdbstub_endpoint but NO durable SessionRegistry record. On a WIRED server a
+    stateful mutating debug.* op must NOT silently resume it — that would bypass the durable model
+    and leave target.run_tests blind to a kernel a stale session already halted. Stateful mutating
+    debug.* ops take BOTH `admission` and `session_registry`; the read path takes
+    `session_registry` only (Finding F8) and runs the lighter `_assert_layer4_ownership` instead.
+
+    Additive: inert unless BOTH `admission` and `session_registry` are injected (every legacy caller
+    passes neither). When wired:
+    - A record EXISTS for TargetKey("local-qemu", run_id) ⇒ Layer-4-owned ⇒ proceed.
+    - NO record ⇒ legacy: dual-write a recovery_required tombstone and REFUSE with
+      DEBUG_ATTACH_FAILURE / `legacy_session_no_ownership`.
+
+    A probe-permits-force-end branch is intentionally NOT implemented in #10: the probe reads the
+    same SessionRegistry record this fence already confirmed absent, so it can only return UNKNOWN.
+    An out-of-band EXECUTING source could permit force-ending a legacy session in a future layer —
+    but #10 always refuses + tombstones. (`debug.end_session` is the one operation that must still
+    detach a legacy session; it bypasses this fence and writes the tombstone post-detach instead.)"""
+    if admission is None or session_registry is None:
+        return
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    if session_registry.read_record(target_key) is not None:
+        return  # Layer-4-owned session; the durable record governs it.
+    _mark_legacy_session_recovery_required(run_id=run_id, admission=admission, session_registry=session_registry)
+    raise ProviderDebugError(
+        "legacy debug session predates the transport-ownership model and has no durable record; "
+        "it cannot be silently resumed. The target is now recovery_required.",
+        category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+        details={"code": "legacy_session_no_ownership", "debug_session_id": None},
+    )
+
+
 def _debug_operation_response(
     *,
     artifact_root: Path,
@@ -1607,6 +2088,8 @@ def _debug_operation_response(
     persist_manifest: bool,
     allow_ended: bool = False,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -1620,6 +2103,15 @@ def _debug_operation_response(
     try:
         with store.debug_lock(run_id):
             session = _load_active_debug_session(store, run_id, debug_session_id, allow_ended=allow_ended)
+            # Mutating-op fence (tombstones the legacy session) when BOTH admission + registry are
+            # wired; pure-read assertion (no tombstone — reads are non-destructive) when only the
+            # registry is wired. Finding F8: every debug.* path that connects gdb gets at least the
+            # ownership assertion, so a legacy session can never silently halt the kernel as a side
+            # effect of `target remote` against a run target.run_tests is unaware of.
+            if admission is not None:
+                _fence_legacy_debug_session(run_id=run_id, admission=admission, session_registry=session_registry)
+            else:
+                _assert_layer4_ownership(run_id=run_id, session_registry=session_registry)
             profile = _resolve_debug_profile(
                 profile_name=session.selected_debug_profile,
                 debug_profiles=debug_profiles,
@@ -1689,7 +2181,14 @@ def _debug_read_response(
     method_name: str,
     kwargs: dict[str, object],
     debug_profiles: dict[str, DebugProfile] | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
+    """Pure-read debug.* path. Takes `session_registry` (Finding F8) but NOT `admission`: reads
+    do not register an ssh-tier admission, so the structural read/ssh-tier separation is
+    preserved (the `test_debug_read_not_ssh_gated` invariant still holds). The registry presence
+    drives the lighter `_assert_layer4_ownership` check, which closes the legacy-fence bypass
+    where a `debug.read_*` call would silently halt the kernel via `target remote` against a run
+    target.run_tests had no durable record for."""
     return _debug_operation_response(
         artifact_root=artifact_root,
         run_id=run_id,
@@ -1699,6 +2198,7 @@ def _debug_read_response(
         kwargs=kwargs,
         persist_manifest=False,
         debug_profiles=debug_profiles,
+        session_registry=session_registry,
     )
 
 
@@ -1710,6 +2210,7 @@ def debug_read_registers_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_read_response(
         artifact_root=artifact_root,
@@ -1719,6 +2220,7 @@ def debug_read_registers_handler(
         method_name="read_registers",
         kwargs={"registers": registers},
         debug_profiles=debug_profiles,
+        session_registry=session_registry,
     )
 
 
@@ -1730,6 +2232,7 @@ def debug_read_symbol_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_read_response(
         artifact_root=artifact_root,
@@ -1739,6 +2242,7 @@ def debug_read_symbol_handler(
         method_name="read_symbol",
         kwargs={"symbol": symbol},
         debug_profiles=debug_profiles,
+        session_registry=session_registry,
     )
 
 
@@ -1751,6 +2255,7 @@ def debug_read_memory_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_read_response(
         artifact_root=artifact_root,
@@ -1760,6 +2265,7 @@ def debug_read_memory_handler(
         method_name="read_memory",
         kwargs={"address": address, "byte_count": byte_count},
         debug_profiles=debug_profiles,
+        session_registry=session_registry,
     )
 
 
@@ -1772,6 +2278,7 @@ def debug_evaluate_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_read_response(
         artifact_root=artifact_root,
@@ -1781,6 +2288,7 @@ def debug_evaluate_handler(
         method_name="evaluate",
         kwargs={"inspector": inspector, "arguments": arguments or {}},
         debug_profiles=debug_profiles,
+        session_registry=session_registry,
     )
 
 
@@ -1794,6 +2302,8 @@ def _debug_stateful_response(
     kwargs: dict[str, object],
     allow_ended: bool = False,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_operation_response(
         artifact_root=artifact_root,
@@ -1805,6 +2315,8 @@ def _debug_stateful_response(
         persist_manifest=True,
         allow_ended=allow_ended,
         debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
     )
 
 
@@ -1816,6 +2328,8 @@ def debug_set_breakpoint_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -1825,6 +2339,8 @@ def debug_set_breakpoint_handler(
         method_name="set_breakpoint",
         kwargs={"symbol": symbol},
         debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
     )
 
 
@@ -1836,6 +2352,8 @@ def debug_clear_breakpoint_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -1845,6 +2363,8 @@ def debug_clear_breakpoint_handler(
         method_name="clear_breakpoint",
         kwargs={"breakpoint_id": breakpoint_id},
         debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
     )
 
 
@@ -1855,6 +2375,8 @@ def debug_list_breakpoints_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -1864,6 +2386,8 @@ def debug_list_breakpoints_handler(
         method_name="list_breakpoints",
         kwargs={},
         debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
     )
 
 
@@ -1875,6 +2399,8 @@ def debug_continue_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -1884,6 +2410,8 @@ def debug_continue_handler(
         method_name="continue_execution",
         kwargs={"timeout_seconds": timeout_seconds},
         debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
     )
 
 
@@ -1895,6 +2423,8 @@ def debug_interrupt_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
@@ -1904,7 +2434,26 @@ def debug_interrupt_handler(
         method_name="interrupt",
         kwargs={"timeout_seconds": timeout_seconds},
         debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
     )
+
+
+def _recorded_transport_session_id(*, artifact_root: Path, run_id: str) -> str | None:
+    """Read the transport-ownership binding `debug.start_session` persisted into the debug step
+    details (set only on the transaction-backed path). None when the run/manifest/step is absent or
+    no transport session was bound — the legacy ungated path records nothing, so close() is skipped."""
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        if not (store.run_dir(run_id) / "manifest.json").is_file():
+            return None
+        debug_result = store.load_manifest(run_id).step_results.get("debug")
+    except ManifestStateError:
+        return None
+    if debug_result is None:
+        return None
+    transport_session_id = debug_result.details.get("transport_session_id")
+    return transport_session_id if isinstance(transport_session_id, str) else None
 
 
 def debug_end_session_handler(
@@ -1914,8 +2463,28 @@ def debug_end_session_handler(
     debug_session_id: str | None = None,
     provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    transaction: TransportTransaction | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
-    return _debug_stateful_response(
+    # Capture the transport binding BEFORE the provider detach rewrites the debug step (end_session
+    # records `current_execution_state="ended"` and may drop the start_session details).
+    transport_session_id = (
+        _recorded_transport_session_id(artifact_root=artifact_root, run_id=run_id) if transaction is not None else None
+    )
+    # B7 review: end_session is the one stateful op that must still detach a LEGACY session (force-end
+    # is the operation here), so the pre-detach fence is bypassed (admission/session_registry passed
+    # as None to `_debug_stateful_response`). A legacy session is one whose target has no
+    # SessionRegistry ownership record; detect it BEFORE the detach so the post-detach tombstone path
+    # below runs even though end_session rewrites the manifest's debug step. A Layer-4-owned session
+    # has a record AND a `transport_session_id` — the transaction.close() branch governs it.
+    is_legacy_session = (
+        admission is not None
+        and session_registry is not None
+        and transport_session_id is None
+        and session_registry.read_record(TargetKey(provisioner="local-qemu", target_id=run_id)) is None
+    )
+    response = _debug_stateful_response(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
@@ -1924,6 +2493,345 @@ def debug_end_session_handler(
         kwargs={},
         allow_ended=True,
         debug_profiles=debug_profiles,
+    )
+    # Clean detach only: close the transaction (release guard/lease, delete the durable record,
+    # deregister the AdmissionHandle) AFTER the provider detach succeeded. A failed end leaves the
+    # session owned so a retry/recovery can act on it. No transport binding ⇒ nothing to close.
+    # force=True: a clean end_session resumed the kernel (the durable record was parked HALTED at
+    # attach), so the target needs no recovery gating — skip the close-while-halted tombstone that
+    # would otherwise leave the next attach `recovery_required`.
+    if response.ok and transaction is not None and transport_session_id is not None:
+        transaction.close(transport_session_id, force=True)
+    # B7 review (#10): a LEGACY session bypassed the pre-detach fence so end_session could force-end
+    # the unmanaged stop, but target.run_tests would otherwise stay BLIND to that detach — exactly the
+    # failure mode B7 fences against. Dual-write a recovery_required tombstone AFTER the successful
+    # detach so run_tests stays gated until a `transport.open(recovery=True)` (or reset) clears it.
+    if response.ok and is_legacy_session:
+        assert admission is not None and session_registry is not None  # narrowed by is_legacy_session
+        _mark_legacy_session_recovery_required(run_id=run_id, admission=admission, session_registry=session_registry)
+    return response
+
+
+def _transport_disabled_failure(*, run_id: str) -> ToolResponse:
+    """The Layer-4 coordination collaborators (transaction/admission/registry) are not wired.
+    create_app wiring is B6; until then a transport tool fails closed rather than acting."""
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        message="transport coordination is not available on this server instance",
+        run_id=run_id,
+        details={"code": "transport_unavailable"},
+    )
+
+
+def _transport_open_request(*, run_id: str, admission: AdmissionService) -> OpenRequest:
+    """Build the §4.3 transport.open request from the authoritative snapshot the boot step
+    published: it reads `generation`/`platform` and the RSP channel straight from the snapshot
+    (never re-derived — ADR 0007), so admission re-binds the request against its own facts and a
+    snapshot naming an unregistered provider flows through to the transaction's lookup (mapped to
+    CONFIGURATION_ERROR by the handler), not silently rewritten to qemu-gdbstub."""
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    snapshot = _require_snapshot(admission, target_key)
+    rsp_channel = next((ref for ref in snapshot.transports if ref.line_role is LineRole.RSP), None)
+    if rsp_channel is None:
+        raise AdmissionError(
+            "authoritative snapshot exposes no RSP channel for a stop-capable open",
+            category=ErrorCategory.READINESS_FAILURE,
+            code="no_rsp_channel",
+        )
+    return OpenRequest(
+        target_key=target_key,
+        generation=snapshot.generation,
+        transport_ref=rsp_channel,
+        required_caps=["rsp"],
+        platform=snapshot.platform,
+    )
+
+
+def transport_open_handler(
+    *,
+    run_id: str,
+    recovery: bool = False,
+    transaction: TransportTransaction | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+) -> ToolResponse:
+    """transport.open: open a stop-capable transport session against the run's READY target,
+    returning the session id and the bound loopback RSP endpoint. `recovery=True` admits through
+    the recovery gate (clearing the recovery tombstone on commit) — the one path permitted while a
+    target is recovery_required."""
+    if transaction is None or admission is None or session_registry is None:
+        return _transport_disabled_failure(run_id=run_id)
+    # Finding F15: every failure path that surfaces `str(exc)` to the agent runs the text through
+    # `Redactor` so an `OSError`/`EndpointSafetyError` message containing a secret-looking
+    # endpoint path or generation number cannot leak. Details dicts pass through `redact_value`
+    # for the same reason. Matches the pattern at `_debug_operation_response`.
+    redactor = Redactor()
+    try:
+        request = _transport_open_request(run_id=run_id, admission=admission)
+        session = transaction.open(request, recovery=recovery)
+    except KeyError:
+        # carried review note #1: a request naming a provider absent from the transaction's
+        # transports map raises a bare KeyError; surface it as CONFIGURATION_ERROR, not a crash.
+        return _configuration_failure(
+            run_id=run_id,
+            message=redactor.redact_text(f"no transport provider registered for {request.transport_ref.provider!r}"),
+            details=redactor.redact_value({"code": "unknown_transport_provider"}),
+        )
+    except (GuardConflict, EndpointSafetyError) as exc:
+        # Finding F13: see transport.open's mirror branch — guard/endpoint conflicts route
+        # through TRANSPORT_CONFLICT, not the gdb-attach-specific DEBUG_ATTACH_FAILURE.
+        return ToolResponse.failure(
+            category=ErrorCategory.TRANSPORT_CONFLICT,
+            message=redactor.redact_text(str(exc)),
+            run_id=run_id,
+            details=redactor.redact_value({"code": getattr(exc, "code", "stop_capable_conflict")}),
+            suggested_next_actions=["providers.list"],
+        )
+    except AdmissionError as exc:
+        return ToolResponse.failure(
+            category=exc.category,
+            message=redactor.redact_text(str(exc)),
+            run_id=run_id,
+            details=redactor.redact_value({"code": exc.code}),
+            suggested_next_actions=["providers.list"],
+        )
+    return ToolResponse.success(
+        summary=f"transport session {session.session_id} open",
+        run_id=run_id,
+        data={
+            "session_id": session.session_id,
+            "provider": session.provider,
+            "channel_id": session.channel_id,
+            "generation": session.generation,
+            "rsp_endpoint": session.rsp_endpoint.model_dump(mode="json") if session.rsp_endpoint else None,
+            "console_endpoint": session.console_endpoint.model_dump(mode="json") if session.console_endpoint else None,
+        },
+        suggested_next_actions=["debug.start_session"],
+    )
+
+
+def _resolve_session_for_run(
+    *,
+    session_registry: SessionRegistry,
+    session_id: str,
+    run_id: str,
+) -> TransportSession | None:
+    """Look up a TransportSession by session_id and verify it belongs to `run_id` (Finding F7).
+    Returns the record on a match. Returns None if no record exists (caller decides whether that
+    is a no-op success — `transport.close` — or a `unknown_session` failure — `inject_break`).
+    Raises a `_SessionRunMismatch` (a stub `ValueError`) when the session exists but belongs to
+    a different run; the caller surfaces this as a `session_run_mismatch` configuration_error so
+    a caller cannot halt/close some OTHER run's kernel by passing its session_id under run_id=X."""
+    record = next((r for r in session_registry.list_records() if r.session_id == session_id), None)
+    if record is None:
+        return None
+    target_key = record.target_key
+    if target_key.provisioner != "local-qemu" or target_key.target_id != run_id:
+        raise _SessionRunMismatch(
+            f"session {session_id!r} belongs to target {target_key.provisioner}/{target_key.target_id}, "
+            f"not run {run_id!r}"
+        )
+    return record
+
+
+class _SessionRunMismatch(ValueError):
+    """Signal that a caller asked to operate on `session_id` under a `run_id` that does not own
+    it — see `_resolve_session_for_run` (Finding F7)."""
+
+
+def transport_close_handler(
+    *,
+    run_id: str,
+    session_id: str,
+    transaction: TransportTransaction | None = None,
+    session_registry: SessionRegistry | None = None,
+) -> ToolResponse:
+    """transport.close: tear down an open transport session — close the backend, release the
+    guard/lease, deregister the admission binding, and delete the durable record. An unknown
+    session id is a no-op success (the record is already gone) but the response is marked
+    `data["already_closed"] = True` so the caller can distinguish "I closed a live session" from
+    "the session was already gone" (e.g. reaped out-of-band by reconcile() / lifecycle force_drop).
+    A session that exists but belongs to a different run is refused as `session_run_mismatch`
+    (Finding F7) — never close another run's session."""
+    if transaction is None or session_registry is None:
+        return _transport_disabled_failure(run_id=run_id)
+    try:
+        record = _resolve_session_for_run(session_registry=session_registry, session_id=session_id, run_id=run_id)
+    except _SessionRunMismatch as exc:
+        return _configuration_failure(
+            run_id=run_id,
+            message=str(exc),
+            details={"code": "session_run_mismatch"},
+        )
+    if record is None:
+        # The record was reaped out-of-band (reconcile() on restart, or a CRASHED/RESETTING
+        # lifecycle event drove force_drop) before this close arrived. transaction.close would
+        # no-op anyway; surface the distinction explicitly so callers can tell.
+        return ToolResponse.success(
+            summary=f"transport session {session_id} already closed",
+            run_id=run_id,
+            data={"session_id": session_id, "already_closed": True},
+            suggested_next_actions=["transport.open"],
+        )
+    transaction.close(session_id)
+    return ToolResponse.success(
+        summary=f"transport session {session_id} closed",
+        run_id=run_id,
+        data={"session_id": session_id, "already_closed": False},
+        suggested_next_actions=["transport.open"],
+    )
+
+
+def transport_inject_break_handler(
+    *,
+    run_id: str,
+    session_id: str,
+    acknowledged_permissions: list[str] | None = None,
+    artifact_root: Path | None = None,
+    transaction: TransportTransaction | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    break_mechanism: Callable[..., None] = inject_break,
+    probe_halted: Callable[[TransportSession], bool] = probe_rsp_halted,
+) -> ToolResponse:
+    """transport.inject_break: drop the target kernel into the debugger over an open session.
+
+    This is DESTRUCTIVE — it is refused unless the caller acknowledges every permission in
+    `TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"]`. The durable record is written
+    `execution_state=HALTED` BEFORE the break mechanism runs (so a death during the break can never
+    strand the record as EXECUTING and let an ssh-tier op admit against a halted kernel), and the
+    execution epoch is bumped to invalidate any pre-halt EXECUTING proof. If the break is
+    unconfirmable — the mechanism raises a known `InjectBreakError` OR any other exception (an
+    OSError, or the B6 real-mechanism missing-kwargs trap) — the record is written `UNKNOWN`,
+    NEVER left EXECUTING and never stranded at the optimistic HALTED.
+
+    Finding #4 / ADR 0006: after the mechanism returns successfully, the handler RE-PROBES the
+    execution state. The mechanism's return value alone is not authoritative — a silent-no-op
+    wiring or a misconfigured `break_plan` can return success while the kernel keeps running. If
+    the probe observes anything other than HALTED (including a probe exception / timeout), the
+    handler dual-writes UNKNOWN to the durable record and returns
+    DEBUG_ATTACH_FAILURE/break_unconfirmed — preserving the existing fail-closed posture.
+    """
+    if transaction is None or admission is None or session_registry is None:
+        return _transport_disabled_failure(run_id=run_id)
+    missing = missing_destructive_permissions("transport.inject_break", acknowledged_permissions or [])
+    if missing:
+        return _configuration_failure(
+            run_id=run_id,
+            message="transport.inject_break is destructive; acknowledge its required permissions to proceed",
+            details={"code": "permission_required", "required_permissions": missing},
+        )
+    # Finding F14: inject_break is destructive — gate it by `DebugProfile.enabled_operations` like
+    # every other halting debug.* op. Resolve the run's debug profile from its manifest when
+    # `artifact_root` is supplied (production wiring), otherwise fall through to the default
+    # profile name (test handlers that exercise the post-permission path don't load a manifest).
+    requested_profile = "qemu-gdbstub-default"
+    if artifact_root is not None:
+        try:
+            store = ArtifactStore(artifact_root, create_root=False)
+            requested_profile = store.load_manifest(run_id).request.debug_profile or "qemu-gdbstub-default"
+        except (ManifestStateError, FileNotFoundError, OSError):
+            # No manifest for this run (or unreadable) — fall back to the default profile name;
+            # _resolve_debug_profile will fail closed if the name is unknown in the registry.
+            pass
+    try:
+        resolved_profile = _resolve_debug_profile(profile_name=requested_profile, debug_profiles=debug_profiles)
+        _ensure_debug_operation_enabled(resolved_profile, "transport.inject_break")
+    except ProviderDebugError as exc:
+        return _configuration_failure(run_id=run_id, message=str(exc), details=exc.details)
+    try:
+        record = _resolve_session_for_run(
+            session_registry=session_registry,
+            session_id=session_id,
+            run_id=run_id,
+        )
+    except _SessionRunMismatch as exc:
+        # Finding F7: never halt some OTHER run's kernel because a caller passed a foreign
+        # session_id under run_id=X. Refuse before _halt_debug_transport writes HALTED.
+        return _configuration_failure(
+            run_id=run_id,
+            message=str(exc),
+            details={"code": "session_run_mismatch"},
+        )
+    if record is None:
+        return _configuration_failure(
+            run_id=run_id,
+            message=f"no open transport session for break injection: {session_id}",
+            details={"code": "unknown_session"},
+        )
+    # Persist HALTED + bump the execution epoch BEFORE the break runs (the ordering target.run_tests
+    # depends on to reject `target_halted` for the whole window the debugger owns the kernel). Reuse
+    # the one helper that defines the durable-write-then-note ordering.
+    _halt_debug_transport(session=record, admission=admission, session_registry=session_registry)
+    # Finding F15: redact every exception message / details dict before surfacing them to the
+    # agent. An InjectBreakError.details (or an OSError str) can carry endpoint paths, generation
+    # numbers, or attached secrets; matches the redaction pattern at `_debug_operation_response`.
+    redactor = Redactor()
+    try:
+        break_mechanism(method="auto", break_plan=record.break_plan)
+    except InjectBreakError as exc:
+        # A KNOWN break failure: record UNKNOWN (never the stale optimistic HALTED) and surface the
+        # mechanism's own ErrorCategory so admission fails closed until a fresh probe runs.
+        session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
+        exc_details = dict(getattr(exc, "details", {}) or {})
+        details = redactor.redact_value(
+            {
+                **exc_details,
+                "code": "break_unconfirmed",
+                "execution_state": ExecutionState.UNKNOWN.value,
+            }
+        )
+        return ToolResponse.failure(
+            category=exc.category,
+            message=redactor.redact_text(str(exc)),
+            run_id=run_id,
+            details=details,
+            suggested_next_actions=["providers.list"],
+        )
+    except Exception as exc:
+        # ANY other mechanism failure (OSError, a missing-kwargs TypeError from a real wiring bug)
+        # MUST hold the same invariant: an unconfirmable break can never leave EXECUTING or a stale
+        # HALTED, so fail closed to UNKNOWN rather than crash after the durable HALTED write.
+        session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            message=redactor.redact_text(f"break mechanism failed unexpectedly: {exc}"),
+            run_id=run_id,
+            details=redactor.redact_value(
+                {"code": "break_unconfirmed", "execution_state": ExecutionState.UNKNOWN.value}
+            ),
+            suggested_next_actions=["providers.list"],
+        )
+    # Post-probe (Finding F2/F4): perform a REAL bounded RSP `?` exchange against the session's
+    # rsp_endpoint to confirm the kernel actually halted. Reading the cached `execution_state`
+    # flag back (the prior implementation) was circular — `_halt_debug_transport` above writes
+    # HALTED to that same field, so a kernel that silently kept running would still report HALTED
+    # and `break_unconfirmed` was unreachable on the success path (ADR 0001's rejected design).
+    # A probe exception or any non-stop-reply observation is fail-closed to UNKNOWN — matching
+    # the existing exception-branch posture and the §5.6 "no optimistic admit" rule.
+    try:
+        halted_observed = probe_halted(record)
+    except Exception:  # noqa: BLE001 — probe failure ⇒ unknown, fail closed
+        halted_observed = False
+    if not halted_observed:
+        session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
+        return ToolResponse.failure(
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            message="inject_break: post-probe did not confirm HALTED",
+            run_id=run_id,
+            details={
+                "code": "break_unconfirmed",
+                "execution_state": ExecutionState.UNKNOWN.value,
+                "probe_observed": ExecutionState.UNKNOWN.value,
+            },
+            suggested_next_actions=["providers.list"],
+        )
+    return ToolResponse.success(
+        summary=f"break injected on transport session {session_id}; target halted",
+        run_id=run_id,
+        data={"session_id": session_id, "execution_state": ExecutionState.HALTED.value},
+        suggested_next_actions=["debug.start_session"],
     )
 
 
@@ -2135,6 +3043,8 @@ def workflow_build_boot_test_handler(
     force_reboot: bool = False,
     force_rerun_tests: bool = False,
     force_recollect: bool = False,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     if run_id is not None:
         try:
@@ -2222,6 +3132,7 @@ def workflow_build_boot_test_handler(
         target_profile=target_profile,
         rootfs_profile=rootfs_profile,
         force_reboot=force_reboot,
+        admission=admission,
     )
     if not boot_response.ok:
         collect_response = artifacts_collect_handler(
@@ -2243,6 +3154,8 @@ def workflow_build_boot_test_handler(
         test_suite=test_suite,
         commands=commands,
         force_rerun=force_rerun_tests,
+        admission=admission,
+        session_registry=session_registry,
     )
     collect_response = artifacts_collect_handler(
         artifact_root=artifact_root,
@@ -2302,6 +3215,9 @@ def workflow_build_boot_debug_handler(
     force_rebuild: bool = False,
     force_reboot: bool = False,
     new_session: bool = False,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    transaction: TransportTransaction | None = None,
 ) -> ToolResponse:
     if run_id is not None:
         try:
@@ -2389,6 +3305,7 @@ def workflow_build_boot_debug_handler(
         target_profile=target_profile,
         rootfs_profile=rootfs_profile,
         force_reboot=force_reboot,
+        admission=admission,
     )
     if not boot_response.ok:
         return _workflow_failure_response(
@@ -2404,6 +3321,9 @@ def workflow_build_boot_debug_handler(
         run_id=run_id,
         debug_profile=debug_profile,
         new_session=new_session,
+        transaction=transaction,
+        admission=admission,
+        session_registry=session_registry,
     )
     if not debug_response.ok:
         return _workflow_failure_response(
@@ -2499,12 +3419,183 @@ def load_server_config() -> ServerConfig | None:
         raise ValueError(f"invalid server config at {config_path}: {exc}") from exc
 
 
-def create_app(config: ServerConfig | None = None) -> FastMCP:
+@dataclass
+class _TransportMachinery:
+    """The Layer-4 coordination collaborators create_app threads into the transport/debug/run_tests
+    tool wrappers (ADR 0005). One AdmissionService over one SnapshotStore so the boot snapshot
+    producer and the transport gates share authoritative facts; one durable SessionRegistry holding
+    the host-global single-instance flock + ownership records. The `lifecycle_dispatcher` is the
+    shared §4.5 dispatcher bound into the transaction at construction; an out-of-band event source
+    drives `admission.invalidate_lifecycle(..., dispatcher, ...)` against this instance so the
+    transaction's _SessionSubscriber.force_drop() path is reachable from production."""
+
+    session_registry: SessionRegistry
+    admission: AdmissionService
+    transaction: TransportTransaction
+    transport_registry: TransportRegistry
+    lifecycle_dispatcher: LifecycleDispatcher
+
+
+def _default_local_transports() -> dict[str, Transport]:
+    """The local-only x86_64 stop-capable transport map (CLAUDE.md: local QEMU gdbstub today). The
+    qemu-gdbstub RSP passthrough is the one stop-capable provider the boot snapshot advertises; the
+    serial-local/agent-proxy console transport is a gated C3 integration concern."""
+    qemu = QemuGdbstubTransport()
+    return {qemu.capability.provider_name: qemu}
+
+
+def _build_transport_registry(transports: dict[str, Transport]) -> TransportRegistry:
+    registry = TransportRegistry()
+    for transport in transports.values():
+        registry.register(transport.capability)
+    return registry
+
+
+def _validate_transport_registry(registry: TransportRegistry) -> None:
+    """Startup capability belt (spec §8.4): re-check every registered transport so a misconfigured
+    registry fails loud before serving. TransportCapability's model validator already rejects
+    REMOTE+loopback_local at construction, but a forged/corrupt registry state could bypass it; this
+    re-asserts the invariant on the live registry so trusted metadata can never authorize an off-host
+    raw TCP endpoint."""
+    for capability in registry.list_capabilities():
+        if (
+            capability.locality is TransportLocality.REMOTE
+            and capability.endpoint_exposure is EndpointExposure.LOOPBACK_LOCAL
+        ):
+            raise ValueError(
+                f"transport {capability.provider_name!r} is REMOTE but advertises loopback_local "
+                "endpoint exposure; remote/out-of-band transports are structurally brokered_required "
+                "(§3.2, §8.4) — refusing to serve a misconfigured transport registry"
+            )
+
+
+def _build_transport_machinery(
+    *,
+    session_registry: SessionRegistry | None,
+    transport_registry: TransportRegistry | None,
+) -> _TransportMachinery:
+    """Construct the Layer-4 machinery, acquire the single-instance flock, and run crash
+    reconciliation BEFORE returning — so no tool can admit before reconcile has reaped orphan
+    backends and re-asserted recovery tombstones (ADR 0005, spec §10.2).
+
+    A default (uninjected) `session_registry` is rooted at a fresh per-process temp dir, NOT the
+    host-global `private_runtime_registry_dir()`: many tests construct create_app() repeatedly in one
+    process, and the production single-instance flock is host-global, so production wires the real
+    registry explicitly in main(); the default stays test-safe (no cross-test flock contention).
+    """
+    transports = _default_local_transports()
+    transport_registry = transport_registry if transport_registry is not None else _build_transport_registry(transports)
+    _validate_transport_registry(transport_registry)
+
+    snapshot_store = SnapshotStore()
+    admission = AdmissionService(snapshot_store)
+    # Bind the §4.5 lifecycle dispatcher so each opened session subscribes its
+    # _SessionSubscriber; the reap callback below routes `LifecycleEvent`s through it so the
+    # transaction's force_drop teardown (FENCED guard/lease release + backend reap + record
+    # delete + handle deregistration) is reachable from production.
+    lifecycle_dispatcher = InProcessLifecycleDispatcher()
+
+    # Production lifecycle-event source (Finding #3 / ADR 0006): `registry.reconcile()`'s
+    # orphan-backend reap is the one production point at which "the backend died" is known in
+    # #10. The closure drives `admission.invalidate_lifecycle(target_key, CRASHED)`, which runs
+    # the §4.5 chain end-to-end (close_admission → dispatcher.emit → _SessionSubscriber.force_drop
+    # → guard/lease release + record delete + handle deregister). Registry imports stay free of
+    # admission/lifecycle — the closure's body lives here, the registry just invokes it.
+    #
+    # Finding F1: only close admission when we actually killed a live orphan backend
+    # (`close_admission_required`). For the common cold-restart case where the durable record's
+    # backend was already dead (or `backend_pid is None` — qemu-gdbstub), we emit the lifecycle
+    # event for any subscriber but do NOT set `_closed_at` for the target. No production code
+    # path calls `reopen()`, so a `_closed_at` write would permanently brick admission for the
+    # target until process restart.
+    def _on_orphan_reaped(reap: OrphanReap) -> None:
+        admission.invalidate_lifecycle(
+            LifecycleEvent(target_key=reap.target_key, kind=LifecycleKind.CRASHED),
+            lifecycle_dispatcher,
+            generation=reap.record.generation,
+            close_admission=reap.close_admission_required,
+        )
+
+    if session_registry is None:
+        session_registry = SessionRegistry(
+            directory=Path(tempfile.mkdtemp(prefix="linux-debug-mcp-registry-")),
+            on_orphan_reaped=_on_orphan_reaped,
+        )
+    else:
+        # An injected registry (test wiring) may not have been constructed with the callback.
+        # The callback hook is a private attribute; setting it here lets test fixtures share the
+        # production behavior without forcing every test that builds a SessionRegistry by hand
+        # to know about the §4.5 reap-source contract.
+        session_registry._on_orphan_reaped = _on_orphan_reaped
+
+    transaction = TransportTransaction(
+        admission=admission,
+        registry=session_registry,
+        guard=InProcessStopCapableGuard(),
+        leases=ConsoleLeaseManager(),
+        secrets=EnvSecretsResolver([]),
+        break_policy=ReferenceBreakPolicy(),
+        transports=transports,
+    )
+    transaction.bind_lifecycle(lifecycle_dispatcher)
+
+    # Single-instance flock + reconcile-before-serve: acquire the host-global lock, then reap orphan
+    # backends / re-assert durable tombstones BEFORE any tool can admit. acquire_instance_lock()
+    # raises InstanceLockError on a 2nd live instance; it propagates out of create_app unchanged so
+    # the process fails loud rather than admitting alongside the first. The fenced reaper is the
+    # ADR-0004 start-time probe (AgentProxyBackend.stop_by_identity): it signals a pid ONLY when the
+    # live start-time fingerprint matches the durable record, so a reused pid is never killed. The
+    # lock is held for the process lifetime — create_app has no teardown hook, so this is
+    # acquire-on-construct, release-on-process-exit.
+    session_registry.acquire_instance_lock()
+    report = session_registry.reconcile(proxy=AgentProxyBackend(), admission=admission)
+    # Finding F9: surface every callback failure through the project logger. `reconcile()` no
+    # longer silently swallows them; reaped records were still deleted, but the lifecycle event
+    # for those targets may have been lost. Visibility lets operators triage; this is not fatal
+    # because reconcile-before-serve must always proceed (a wedge here would deny service).
+    for record, exc in report.failures:
+        logger.warning(
+            "transport: reconcile lifecycle callback raised for session %s (target %s): %s",
+            record.session_id,
+            record.target_key,
+            exc,
+        )
+    return _TransportMachinery(
+        session_registry=session_registry,
+        admission=admission,
+        transaction=transaction,
+        transport_registry=transport_registry,
+        lifecycle_dispatcher=lifecycle_dispatcher,
+    )
+
+
+def create_app(
+    config: ServerConfig | None = None,
+    *,
+    session_registry: SessionRegistry | None = None,
+    transport_registry: TransportRegistry | None = None,
+) -> FastMCP:
     app = FastMCP("linux-debug-mcp")
     # Operator-configured sensitive paths are the only ServerConfig field consumed today; they
     # are threaded into the rootfs-source validation in kernel.create_run and target.boot.
     # Profiles remain code-defined (the DEFAULT_* registries) — wiring those is separate work.
     sensitive_paths = list(config.sensitive_paths) if config is not None else []
+
+    # Construct the Layer-4 transport machinery, acquire the single-instance flock, validate the
+    # capability registry, and reconcile crashes BEFORE registering (and therefore before serving)
+    # any tool — so a transport/debug/run_tests op can never admit ahead of crash recovery.
+    machinery = _build_transport_machinery(
+        session_registry=session_registry,
+        transport_registry=transport_registry,
+    )
+    transport_transaction = machinery.transaction
+    admission_service = machinery.admission
+    durable_registry = machinery.session_registry
+    # Stash the assembled machinery on the FastMCP instance so test-injection and any future
+    # in-process lifecycle event source can reach the SAME admission/transaction/dispatcher trio
+    # the tool wrappers close over (rather than constructing a parallel set that would not share
+    # state with the live wrappers). Private attribute by convention; not part of the wire surface.
+    app._transport_machinery = machinery  # type: ignore[attr-defined]
 
     @app.tool(name="host.check_prerequisites")
     def host_check_prerequisites(
@@ -2861,6 +3952,7 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             force_reboot=force_reboot,
             boot_overrides=boot_overrides,
             sensitive_paths=sensitive_paths,
+            admission=admission_service,
         ).model_dump(mode="json")
 
     @app.tool(name="target.run_tests")
@@ -2879,6 +3971,8 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             commands=commands,
             force_rerun=force_rerun,
             attempt=attempt,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="artifacts.collect")
@@ -2905,6 +3999,9 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             run_id=run_id,
             debug_profile=debug_profile,
             new_session=new_session,
+            transaction=transport_transaction,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.read_registers")
@@ -2919,6 +4016,7 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             run_id=run_id,
             registers=registers,
             debug_session_id=debug_session_id,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.read_symbol")
@@ -2933,6 +4031,7 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             run_id=run_id,
             symbol=symbol,
             debug_session_id=debug_session_id,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.read_memory")
@@ -2949,6 +4048,7 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             address=address,
             byte_count=byte_count,
             debug_session_id=debug_session_id,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.evaluate")
@@ -2965,6 +4065,7 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             inspector=inspector,
             arguments=arguments,
             debug_session_id=debug_session_id,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.set_breakpoint")
@@ -2979,6 +4080,8 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             run_id=run_id,
             symbol=symbol,
             debug_session_id=debug_session_id,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.clear_breakpoint")
@@ -2993,6 +4096,8 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             run_id=run_id,
             breakpoint_id=breakpoint_id,
             debug_session_id=debug_session_id,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.list_breakpoints")
@@ -3005,6 +4110,8 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             artifact_root=Path(artifact_root),
             run_id=run_id,
             debug_session_id=debug_session_id,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.continue")
@@ -3019,6 +4126,8 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             run_id=run_id,
             debug_session_id=debug_session_id,
             timeout_seconds=timeout_seconds,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.interrupt")
@@ -3033,6 +4142,8 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             run_id=run_id,
             debug_session_id=debug_session_id,
             timeout_seconds=timeout_seconds,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.end_session")
@@ -3045,6 +4156,50 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             artifact_root=Path(artifact_root),
             run_id=run_id,
             debug_session_id=debug_session_id,
+            transaction=transport_transaction,
+            admission=admission_service,
+            session_registry=durable_registry,
+        ).model_dump(mode="json")
+
+    @app.tool(name="transport.open")
+    def transport_open(run_id: str, recovery: bool = False) -> dict[str, Any]:
+        return transport_open_handler(
+            run_id=run_id,
+            recovery=recovery,
+            transaction=transport_transaction,
+            admission=admission_service,
+            session_registry=durable_registry,
+        ).model_dump(mode="json")
+
+    @app.tool(name="transport.close")
+    def transport_close(run_id: str, session_id: str) -> dict[str, Any]:
+        return transport_close_handler(
+            run_id=run_id,
+            session_id=session_id,
+            transaction=transport_transaction,
+            session_registry=durable_registry,
+        ).model_dump(mode="json")
+
+    @app.tool(name="transport.inject_break")
+    def transport_inject_break(
+        run_id: str,
+        session_id: str,
+        acknowledged_permissions: list[str] | None = None,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+    ) -> dict[str, Any]:
+        # The real break_mechanism args (proxy/proxy_handle/ssh_runner/ssh_argv_prefix) belong to the
+        # gated agent-proxy/PTY harness (a C3 integration concern); the only local-qemu break is
+        # gdbstub-native, which needs no injection. So the wrapper keeps the default mechanism: B5's
+        # handler fails closed to UNKNOWN+failure on any mechanism error, so a missing-harness call is
+        # safe. Full break wiring is deferred to C3.
+        return transport_inject_break_handler(
+            run_id=run_id,
+            session_id=session_id,
+            acknowledged_permissions=acknowledged_permissions,
+            artifact_root=Path(artifact_root),
+            transaction=transport_transaction,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="workflow.build_boot_test")
@@ -3075,6 +4230,8 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             force_reboot=force_reboot,
             force_rerun_tests=force_rerun_tests,
             force_recollect=force_recollect,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="workflow.build_boot_debug")
@@ -3101,6 +4258,9 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             force_rebuild=force_rebuild,
             force_reboot=force_reboot,
             new_session=new_session,
+            admission=admission_service,
+            session_registry=durable_registry,
+            transaction=transport_transaction,
         ).model_dump(mode="json")
 
     return app
@@ -3108,4 +4268,9 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
 
 def main() -> None:
     configure_logging()
-    create_app(load_server_config()).run()
+    # Production wires the host-global durable registry explicitly so the single-instance flock +
+    # crash reconciliation are host-wide (ADR 0005): a second server process fails loud on the shared
+    # instance.lock. The default create_app() registry is a per-process temp dir (test-safe), so this
+    # injection is the one place the real host-global path is taken.
+    registry = SessionRegistry(directory=private_runtime_registry_dir())
+    create_app(load_server_config(), session_registry=registry).run()
