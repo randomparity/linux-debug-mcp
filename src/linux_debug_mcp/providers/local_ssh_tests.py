@@ -175,6 +175,52 @@ class SubprocessSshRunner:
             return handle.read(_SNIPPET_LIMIT)
 
 
+def build_ssh_argv(
+    *,
+    rootfs_profile: RootfsProfile,
+    known_hosts_path: Path,
+    command: list[str],
+    command_timeout: int,
+) -> list[str]:
+    """Construct the canonical ``ssh`` argv for invoking *command* on the
+    rootfs's remote shell.
+
+    Single source of truth for SSH argv shape — both
+    ``LocalSshTestProvider`` (test-run paths, dmesg) and
+    ``debug_introspect_run_handler`` (sudo preflight, wrapper invocation)
+    call this. R6-F5: the introspect handler previously referenced
+    ``RootfsProfile.ssh_args()`` / ``.ssh_argv()`` methods that do not
+    exist on the Pydantic model (config.py:254-277); lifting this helper
+    to module scope eliminates that fictional API.
+    """
+    configured_timeout = rootfs_profile.ssh_options.get("ConnectTimeout")
+    if configured_timeout is not None and int(configured_timeout) > command_timeout:
+        raise ValueError("ConnectTimeout cannot exceed command timeout")
+    connect_timeout = configured_timeout or str(min(command_timeout, 10))
+    strict_host_key_checking = rootfs_profile.ssh_options.get("StrictHostKeyChecking", "accept-new")
+    ssh_argv = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"UserKnownHostsFile={known_hosts_path}",
+        "-o",
+        f"ConnectTimeout={connect_timeout}",
+        "-o",
+        f"StrictHostKeyChecking={strict_host_key_checking}",
+    ]
+    for key in sorted(rootfs_profile.ssh_options):
+        if key in {"ConnectTimeout", "StrictHostKeyChecking"}:
+            continue
+        ssh_argv.extend(["-o", f"{key}={rootfs_profile.ssh_options[key]}"])
+    ssh_argv.extend(["-p", str(rootfs_profile.ssh_port)])
+    if rootfs_profile.ssh_key_ref:
+        ssh_argv.extend(["-i", rootfs_profile.ssh_key_ref])
+    remote_command = " ".join(shlex.quote(item) for item in command)
+    ssh_argv.extend(["--", f"{rootfs_profile.ssh_user}@{rootfs_profile.ssh_host}", remote_command])
+    return ssh_argv
+
+
 class LocalSshTestProvider:
     name = "local-ssh-tests"
 
@@ -361,7 +407,7 @@ class LocalSshTestProvider:
         return PlannedTestCommand(
             label=label,
             argv=command.argv,
-            ssh_argv=self._ssh_argv(
+            ssh_argv=build_ssh_argv(
                 rootfs_profile=rootfs_profile,
                 known_hosts_path=known_hosts_path,
                 command=command.argv,
@@ -386,7 +432,7 @@ class LocalSshTestProvider:
         return PlannedTestCommand(
             label="dmesg",
             argv=argv,
-            ssh_argv=self._ssh_argv(
+            ssh_argv=build_ssh_argv(
                 rootfs_profile=rootfs_profile,
                 known_hosts_path=known_hosts_path,
                 command=argv,
@@ -398,41 +444,6 @@ class LocalSshTestProvider:
             stderr_path=attempt_dir / "dmesg.stderr.txt",
             metadata_path=attempt_dir / "dmesg.command.json",
         )
-
-    def _ssh_argv(
-        self,
-        *,
-        rootfs_profile: RootfsProfile,
-        known_hosts_path: Path,
-        command: list[str],
-        command_timeout: int,
-    ) -> list[str]:
-        configured_timeout = rootfs_profile.ssh_options.get("ConnectTimeout")
-        if configured_timeout is not None and int(configured_timeout) > command_timeout:
-            raise ValueError("ConnectTimeout cannot exceed command timeout")
-        connect_timeout = configured_timeout or str(min(command_timeout, 10))
-        strict_host_key_checking = rootfs_profile.ssh_options.get("StrictHostKeyChecking", "accept-new")
-        ssh_argv = [
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            f"UserKnownHostsFile={known_hosts_path}",
-            "-o",
-            f"ConnectTimeout={connect_timeout}",
-            "-o",
-            f"StrictHostKeyChecking={strict_host_key_checking}",
-        ]
-        for key in sorted(rootfs_profile.ssh_options):
-            if key in {"ConnectTimeout", "StrictHostKeyChecking"}:
-                continue
-            ssh_argv.extend(["-o", f"{key}={rootfs_profile.ssh_options[key]}"])
-        ssh_argv.extend(["-p", str(rootfs_profile.ssh_port)])
-        if rootfs_profile.ssh_key_ref:
-            ssh_argv.extend(["-i", rootfs_profile.ssh_key_ref])
-        remote_command = " ".join(shlex.quote(item) for item in command)
-        ssh_argv.extend(["--", f"{rootfs_profile.ssh_user}@{rootfs_profile.ssh_host}", remote_command])
-        return ssh_argv
 
     def _run_dmesg(self, plan: TestPlan) -> dict[str, object]:
         command = plan.dmesg_command
