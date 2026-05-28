@@ -7,6 +7,7 @@ import stat
 import subprocess
 import threading
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 
 
@@ -145,7 +146,13 @@ def open_device(path: str, *, deadline: Deadline, cancel: threading.Event) -> in
     return os.open(path, os.O_RDWR | os.O_NONBLOCK | os.O_NOCTTY)
 
 
-def spawn(argv: list[str], *, deadline: Deadline, cancel: threading.Event, **popen_kwargs: object) -> subprocess.Popen:
+def spawn(
+    argv: list[str],
+    *,
+    deadline: Deadline,
+    cancel: threading.Event,
+    pass_fds: Collection[int] = (),
+) -> subprocess.Popen[bytes]:
     """Start a subprocess with no shell.
 
     Spawn itself is non-blocking; the deadline/cancel are checked before exec so a
@@ -153,4 +160,4 @@ def spawn(argv: list[str], *, deadline: Deadline, cancel: threading.Event, **pop
     """
     _slice(deadline, cancel)
     # list argv, never a shell — not a shell injection vector
-    return subprocess.Popen(argv, shell=False, **popen_kwargs)
+    return subprocess.Popen(argv, shell=False, pass_fds=pass_fds)

@@ -24,6 +24,22 @@ from linux_debug_mcp.transport.bounded import (
 AGENT_PROXY = "agent-proxy"
 ON_PARTIAL = Callable[[str, object], None]
 
+
+class _ProxyProcess(Protocol):
+    """Structural view of the spawned agent-proxy process.
+
+    Real production code passes a `subprocess.Popen`; unit tests pass a `_FakeProc`
+    with the same attribute/method shape. Stay narrow so test fakes remain trivial.
+    """
+
+    pid: int
+
+    def terminate(self) -> None: ...
+    def kill(self) -> None: ...
+    def wait(self, timeout: float | None = None) -> int: ...
+    def poll(self) -> int | None: ...
+
+
 # Telnet IAC BREAK — what a client sends agent-proxy's console port to request a target
 # break. agent-proxy.c defaultBrkStr = {0xff, 0xf3}. Under -s003 agent-proxy emits the
 # alternate byte 0x03 to the *target* line instead of a real serial break.
@@ -48,7 +64,7 @@ ProxySource = LocalDeviceSource | RemoteTerminalServerSource
 
 @dataclass
 class ProxyHandle:
-    process: object
+    process: _ProxyProcess
     backend_pid: int
     backend_start_time: str | None
     console_port: int
@@ -94,7 +110,7 @@ class AgentProxyBackend:
     def __init__(
         self,
         *,
-        spawner: Callable[..., object] = spawn,
+        spawner: Callable[..., _ProxyProcess] = spawn,
         identity_probe: ProcessIdentityProbe | None = None,
     ) -> None:
         self._spawn = spawner
@@ -229,7 +245,7 @@ class AgentProxyBackend:
     TERM_GRACE = 5.0
     KILL_GRACE = 2.0
 
-    def _reap(self, process: object) -> None:
+    def _reap(self, process: _ProxyProcess) -> None:
         # Terminate → wait → kill → wait an OWNED Popen (no fingerprint gate — the caller
         # holds this exact Popen, so it is unambiguously ours). Reaps the child: no zombie,
         # no CPU-spinning poll loop, and a foreign pid can never be signalled.

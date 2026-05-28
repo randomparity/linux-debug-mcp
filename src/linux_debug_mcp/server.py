@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
@@ -545,14 +545,17 @@ class _ResolvedProfiles:
     rootfs: RootfsProfile
 
 
+_ProfileT = TypeVar("_ProfileT", BuildProfile, TargetProfile, RootfsProfile)
+
+
 def _resolve_base_profile(
     kind: str,
     *,
     name: str | None,
     spec: dict[str, Any] | None,
-    registry: dict[str, Any],
-    model: type[BuildProfile | TargetProfile | RootfsProfile],
-) -> BuildProfile | TargetProfile | RootfsProfile:
+    registry: dict[str, _ProfileT],
+    model: type[_ProfileT],
+) -> _ProfileT:
     """Resolve a base profile from exactly one of a named registry entry or an inline spec."""
     if name is not None and spec is not None:
         raise ValueError(f"provide either {kind}_profile or {kind}_profile_spec, not both")
@@ -1192,6 +1195,7 @@ def target_boot_handler(
         resolved_target_profile = resolved_target_profile.model_copy(update={"libvirt_uri": default_libvirt_uri})
     if resolved_target_profile.target_ref is None:
         return _configuration_failure(run_id=run_id, message="target profile target_ref is required")
+    target_ref = resolved_target_profile.target_ref
 
     effective_boot_overrides = boot_overrides
     if effective_boot_overrides is None and not manifest.boot_attempts:
@@ -1397,7 +1401,7 @@ def target_boot_handler(
             replace_succeeded = (
                 bool(locked_existing and locked_existing.status == StepStatus.SUCCEEDED) or has_new_boot_overrides
             )
-            with store.target_lock(resolved_target_profile.target_ref):
+            with store.target_lock(target_ref):
                 if locked_existing and locked_existing.status == StepStatus.RUNNING:
                     stale_failed = StepResult(
                         step_name="boot",
@@ -3105,6 +3109,11 @@ def workflow_build_boot_test_handler(
         if not create_response.ok:
             return create_response
         run_id = create_response.run_id
+    if run_id is None:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            message="workflow.build_boot_test could not establish a run_id",
+        )
 
     build_response = kernel_build_handler(
         artifact_root=artifact_root,
@@ -3283,6 +3292,11 @@ def workflow_build_boot_debug_handler(
         if not create_response.ok:
             return create_response
         run_id = create_response.run_id
+    if run_id is None:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            message="workflow.build_boot_debug could not establish a run_id",
+        )
 
     build_response = kernel_build_handler(
         artifact_root=artifact_root,
@@ -3595,7 +3609,9 @@ def create_app(
     # in-process lifecycle event source can reach the SAME admission/transaction/dispatcher trio
     # the tool wrappers close over (rather than constructing a parallel set that would not share
     # state with the live wrappers). Private attribute by convention; not part of the wire surface.
-    app._transport_machinery = machinery  # type: ignore[attr-defined]
+    # FastMCP has no slot for this; setattr makes the dynamic stash explicit so static checkers
+    # do not flag a missing attribute on a third-party class we cannot extend.
+    setattr(app, "_transport_machinery", machinery)  # noqa: B010
 
     @app.tool(name="host.check_prerequisites")
     def host_check_prerequisites(

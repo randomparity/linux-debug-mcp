@@ -369,7 +369,7 @@ class QemuGdbstubProvider:
             timeout=30,
             transcript_path=transcript_path,
         )
-        details = {
+        details: dict[str, object] = {
             "session_path": str(session_path),
             "gdbstub_endpoint": endpoint,
             "exit_status": result.exit_status,
@@ -517,7 +517,7 @@ class QemuGdbstubProvider:
                     "symbol_address arguments must be an object",
                     category=ErrorCategory.CONFIGURATION_ERROR,
                 )
-            symbol = self.validate_symbol_name(arguments.get("symbol"))  # type: ignore[arg-type]
+            symbol = self.validate_symbol_name(arguments.get("symbol"))
             result = self._run_read_operation(
                 run_dir=run_dir,
                 session=session,
@@ -1106,14 +1106,14 @@ class QemuGdbstubProvider:
             text = text[1:-1].replace("\\n", "\n").replace('\\"', '"')
         return self.redactor.redact_text(self._snippet(text))
 
-    def validate_symbol_name(self, symbol: str) -> str:
+    def validate_symbol_name(self, symbol: object) -> str:
         if type(symbol) is not str:
             raise ProviderDebugError("invalid symbol name", category=ErrorCategory.CONFIGURATION_ERROR)
         if _has_control_character(symbol) or not SYMBOL_PATTERN.match(symbol):
             raise ProviderDebugError("invalid symbol name", category=ErrorCategory.CONFIGURATION_ERROR)
         return symbol
 
-    def validate_register_name(self, register: str) -> str:
+    def validate_register_name(self, register: object) -> str:
         if type(register) is not str:
             raise ProviderDebugError("invalid register name", category=ErrorCategory.CONFIGURATION_ERROR)
         if _has_control_character(register) or not REGISTER_PATTERN.match(register):
@@ -1167,11 +1167,11 @@ class QemuGdbstubProvider:
         return text.replace("\\", "\\\\").replace(" ", "\\ ")
 
     def _same_path(self, left: object, right: object) -> bool:
-        if left is None or right is None:
+        if not isinstance(left, (str, Path)) or not isinstance(right, (str, Path)):
             return False
         try:
             return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
-        except (OSError, TypeError, ValueError):
+        except (OSError, ValueError):
             return False
 
     def _linux_banner_release(self, output: str) -> str | None:
