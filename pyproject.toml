@@ -40,3 +40,8 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.153.6",
+]
