@@ -108,22 +108,19 @@ ToolResponse.success({
                                         # See §5.2.
   "status": "ok" | "script_error",      # "script_error" = wrapper ran, user script raised
   "outcome": {
-    "status": "ok" | "error" | "wrapper_internal_error",
-                                        # "wrapper_internal_error" (R2-F2): the wrapper's tail
-                                        # serialization or write failed before a normal `ok`/`error`
-                                        # could be emitted (e.g. UnicodeEncodeError on a lone
-                                        # surrogate, BrokenPipeError on a closed SSH pipe,
-                                        # MemoryError during json.dumps). The wrapper's inner
-                                        # except (§4.2) writes a minimal JSON document with this
-                                        # status carrying `error_type` and `error_message` from
-                                        # the failing operation; the host maps it to
-                                        # `INFRASTRUCTURE_FAILURE` / `wrapper_crash` per §4.3.
-    "error_type": "...",                # populated for `error` (user script raised) and for
-                                        # `wrapper_internal_error` (host-detected wrapper
-                                        # internal failure); redacted, truncated to
+    "status": "ok" | "error",           # R4-F3: the agent-facing enum is exactly two values.
+                                        # The wrapper still emits a third value
+                                        # (`wrapper_internal_error`) into the on-disk artifact
+                                        # for forensics — see §4.2, §4.3, and §6.2
+                                        # `details.outcome_status` — but the agent-facing
+                                        # failure response (where §3.2's success schema does
+                                        # not apply) collapses that sub-case to
+                                        # `INFRASTRUCTURE_FAILURE` / `wrapper_crash`.
+    "error_type": "...",                # populated when status="error" (user script raised);
+                                        # redacted, truncated to CAPS["error_message"]
+                                        # (4096 chars)
+    "error_message": "...",             # populated when status="error"; redacted, truncated to
                                         # CAPS["error_message"] (4096 chars)
-    "error_message": "...",             # populated for `error` and `wrapper_internal_error`;
-                                        # redacted, truncated to CAPS["error_message"] (4096 chars)
     "traceback": "...",                 # only when status="error"; redacted, truncated to
                                         # CAPS["traceback"]
   },
@@ -174,8 +171,8 @@ An `emits` entry of the form `{"__emit_unserializable__": true, "error_type": ".
 | `manifest.steps["build"].details["build_id"]` present but malformed (fails `^[0-9a-f]{8,}$`) | `INFRASTRUCTURE_FAILURE` | `provenance_corrupt` | Pre-SSH |
 | Manifest absent or run_id invalid | `CONFIGURATION_ERROR` | (existing path-safety codes) | Pre-SSH |
 | Introspect call budget exhausted for run (≥ `MAX_INTROSPECT_CALLS_PER_RUN`) | `CONFIGURATION_ERROR` | `manifest_call_budget_exhausted` | Pre-SSH |
+| `<run>/sensitive/` mode is more permissive than `0700` (legacy run from before R2-F4, or chmoded out-of-band) | `CONFIGURATION_ERROR` | `sensitive_dir_too_permissive` | Pre-SSH (§5.2 step 4b) |
 | `sudo -n true` preflight fails (sudo wants a password) | `CONFIGURATION_ERROR` | `sudo_requires_password` | Pre-SSH (preflight, §5.2 step 5) |
-| `<run>/sensitive/` mode is more permissive than `0700` (legacy run from before R2-F4, or chmoded out-of-band) | `CONFIGURATION_ERROR` | `sensitive_dir_too_permissive` | Pre-admission (§5.2 step 7) |
 | Target snapshot absent / not READY/EXECUTING | `READINESS_FAILURE` | `target_not_ready` | Pre-admission |
 | Target `HALTED` (admission rejects) | `READINESS_FAILURE` | `target_halted` | Admission |
 | `ExecutionProof` stale / `UNKNOWN` | `READINESS_FAILURE` | `execution_state_unknown` | Admission |
@@ -188,8 +185,7 @@ An `emits` entry of the form `{"__emit_unserializable__": true, "error_type": ".
 | Wrapper exit 5 (script `compile()` error) | `CONFIGURATION_ERROR` | `script_compile_error` | Wrapper |
 | Wrapper exit 124 (target-side `timeout(1)` fired) | `INFRASTRUCTURE_FAILURE` | `introspect_timeout` | Wrapper |
 | Wrapper exited normally but no/invalid JSON | `INFRASTRUCTURE_FAILURE` | `wrapper_crash` | Host parse |
-| Wrapper exit 6 with no/invalid JSON (R2-F2: inner-except recovery also failed) | `INFRASTRUCTURE_FAILURE` | `wrapper_crash` | Host parse |
-| Wrapper exit 6 with minimal JSON, `outcome.status="wrapper_internal_error"` (R2-F2) | `INFRASTRUCTURE_FAILURE` | `wrapper_crash` | Host parse |
+| Wrapper exit 6 with no/invalid JSON OR with a minimal recovery JSON carrying `outcome.status="wrapper_internal_error"` (R2-F2: the minimal-JSON sub-case lands on disk for forensics — see §4.2 / §6.2 — but collapses to the same agent-facing code as the silent-crash sub-case, R4-F3) | `INFRASTRUCTURE_FAILURE` | `wrapper_crash` | Host parse |
 | Host-side `SshRunner.timed_out` (network hang past margin) | `INFRASTRUCTURE_FAILURE` | `ssh_timeout` | SSH |
 | Build vmlinux has no `.note.gnu.build-id` | `BUILD_FAILURE` | `build_id_missing` | Build (kernel.build, §7) |
 | `readelf` unavailable / errored extracting build_id | `INFRASTRUCTURE_FAILURE` | `readelf_unavailable` | Build (kernel.build, §7) |
@@ -223,12 +219,17 @@ with the rendered wrapper piped on stdin. `<user>` and `<ssh_args>` come from `r
 Sketch (final form lives in `providers/local_drgn_introspect.py`):
 
 ```python
-import sys, json, io, traceback, contextlib
+import sys as _li_sys
+import json as _li_json
+import io as _li_io
+import traceback as _li_traceback
+import contextlib as _li_contextlib
 
-# R2-F8: every wrapper-private global is `_li_`-prefixed so the
-# `from drgn.helpers.linux import *` wildcard below cannot shadow it. `prog`,
-# `drgn`, and `emit` are deliberately *not* prefixed because they're injected
-# into the user namespace and renaming them would break user scripts.
+# R2-F8 + R4-F4: every wrapper-private global — including aliased stdlib
+# modules — is `_li_`-prefixed so the `from drgn.helpers.linux import *`
+# wildcard below cannot shadow it. `prog`, `drgn`, and `emit` are deliberately
+# *not* prefixed because they're injected into the user namespace and renaming
+# them would break user scripts.
 _li_caps = {"emits": 100, "user_stdout": 256 * 1024, "traceback": 16 * 1024,
             "total_json": 1 * 1024 * 1024, "per_emit_bytes": 32 * 1024,
             "error_message": 4096}
@@ -246,8 +247,8 @@ _li_result = {"call_id": "${CALL_ID}", "build_id": None, "outcome": None,
                             "traceback": False, "total_json": False,
                             "per_emit_size": False, "error_message": False}}
 
-import time
-_li_t_prelude_start = time.monotonic()
+import time as _li_time
+_li_t_prelude_start = _li_time.monotonic()
 
 try:
     # `drgn` is imported first so it predates the helper snapshot; the wildcard
@@ -282,11 +283,11 @@ except Exception as exc:
                              "error_message": msg}
     _li_result["truncated"]["error_message"] = msg_trunc
     try:
-        json.dump(_li_result, sys.stdout)
+        _li_json.dump(_li_result, _li_sys.stdout)
     finally:
-        sys.exit(3)
+        _li_sys.exit(3)
 
-_li_result["prelude_ms"] = int((time.monotonic() - _li_t_prelude_start) * 1000)
+_li_result["prelude_ms"] = int((_li_time.monotonic() - _li_t_prelude_start) * 1000)
 
 # F8: guard the build_id read separately so older/newer drgn versions that
 # don't expose `main_module().build_id` surface as `drgn_version_skew` rather
@@ -301,9 +302,9 @@ except Exception as exc:
                              "error_message": msg}
     _li_result["truncated"]["error_message"] = msg_trunc
     try:
-        json.dump(_li_result, sys.stdout)
+        _li_json.dump(_li_result, _li_sys.stdout)
     finally:
-        sys.exit(3)
+        _li_sys.exit(3)
 
 # Render-time `string.Template.substitute` is strict, so `${EXPECTED_BUILD_ID}`
 # is always replaced with the host-validated hex blob; no truthy guard.
@@ -312,9 +313,9 @@ if _li_result["build_id"] != "${EXPECTED_BUILD_ID}":
                              "expected": "${EXPECTED_BUILD_ID}",
                              "actual": _li_result["build_id"]}
     try:
-        json.dump(_li_result, sys.stdout)
+        _li_json.dump(_li_result, _li_sys.stdout)
     finally:
-        sys.exit(4)
+        _li_sys.exit(4)
 
 _li_emit_buffer = []
 _li_emit_overflow = False
@@ -325,10 +326,10 @@ def emit(obj):
         _li_emit_overflow = True
         return
     try:
-        # Validate JSON-serializability up front so the final json.dumps
+        # Validate JSON-serializability up front so the final _li_json.dumps
         # can never fail. Reject by recording a placeholder, not by raising,
         # so a bad emit doesn't tear down the rest of the script.
-        encoded = json.dumps(obj)
+        encoded = _li_json.dumps(obj)
     except (TypeError, ValueError) as exc:
         _li_emit_buffer.append({
             "__emit_unserializable__": True,
@@ -348,7 +349,7 @@ def emit(obj):
         return
     _li_emit_buffer.append(obj)
 
-user_stdout = io.StringIO()
+user_stdout = _li_io.StringIO()
 # Snapshot globals immediately before the wildcard import; everything that
 # appears after is a drgn helper. `drgn` itself is injected explicitly here
 # (it predates the snapshot) so user scripts can do `drgn.Object(...)` etc.
@@ -359,11 +360,11 @@ namespace = {
 for name in _li_drgn_helper_names:
     namespace[name] = globals()[name]
 
-import base64
+import base64 as _li_base64
 USER_SCRIPT_B64 = "${USER_SCRIPT_B64}"   # host substitutes a pure-ASCII base64 blob
 try:
     compiled = compile(
-        base64.b64decode(USER_SCRIPT_B64).decode("utf-8"),
+        _li_base64.b64decode(USER_SCRIPT_B64).decode("utf-8"),
         "<introspect>", "exec",
     )
 except SyntaxError as exc:
@@ -373,11 +374,11 @@ except SyntaxError as exc:
                              "error_message": msg}
     _li_result["truncated"]["error_message"] = msg_trunc
     try:
-        json.dump(_li_result, sys.stdout)
+        _li_json.dump(_li_result, _li_sys.stdout)
     finally:
-        sys.exit(5)
+        _li_sys.exit(5)
 
-with contextlib.redirect_stdout(user_stdout):
+with _li_contextlib.redirect_stdout(user_stdout):
     try:
         exec(compiled, namespace)
         _li_result["outcome"] = {"status": "ok"}
@@ -387,7 +388,7 @@ with contextlib.redirect_stdout(user_stdout):
         # `KeyboardInterrupt`, and similar non-Exception conditions all land
         # here and are recorded as `outcome.status="error"` with the real
         # exit code carried in `error_type`.
-        tb, tb_trunc = _li_truncate(traceback.format_exc(), _li_caps["traceback"])
+        tb, tb_trunc = _li_truncate(_li_traceback.format_exc(), _li_caps["traceback"])
         msg, msg_trunc = _li_truncate(str(exc), _li_caps["error_message"])
         etype, _ = _li_truncate(type(exc).__name__, _li_caps["error_message"])
         _li_result["outcome"] = {"status": "error",
@@ -398,7 +399,7 @@ with contextlib.redirect_stdout(user_stdout):
 
 # F1 + R2-F2: tail JSON write wrapped in try/except/finally with sentinel
 # exit code 6 (`wrapper_complete`). The exit code is reached only after
-# `sys.stdout.write` returns, so user code cannot fabricate it — any
+# `_li_sys.stdout.write` returns, so user code cannot fabricate it — any
 # `sys.exit(6)` from inside `exec` is caught by the BaseException handler
 # above and routed to the `error` outcome. R2-F2: if tail serialization or
 # the write itself fails (e.g. `UnicodeEncodeError` on a lone surrogate,
@@ -408,13 +409,19 @@ with contextlib.redirect_stdout(user_stdout):
 # even that fails, the host sees exit 6 with no JSON and falls through to
 # `INFRASTRUCTURE_FAILURE`/`wrapper_crash` per §4.3.
 #
+# R4-F3: the minimal JSON carries `outcome.status="wrapper_internal_error"`
+# for **on-disk forensics only** (see §6.2 `details.outcome_status` and
+# §4.3); the agent-facing failure response collapses both sub-cases —
+# minimal-JSON recovery and silent-crash fall-through — to the single
+# `wrapper_crash` code so agents have one branch, not two.
+#
 # R3-F2 coverage clarification: the recovery handles *serialization-stage*
 # failures (`UnicodeEncodeError` from a lone surrogate in
 # `_li_result["user_stdout"]`, a JSON-incompatible object from drgn,
 # encoding-time `MemoryError`). *Pipe-stage* failures (`BrokenPipeError`
 # on a closed SSH pipe, post-encode `OSError` on the write) always fall
 # through to the silent-crash sub-case because the recovery write uses
-# the same `sys.stdout` that just failed — the host then maps exit 6 +
+# the same `_li_sys.stdout` that just failed — the host then maps exit 6 +
 # no JSON to `wrapper_crash` per §4.3.
 try:
     _li_result["emits"] = _li_emit_buffer
@@ -423,24 +430,24 @@ try:
     _li_result["user_stdout"] = out
     _li_result["truncated"]["user_stdout"] = trunc
 
-    payload = json.dumps(_li_result)
+    payload = _li_json.dumps(_li_result)
     while len(payload) > _li_caps["total_json"] and _li_result["emits"]:
         _li_result["emits"].pop()              # drop from the tail until under cap
         _li_result["truncated"]["total_json"] = True
-        payload = json.dumps(_li_result)
+        payload = _li_json.dumps(_li_result)
     # If still over cap after emits exhausted, clear user_stdout as the final
     # fallback (header fields + outcome + truncation flags are kept).
     if len(payload) > _li_caps["total_json"]:
         _li_result["user_stdout"] = ""
         _li_result["truncated"]["user_stdout"] = True
-        payload = json.dumps(_li_result)
-    sys.stdout.write(payload)
+        payload = _li_json.dumps(_li_result)
+    _li_sys.stdout.write(payload)
 except BaseException as exc:
     # R2-F2: best-effort recovery. Emit a minimal JSON document so the host
     # can tell wrapper-internal failure (exit 6 + this minimal JSON) from a
     # silent crash (exit 6 + no JSON, mapped to `wrapper_crash`).
     try:
-        sys.stdout.write(json.dumps({
+        _li_sys.stdout.write(_li_json.dumps({
             "call_id": _li_result.get("call_id"),
             "outcome": {"status": "wrapper_internal_error",
                         "error_type": type(exc).__name__,
@@ -453,7 +460,7 @@ except BaseException as exc:
         pass        # last-ditch: host sees exit 6 with no JSON →
                     # wrapper_crash per §4.3 row "exit 6 + no/invalid JSON"
 finally:
-    sys.exit(6)
+    _li_sys.exit(6)
 ```
 
 ### 4.3 Exit-code contract
@@ -468,8 +475,7 @@ wrapper exits **6** (`wrapper_complete`) on the happy path; a user script's
 | Exit | JSON on stdout? | Meaning | Host maps to |
 |---|---|---|---|
 | 6 | valid `result`-shaped JSON with `outcome.status` ∈ {`ok`, `error`} | Wrapper ran to completion; `outcome.status` is authoritative | `status="ok"` or `status="script_error"` depending on `outcome.status` |
-| 6 | valid minimal JSON with `outcome.status="wrapper_internal_error"` | R2-F2: tail serialization or write failed; the inner `except BaseException` in §4.2 emitted a stripped-down document carrying `outcome.error_type` / `error_message` | `INFRASTRUCTURE_FAILURE` / `wrapper_crash` — a wrapper-internal failure sub-case, distinguished from the silent-crash sub-case below by the presence of a valid JSON document |
-| 6 | absent / unparseable | Inner-except recovery also failed; host sees exit 6 with no JSON (includes pipe-stage failures where the recovery write itself raised — see §4.2 R3-F2 note) | `INFRASTRUCTURE_FAILURE` / `wrapper_crash` — silent-crash sub-case; raw stderr persisted |
+| 6 | absent / unparseable, OR valid minimal JSON with `outcome.status="wrapper_internal_error"` | R2-F2: either the inner-except recovery wrote a minimal JSON document (serialization-stage failure — see §4.2) or both writes failed (pipe-stage fall-through; see §4.2 R3-F2 note). The two sub-cases are distinguishable on disk via `stdout.json` / `result.json` / `details.outcome_status` for forensics but collapse to one agent-facing code (R4-F3). | `INFRASTRUCTURE_FAILURE` / `wrapper_crash` — raw stderr persisted; minimal JSON (if any) persisted via the redactor to `stdout.json` |
 | 3 | — | Wrapper-side drgn surface failed | `INFRASTRUCTURE_FAILURE` / `drgn_open_failure` *or* `drgn_version_skew` — the host discriminates on `outcome.status` in the emitted JSON (`drgn_open_failure` for `import drgn` / `set_kernel` / `load_default_debug_info` failure; `drgn_version_skew` when `prog.main_module().build_id` is unavailable or shaped wrong on older/newer drgn) |
 | 4 | — | `build_id` mismatch | `CONFIGURATION_ERROR` / `provenance_mismatch` |
 | 5 | — | User script failed `compile()` | `CONFIGURATION_ERROR` / `script_compile_error` |
@@ -505,12 +511,12 @@ def debug_introspect_run_handler(
 
 - *No on-disk artifact is created for a call before admission + sudo preflight
   succeed.* A failed profile lookup, operation gate, request invariant,
-  provenance check, manifest call-budget check, sudo preflight, or admission
-  attempt returns a failure `ToolResponse` with **no `call_id`** in the body
-  and **no manifest entry** — from the caller's perspective the call never
-  existed. The `<call_id>/` artifact directory and the symmetric
-  `<run>/sensitive/debug/introspect/<call_id>/` (§6.1) are both created only
-  after admission returns a handle.
+  provenance check, manifest call-budget check, mode preflight, sudo
+  preflight, or admission attempt returns a failure `ToolResponse` with **no
+  `call_id`** in the body and **no manifest entry** — from the caller's
+  perspective the call never existed. The `<call_id>/` artifact directory
+  and the symmetric `<run>/sensitive/debug/introspect/<call_id>/` (§6.1) are
+  both created only after admission returns a handle.
 - *Every diagnostic that may carry remote output is redacted.* The handler
   constructs `redactor = Redactor(secret_values=[rootfs_profile.ssh_key_ref]
   if rootfs_profile.ssh_key_ref else [])` immediately after profile resolution
@@ -523,7 +529,8 @@ def debug_introspect_run_handler(
 2. **Operation gating.** `_ensure_debug_operation_enabled(resolved_debug_profile, "debug.introspect.run")`.
 3. **Request invariants.** Reject `allow_write=true`. Validate `timeout_seconds in [5, 300]`. Validate `script` non-empty, ≤ 256 KiB.
 4. **Build_id from manifest.** Read `manifest.steps["build"].details["build_id"]`. Missing → `CONFIGURATION_ERROR` / `provenance_missing`. Present but failing the `^[0-9a-f]{8,}$` regex check (the §3.1 host-side validation) → `INFRASTRUCTURE_FAILURE` / `provenance_corrupt`. This is the minimal `KernelProvenance` consumer (§7); the regex check exists so the wrapper's `${EXPECTED_BUILD_ID}` comparison can be unconditional (§4.2 dropped its truthy guard for F4).
-   4a. **Manifest call budget (authoritative soft cap).** Count existing keys in `manifest.step_results` matching `^introspect:`. If the count is ≥ `MAX_INTROSPECT_CALLS_PER_RUN` (default **1000**, surfaced in `config.py`), return `CONFIGURATION_ERROR` / `manifest_call_budget_exhausted`. The budget check is performed once, here, **without holding the manifest lock**. Under contention the cap may overshoot by up to `(concurrent_calls - 1)` (R2-F5); this is a deliberate trade-off — `MAX_INTROSPECT_CALLS_PER_RUN` is a soft target, not a hard ceiling, so an admitted call's work is never thrown away post-SSH. The cap exists to bound the manifest-rewrite cost (each successful call rewrites the full manifest under the lock — see step 13). Recovery is documented: start a fresh `kernel.create_run` and continue work there.
+   4a. **Manifest call budget (authoritative soft cap).** Call `_count_introspect_calls(manifest)`, which returns the number of `step_results` keys matching `^introspect:`. If the returned count is ≥ `MAX_INTROSPECT_CALLS_PER_RUN` (default **1000**, surfaced in `config.py`), return `CONFIGURATION_ERROR` / `manifest_call_budget_exhausted`. The helper is named explicitly so the §9.1 R3-F5 test has a stable monkey-patch target. The budget check is performed once, here, **without holding the manifest lock**. Under contention the cap may overshoot by up to `(concurrent_calls - 1)` (R2-F5); this is a deliberate trade-off — `MAX_INTROSPECT_CALLS_PER_RUN` is a soft target, not a hard ceiling, so an admitted call's work is never thrown away post-SSH. The cap exists to bound the manifest-rewrite cost (each successful call rewrites the full manifest under the lock — see step 13). Recovery is documented: start a fresh `kernel.create_run` and continue work there.
+   4b. **`sensitive/` parent-mode preflight (R4-F1).** Before any SSH round trip, `os.stat(<run>/sensitive/)` and inspect the low 9 bits of `st_mode`. If the mode is more permissive than `0o700` (i.e. `(st_mode & 0o077) != 0`), return `CONFIGURATION_ERROR` / `sensitive_dir_too_permissive`; the diagnostic names the actual mode in octal (e.g. `0o755`) and points to the remediation (re-run `kernel.create_run` — the recommended path — or `chmod 0700 <run>/sensitive` by hand). The check sits **before** sudo preflight (step 5) and admission (step 6) so that (a) no admission handle is acquired on the rejection path, (b) no SSH round trip is issued, and (c) the response carries no `call_id` (the mint is at step 7, after admission). The check applies to **every** call — there is no caching — because the parent mode can be relaxed out of band between calls and the contract is on what the call sees, not on what `create_run` produced. The check is what makes the R2-F4 `0700` parent and the `0600` `wrapper.py` mode actually load-bearing on legacy runs (§6.1a).
 5. **Sudo preflight** (only when `ssh_user != "root"`). Run `ssh <ssh_args> <user>@<host> -- 'sudo -n true'` with a 5-second host timeout. Non-zero exit → `CONFIGURATION_ERROR` / `sudo_requires_password`; the diagnostic embeds the captured stderr after passing it through `redactor.redact_text(...)` **first**, then truncating the redacted output to the first 256 bytes (typically `"sudo: a password is required"`, but `ssh_key_ref` and any other configured secrets are scrubbed before any truncation). The redact-before-truncate ordering is mandatory (R2-F3): `Redactor.redact_text` does literal substring replacement against `secret_values`, so a truncation point inside an `ssh_key_ref` would leave a partial copy of the key in the diagnostic that the redactor could no longer match. The probe is cheap, deterministic, and turns a 30-second `ssh_timeout` into a sub-second actionable error. Skipped when `ssh_user == "root"` because there is no sudo round trip on the hot path either.
 6. **Admission gate.**
    ```python
@@ -535,7 +542,7 @@ def debug_introspect_run_handler(
    )
    ```
    Admission errors map per the §3.3 table. No `call_id` is minted and no artifact directory is created on admission failure.
-7. **`sensitive/` parent-mode preflight + mint `call_id`** (R3-F4). Before creating any artifact directory on disk, `os.stat(<run>/sensitive/)` and inspect the low 9 bits of `st_mode`. If the mode is more permissive than `0o700` (i.e. `(st_mode & 0o077) != 0`), return `CONFIGURATION_ERROR` / `sensitive_dir_too_permissive`; the diagnostic names the actual mode in octal (e.g. `0o755`) and points to the remediation (re-run `kernel.create_run` — the recommended path — or `chmod 0700 <run>/sensitive` by hand). The check sits **before** the call_id mint and the artifact-directory creation so no `<call_id>/` directory is left behind on the failure path (preserving the §5.2 prologue invariant that no on-disk artifact is created for a call before the call commits to running). The check applies to **every** call — there is no caching — because the parent mode can be relaxed out of band between calls and the contract is on what the call sees, not on what `create_run` produced. The check is what makes the R2-F4 `0700` parent and the `0600` `wrapper.py` mode actually load-bearing on legacy runs (§6.1a). Then mint `call_id = uuid4().hex` and create `<run>/debug/introspect/<call_id>/` (mode 0700) **and** the sibling `<run>/sensitive/debug/introspect/<call_id>/` (mode 0700, under the existing `sensitive/` subtree — see §6.1 for the file-mode rules). The `call_id` is included in the response from this step onward.
+7. **Mint `call_id`.** `uuid4().hex`. Create `<run>/debug/introspect/<call_id>/` (mode 0700) **and** the sibling `<run>/sensitive/debug/introspect/<call_id>/` (mode 0700, under the existing `sensitive/` subtree — see §6.1 for the file-mode rules; the parent-mode preflight at step 4b guarantees the subtree is itself `0700`). The `call_id` is included in the response from this step onward.
 8. **Render wrapper.** Substitute `${USER_SCRIPT_B64}` (the user script base64-encoded as a pure-ASCII blob per §3.1), `${EXPECTED_BUILD_ID}`, and `${CALL_ID}` into the template via `string.Template(...).substitute(...)` (strict, with the §3.1 pre-substitution regex checks on the non-user values). Persist:
    - the full rendered wrapper as `<run>/sensitive/debug/introspect/<call_id>/wrapper.py` (mode 0600 — the script body is in here verbatim, see §6.3),
    - a `<run>/debug/introspect/<call_id>/wrapper.skeleton.py` containing the rendered wrapper with the user-script base64 body replaced by the placeholder `# <user script: sha256:<hex>; full source under sensitive/debug/introspect/<call_id>/wrapper.py>`, where `<hex>` is `hashlib.sha256(base64.b64decode(USER_SCRIPT_B64)).hexdigest()` — the sha256 of the **decoded user script bytes**, not of the rendered wrapper (R2-F7; see §6.3 for the canonical definition),
@@ -615,7 +622,7 @@ No introspect-level lock is required for ordering across calls — the manifest 
 
 #### 6.1a Backwards compatibility for legacy runs
 
-Runs whose `create_run` predates the R2-F4 change have `<run>/sensitive/` at the system umask (typically `0755`). The introspect handler does **not** migrate them — chmod-on-call would muddle the per-run-property invariant and risks fighting an operator who deliberately tightened or loosened the mode out of band. Instead the handler **fails loudly** (R3-F4): the per-call preflight at §5.2 step 7 stat()s `<run>/sensitive/` before any artifact directory is created and returns `CONFIGURATION_ERROR` / `sensitive_dir_too_permissive` whenever the mode is more permissive than `0o700` (see also the §3.3 row of the same name). A legacy run therefore cannot be used with `debug.introspect.run` until the operator remediates — either by re-running `kernel.create_run` (the recommended path; the introspect call budget and per-run isolation make this the natural workflow) or by `chmod 0700 <run>/sensitive` by hand. The fail-loud posture is intentional and matches the existing sudo-preflight stance: silently letting a call land under a world-readable parent would render the `0600` mode on `wrapper.py` ineffective, breaking the file-mode contract advertised in §6.1. The hardened mode is asserted in tests against fresh runs (`test_sensitive_run_subdir_is_mode_0700`, §9.1); the fail-loud path is asserted in `test_legacy_sensitive_dir_rejected` (§9.1).
+Runs whose `create_run` predates the R2-F4 change have `<run>/sensitive/` at the system umask (typically `0755`). The introspect handler does **not** migrate them — chmod-on-call would muddle the per-run-property invariant and risks fighting an operator who deliberately tightened or loosened the mode out of band. Instead the handler **fails loudly** (R3-F4, refined by R4-F1): the per-call preflight at §5.2 step 4b stat()s `<run>/sensitive/` **before any SSH round trip** — ahead of sudo preflight (step 5) and admission (step 6) — and returns `CONFIGURATION_ERROR` / `sensitive_dir_too_permissive` whenever the mode is more permissive than `0o700` (see also the §3.3 row of the same name). A legacy run therefore cannot be used with `debug.introspect.run` until the operator remediates — either by re-running `kernel.create_run` (the recommended path; the introspect call budget and per-run isolation make this the natural workflow) or by `chmod 0700 <run>/sensitive` by hand. The fail-loud posture is intentional and matches the existing sudo-preflight stance: silently letting a call land under a world-readable parent would render the `0600` mode on `wrapper.py` ineffective, breaking the file-mode contract advertised in §6.1. The hardened mode is asserted in tests against fresh runs (`test_sensitive_run_subdir_is_mode_0700`, §9.1); the fail-loud path is asserted in `test_legacy_sensitive_dir_rejected` (§9.1).
 
 `stderr.log` is streamed to disk during the call as raw bytes, then rewritten in-place under the manifest lock with the text-mode `Redactor` applied (see §6.3). `stdout.json` is **not** streamed verbatim: SSH stdout is captured to a temporary path during the call, the host then parses it as JSON, passes the parsed structure through `Redactor.redact_value`, and persists the result via `json.dumps` to `stdout.json`. On a wrapper crash where stdout is not valid JSON, the temporary capture is moved to `<run>/sensitive/debug/introspect/<call_id>/stdout.raw` instead and `stdout.json` is absent for that call — the raw file may carry secrets that the text-mode redactor cannot reliably scrub from unstructured binary, so it stays under `sensitive/`. `result.json` is written after the host finishes post-processing. `request.json` and `wrapper.skeleton.py` are present on every successful admission; later files are present whenever the call reached SSH.
 
@@ -641,7 +648,10 @@ StepResult(
     "call_id": call_id, "build_id": "...",
     "timeout_seconds": 30, "wrapper_exit_code": 0,
     "duration_ms": 142, "prelude_ms": 35, "truncated": {...},
-    "ssh_user": "root", "outcome_status": "ok"|"error"|"drgn_open_failure"|"drgn_version_skew"|...,
+    "ssh_user": "root", "outcome_status": "ok"|"error"|"drgn_open_failure"|"drgn_version_skew"|"wrapper_internal_error"|...,
+                                              # `wrapper_internal_error` is a manifest-forensic
+                                              # value (R4-F3); the agent-facing response
+                                              # collapses it to `wrapper_crash`.
   },
 )
 ```
@@ -804,11 +814,11 @@ Test cases:
 - `test_call_budget_exhausted` (manifest's `step_results` is pre-populated with `MAX_INTROSPECT_CALLS_PER_RUN` entries matching `^introspect:`; handler returns `CONFIGURATION_ERROR` / `manifest_call_budget_exhausted`; no SSH; no new `<call_id>/` directory — covers F5)
 - `test_wrapper_py_written_under_sensitive_with_0600` (after a successful call, assert `<run>/sensitive/debug/introspect/<call_id>/wrapper.py` exists with mode `0600`; this is the leaf-file assertion — covers F2)
 - `test_sensitive_run_subdir_is_mode_0700` (R2-F4: exercise `ArtifactStore.create_run` directly — no introspect call needed — and assert `<run>/sensitive/` is mode `0700` regardless of the host umask; coverage of the parent-directory contract does not depend on the introspect path, since the mode is established at run-creation time)
-- `test_legacy_sensitive_dir_rejected` (R3-F4: pre-create a run with `<run>/sensitive/` at mode `0o755` to mimic a pre-R2-F4 layout; call the handler with otherwise-valid inputs; assert the response is `CONFIGURATION_ERROR` / `sensitive_dir_too_permissive`, the diagnostic names the actual mode in octal, FakeSshRunner observed **no** invocation (neither the sudo preflight nor the wrapper round trip ran), and neither `<run>/debug/introspect/<call_id>/` nor `<run>/sensitive/debug/introspect/<call_id>/` was created — the failure happens before the call_id mint per §5.2 step 7. A companion sub-case at mode `0o700` is admitted normally to prove the check's discrimination is exactly on the low-bits boundary.)
+- `test_legacy_sensitive_dir_rejected` (R3-F4, refined by R4-F1: pre-create a run with `<run>/sensitive/` at mode `0o755` to mimic a pre-R2-F4 layout; call the handler with otherwise-valid inputs; assert the response is `CONFIGURATION_ERROR` / `sensitive_dir_too_permissive`, the diagnostic names the actual mode in octal, FakeSshRunner observed **no** invocation (neither the sudo preflight nor the wrapper round trip ran), and neither `<run>/debug/introspect/<call_id>/` nor `<run>/sensitive/debug/introspect/<call_id>/` was created — the failure happens before the call_id mint per §5.2 step 4b. The pre-step-5 placement is what makes this assertion robust against the `ssh_user != 'root'` case where step 5's `sudo -n true` would otherwise have issued an SSH preflight first. A companion sub-case at mode `0o700` is admitted normally to prove the check's discrimination is exactly on the low-bits boundary.)
 - `test_response_artifacts_omit_wrapper_py` (response `artifacts` list contains `wrapper.skeleton.py` but not `wrapper.py`; the step record's `artifacts` includes a `sensitive=True` `ArtifactRef` for `wrapper.py` — covers F2)
 - `test_no_orphan_artifacts_on_admission_failure` (admission raises `target_halted`; assert no `<call_id>/` directory exists under either `<run>/debug/introspect/` or `<run>/sensitive/debug/introspect/`; the response has no `call_id` field — covers F6)
 - `test_prelude_warning_at_threshold_boundary` (configure FakeSshRunner to return a wrapper JSON with `prelude_ms = 4000` and `timeout_seconds = 10`; assert the integer-only comparison `4000 * 100 >= PRELUDE_WARNING_FRACTION_PCT * 10 * 1000` (= `400_000 >= 400_000`, exactly the 40 % threshold) triggers the soft warning and the response `diagnostic` contains it; also assert the `prelude_ms = 3999` case (= `399_900 >= 400_000` is false) does not produce the warning — covers R2-F1 and the pre-existing prelude-budget instrumentation)
-- `test_budget_soft_cap_overshoot_under_concurrency` (R2-F5, R3-F5: pre-populate `manifest.step_results` with `MAX_INTROSPECT_CALLS_PER_RUN - 1` entries matching `^introspect:`; monkey-patch the `_count_introspect_calls` helper that §5.2 step 4a invokes — the implementation PR names the helper explicitly — so it returns `MAX - 1` on each of its first two invocations and the real value thereafter. Run **two sequential** handler invocations with mutually-distinct `call_id`s and assert: (a) both succeed with `status="ok"`; (b) the manifest ends with `count == MAX_INTROSPECT_CALLS_PER_RUN + 1` (the one-call overshoot the §5.3 soft-cap framing advertises); (c) a third sequential invocation (no monkey-patch — `_count_introspect_calls` returns the true count, now ≥ `MAX`) is rejected at *its* step 4a with `CONFIGURATION_ERROR` / `manifest_call_budget_exhausted`. The sequential framing with an injected count helper isolates the overshoot property from thread-scheduling races (no `threading.Event` barrier on the handler, which §5.1's signature does not expose); the missing step-13 post-lock recheck is what lets the second call write the `MAX`-th entry without being rejected after acquiring the manifest lock. Proves the soft-cap framing in §5.3 and the deliberate omission of the post-lock recheck at step 13.)
+- `test_budget_soft_cap_overshoot_under_concurrency` (R2-F5, R3-F5: pre-populate `manifest.step_results` with `MAX_INTROSPECT_CALLS_PER_RUN - 1` entries matching `^introspect:`; monkey-patch `_count_introspect_calls` (named in §5.2 step 4a) so it returns `MAX - 1` on each of its first two invocations and the real value thereafter. Run **two sequential** handler invocations with mutually-distinct `call_id`s and assert: (a) both succeed with `status="ok"`; (b) the manifest ends with `count == MAX_INTROSPECT_CALLS_PER_RUN + 1` (the one-call overshoot the §5.3 soft-cap framing advertises); (c) a third sequential invocation (no monkey-patch — `_count_introspect_calls` returns the true count, now ≥ `MAX`) is rejected at *its* step 4a with `CONFIGURATION_ERROR` / `manifest_call_budget_exhausted`. The sequential framing with an injected count helper isolates the overshoot property from thread-scheduling races (no `threading.Event` barrier on the handler, which §5.1's signature does not expose); the missing step-13 post-lock recheck is what lets the second call write the `MAX`-th entry without being rejected after acquiring the manifest lock. Proves the soft-cap framing in §5.3 and the deliberate omission of the post-lock recheck at step 13.)
 
 **Build-handler tests (R2-F6) — added to `tests/test_local_kernel_build.py` in the implementation PR for #51, not this iteration:**
 - `test_readelf_unavailable_fails_build` — patch `subprocess.run` to raise `FileNotFoundError`; assert `_extract_build_id` raises `ReadelfUnavailable`, the build step's terminal status is `FAILED`, and the `StepResult.error_category` / `code` are `INFRASTRUCTURE_FAILURE` / `readelf_unavailable`.
@@ -843,13 +853,13 @@ Test cases:
 - `test_wrapper_stdout_only_contains_json` (stdin script `print("noise")` lands in `user_stdout`, not stdout)
 - `test_wrapper_round_trips_script_containing_triple_quotes_and_template_sigils` (a script containing `'"""'`, `'${EXPECTED_BUILD_ID}'`, embedded `\x00`, and a CRLF round-trips through render→execute unchanged)
 - `test_wrapper_emit_unserializable_replaced_with_placeholder` (calling `emit(set())` produces an `__emit_unserializable__` entry; the rest of the script runs and its emits land normally)
-- `test_wrapper_helper_namespace_contains_expected_subset` — assert at least `list_for_each_entry`, `for_each_task`, and `dmesg` are present in the user namespace, and that the renamed wrapper-private globals (`_li_pre_helpers`, `_li_drgn_helper_names`, `_li_emit_buffer`, `_li_emit_overflow`, `_li_result`, `_li_caps`, `_li_truncate`, `_li_t_prelude_start`) are NOT exposed in the user namespace. Covers R2-F8; the non-exposure of `_li_pre_helpers` and `_li_drgn_helper_names` specifically depends on the R3-F1 self-seeded snapshot in §4.2 — without that pre-seeding `_li_pre_helpers` itself would appear in the post-import helper diff and leak into the user namespace, breaking this assertion.
+- `test_wrapper_helper_namespace_contains_expected_subset` — assert at least `list_for_each_entry`, `for_each_task`, and `dmesg` are present in the user namespace, and that the renamed wrapper-private globals (`_li_pre_helpers`, `_li_drgn_helper_names`, `_li_emit_buffer`, `_li_emit_overflow`, `_li_result`, `_li_caps`, `_li_truncate`, `_li_t_prelude_start`, `_li_sys`, `_li_json`, `_li_io`, `_li_traceback`, `_li_contextlib`, `_li_time`, `_li_base64`) are NOT exposed in the user namespace. Covers R2-F8; the non-exposure of `_li_pre_helpers` and `_li_drgn_helper_names` specifically depends on the R3-F1 self-seeded snapshot in §4.2 — without that pre-seeding `_li_pre_helpers` itself would appear in the post-import helper diff and leak into the user namespace, breaking this assertion. The trailing seven entries cover R4-F4: the stdlib aliases are imported before the wildcard so they land in `_li_pre_helpers` and are excluded from the post-import helper diff; the assertion here defends against a future refactor that moves any of these imports past the wildcard and reintroduces the shadow class.
 - `test_wrapper_handles_drgn_helper_shadowing_wrapper_private_name` (R2-F8) — monkey-patch the stub `drgn.helpers.linux` module so the wildcard import exposes a top-level `result` symbol (the legacy wrapper-private name). Assert: (a) the wrapper still emits a complete JSON document with `outcome.status="ok"` on the happy path, (b) the user namespace's `result` is the helper-defined symbol (not the wrapper's), proving the rename eliminated the shadowing class entirely.
 - `test_user_script_sys_exit_does_not_spoof_timeout` — user script does `sys.exit(124)`; the wrapper's BaseException handler catches the resulting `SystemExit`, the tail JSON write runs through the `try/finally`, and the wrapper exits **6** (`wrapper_complete`) with `outcome.status="error"` and `outcome.error_type="SystemExit"`. The process exit code is **not** 124, so the host cannot misclassify the call as `introspect_timeout`. Covers F1.
 - `test_wrapper_truncates_error_message` — user script raises an exception whose `str(exc)` is 32 KiB; assert `result["outcome"]["error_message"]` has length `CAPS["error_message"]` (4096), `result["truncated"]["error_message"]` is `True`, and the wrapper still exits **6** with a valid JSON document. Covers F3.
 - `test_wrapper_drgn_version_skew_exits_3` — stub `prog.main_module` to raise `AttributeError`; assert exit code 3, `outcome.status="drgn_version_skew"`, `outcome.error_type="AttributeError"`, and the document carries a valid JSON payload (the host parses JSON first per §4.3). Covers F8.
 - `test_wrapper_always_emits_json_on_happy_path` — instrument the wrapper so the final `sys.stdout.write` is invoked; assert exit code 6 and that stdout is a complete JSON document. Sanity check for the F1 `try/finally`.
-- `test_wrapper_tail_serialization_failure_emits_minimal_json` (R2-F2) — monkey-patch `json.dumps` so the first call inside the tail `try:` block raises `RuntimeError("forced")` but the recovery call inside the inner `except BaseException:` succeeds. Assert: (a) the wrapper exits with code 6 (the `finally` still runs), (b) stdout is a valid minimal JSON document with `outcome.status == "wrapper_internal_error"`, `outcome.error_type == "RuntimeError"`, `outcome.error_message == "forced"`, `truncated.wrapper_internal_error == True`, and (c) `call_id` and `build_id` carry through from the in-flight `_li_result`. Companion: simulate a host parsing the document and assert the host maps it to `INFRASTRUCTURE_FAILURE` / `wrapper_crash` per §4.3.
+- `test_wrapper_tail_serialization_failure_emits_minimal_json` (R2-F2, R4-F3) — monkey-patch `json.dumps` so the first call inside the tail `try:` block raises `RuntimeError("forced")` but the recovery call inside the inner `except BaseException:` succeeds. Assert: (a) the wrapper exits with code 6 (the `finally` still runs), (b) stdout is a valid minimal JSON document with `outcome.status == "wrapper_internal_error"`, `outcome.error_type == "RuntimeError"`, `outcome.error_message == "forced"`, `truncated.wrapper_internal_error == True`, and (c) `call_id` and `build_id` carry through from the in-flight `_li_result`. Companion: simulate a host parsing the document and assert the simulated host-side response is `INFRASTRUCTURE_FAILURE` / `wrapper_crash`; the agent does not see `wrapper_internal_error` in the response's `outcome.status` (R4-F3) — the value survives only via `details.outcome_status` on the manifest and via `stdout.json` / `result.json` on disk.
 - `test_wrapper_tail_pipe_failure_falls_through_to_silent_crash` (R3-F2) — monkey-patch `sys.stdout` so *every* `write` raises `BrokenPipeError` (the closed-SSH-pipe failure mode the §4.2 R3-F2 coverage note calls out). Assert: (a) the wrapper exits with code 6 (the `finally` still runs), (b) stdout is empty — the primary tail `sys.stdout.write` raises, the inner `except BaseException:` recovery write also raises against the same broken stdout, the last-ditch `except BaseException: pass` swallows it, and **no** JSON document is produced; (c) a host simulator that parses the empty stdout maps the call to `INFRASTRUCTURE_FAILURE` / `wrapper_crash` per the §4.3 "exit 6 + absent / unparseable" row. Companion to `test_wrapper_tail_serialization_failure_emits_minimal_json`: together they cover the serialization-stage success path (recovery emits minimal JSON) and the pipe-stage fall-through path (recovery cannot write) described in the §4.2 R3-F2 coverage note.
 
 ### 9.3 Integration tests — `tests/test_drgn_introspect_integration.py`
