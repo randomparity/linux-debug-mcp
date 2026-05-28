@@ -1,7 +1,11 @@
+import pytest
+from pydantic import ValidationError
+
 from linux_debug_mcp import __version__
 from linux_debug_mcp.config import BootOverrides, BuildOverrides
 from linux_debug_mcp.domain import (
     ArtifactRef,
+    DebugIntrospectRunRequest,
     ErrorCategory,
     OperationSemantics,
     PrerequisiteCheck,
@@ -128,3 +132,17 @@ def test_prerequisite_check_serializes_status_and_fix() -> None:
         "details": {},
         "suggested_fix": "Install gdb with your distro package manager.",
     }
+
+
+def test_debug_introspect_run_request_minimal() -> None:
+    req = DebugIntrospectRunRequest(run_id="r1", target_ref="local-qemu", script="print(1)")
+    assert req.timeout_seconds == 30
+    assert req.allow_write is False
+    assert req.debug_profile is None
+    assert req.target_profile is None
+    assert req.rootfs_profile is None
+
+
+def test_debug_introspect_run_request_rejects_extra_fields() -> None:
+    with pytest.raises(ValidationError):
+        DebugIntrospectRunRequest(run_id="r1", target_ref="t", script="s", unknown=1)

@@ -92,6 +92,29 @@ class RunRequest(Model):
     boot_overrides: BootOverrides | None = None
 
 
+class DebugIntrospectRunRequest(Model):
+    """Request payload for ``debug.introspect.run``. Spec §3.1.
+
+    ``script`` is the user-supplied drgn Python source. The handler
+    base64-encodes it for transport and substitutes it into a
+    ``string.Template``-rendered wrapper on the target (spec §4.2).
+    ``call_id`` is server-minted, not part of the request.
+
+    The ``[5, 300]`` timeout band and the script-non-empty / ≤256 KiB
+    invariants are enforced by the handler (not Pydantic) so they surface
+    as ``ToolResponse.failure(...)`` with the spec's exact codes from §3.3.
+    """
+
+    run_id: str
+    target_ref: str
+    script: str
+    timeout_seconds: int = 30
+    allow_write: bool = False
+    debug_profile: str | None = None
+    target_profile: str | None = None
+    rootfs_profile: str | None = None
+
+
 class RunStep(Model):
     name: str
     status: StepStatus = StepStatus.PENDING
