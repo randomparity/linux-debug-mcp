@@ -28,6 +28,7 @@ from linux_debug_mcp.config import (
     merge_config_lines,
     merge_kernel_args,
 )
+from linux_debug_mcp.coordination.admission import AdmissionService
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
@@ -61,6 +62,14 @@ from linux_debug_mcp.providers.stubs import (
 )
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_rootfs_source, validate_source_path
 from linux_debug_mcp.safety.redaction import Redactor
+from linux_debug_mcp.seams.target import (
+    BreakHint,
+    ConsoleKind,
+    PlatformMetadata,
+    TargetKey,
+    publish_ready_snapshot,
+)
+from linux_debug_mcp.transport.base import LineRole, TransportRef
 
 DEFAULT_ARTIFACT_ROOT = Path(".linux-debug-mcp/runs")
 SERVER_CONFIG_ENV_VAR = "LINUX_DEBUG_MCP_CONFIG"
@@ -906,6 +915,48 @@ def kernel_build_handler(
     )
 
 
+def _publish_boot_ready_snapshot(
+    admission: AdmissionService,
+    *,
+    run_id: str,
+    generation: int,
+    gdbstub_endpoint: dict[str, Any] | None,
+    rootfs_profile: RootfsProfile,
+) -> None:
+    """Publish the authoritative READY TargetSnapshot for a local-qemu boot (ADR 0007).
+
+    No provisioner exists on the local path, so the boot step is the snapshot producer: it mints
+    the RSP TransportRef from the recorded gdbstub endpoint (so admission can re-bind transport.open
+    requests) and the platform facts admission re-binds against. `generation` is the boot attempt
+    number, so a reboot bumps it and invalidates handles minted against the prior incarnation.
+    """
+    transports: list[TransportRef] = []
+    if gdbstub_endpoint is not None:
+        transports.append(
+            TransportRef(
+                provider="qemu-gdbstub",
+                channel_id="rsp0",
+                line_role=LineRole.RSP,
+                caps=("rsp",),
+                target_ref=gdbstub_endpoint,
+            )
+        )
+    platform = PlatformMetadata(
+        console_kind=ConsoleKind.UART,
+        console_count=1,
+        dedicated_debug_line=False,
+        ssh_reachable=rootfs_profile.ssh_host is not None and rootfs_profile.ssh_port is not None,
+        break_hints=[BreakHint.GDBSTUB_NATIVE],
+    )
+    publish_ready_snapshot(
+        admission,
+        target_key=TargetKey(provisioner="local-qemu", target_id=run_id),
+        generation=generation,
+        transports=transports,
+        platform=platform,
+    )
+
+
 def target_boot_handler(
     *,
     artifact_root: Path,
@@ -919,6 +970,7 @@ def target_boot_handler(
     default_libvirt_uri: str | None = None,
     boot_overrides: BootOverrides | None = None,
     sensitive_paths: list[Path] | None = None,
+    admission: AdmissionService | None = None,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -1124,6 +1176,14 @@ def target_boot_handler(
             status=execution.status,
         )
         store.record_boot_attempt(run_id, attempt=attempt_record, boot_result=terminal)
+        if execution.status == StepStatus.SUCCEEDED and admission is not None:
+            _publish_boot_ready_snapshot(
+                admission,
+                run_id=run_id,
+                generation=attempt,
+                gdbstub_endpoint=plan_gdbstub_endpoint,
+                rootfs_profile=resolved_rootfs_profile,
+            )
         if execution.status == StepStatus.SUCCEEDED:
             return ToolResponse.success(
                 summary=execution.summary,
