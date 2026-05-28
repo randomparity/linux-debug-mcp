@@ -4,9 +4,12 @@ import contextlib
 import json
 import logging
 import os
+import re
+import shutil
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,6 +23,8 @@ from linux_debug_mcp.artifacts.manifest import BootAttempt, RunManifest
 from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
 from linux_debug_mcp.config import (
     ALLOWED_DEBUG_OPERATIONS,
+    MAX_INTROSPECT_CALLS_PER_RUN,
+    PRELUDE_WARNING_FRACTION_PCT,
     BootOverrides,
     BuildOverrides,
     BuildProfile,
@@ -46,7 +51,15 @@ from linux_debug_mcp.coordination.exec_probe import probe_execution_state, probe
 from linux_debug_mcp.coordination.lease import ConsoleLeaseManager
 from linux_debug_mcp.coordination.registry import OrphanReap, RecoveryTombstone, SessionRegistry
 from linux_debug_mcp.coordination.transaction import TransportTransaction
-from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
+from linux_debug_mcp.domain import (
+    ArtifactRef,
+    DebugIntrospectRunRequest,
+    ErrorCategory,
+    RunRequest,
+    StepResult,
+    StepStatus,
+    ToolResponse,
+)
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
 from linux_debug_mcp.providers.contracts import (
@@ -64,12 +77,26 @@ from linux_debug_mcp.providers.contracts import (
     ReserveProvisionBootRequest,
 )
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
+from linux_debug_mcp.providers.local_drgn_introspect import (
+    SCRIPT_BYTE_CAP,
+    WrapperRenderError,
+    render_wrapper,
+    render_wrapper_skeleton,
+    user_script_sha256,
+)
 from linux_debug_mcp.providers.local_kernel_build import (
     BuildIdMissing,
     LocalKernelBuildProvider,
     ReadelfUnavailable,
 )
-from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider, TestExecutionResult, TestPlan
+from linux_debug_mcp.providers.local_ssh_tests import (
+    LocalSshTestProvider,
+    SshRunner,
+    SubprocessSshRunner,
+    TestExecutionResult,
+    TestPlan,
+    build_ssh_argv,
+)
 from linux_debug_mcp.providers.qemu_gdbstub import (
     DebugProviderResult,
     DebugSession,
@@ -236,6 +263,144 @@ def _record_terminal_build_result(
                 raise
             time.sleep(delay_seconds)
             delay_seconds *= 2
+
+
+_INTROSPECT_STEP_NAME_RE = re.compile(r"^introspect:")
+_BUILD_ID_RE = re.compile(r"^[0-9a-f]{8,}$")
+_CALL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _count_introspect_calls(manifest: RunManifest) -> int:
+    """Spec §5.2 step 4a / R3-F5. Named so tests can monkey-patch it."""
+    return sum(1 for name in manifest.step_results if _INTROSPECT_STEP_NAME_RE.match(name))
+
+
+def _redact_and_truncate(redactor: Redactor, text: str, cap: int = 256) -> str:
+    """Spec §5.2 step 5, step 9, §6.3 — redact BEFORE truncate (R2-F3).
+
+    The order matters: ``Redactor.redact_text`` does literal substring
+    replacement against ``secret_values``, so truncating first could split
+    an ``ssh_key_ref`` mid-secret and leave an unmatched prefix in the
+    diagnostic.
+    """
+    redacted = redactor.redact_text(text)
+    return redacted[:cap]
+
+
+def _head_tail(s: str, *, head: int, tail: int) -> str:
+    """Spec §3.2: snippet helper — head N + middle marker + tail N."""
+    if len(s) <= head + tail:
+        return s
+    return f"{s[:head]}\n…[truncated]…\n{s[-tail:]}"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _record_terminal_introspect_result(
+    store: ArtifactStore,
+    run_id: str,
+    result: StepResult,
+    *,
+    attempts: int = 5,
+    initial_delay_seconds: float = 0.01,
+) -> None:
+    """Clone of ``_record_terminal_build_result`` that appends rather than
+    replaces. Spec §5.2 step 13: every ``introspect:<call_id>`` is a fresh
+    entry — collisions are an internal bug (UUIDv4).
+    """
+    delay_seconds = initial_delay_seconds
+    for attempt in range(attempts):
+        try:
+            store.record_step_result(run_id, result, append=True)
+            return
+        except ManifestStateError as exc:
+            if "manifest is locked" not in str(exc) or attempt == attempts - 1:
+                raise
+            time.sleep(delay_seconds)
+            delay_seconds *= 2
+
+
+def _record_introspect_failure(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    call_id: str,
+    category: ErrorCategory,
+    code: str,
+    message: str,
+    agent_dir: Path,
+    sensitive_dir: Path,
+    redactor: Redactor,
+    raw_stderr: str,
+    started_at: datetime,
+    finished_at: datetime,
+    ssh_exit: int,
+    request_timeout_seconds: int,
+    duration_ms: int,
+    ssh_user: str | None,
+    outcome_status_for_forensics: str | None,
+    include_stdout_json: bool = False,
+    redacted_payload: dict[str, Any] | None = None,
+) -> ToolResponse:
+    """Persist artifacts, record the FAILED step, return ``ToolResponse.failure``.
+
+    ``request_timeout_seconds`` is the caller's *budget* (spec §6.2);
+    ``duration_ms`` is the measured wall-clock duration. Keeping success and
+    failure record shapes symmetric lets forensic tooling treat the two
+    paths uniformly. ``ssh_user`` is required (no "unknown" placeholder).
+
+    Note (R6-F3): the ``WrapperRenderError`` path in Step 9.5 does NOT call
+    this helper — the render failure happens before SSH runs, so there is
+    no stderr/stdout text to redact. That path writes the FAILED
+    ``StepResult`` directly.
+    """
+    (agent_dir / "stderr.log").write_text(redactor.redact_text(raw_stderr), encoding="utf-8")
+    if include_stdout_json and redacted_payload is not None:
+        (agent_dir / "stdout.json").write_text(json.dumps(redacted_payload), encoding="utf-8")
+    artifacts: list[ArtifactRef] = [
+        ArtifactRef(path=str(agent_dir / "request.json"), kind="application/json"),
+        ArtifactRef(path=str(agent_dir / "wrapper.skeleton.py"), kind="text/x-python"),
+        ArtifactRef(path=str(sensitive_dir / "wrapper.py"), kind="text/x-python", sensitive=True),
+        ArtifactRef(path=str(agent_dir / "stderr.log"), kind="text/plain"),
+    ]
+    if include_stdout_json:
+        artifacts.append(ArtifactRef(path=str(agent_dir / "stdout.json"), kind="application/json"))
+    if (sensitive_dir / "stdout.raw").exists():
+        artifacts.append(
+            ArtifactRef(
+                path=str(sensitive_dir / "stdout.raw"),
+                kind="application/octet-stream",
+                sensitive=True,
+            )
+        )
+    details: dict[str, Any] = {
+        "call_id": call_id,
+        "timeout_seconds": request_timeout_seconds,
+        "duration_ms": duration_ms,
+        "wrapper_exit_code": ssh_exit,
+        "ssh_user": ssh_user,
+        "outcome_status": outcome_status_for_forensics,
+        "code": code,
+    }
+    step = StepResult(
+        step_name=f"introspect:{call_id}",
+        status=StepStatus.FAILED,
+        summary=message,
+        artifacts=artifacts,
+        details=details,
+    )
+    _record_terminal_introspect_result(store, run_id, step)
+    public = [a for a in artifacts if not a.sensitive]
+    return ToolResponse.failure(
+        category=category,
+        run_id=run_id,
+        message=message,
+        details={"code": code, "call_id": call_id, "outcome_status": outcome_status_for_forensics},
+        artifacts=public,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
 
 
 def _redacted_boot_data(data: dict[str, Any]) -> dict[str, Any]:
@@ -1729,6 +1894,575 @@ def target_run_tests_handler(
         artifacts=safe_artifacts,
         suggested_next_actions=["artifacts.collect"],
     )
+
+
+def debug_introspect_run_handler(
+    request: DebugIntrospectRunRequest,
+    *,
+    artifact_root: Path,
+    target_profiles: dict[str, TargetProfile] | None = None,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    ssh_runner: SshRunner | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> ToolResponse:
+    """Spec §5.2. Execute a user-supplied drgn Python script over SSH against
+    a live target VM and return structured JSON.
+    """
+    run_id = request.run_id
+    now = clock or _utcnow
+
+    # Spec §5.2 step 1: resolve profiles + load manifest.
+    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    target_profiles = target_profiles if target_profiles is not None else DEFAULT_TARGET_PROFILES
+    debug_profiles = debug_profiles if debug_profiles is not None else DEFAULT_DEBUG_PROFILES
+
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        manifest_path = store.run_dir(run_id) / "manifest.json"
+        if not manifest_path.is_file():
+            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    rootfs_name = request.rootfs_profile or manifest.request.rootfs_profile
+    try:
+        resolved_rootfs = rootfs_profiles[rootfs_name]
+    except KeyError:
+        return _configuration_failure(run_id=run_id, message=f"unknown rootfs profile: {rootfs_name}")
+
+    debug_name = request.debug_profile or manifest.request.debug_profile or "qemu-gdbstub-default"
+    try:
+        resolved_debug = _resolve_debug_profile(profile_name=debug_name, debug_profiles=debug_profiles)
+    except ProviderDebugError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id, details=exc.details)
+
+    redactor = Redactor(secret_values=[resolved_rootfs.ssh_key_ref] if resolved_rootfs.ssh_key_ref else [])
+
+    # Spec §5.2 step 2: operation gating.
+    try:
+        _ensure_debug_operation_enabled(resolved_debug, "debug.introspect.run")
+    except ProviderDebugError as exc:
+        return ToolResponse.failure(
+            category=exc.category,
+            message=str(exc),
+            run_id=run_id,
+            details={**exc.details, "code": "operation_disabled"},
+        )
+
+    # Spec §5.2 step 3: request invariants.
+    if request.allow_write:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message="allow_write=true is not yet supported (#56 — write-mode opt-in)",
+            details={"code": "allow_write_not_supported"},
+        )
+    if not (5 <= request.timeout_seconds <= 300):
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=f"timeout_seconds must be in [5, 300]; got {request.timeout_seconds}",
+            details={"code": "invalid_timeout"},
+        )
+    script_bytes = request.script.encode("utf-8")
+    if not script_bytes:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message="script must not be empty",
+            details={"code": "invalid_script"},
+        )
+    if len(script_bytes) > SCRIPT_BYTE_CAP:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=f"script exceeds {SCRIPT_BYTE_CAP} bytes",
+            details={"code": "invalid_script"},
+        )
+
+    # Spec §5.2 step 4: build_id from manifest.
+    build_step = manifest.step_results.get("build")
+    if build_step is None or "build_id" not in build_step.details:
+        # Plan review finding 3 / R6-F1: the diagnostic must point at
+        # kernel.create_run (NOT "rerun kernel.build" which is a no-op on
+        # SUCCEEDED, and NOT force_rebuild which is rejected outright). The
+        # explanatory mention of force_rebuild is intentional — it tells
+        # operators *why* a rebuild flag is not a path forward.
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=(
+                "kernel.build for this run did not record a build_id. Start a "
+                "fresh run via kernel.create_run (kernel.build is idempotent on "
+                "SUCCEEDED and force_rebuild is not yet supported). The fresh "
+                "build will populate build_id."
+            ),
+            details={"code": "provenance_missing"},
+        )
+    build_id = build_step.details["build_id"]
+    if not isinstance(build_id, str) or not _BUILD_ID_RE.match(build_id):
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="recorded build_id is malformed",
+            details={"code": "provenance_corrupt", "recorded": str(build_id)},
+        )
+
+    # Spec §5.2 step 4a: manifest call budget.
+    if _count_introspect_calls(manifest) >= MAX_INTROSPECT_CALLS_PER_RUN:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=(
+                f"introspect call budget exhausted (>= {MAX_INTROSPECT_CALLS_PER_RUN}); "
+                "start a new run via kernel.create_run"
+            ),
+            details={"code": "manifest_call_budget_exhausted"},
+        )
+
+    # Spec §5.2 step 4b: sensitive/ parent-mode preflight (R4-F1).
+    sensitive_dir = store.run_dir(run_id) / "sensitive"
+    mode = sensitive_dir.stat().st_mode & 0o777
+    if mode & 0o077:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=(
+                f"{sensitive_dir} mode is {oct(mode)}; expected 0o700. "
+                "Re-run kernel.create_run, or chmod 0700 the directory."
+            ),
+            details={"code": "sensitive_dir_too_permissive", "actual_mode": oct(mode)},
+        )
+
+    runner: SshRunner = ssh_runner or SubprocessSshRunner()
+
+    # Spec §5.2 step 5: sudo preflight (skip when ssh_user is root).
+    if resolved_rootfs.ssh_user != "root":
+        sudo_argv = build_ssh_argv(
+            rootfs_profile=resolved_rootfs,
+            known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
+            command=["sudo", "-n", "true"],
+            command_timeout=5,
+        )
+        preflight_stdout = store.run_dir(run_id) / "logs" / "sudo_preflight.stdout"
+        preflight_stderr = store.run_dir(run_id) / "logs" / "sudo_preflight.stderr"
+        preflight_stdout.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            sudo_result = runner.run(
+                sudo_argv,
+                timeout=5,
+                stdout_path=preflight_stdout,
+                stderr_path=preflight_stderr,
+            )
+        except Exception as exc:
+            return ToolResponse.failure(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                run_id=run_id,
+                message=f"sudo preflight raised: {exc}",
+                details={"code": "ssh_failure"},
+            )
+        if sudo_result.exit_status != 0:
+            stderr_for_message = sudo_result.stderr or sudo_result.stderr_snippet or ""
+            message = _redact_and_truncate(redactor, stderr_for_message, cap=256)
+            return ToolResponse.failure(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                run_id=run_id,
+                message=f"sudo -n true failed: {message}",
+                details={"code": "sudo_requires_password"},
+            )
+
+    # Spec §5.2 step 6: admission gate.
+    if admission is None or session_registry is None:
+        return ToolResponse.failure(
+            category=ErrorCategory.READINESS_FAILURE,
+            run_id=run_id,
+            message="admission service unavailable",
+            details={"code": "target_not_ready"},
+        )
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    snapshot = admission.current_snapshot(target_key)
+    if snapshot is None:
+        return ToolResponse.failure(
+            category=ErrorCategory.READINESS_FAILURE,
+            run_id=run_id,
+            message="target not ready",
+            details={"code": "target_not_ready"},
+        )
+    proof = probe_execution_state(
+        registry=session_registry,
+        admission=admission,
+        target_key=target_key,
+        generation=snapshot.generation,
+    )
+    try:
+        handle = admission.admit_ssh_tier(
+            target_key,
+            snapshot.generation,
+            snapshot.platform,
+            lease=snapshot.lease,
+            execution_proof=proof,
+        )
+    except AdmissionError as exc:
+        return ToolResponse.failure(
+            category=exc.category,
+            message=str(exc),
+            run_id=run_id,
+            details={"code": exc.code},
+            suggested_next_actions=["artifacts.collect"],
+        )
+
+    # R6-F3: Step 9.4 admitted us — Steps 9.5–9.10 must always complete
+    # (Step 9.6 happy path) or roll back (this envelope) the admission
+    # handle. Mirrors target_run_tests_handler:1588-1620.
+    try:
+        call_id = uuid.uuid4().hex
+        agent_dir = store.run_dir(run_id) / "debug" / "introspect" / call_id
+        sensitive_call_dir = store.run_dir(run_id) / "sensitive" / "debug" / "introspect" / call_id
+        agent_dir.mkdir(parents=True, mode=0o700)
+        sensitive_call_dir.mkdir(parents=True, mode=0o700)
+        # Defensive chmod — intermediate dirs may have inherited umask.
+        sensitive_call_dir.chmod(0o700)
+        sensitive_call_dir.parent.chmod(0o700)
+        sensitive_call_dir.parent.parent.chmod(0o700)
+
+        try:
+            wrapper = render_wrapper(
+                user_script=request.script,
+                expected_build_id=build_id,
+                call_id=call_id,
+            )
+            skeleton = render_wrapper_skeleton(
+                expected_build_id=build_id,
+                call_id=call_id,
+                user_script_sha256_hex=user_script_sha256(request.script),
+            )
+        except WrapperRenderError as exc:
+            # R6-F3: render failure before SSH ran. Release the admission
+            # handle, clean up the orphan directories, and write a forensic
+            # FAILED StepResult directly (no SSH means no stderr/stdout to
+            # redact via _record_introspect_failure).
+            with contextlib.suppress(Exception):
+                admission.rollback(handle)
+            shutil.rmtree(agent_dir, ignore_errors=True)
+            shutil.rmtree(sensitive_call_dir, ignore_errors=True)
+            failed = StepResult(
+                step_name=f"introspect:{call_id}",
+                status=StepStatus.FAILED,
+                summary=f"wrapper render error: {exc}",
+                artifacts=[],
+                details={
+                    "call_id": call_id,
+                    "code": "wrapper_render_error",
+                    "ssh_user": resolved_rootfs.ssh_user,
+                    "outcome_status": None,
+                    "timeout_seconds": request.timeout_seconds,
+                    "duration_ms": 0,
+                    "wrapper_exit_code": None,
+                },
+            )
+            _record_terminal_introspect_result(store, run_id, failed)
+            return ToolResponse.failure(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                run_id=run_id,
+                message=f"wrapper render error: {exc}",
+                details={"code": "wrapper_render_error", "call_id": call_id},
+                suggested_next_actions=["artifacts.get_manifest"],
+            )
+
+        (sensitive_call_dir / "wrapper.py").write_text(wrapper, encoding="utf-8")
+        (sensitive_call_dir / "wrapper.py").chmod(0o600)
+        (agent_dir / "wrapper.skeleton.py").write_text(skeleton, encoding="utf-8")
+
+        redacted_request = redactor.redact_value(request.model_dump(mode="json"))
+        (agent_dir / "request.json").write_text(json.dumps(redacted_request), encoding="utf-8")
+
+        # Spec §5.2 steps 9–10: SSH invocation + cancellation watcher.
+        user_timeout = request.timeout_seconds
+        ssh_argv = build_ssh_argv(
+            rootfs_profile=resolved_rootfs,
+            known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
+            command=[
+                "timeout",
+                "--kill-after=2s",
+                f"{user_timeout}s",
+                "sudo",
+                "python3",
+                "-",
+            ],
+            command_timeout=user_timeout + 10,
+        )
+        stdout_path = agent_dir / "stdout.raw.tmp"
+        stderr_path = agent_dir / "stderr.raw.tmp"
+
+        cancel_event = threading.Event()
+        stop_watcher = threading.Event()
+
+        def _watcher() -> None:
+            while not stop_watcher.is_set():
+                if handle.wait_cancelled(0.1):
+                    cancel_event.set()
+                    return
+
+        thread = threading.Thread(target=_watcher, daemon=True)
+        thread.start()
+        started_at = now()
+        try:
+            ssh_result = runner.run(
+                ssh_argv,
+                timeout=user_timeout + 10,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                cancel=cancel_event,
+                stdin=wrapper,
+            )
+        finally:
+            stop_watcher.set()
+            thread.join()
+
+        try:
+            admission.complete(handle)
+        except AdmissionError as exc:
+            return ToolResponse.failure(
+                category=exc.category,
+                message=str(exc),
+                run_id=run_id,
+                details={"code": exc.code, "call_id": call_id},
+                suggested_next_actions=["artifacts.get_manifest"],
+            )
+
+        # Spec §5.2 step 11: exit-code + JSON parsing.
+        raw_stdout = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
+        raw_stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
+        finished_at = now()
+        duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+
+        parsed: dict[str, Any] | None
+        try:
+            parsed = json.loads(raw_stdout) if raw_stdout else None
+        except json.JSONDecodeError:
+            parsed = None
+
+        ssh_exit = ssh_result.exit_status
+
+        # Locally bind a partial-application closure so the many call sites
+        # below don't redeclare every kwarg, while preserving precise types
+        # (a `dict[str, Any]` spread would lose them).
+        def _fail(
+            *,
+            category: ErrorCategory,
+            code: str,
+            message: str,
+            outcome_status_for_forensics: str | None,
+            include_stdout_json: bool = False,
+            redacted_payload: dict[str, Any] | None = None,
+        ) -> ToolResponse:
+            return _record_introspect_failure(
+                store=store,
+                run_id=run_id,
+                call_id=call_id,
+                category=category,
+                code=code,
+                message=message,
+                agent_dir=agent_dir,
+                sensitive_dir=sensitive_call_dir,
+                redactor=redactor,
+                raw_stderr=raw_stderr,
+                started_at=started_at,
+                finished_at=finished_at,
+                ssh_exit=ssh_exit,
+                request_timeout_seconds=request.timeout_seconds,
+                duration_ms=duration_ms,
+                ssh_user=resolved_rootfs.ssh_user,
+                outcome_status_for_forensics=outcome_status_for_forensics,
+                include_stdout_json=include_stdout_json,
+                redacted_payload=redacted_payload,
+            )
+
+        if ssh_result.timed_out:
+            return _fail(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                code="ssh_timeout",
+                message="ssh round trip exceeded host-side timeout margin",
+                outcome_status_for_forensics=None,
+            )
+
+        if ssh_exit == 124 and parsed is None:
+            return _fail(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                code="introspect_timeout",
+                message="target-side timeout(1) fired",
+                outcome_status_for_forensics=None,
+            )
+
+        if parsed is None:
+            # Spec §6.1 R3-F2: stdout was non-empty but not JSON ->
+            # move to sensitive/stdout.raw.
+            if raw_stdout:
+                (sensitive_call_dir / "stdout.raw").write_text(raw_stdout, encoding="utf-8")
+                (sensitive_call_dir / "stdout.raw").chmod(0o600)
+            return _fail(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                code="wrapper_crash",
+                message=f"wrapper exited {ssh_exit} without a parseable JSON document",
+                outcome_status_for_forensics=None,
+            )
+
+        # JSON parsed. Discriminate on outcome.status per §4.3.
+        redacted_payload = redactor.redact_value(parsed)
+        outcome_obj = redacted_payload.get("outcome") if isinstance(redacted_payload, dict) else None
+        outcome_status = outcome_obj.get("status") if isinstance(outcome_obj, dict) else None
+        rp = redacted_payload if isinstance(redacted_payload, dict) else None
+
+        if outcome_status == "drgn_open_failure":
+            return _fail(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                code="drgn_open_failure",
+                message="drgn could not attach to the live target",
+                outcome_status_for_forensics=outcome_status,
+                include_stdout_json=True,
+                redacted_payload=rp,
+            )
+        if outcome_status == "drgn_version_skew":
+            return _fail(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                code="drgn_version_skew",
+                message="drgn on target lacks main_module().build_id (version skew)",
+                outcome_status_for_forensics=outcome_status,
+                include_stdout_json=True,
+                redacted_payload=rp,
+            )
+        if outcome_status == "provenance_mismatch":
+            return _fail(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                code="provenance_mismatch",
+                message="target build_id does not match the recorded build_id",
+                outcome_status_for_forensics=outcome_status,
+                include_stdout_json=True,
+                redacted_payload=rp,
+            )
+        if outcome_status == "script_compile_error":
+            return _fail(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                code="script_compile_error",
+                message="user script failed to compile on the target",
+                outcome_status_for_forensics=outcome_status,
+                include_stdout_json=True,
+                redacted_payload=rp,
+            )
+        if outcome_status == "wrapper_internal_error":
+            # R4-F3: forensic-only on disk; agent-facing collapses to wrapper_crash.
+            return _fail(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                code="wrapper_crash",
+                message="wrapper exited 6 with a minimal-recovery JSON document",
+                outcome_status_for_forensics="wrapper_internal_error",
+                include_stdout_json=True,
+                redacted_payload=rp,
+            )
+
+        # Spec §5.2 step 12: redaction post-processing for the happy path.
+        (agent_dir / "stdout.json").write_text(json.dumps(redacted_payload), encoding="utf-8")
+        (agent_dir / "stderr.log").write_text(redactor.redact_text(raw_stderr), encoding="utf-8")
+
+        emits = redacted_payload.get("emits", []) if isinstance(redacted_payload, dict) else []
+        user_stdout = redacted_payload.get("user_stdout", "") if isinstance(redacted_payload, dict) else ""
+        truncated = redacted_payload.get("truncated", {}) if isinstance(redacted_payload, dict) else {}
+        prelude_ms = redacted_payload.get("prelude_ms", 0) if isinstance(redacted_payload, dict) else 0
+
+        diagnostic: str | None = None
+        if prelude_ms * 100 >= PRELUDE_WARNING_FRACTION_PCT * request.timeout_seconds * 1000:
+            diagnostic = (
+                f"prelude ({prelude_ms} ms) consumed >= "
+                f"{PRELUDE_WARNING_FRACTION_PCT}% of timeout_seconds "
+                f"({request.timeout_seconds} s); consider raising timeout_seconds."
+            )
+
+        status = "script_error" if outcome_status == "error" else "ok"
+        if status == "script_error" and isinstance(outcome_obj, dict):
+            outcome_for_response: dict[str, Any] = {"status": "error", **outcome_obj}
+        else:
+            outcome_for_response = {"status": "ok"}
+
+        user_stdout_snippet = _head_tail(user_stdout, head=2048, tail=2048)
+        drgn_stderr_snippet = _head_tail(redactor.redact_text(raw_stderr), head=2048, tail=2048)
+
+        # Spec §5.2 step 13: manifest record under the lock.
+        artifacts: list[ArtifactRef] = [
+            ArtifactRef(path=str(agent_dir / "request.json"), kind="application/json"),
+            ArtifactRef(path=str(agent_dir / "wrapper.skeleton.py"), kind="text/x-python"),
+            ArtifactRef(
+                path=str(sensitive_call_dir / "wrapper.py"),
+                kind="text/x-python",
+                sensitive=True,
+            ),
+            ArtifactRef(path=str(agent_dir / "stdout.json"), kind="application/json"),
+            ArtifactRef(path=str(agent_dir / "stderr.log"), kind="text/plain"),
+        ]
+        if (sensitive_call_dir / "stdout.raw").exists():
+            artifacts.append(
+                ArtifactRef(
+                    path=str(sensitive_call_dir / "stdout.raw"),
+                    kind="application/octet-stream",
+                    sensitive=True,
+                )
+            )
+
+        step = StepResult(
+            step_name=f"introspect:{call_id}",
+            status=StepStatus.SUCCEEDED,
+            summary=f"introspect call {call_id[:8]} ok",
+            artifacts=artifacts,
+            details={
+                "call_id": call_id,
+                "build_id": redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None,
+                "timeout_seconds": request.timeout_seconds,
+                "wrapper_exit_code": ssh_result.exit_status,
+                "duration_ms": duration_ms,
+                "prelude_ms": prelude_ms,
+                "truncated": truncated,
+                "ssh_user": resolved_rootfs.ssh_user,
+                "outcome_status": outcome_status,
+            },
+        )
+        _record_terminal_introspect_result(store, run_id, step)
+
+        public_artifacts = [a for a in artifacts if not a.sensitive]
+        return ToolResponse.success(
+            summary=f"introspect call {call_id[:8]} ok",
+            run_id=run_id,
+            status=StepStatus.SUCCEEDED,
+            artifacts=public_artifacts,
+            suggested_next_actions=["artifacts.get_manifest", "debug.introspect.run"],
+            data={
+                "call_id": call_id,
+                "status": status,
+                "outcome": outcome_for_response,
+                "emits": emits,
+                "user_stdout_snippet": user_stdout_snippet,
+                "drgn_stderr_snippet": drgn_stderr_snippet,
+                "build_id": redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None,
+                "truncated": truncated,
+                "started_at": started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+                "duration_ms": duration_ms,
+                "prelude_ms": prelude_ms,
+                "artifacts": [a.model_dump(mode="json") for a in public_artifacts],
+                "diagnostic": diagnostic,
+            },
+        )
+
+    except Exception:
+        # R6-F3: any unhandled exception between admit (step 6) and the
+        # happy-path admission.complete() must release the admission handle
+        # or it lingers in admission._bindings and blocks subsequent admit()
+        # calls. Re-raise so the standard error path produces the response.
+        with contextlib.suppress(Exception):
+            admission.rollback(handle)
+        raise
 
 
 def _require_snapshot(admission: AdmissionService, target_key: TargetKey) -> TargetSnapshot:
