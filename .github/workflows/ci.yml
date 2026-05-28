@@ -58,3 +58,25 @@ jobs:
         with:
           name: coverage-${{ matrix.python-version }}
           path: coverage.xml
+
+  typecheck:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+      - run: |
+          set -euo pipefail
+          uv venv --allow-existing
+          uv pip install -e '.[dev,test]'
+          status=0
+          {
+            echo '## ty check'
+            echo
+            echo '```'
+            uv run ty check src 2>&1 | tee /tmp/ty.log || status=$?
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
