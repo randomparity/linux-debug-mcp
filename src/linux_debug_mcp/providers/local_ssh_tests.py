@@ -106,6 +106,8 @@ class SubprocessSshRunner:
     ) -> SshCommandResult:
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
         stderr_path.parent.mkdir(parents=True, exist_ok=True)
+        cancelled_flag = False
+        timed_out_flag = False
         with (
             stdout_path.open("w", encoding="utf-8") as stdout_file,
             stderr_path.open("w", encoding="utf-8") as stderr_file,
@@ -118,35 +120,31 @@ class SubprocessSshRunner:
                 shell=False,
                 start_new_session=True,
             )
-            waited = 0.0
+            ticks = 0
             while True:
                 try:
                     proc.wait(timeout=0.1)
                     break
                 except subprocess.TimeoutExpired:
-                    waited += 0.1
+                    ticks += 1
                     if cancel is not None and cancel.is_set():
                         os.killpg(proc.pid, signal.SIGKILL)
                         proc.wait()
-                        return SshCommandResult(
-                            exit_status=-1,
-                            stdout_snippet=self._read_snippet(stdout_path),
-                            stderr_snippet=self._read_snippet(stderr_path),
-                            cancelled=True,
-                        )
-                    if waited >= timeout:
+                        cancelled_flag = True
+                        break
+                    if ticks * 0.1 >= timeout:
                         os.killpg(proc.pid, signal.SIGKILL)
                         proc.wait()
-                        return SshCommandResult(
-                            exit_status=-1,
-                            stdout_snippet=self._read_snippet(stdout_path),
-                            stderr_snippet=self._read_snippet(stderr_path),
-                            timed_out=True,
-                        )
+                        timed_out_flag = True
+                        break
+        # -1 sentinel: process was killed (cancel/timeout), so there is no real exit code.
+        exit_status = -1 if (cancelled_flag or timed_out_flag) else proc.returncode
         return SshCommandResult(
-            exit_status=proc.returncode,
+            exit_status=exit_status,
             stdout_snippet=self._read_snippet(stdout_path),
             stderr_snippet=self._read_snippet(stderr_path),
+            timed_out=timed_out_flag,
+            cancelled=cancelled_flag,
         )
 
     def _read_snippet(self, path: Path) -> str:
