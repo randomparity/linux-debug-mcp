@@ -1,16 +1,19 @@
+import time
+
 import pytest
 from _layer4_fakes import (
     KEY,
+    FakeBlockingReapProxy,
     FakeBrokeredTransport,
     FakeQemuTransport,
     build_txn,
     make_request,
 )
 
-from linux_debug_mcp.coordination.admission import TargetSnapshot
+from linux_debug_mcp.coordination.admission import AdmissionError, TargetSnapshot
 from linux_debug_mcp.coordination.endpoint_safety import EndpointSafetyError
 from linux_debug_mcp.coordination.lease import ConsoleLeaseManager, LeaseOwner
-from linux_debug_mcp.coordination.registry import SessionRegistry
+from linux_debug_mcp.coordination.registry import RecoveryTombstone, SessionRegistry
 from linux_debug_mcp.seams.guard import GuardConflict, InProcessStopCapableGuard
 from linux_debug_mcp.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleEvent, LifecycleKind
 from linux_debug_mcp.transport.base import RecordState, TcpEndpoint
@@ -177,3 +180,86 @@ def test_lifecycle_invalidation_between_promote_and_subscribe_force_drops_cleanl
     # nor leak the cancelled binding back into the table.
     txn.close(session.session_id)
     assert admission._bindings.get(KEY, []) == []
+
+
+def test_recovery_clear_failure_restores_cache_gate(tmp_path):
+    """Fix A — when the post-lock durable tombstone clear (`clear_tombstone`) raises (EIO, EACCES,
+    …), the in-memory admission cache MUST be restored to its parked generation so the gate stays
+    fail-closed.
+
+    Before the fix, the admission cache was cleared inside the key lock and the durable I/O ran
+    outside it. An OSError in `clear_tombstone` would propagate to the outer
+    `except BaseException: self._rollback(...)`, but rollback does NOT re-mark
+    `recovery_required` — so the in-memory gate was clear while the on-disk tombstone was still
+    present, and a subsequent non-recovery `admit()` would slip past the cache check.
+    """
+
+    class FailingClearRegistry(SessionRegistry):
+        def clear_tombstone(self, target_key, *, expected_generation):  # type: ignore[override]
+            raise OSError("simulated EIO")
+
+    reg = FailingClearRegistry(directory=tmp_path)
+    txn, admission = build_txn(FakeQemuTransport(), registry=reg)
+    # Park the target at generation 1: durable tombstone on disk + admission cache marked.
+    reg.write_tombstone(RecoveryTombstone(target_key=KEY, generation=1, reason="test"))
+    admission.mark_recovery_required(KEY, 1)
+    # The recovery-mode open admits, promotes, clears the cache under the lock, then post-lock
+    # the durable clear raises OSError — Fix A re-marks the cache before re-raising.
+    with pytest.raises(OSError, match="simulated EIO"):
+        txn.open(make_request(), recovery=True)
+    # The cache is back at the parked generation: the gate is fail-closed again.
+    assert admission._recovery_required.get(KEY) == 1
+    # A subsequent non-recovery admit is rejected `recovery_required` (cache + still-present
+    # durable tombstone both agree). Without Fix A this open would slip past.
+    with pytest.raises(AdmissionError) as exc:
+        txn.open(make_request())
+    assert exc.value.code == "recovery_required"
+
+
+def test_force_drop_keeps_durable_record_when_invalidate_wedged(tmp_path):
+    """Fix B — when `invalidate`'s `proxy.stop_by_identity` is wedged, `force_drop` MUST NOT
+    delete the durable ownership record. The orphan-reap safety net is
+    `SessionRegistry.reconcile()` iterating `owner-*.json` on the next process start; if
+    force_drop deletes the record while the backend kill is still pending, the orphan PID has no
+    paper trail and a process restart leaves it permanently orphaned.
+
+    Before the fix, force_drop unconditionally called `delete_record`, so a wedge erased the only
+    trace of the orphan backend the next start could have reaped.
+    """
+    proxy = FakeBlockingReapProxy()
+    transport = FakeQemuTransport(backend_pid=9999, backend_start_time="t")
+    transport._proxy = proxy
+    reg = SessionRegistry(directory=tmp_path)
+    dispatcher = InProcessLifecycleDispatcher(teardown_deadline=0.2)
+    txn, admission = build_txn(transport, registry=reg)
+    txn.bind_lifecycle(dispatcher)
+    session = txn.open(make_request())
+    assert reg.read_record(KEY) is not None  # baseline: open committed the durable record
+
+    try:
+        # invalidate's stop_by_identity blocks on `proxy._block`. The dispatcher times out after
+        # the teardown_deadline and runs force_drop on a separate worker, which (with Fix B)
+        # drops the in-memory line but leaves the durable record in place for reconcile().
+        admission.invalidate_lifecycle(
+            LifecycleEvent(target_key=KEY, kind=LifecycleKind.CRASHED),
+            dispatcher,
+            generation=session.generation,
+        )
+        # The durable record persists — it is the only trace reconcile() will find on the next
+        # process start to drive a fingerprint-fenced reap.
+        assert reg.read_record(KEY) is not None
+        # The in-memory line is dropped: confirm_reaped → abandon ran on the admission handle,
+        # so reopen() will not be blocked by `bindings_outstanding`.
+        assert admission._bindings.get(KEY, []) == []
+        # The wedged invalidate worker is still tracked by the dispatcher (single-flight).
+        assert dispatcher.outstanding_overdue() == 1
+    finally:
+        # Unblock the wedged worker so the test does not leave a hung thread behind. The worker
+        # will return from stop_by_identity, set `_killed`, and then its own self.force_drop()
+        # tail will delete the durable record.
+        proxy.unblock()
+
+    deadline = time.monotonic() + 5.0
+    while reg.read_record(KEY) is not None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert reg.read_record(KEY) is None

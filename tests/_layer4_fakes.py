@@ -119,6 +119,26 @@ class FakeReapProxy:
         return self._kills_live_backend
 
 
+class FakeBlockingReapProxy:
+    """stop_by_identity blocks until `unblock()` is called, so a transport-transaction test can
+    drive the lifecycle dispatcher's `teardown_deadline` path and observe what runs while the
+    `invalidate` worker is wedged on the SIGTERM/wait/SIGKILL sequence. Used to verify Fix B:
+    when invalidate is wedged, force_drop must leave the durable record intact so
+    `SessionRegistry.reconcile()` can reap the orphan on the next process start."""
+
+    def __init__(self) -> None:
+        self._block = threading.Event()
+        self.reaped: list[tuple[int, str | None]] = []
+
+    def stop_by_identity(self, pid: int, start_time: str | None) -> bool:
+        self.reaped.append((pid, start_time))
+        self._block.wait()
+        return True
+
+    def unblock(self) -> None:
+        self._block.set()
+
+
 class FakeSshRunner:
     """Blocks in run() until its cancel event fires, so the async-halt cancel bridge (Fix 3)
     is exercised without a real subprocess. Consumed by Task B2 — depends on the

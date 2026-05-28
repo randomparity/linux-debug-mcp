@@ -69,6 +69,16 @@ class _SessionSubscriber:
         self._transaction = transaction
         self._session = session
         self._state = state
+        # Gates the durable `delete_record` so an out-of-band force_drop CANNOT erase the
+        # ownership record while the backend kill is still pending. Set by `invalidate` after
+        # `proxy.stop_by_identity` resolves (cleanly or via suppressed exception); pre-set when
+        # there is no backend to reap. While unset, `force_drop` drops the in-memory line but
+        # leaves `owner-*.json` on disk so `SessionRegistry.reconcile()` reaps the orphan on the
+        # next process start (the §4.5 backstop the dispatcher's bounded `teardown_deadline`
+        # delegates to when invalidate wedges).
+        self._killed = threading.Event()
+        if state.backend_pid is None:
+            self._killed.set()
 
     def invalidate(self, event: LifecycleEvent, deadline: float) -> None:
         # Bounded-blocking teardown: reap the backend by identity (SIGTERM/wait/SIGKILL) on the
@@ -83,14 +93,20 @@ class _SessionSubscriber:
                 # (out of scope here).
                 with contextlib.suppress(Exception):
                     proxy.stop_by_identity(self._state.backend_pid, self._state.backend_start)
+        # Confirm "the kill resolved" (returned cleanly, raised+suppressed, or was skipped because
+        # no proxy is wired). Only set here — never in force_drop — so a force_drop dispatched
+        # while this worker is still wedged on stop_by_identity will NOT see `_killed` and will
+        # leave the durable record in place for reconcile(). If invalidate eventually unwedges,
+        # its `self.force_drop(event)` tail below sees `_killed` and deletes the record.
+        self._killed.set()
         self.force_drop(event)
 
     def force_drop(self, event: LifecycleEvent) -> None:
         # NON-BLOCKING out-of-band release: pop the in-memory token/lease/guard, deregister the
-        # admission handle (confirm_reaped → abandon), and delete the durable record. NO
-        # proxy.stop_by_identity — the blocking signal sequence belongs to `invalidate` (which the
-        # dispatcher supervises with a deadline). Idempotent: a clean invalidate already popped
-        # everything, so each step is a no-op the second time around.
+        # admission handle (confirm_reaped → abandon), and conditionally delete the durable
+        # record. NO proxy.stop_by_identity — the blocking signal sequence belongs to `invalidate`
+        # (which the dispatcher supervises with a deadline). Idempotent: a clean invalidate
+        # already popped everything, so each step is a no-op the second time around.
         if self._state.lease_token is not None:
             self._transaction._leases.release(self._session.target_key, self._state.lease_token)
         if self._state.guard_token is not None:
@@ -104,10 +120,15 @@ class _SessionSubscriber:
                 self._transaction._admission.confirm_reaped(self._state.admission_handle)
                 self._transaction._admission.abandon(self._state.admission_handle)
         self._transaction._handles.pop(self._session.session_id, None)
-        # state.session_id is always set here: the READY record is committed before
-        # _subscribe_session is called, so the unconditional delete is safe (idempotent if already
-        # deleted by a prior invalidate).
-        self._transaction._registry.delete_record(self._session.target_key)
+        # Only delete the durable ownership record once the backend kill has resolved. While the
+        # dispatcher's bounded force_drop fires from a wedged invalidate (`_killed` still unset),
+        # the record persists on disk so `SessionRegistry.reconcile()` on the next process start
+        # finds the orphan PID and reaps it via `stop_by_identity(record.backend_pid, …)`. If the
+        # wedge later resolves, invalidate sets `_killed` and re-calls force_drop, which then
+        # deletes the record. delete_record is idempotent (unlink + missing_ok=True), so a
+        # double-delete on the unwedge path is harmless.
+        if self._killed.is_set():
+            self._transaction._registry.delete_record(self._session.target_key)
 
 
 class TransportTransaction:
@@ -309,7 +330,20 @@ class TransportTransaction:
                     self._clear_recovery_cache(request.target_key, request.generation)
                 self._subscribe_session(session, state)
             if recovery:
-                self._clear_recovery_durable(request.target_key, request.generation)
+                # F4-followup: durable I/O runs outside the lock to keep the admission table
+                # responsive under a slow filesystem, but a raise here (EIO on `_fsync_dir`,
+                # EACCES, ENOSPC, …) would leave the in-memory cache CLEARED while the on-disk
+                # tombstone is STILL PRESENT — a subsequent non-recovery admit() would slip past
+                # the gate. Restore the cache to the parked generation before propagating, so the
+                # gate is fail-closed end-to-end (cache + tombstone agree). The outer rollback
+                # still runs and unwinds the rest of the open. `mark_recovery_required` is
+                # generation-fenced (never regresses a newer mark), takes its own key lock, and is
+                # idempotent — safe to call here.
+                try:
+                    self._clear_recovery_durable(request.target_key, request.generation)
+                except BaseException:
+                    self._admission.mark_recovery_required(request.target_key, request.generation)
+                    raise
             return session
         except BaseException:
             self._rollback(request.target_key, state, transport, handle)
