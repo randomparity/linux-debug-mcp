@@ -101,12 +101,40 @@ class ArtifactStore:
         except (OSError, ValidationError, json.JSONDecodeError) as exc:
             raise ManifestStateError(f"failed to read manifest for {run_id}: {exc}") from exc
 
-    def record_step_result(self, run_id: str, result: StepResult, *, replace_succeeded: bool = False) -> RunManifest:
+    def record_step_result(
+        self,
+        run_id: str,
+        result: StepResult,
+        *,
+        replace_succeeded: bool = False,
+        append: bool = False,
+    ) -> RunManifest:
+        """Record ``result`` into the manifest under the manifest lock.
+
+        ``append=False`` (default): ``replace_succeeded`` controls the
+        ``with_step_result`` semantics — used by the singleton named steps
+        (``build``, ``boot``, ``run_tests``, ``debug``) where a re-invocation
+        after ``force_*`` overwrites a SUCCEEDED entry.
+
+        ``append=True`` (spec §5.2 step 13): uses
+        ``RunManifest.append_step_result``, which never replaces and raises on
+        ``step_name`` collision. Used for ``introspect:<call_id>`` records.
+        ``replace_succeeded`` is rejected when combined with ``append=True``
+        to surface caller bugs early.
+        """
+        if append and replace_succeeded:
+            raise ValueError("append=True is incompatible with replace_succeeded=True")
         run_id = self._validate_run_id(run_id)
         run_dir = self._run_dir(run_id)
         with self._manifest_lock(run_dir):
             manifest = self.load_manifest(run_id)
-            updated = manifest.with_step_result(result, replace_succeeded=replace_succeeded)
+            if append:
+                try:
+                    updated = manifest.append_step_result(result)
+                except ValueError as exc:
+                    raise ManifestStateError(str(exc), ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
+            else:
+                updated = manifest.with_step_result(result, replace_succeeded=replace_succeeded)
             if updated != manifest:
                 self._write_manifest(run_dir, updated)
             return updated

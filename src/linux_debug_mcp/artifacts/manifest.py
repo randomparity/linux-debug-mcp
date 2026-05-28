@@ -69,6 +69,25 @@ class RunManifest(Model):
                 step.status = result.status
         return clone
 
+    def append_step_result(self, result: StepResult) -> RunManifest:
+        """Append a new step result. Unlike ``with_step_result``, this never
+        replaces an existing entry and never short-circuits — duplicate
+        ``step_name`` raises. Spec §5.2 step 13 uses this for
+        ``introspect:<call_id>`` records, where every call is a fresh entry
+        and collisions are an internal bug (UUIDv4).
+
+        ``self.steps`` is intentionally untouched. ``steps`` is the fixed
+        *planned* list of six well-known workflow steps (create_run, build,
+        boot, run_tests, collect_artifacts, debug). Introspect calls are
+        dynamic — they grow ``step_results`` under ``introspect:<call_id>``
+        keys but stay out of ``steps``.
+        """
+        if result.step_name in self.step_results:
+            raise ValueError(f"step name already recorded: {result.step_name}")
+        clone = self.model_copy(deep=True)
+        clone.step_results[result.step_name] = result
+        return clone
+
     def with_boot_attempt(self, attempt: BootAttempt) -> RunManifest:
         clone = self.model_copy(deep=True)
         clone.boot_attempts.append(attempt)
