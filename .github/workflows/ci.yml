@@ -61,7 +61,6 @@ jobs:
 
   typecheck:
     runs-on: ubuntu-24.04
-    continue-on-error: true
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -71,6 +70,9 @@ jobs:
           set -euo pipefail
           uv venv --allow-existing
           uv pip install -e '.[dev,test]'
+          # Capture ty's exit status without aborting the block, so the closing code
+          # fence still writes to the step summary on failure; then propagate the
+          # status as the step's exit code to fail the (now hard-gating) job.
           status=0
           {
             echo '## ty check'

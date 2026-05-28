@@ -18,7 +18,7 @@ dev = [
   "detect-secrets>=1.5,<2",
   "pre-commit>=4.3,<5",
   "ruff>=0.15,<1",
-  "ty>=0.0.40,<0.1",
+  "ty==0.0.40",
 ]
 test = [
   "hypothesis>=6.153,<7",
@@ -45,7 +45,8 @@ exclude_also = [
 ]
 
 [tool.ty.rules]
-# Permissive starting profile — advisory only in CI. Tighten incrementally.
+# Minimal rule overrides — ty defaults are strict enough for the project's hard-gating
+# `ci / typecheck` job. Tighten further by adding entries here, not by raising defaults.
 unresolved-import = "warn"
 
 [project.scripts]

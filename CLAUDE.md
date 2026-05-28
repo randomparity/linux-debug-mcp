@@ -22,7 +22,7 @@ Future-work epics (remote interactive debug, transports, drgn/KDB/KGDB/postmorte
 | Server stdio smoke | `timeout 2 uv run linux-debug-mcp \|\| test $? -eq 124` |
 | Doc terminology guard | `just check-docs` (forbids "sprint*" in `README.md` and `docs/`, excluding the internal `docs/superpowers/` planning artifacts) |
 
-Python 3.11+. Ruff is the linter/formatter (line length 120, selects `E,F,I,UP,B,SIM`). `ty check src` runs in CI as an **advisory** job (`continue-on-error: true`); type errors do not block PRs but are surfaced in the run summary. Do not invoke `mypy` or `pyright`. The hard-fail checks per commit are ruff, the pre-commit hygiene hooks, and `detect-secrets`. Pre-commit uses `pre-commit` (not `prek`) with `detect-secrets` against `.secrets.baseline`.
+Python 3.11+. Ruff is the linter/formatter (line length 120, selects `E,F,I,UP,B,SIM`). `ty check src` runs in CI as a **hard-gating** job; type errors block PRs and are also surfaced in the run summary. Do not invoke `mypy` or `pyright`. The hard-fail checks per commit are ruff, the pre-commit hygiene hooks, `detect-secrets`, and `ty`. Pre-commit uses `pre-commit` (not `prek`) with `detect-secrets` against `.secrets.baseline`.
 
 ## Architecture
 
