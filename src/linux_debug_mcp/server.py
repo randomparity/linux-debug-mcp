@@ -78,6 +78,7 @@ from linux_debug_mcp.providers.contracts import (
 )
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from linux_debug_mcp.providers.local_drgn_introspect import (
+    _BUILD_ID_RE,
     SCRIPT_BYTE_CAP,
     WrapperRenderError,
     render_wrapper,
@@ -266,8 +267,6 @@ def _record_terminal_build_result(
 
 
 _INTROSPECT_STEP_NAME_RE = re.compile(r"^introspect:")
-_BUILD_ID_RE = re.compile(r"^[0-9a-f]{8,}$")
-_CALL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def _count_introspect_calls(manifest: RunManifest) -> int:
@@ -334,8 +333,6 @@ def _record_introspect_failure(
     sensitive_dir: Path,
     redactor: Redactor,
     raw_stderr: str,
-    started_at: datetime,
-    finished_at: datetime,
     ssh_exit: int,
     request_timeout_seconds: int,
     duration_ms: int,
@@ -2085,7 +2082,15 @@ def debug_introspect_run_handler(
 
     # Spec §5.2 step 4b: sensitive/ parent-mode preflight (R4-F1).
     sensitive_dir = store.run_dir(run_id) / "sensitive"
-    mode = sensitive_dir.stat().st_mode & 0o777
+    try:
+        mode = sensitive_dir.stat().st_mode & 0o777
+    except FileNotFoundError:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=(f"{sensitive_dir} is missing; re-run kernel.create_run to recreate the run layout."),
+            details={"code": "sensitive_dir_missing"},
+        )
     if mode & 0o077:
         return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
@@ -2107,29 +2112,48 @@ def debug_introspect_run_handler(
 
     # Spec §5.2 step 5: sudo preflight (only when sudo is needed).
     if use_sudo:
-        sudo_argv = build_ssh_argv(
-            rootfs_profile=resolved_rootfs,
-            known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
-            command=["sudo", "-n", "true"],
-            command_timeout=5,
-        )
+        try:
+            sudo_argv = build_ssh_argv(
+                rootfs_profile=resolved_rootfs,
+                known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
+                command=["sudo", "-n", "true"],
+                command_timeout=5,
+            )
+        except ValueError as exc:
+            return ToolResponse.failure(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                run_id=run_id,
+                message=_redact_and_truncate(redactor, str(exc), cap=256),
+                details={"code": "invalid_ssh_options"},
+            )
         preflight_stdout = store.run_dir(run_id) / "logs" / "sudo_preflight.stdout"
         preflight_stderr = store.run_dir(run_id) / "logs" / "sudo_preflight.stderr"
         preflight_stdout.parent.mkdir(parents=True, exist_ok=True)
+        # Route preflight output under sensitive/ so guest stderr (which may
+        # carry secrets) does not land on disk in agent-visible logs/.
+        sensitive_preflight_stderr = store.run_dir(run_id) / "sensitive" / "sudo_preflight.stderr"
         try:
             sudo_result = runner.run(
                 sudo_argv,
                 timeout=5,
                 stdout_path=preflight_stdout,
-                stderr_path=preflight_stderr,
+                stderr_path=sensitive_preflight_stderr,
             )
         except Exception as exc:
             return ToolResponse.failure(
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 run_id=run_id,
-                message=f"sudo preflight raised: {exc}",
+                message=_redact_and_truncate(redactor, f"sudo preflight raised: {exc}", cap=256),
                 details={"code": "ssh_failure"},
             )
+        # Persist a redacted copy in the agent-visible location so forensic
+        # tooling sees a stable artifact path even when the raw file is sealed
+        # under sensitive/.
+        if sensitive_preflight_stderr.exists():
+            with contextlib.suppress(FileNotFoundError):
+                sensitive_preflight_stderr.chmod(0o600)
+            raw_preflight_stderr = sensitive_preflight_stderr.read_text(encoding="utf-8", errors="replace")
+            preflight_stderr.write_text(redactor.redact_text(raw_preflight_stderr), encoding="utf-8")
         if sudo_result.exit_status != 0:
             stderr_for_message = sudo_result.stderr or sudo_result.stderr_snippet or ""
             message = _redact_and_truncate(redactor, stderr_for_message, cap=256)
@@ -2186,6 +2210,7 @@ def debug_introspect_run_handler(
     # R6-F3: Step 9.4 admitted us — Steps 9.5–9.10 must always complete
     # (Step 9.6 happy path) or roll back (this envelope) the admission
     # handle. Mirrors target_run_tests_handler:1588-1620.
+    admission_disposed = False
     try:
         call_id = uuid.uuid4().hex
         agent_dir = store.run_dir(run_id) / "debug" / "introspect" / call_id
@@ -2246,8 +2271,17 @@ def debug_introspect_run_handler(
                 suggested_next_actions=["artifacts.get_manifest"],
             )
 
-        (sensitive_call_dir / "wrapper.py").write_text(wrapper, encoding="utf-8")
-        (sensitive_call_dir / "wrapper.py").chmod(0o600)
+        # Create wrapper.py with mode=0o600 atomically — write_text + chmod
+        # leaves a window where the file is umask-default readable.
+        wrapper_path = sensitive_call_dir / "wrapper.py"
+        wrapper_fd = os.open(wrapper_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(wrapper_fd, "w", encoding="utf-8") as wrapper_handle:
+                wrapper_handle.write(wrapper)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                wrapper_path.unlink()
+            raise
         (agent_dir / "wrapper.skeleton.py").write_text(skeleton, encoding="utf-8")
 
         # Iter-1 finding 5: the agent-visible request.json must NOT carry the
@@ -2269,12 +2303,31 @@ def debug_introspect_run_handler(
         if use_sudo:
             remote_argv.append("sudo")
         remote_argv.extend(["python3", "-"])
-        ssh_argv = build_ssh_argv(
-            rootfs_profile=resolved_rootfs,
-            known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
-            command=remote_argv,
-            command_timeout=user_timeout + 10,
-        )
+        try:
+            ssh_argv = build_ssh_argv(
+                rootfs_profile=resolved_rootfs,
+                known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
+                command=remote_argv,
+                command_timeout=user_timeout + 10,
+            )
+        except ValueError as exc:
+            # build_ssh_argv raises when RootfsProfile.ssh_options['ConnectTimeout']
+            # exceeds the command timeout — surface as CONFIGURATION_ERROR rather
+            # than letting it fall into the outer broad-except.
+            try:
+                admission.rollback(handle)
+            except Exception:
+                logger.exception("admission rollback failed for introspect call_id=%s run_id=%s", call_id, run_id)
+            admission_disposed = True
+            shutil.rmtree(agent_dir, ignore_errors=True)
+            shutil.rmtree(sensitive_call_dir, ignore_errors=True)
+            return ToolResponse.failure(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                run_id=run_id,
+                message=_redact_and_truncate(redactor, str(exc), cap=256),
+                details={"code": "invalid_ssh_options", "call_id": call_id},
+                suggested_next_actions=["artifacts.collect"],
+            )
         # Iter-2 finding 2: SSH output may contain unredacted user-script
         # stdout, drgn output, and stderr — write straight to <sensitive>/
         # so the dir-mode 0700 + file-mode 0600 protection is uniform across
@@ -2295,6 +2348,9 @@ def debug_introspect_run_handler(
         thread = threading.Thread(target=_watcher, daemon=True)
         thread.start()
         started_at = now()
+        # Monotonic clock for duration_ms — wall-clock subtraction goes negative
+        # under NTP slew or leap-second smear and misfires PRELUDE_WARNING.
+        started_monotonic = time.monotonic()
         try:
             ssh_result = runner.run(
                 ssh_argv,
@@ -2321,9 +2377,12 @@ def debug_introspect_run_handler(
             with contextlib.suppress(FileNotFoundError):
                 _raw_path.chmod(0o600)
 
-        finished_at_complete = now()
+        # admission_disposed flips True as soon as either complete() succeeds
+        # or rollback() runs — the outer `except` then skips a redundant
+        # rollback that would log a spurious handle_already_disposed.
         try:
             admission.complete(handle)
+            admission_disposed = True
         except AdmissionError as exc:
             # Iter-1 finding 2: previously this path returned without
             # rolling back the handle (leaking it in admission._bindings)
@@ -2338,21 +2397,20 @@ def debug_introspect_run_handler(
                 # admission-state corruption from operators. Log the
                 # exception with enough context to find the offending call.
                 logger.exception("admission rollback failed for introspect call_id=%s run_id=%s", call_id, run_id)
+            admission_disposed = True
             raw_stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
-            duration_ms = int((finished_at_complete - started_at).total_seconds() * 1000)
+            duration_ms = int((time.monotonic() - started_monotonic) * 1000)
             return _record_introspect_failure(
                 store=store,
                 run_id=run_id,
                 call_id=call_id,
                 category=exc.category,
                 code=exc.code,
-                message=str(exc),
+                message=redactor.redact_text(str(exc)),
                 agent_dir=agent_dir,
                 sensitive_dir=sensitive_call_dir,
                 redactor=redactor,
                 raw_stderr=raw_stderr,
-                started_at=started_at,
-                finished_at=finished_at_complete,
                 ssh_exit=ssh_result.exit_status,
                 request_timeout_seconds=request.timeout_seconds,
                 duration_ms=duration_ms,
@@ -2364,7 +2422,7 @@ def debug_introspect_run_handler(
         raw_stdout = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
         raw_stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
         finished_at = now()
-        duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+        duration_ms = int((time.monotonic() - started_monotonic) * 1000)
 
         parsed: dict[str, Any] | None
         try:
@@ -2397,8 +2455,6 @@ def debug_introspect_run_handler(
                 sensitive_dir=sensitive_call_dir,
                 redactor=redactor,
                 raw_stderr=raw_stderr,
-                started_at=started_at,
-                finished_at=finished_at,
                 ssh_exit=ssh_exit,
                 request_timeout_seconds=request.timeout_seconds,
                 duration_ms=duration_ms,
@@ -2406,6 +2462,26 @@ def debug_introspect_run_handler(
                 outcome_status_for_forensics=outcome_status_for_forensics,
                 include_stdout_json=include_stdout_json,
                 redacted_payload=redacted_payload,
+            )
+
+        if ssh_result.cancelled:
+            return _fail(
+                category=ErrorCategory.READINESS_FAILURE,
+                code="introspect_cancelled",
+                message="introspect call cancelled by admission fence",
+                outcome_status_for_forensics=None,
+            )
+
+        if ssh_result.stdin_failed:
+            # Wrapper payload was truncated mid-write (BrokenPipe / OSError).
+            # The remote python3 saw an incomplete script — any exit code or
+            # stdout it produced is meaningless. Classify as transport failure
+            # so operators chase the network/SSH path, not a phantom wrapper bug.
+            return _fail(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                code="ssh_stdin_failure",
+                message="wrapper payload was not fully written to ssh stdin",
+                outcome_status_for_forensics=None,
             )
 
         if ssh_result.timed_out:
@@ -2506,9 +2582,16 @@ def debug_introspect_run_handler(
                 f"({request.timeout_seconds} s); consider raising timeout_seconds."
             )
 
+        # Spec §4.3: only these keys are part of the response outcome contract
+        # for status=error. Allowlist (not spread) so a buggy/hostile wrapper
+        # output cannot inject keys downstream readers might treat as authoritative.
+        _SCRIPT_ERROR_OUTCOME_KEYS = ("error_type", "error_message", "traceback")
         status = "script_error" if outcome_status == "error" else "ok"
         if status == "script_error" and isinstance(outcome_obj, dict):
-            outcome_for_response: dict[str, Any] = {"status": "error", **outcome_obj}
+            outcome_for_response: dict[str, Any] = {"status": "error"}
+            for _k in _SCRIPT_ERROR_OUTCOME_KEYS:
+                if _k in outcome_obj:
+                    outcome_for_response[_k] = outcome_obj[_k]
         else:
             outcome_for_response = {"status": "ok"}
 
@@ -2590,13 +2673,17 @@ def debug_introspect_run_handler(
         # happy-path admission.complete() must release the admission handle
         # or it lingers in admission._bindings and blocks subsequent admit()
         # calls. Re-raise so the standard error path produces the response.
-        try:
-            admission.rollback(handle)
-        except Exception:
-            # Iter-2 finding 3: don't let a secondary rollback failure
-            # disappear silently — the primary exception is re-raised below,
-            # but the operator still needs admission-state diagnostics.
-            logger.exception("admission rollback failed while unwinding introspect handler for run_id=%s", run_id)
+        # Skip rollback if the handle is already disposed — calling rollback
+        # twice raises handle_already_disposed and pollutes logs on every
+        # post-complete() failure (e.g. the manifest record path).
+        if not admission_disposed:
+            try:
+                admission.rollback(handle)
+            except Exception:
+                # Iter-2 finding 3: don't let a secondary rollback failure
+                # disappear silently — the primary exception is re-raised below,
+                # but the operator still needs admission-state diagnostics.
+                logger.exception("admission rollback failed while unwinding introspect handler for run_id=%s", run_id)
         raise
 
 

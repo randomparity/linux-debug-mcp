@@ -64,6 +64,10 @@ class SshCommandResult:
     stderr_snippet: str = ""
     timed_out: bool = False
     cancelled: bool = False
+    # True when the stdin writer thread observed BrokenPipeError / OSError
+    # before delivering the full payload. The caller cannot trust that the
+    # remote process saw the complete script — surface as a transport failure.
+    stdin_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -125,6 +129,10 @@ class SubprocessSshRunner:
                 start_new_session=True,
             )
             stdin_thread: threading.Thread | None = None
+            # The writer thread records partial-write/EPIPE failures here so
+            # the caller can distinguish a transport failure (truncated wrapper
+            # payload) from a clean wrapper run that emitted a non-JSON crash.
+            stdin_write_error: list[BaseException] = []
             if stdin is not None:
                 # R6-F4 + iter-1 finding 4: the wrapper payload can be ~264 KiB,
                 # which exceeds Linux's default 64 KiB pipe buffer. Writing in
@@ -140,8 +148,8 @@ class SubprocessSshRunner:
                 def _write_stdin() -> None:
                     try:
                         stdin_handle.write(payload)
-                    except (BrokenPipeError, ValueError, OSError):
-                        pass
+                    except (BrokenPipeError, ValueError, OSError) as exc:
+                        stdin_write_error.append(exc)
                     finally:
                         with contextlib.suppress(Exception):
                             stdin_handle.close()
@@ -177,6 +185,7 @@ class SubprocessSshRunner:
             stderr_snippet=self._read_snippet(stderr_path),
             timed_out=timed_out_flag,
             cancelled=cancelled_flag,
+            stdin_failed=bool(stdin_write_error),
         )
 
     def _read_snippet(self, path: Path) -> str:

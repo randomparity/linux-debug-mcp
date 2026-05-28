@@ -391,9 +391,9 @@ class LocalKernelBuildProvider:
         try:
             details["build_id"] = _extract_build_id(plan.output_path / "vmlinux")
         except ReadelfUnavailable as exc:
-            raise ReadelfUnavailable(str(exc), artifacts=artifacts) from exc
+            raise ReadelfUnavailable(str(exc), artifacts=self._existing_artifacts(artifacts)) from exc
         except BuildIdMissing as exc:
-            raise BuildIdMissing(str(exc), artifacts=artifacts) from exc
+            raise BuildIdMissing(str(exc), artifacts=self._existing_artifacts(artifacts)) from exc
         return self._finalize_build_result(
             plan=plan,
             log_path=log_path,
@@ -403,6 +403,16 @@ class LocalKernelBuildProvider:
             status=StepStatus.SUCCEEDED,
             summary="kernel build succeeded",
         )
+
+    def _existing_artifacts(self, artifacts: list[ArtifactRef]) -> list[ArtifactRef]:
+        """Filter to artifacts whose files exist on disk.
+
+        Spec §7 R2-F6: when re-raising on readelf failure, the summary file has
+        not been written yet (write happens in ``_finalize_build_result``). Drop
+        any ArtifactRef pointing at a non-existent path so the manifest does
+        not claim a build-summary that the operator cannot read.
+        """
+        return [artifact for artifact in artifacts if Path(artifact.path).is_file()]
 
     def _detect_artifacts(self, *, plan: BuildPlan, log_path: Path, summary_path: Path) -> list[ArtifactRef]:
         candidates = [
