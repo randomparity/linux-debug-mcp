@@ -295,6 +295,7 @@ class TransportTransaction:
                     proxy.stop_by_identity(state.backend_pid, state.backend_start)
         if state.session_id is not None:
             self._tokens.pop(state.session_id, None)
+            self._handles.pop(state.session_id, None)  # keep _handles symmetric with _tokens
             self._registry.delete_record(target_key)
         if state.lease_token is not None:
             self._leases.release(target_key, state.lease_token)
