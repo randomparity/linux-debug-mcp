@@ -367,14 +367,19 @@ def _record_introspect_failure(
     ]
     if include_stdout_json:
         artifacts.append(ArtifactRef(path=str(agent_dir / "stdout.json"), kind="application/json"))
-    if (sensitive_dir / "stdout.raw").exists():
-        artifacts.append(
-            ArtifactRef(
-                path=str(sensitive_dir / "stdout.raw"),
-                kind="application/octet-stream",
-                sensitive=True,
+    # Iter-2 finding 2: SSH now writes raw stdout/stderr straight to
+    # sensitive/, so register both for forensics on every failure path
+    # (subject to existence — admit-time / preflight failures skip SSH).
+    for raw_name in ("stdout.raw", "stderr.raw"):
+        raw_path = sensitive_dir / raw_name
+        if raw_path.exists():
+            artifacts.append(
+                ArtifactRef(
+                    path=str(raw_path),
+                    kind="application/octet-stream",
+                    sensitive=True,
+                )
             )
-        )
     details: dict[str, Any] = {
         "call_id": call_id,
         "timeout_seconds": request_timeout_seconds,
@@ -2208,8 +2213,13 @@ def debug_introspect_run_handler(
             # handle, clean up the orphan directories, and write a forensic
             # FAILED StepResult directly (no SSH means no stderr/stdout to
             # redact via _record_introspect_failure).
-            with contextlib.suppress(Exception):
+            try:
                 admission.rollback(handle)
+            except Exception:
+                # Iter-2 finding 3: surface rollback failures rather than
+                # swallowing them; the operator needs to know if the
+                # admission state for this target_key is now corrupt.
+                logger.exception("admission rollback failed for introspect call_id=%s run_id=%s", call_id, run_id)
             shutil.rmtree(agent_dir, ignore_errors=True)
             shutil.rmtree(sensitive_call_dir, ignore_errors=True)
             failed = StepResult(
@@ -2265,8 +2275,13 @@ def debug_introspect_run_handler(
             command=remote_argv,
             command_timeout=user_timeout + 10,
         )
-        stdout_path = agent_dir / "stdout.raw.tmp"
-        stderr_path = agent_dir / "stderr.raw.tmp"
+        # Iter-2 finding 2: SSH output may contain unredacted user-script
+        # stdout, drgn output, and stderr — write straight to <sensitive>/
+        # so the dir-mode 0700 + file-mode 0600 protection is uniform across
+        # success and failure paths and no `.tmp` file is ever left in the
+        # agent-visible directory.
+        stdout_path = sensitive_call_dir / "stdout.raw"
+        stderr_path = sensitive_call_dir / "stderr.raw"
 
         cancel_event = threading.Event()
         stop_watcher = threading.Event()
@@ -2293,6 +2308,15 @@ def debug_introspect_run_handler(
             stop_watcher.set()
             thread.join()
 
+        # Iter-2 finding 2: defense-in-depth — tighten file mode on the
+        # SSH-output files that the runner created with umask-default perms.
+        # The dir mode (0o700 on sensitive_call_dir) already blocks other
+        # local users; the explicit 0o600 chmod makes that explicit and
+        # survives any future relocation.
+        for _raw_path in (stdout_path, stderr_path):
+            if _raw_path.exists():
+                _raw_path.chmod(0o600)
+
         finished_at_complete = now()
         try:
             admission.complete(handle)
@@ -2301,12 +2325,15 @@ def debug_introspect_run_handler(
             # rolling back the handle (leaking it in admission._bindings)
             # and without recording any StepResult — leaving SSH's on-disk
             # artifacts orphaned with no manifest trace. Roll back the
-            # admission binding (suppressed; the disposal raises only on
-            # promoted-but-not-reaped sessions, which ssh-tier handles
-            # never become) and append a FAILED introspect:<call_id>
+            # admission binding and append a FAILED introspect:<call_id>
             # record so the manifest reflects the on-disk state.
-            with contextlib.suppress(Exception):
+            try:
                 admission.rollback(handle)
+            except Exception:
+                # Iter-2 finding 3: silent suppression hides real
+                # admission-state corruption from operators. Log the
+                # exception with enough context to find the offending call.
+                logger.exception("admission rollback failed for introspect call_id=%s run_id=%s", call_id, run_id)
             raw_stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
             duration_ms = int((finished_at_complete - started_at).total_seconds() * 1000)
             return _record_introspect_failure(
@@ -2394,11 +2421,10 @@ def debug_introspect_run_handler(
             )
 
         if parsed is None:
-            # Spec §6.1 R3-F2: stdout was non-empty but not JSON ->
-            # move to sensitive/stdout.raw.
-            if raw_stdout:
-                (sensitive_call_dir / "stdout.raw").write_text(raw_stdout, encoding="utf-8")
-                (sensitive_call_dir / "stdout.raw").chmod(0o600)
+            # Spec §6.1 R3-F2: stdout was non-empty but not JSON. With the
+            # iter-2 finding 2 routing, SSH already wrote to
+            # `sensitive/stdout.raw` directly — no relocation needed; the
+            # explicit chmod above already tightened the mode.
             return _fail(
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 code="wrapper_crash",
@@ -2497,14 +2523,19 @@ def debug_introspect_run_handler(
             ArtifactRef(path=str(agent_dir / "stdout.json"), kind="application/json"),
             ArtifactRef(path=str(agent_dir / "stderr.log"), kind="text/plain"),
         ]
-        if (sensitive_call_dir / "stdout.raw").exists():
-            artifacts.append(
-                ArtifactRef(
-                    path=str(sensitive_call_dir / "stdout.raw"),
-                    kind="application/octet-stream",
-                    sensitive=True,
+        # Iter-2 finding 2: SSH now writes raw stdout/stderr straight to
+        # sensitive/, so register both as sensitive artifacts when present
+        # (empty files are still meaningful — they prove SSH wrote nothing).
+        for raw_name in ("stdout.raw", "stderr.raw"):
+            raw_path = sensitive_call_dir / raw_name
+            if raw_path.exists():
+                artifacts.append(
+                    ArtifactRef(
+                        path=str(raw_path),
+                        kind="application/octet-stream",
+                        sensitive=True,
+                    )
                 )
-            )
 
         step = StepResult(
             step_name=f"introspect:{call_id}",
@@ -2555,8 +2586,13 @@ def debug_introspect_run_handler(
         # happy-path admission.complete() must release the admission handle
         # or it lingers in admission._bindings and blocks subsequent admit()
         # calls. Re-raise so the standard error path produces the response.
-        with contextlib.suppress(Exception):
+        try:
             admission.rollback(handle)
+        except Exception:
+            # Iter-2 finding 3: don't let a secondary rollback failure
+            # disappear silently — the primary exception is re-raised below,
+            # but the operator still needs admission-state diagnostics.
+            logger.exception("admission rollback failed while unwinding introspect handler for run_id=%s", run_id)
         raise
 
 
@@ -3765,6 +3801,30 @@ def _bundle_for_manifest(
                 missing_required.append({"step": step.name, "artifact": artifact.model_dump(mode="json")})
             else:
                 missing_optional.append({"step": step.name, "artifact": artifact.model_dump(mode="json")})
+
+    # Iter-2 finding 1: dynamic step results (e.g., introspect:<call_id>)
+    # are not in the fixed `manifest.steps` list but DO exist in
+    # `manifest.step_results`. Without this pass, every introspect artifact
+    # is silently dropped from the bundle, _collection_covers_manifest
+    # returns False on every subsequent call (forcing a re-bundle that
+    # still misses the same artifacts), and forensic exports lose every
+    # introspect call. Group them under their actual step_results key so
+    # the bundle's "artifacts_by_step" shape stays self-describing.
+    fixed_step_names = {step.name for step in manifest.steps}
+    for step_name, result in manifest.step_results.items():
+        if step_name in fixed_step_names:
+            continue
+        grouped[step_name] = []
+        for artifact in result.artifacts:
+            exists = Path(artifact.path).is_file()
+            item = {**artifact.model_dump(mode="json"), "exists": exists}
+            grouped[step_name].append(item)
+            if exists:
+                collected_refs.append(artifact)
+            elif result.status == StepStatus.SUCCEEDED:
+                missing_required.append({"step": step_name, "artifact": artifact.model_dump(mode="json")})
+            else:
+                missing_optional.append({"step": step_name, "artifact": artifact.model_dump(mode="json")})
     bundle_ref = ArtifactRef(path=str(bundle_path), kind="artifact-bundle")
     bundle = {
         "run_id": manifest.run_id,

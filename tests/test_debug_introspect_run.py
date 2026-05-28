@@ -1008,6 +1008,55 @@ def test_request_json_replaces_script_with_sha256_pointer(tmp_path: Path) -> Non
 # ---------------------------------------------------------------------------
 
 
+def test_raw_stdout_and_stderr_are_sensitive_artifacts(tmp_path: Path) -> None:
+    # Iter-2 finding 2: SSH stdout/stderr are now routed directly to
+    # `<sensitive>/stdout.raw` and `<sensitive>/stderr.raw` (mode 0600)
+    # and registered as sensitive=True ArtifactRefs. The agent's
+    # response.artifacts must NOT contain them; the manifest's
+    # introspect:<call_id> step MUST.
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    ssh = FakeSshRunner(results=[_happy_ssh_result()])
+    response = debug_introspect_run_handler(
+        _make_request(run_id),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=ssh,
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is True
+    public_paths = {a.path for a in response.artifacts}
+    # No agent-visible path under <run>/debug/introspect/ ends in `.tmp`.
+    assert not any(p.endswith(".tmp") for p in public_paths)
+    # Raw files live in sensitive/ and are absent from the public list.
+    manifest = store.load_manifest(run_id)
+    introspect_steps = [n for n in manifest.step_results if n.startswith("introspect:")]
+    call_id = introspect_steps[0].split(":", 1)[1]
+    sensitive_dir = store.run_dir(run_id) / "sensitive" / "debug" / "introspect" / call_id
+    raw_stdout = sensitive_dir / "stdout.raw"
+    raw_stderr = sensitive_dir / "stderr.raw"
+    assert raw_stdout.exists()
+    assert raw_stderr.exists()
+    # Both are 0600 (defense-in-depth on top of the 0700 dir).
+    assert raw_stdout.stat().st_mode & 0o777 == 0o600
+    assert raw_stderr.stat().st_mode & 0o777 == 0o600
+    # Public response artifacts don't expose the raw files.
+    assert str(raw_stdout) not in public_paths
+    assert str(raw_stderr) not in public_paths
+    # Manifest records them as sensitive=True so artifacts.collect can pick
+    # them up (when the operator opts in to sensitive collection).
+    step_artifacts = manifest.step_results[introspect_steps[0]].artifacts
+    sensitive_paths = {a.path for a in step_artifacts if a.sensitive}
+    assert str(raw_stdout) in sensitive_paths
+    assert str(raw_stderr) in sensitive_paths
+    # No `.tmp` lingers in the agent-visible directory.
+    agent_dir = store.run_dir(run_id) / "debug" / "introspect" / call_id
+    assert list(agent_dir.glob("*.tmp")) == []
+
+
 def test_root_ssh_user_omits_sudo_from_remote_argv(tmp_path: Path) -> None:
     _, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()

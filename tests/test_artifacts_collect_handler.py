@@ -234,3 +234,73 @@ def test_collect_artifacts_recollects_when_debug_artifacts_are_added_after_succe
     recorded_collect = manifest.step_results["collect_artifacts"]
     recorded_kinds = {artifact.kind for artifact in recorded_collect.artifacts}
     assert {"debug-session", "debug-transcript", "debug-command-metadata", "debug-summary"} <= recorded_kinds
+
+
+def test_collect_artifacts_bundles_dynamic_introspect_step_results(tmp_path: Path) -> None:
+    # Iter-2 finding 1: introspect:<call_id> step results live in
+    # `manifest.step_results` but NOT in the fixed `manifest.steps` list,
+    # so the bundler used to drop them silently — leaving forensic exports
+    # without any record of executed introspect calls.
+    artifact_root = create_run(tmp_path)
+    run_id = "run-abc123"
+    run_dir = artifact_root / run_id
+    introspect_dir = run_dir / "debug" / "introspect" / "deadbeefdeadbeefdeadbeefdeadbeef"
+    introspect_dir.mkdir(parents=True, exist_ok=True)
+    stdout_json = introspect_dir / "stdout.json"
+    request_json = introspect_dir / "request.json"
+    stdout_json.write_text('{"emits": []}\n', encoding="utf-8")
+    request_json.write_text('{"script": "sha256:abc"}\n', encoding="utf-8")
+    ArtifactStore(artifact_root, create_root=False).record_step_result(
+        run_id,
+        StepResult(
+            step_name="introspect:deadbeefdeadbeefdeadbeefdeadbeef",
+            status=StepStatus.SUCCEEDED,
+            summary="introspect call deadbeef ok",
+            artifacts=[
+                ArtifactRef(path=str(stdout_json), kind="application/json"),
+                ArtifactRef(path=str(request_json), kind="application/json"),
+            ],
+        ),
+        append=True,
+    )
+
+    response = artifacts_collect_handler(artifact_root=artifact_root, run_id=run_id)
+
+    assert response.ok is True
+    bundle_path = run_dir / "summaries" / "artifact-bundle.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    dynamic_step_name = "introspect:deadbeefdeadbeefdeadbeefdeadbeef"
+    assert dynamic_step_name in bundle["artifacts_by_step"]
+    artifacts = bundle["artifacts_by_step"][dynamic_step_name]
+    assert {a["kind"] for a in artifacts} == {"application/json"}
+    assert all(a["exists"] for a in artifacts)
+    # Bundle's artifact list (returned to the agent) now includes the
+    # introspect call's artifacts.
+    collected_paths = {a.path for a in response.artifacts}
+    assert str(stdout_json) in collected_paths
+    assert str(request_json) in collected_paths
+
+
+def test_collect_introspect_succeeded_artifact_missing_is_reported(tmp_path: Path) -> None:
+    # Iter-2 finding 1: a SUCCEEDED introspect step that references a
+    # nonexistent artifact must be reported as missing_required, mirroring
+    # how the bundler treats SUCCEEDED fixed-step entries.
+    artifact_root = create_run(tmp_path)
+    run_id = "run-abc123"
+    missing_path = artifact_root / run_id / "debug" / "introspect" / "ghost" / "stdout.json"
+    ArtifactStore(artifact_root, create_root=False).record_step_result(
+        run_id,
+        StepResult(
+            step_name="introspect:ghost",
+            status=StepStatus.SUCCEEDED,
+            summary="introspect call ghost ok",
+            artifacts=[ArtifactRef(path=str(missing_path), kind="application/json")],
+        ),
+        append=True,
+    )
+
+    response = artifacts_collect_handler(artifact_root=artifact_root, run_id=run_id)
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.details["rollup"]["missing_required"] >= 1
