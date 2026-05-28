@@ -49,7 +49,21 @@ class _SessionSubscriber:
     """The §4.5 lifecycle subscriber for one open session — a long-lived object held by the
     dispatcher (not an ephemeral callback), so it is a named module-level class. On invalidation it
     releases the guard/lease/backend/record the session holds, keyed off the frozen `_OpenState`, so
-    a RESETTING/CRASHED/RELEASING transition completes even when no owner is around to close()."""
+    a RESETTING/CRASHED/RELEASING transition completes even when no owner is around to close().
+
+    Split along the lifecycle contract (`seams/lifecycle.py`):
+
+    - `invalidate` performs the **bounded, possibly-blocking** teardown — namely
+      `proxy.stop_by_identity` (SIGTERM → wait → SIGKILL ≤ TERM_GRACE + KILL_GRACE seconds). It is
+      run on a supervised worker the dispatcher joins under the deadline, so a slow signal sequence
+      doesn't block the dispatcher itself.
+    - `force_drop` is invoked **only when invalidate exceeds the deadline** and **MUST be
+      non-blocking**: in-memory token/lease/guard pops, `confirm_reaped → abandon` on the admission
+      handle, and the durable record delete. No SIGTERM/wait. If `invalidate` already ran cleanly,
+      `force_drop` is a no-op (everything it would pop is already gone). If `invalidate` wedged on
+      the signal sequence, `force_drop` still drops the in-memory line; the orphan backend becomes
+      `SessionRegistry.reconcile()`'s job on the next process start (per §4.5 / lifecycle.py:36-44).
+    """
 
     def __init__(self, transaction: TransportTransaction, session: TransportSession, state: _OpenState) -> None:
         self._transaction = transaction
@@ -57,14 +71,10 @@ class _SessionSubscriber:
         self._state = state
 
     def invalidate(self, event: LifecycleEvent, deadline: float) -> None:
-        # No graceful-stop signal for the backend yet, so perform the full drop immediately; the
-        # dispatcher's force_drop fast-path is only for the invalidate-timed-out case.
-        self.force_drop(event)
-
-    def force_drop(self, event: LifecycleEvent) -> None:
-        # out-of-band release of the recorded resources (lifecycle force_drop contract): reap the
-        # backend by identity, then FENCED-release lease + guard, then delete the durable record —
-        # mirroring _rollback, each guarded so a partial drop completes.
+        # Bounded-blocking teardown: reap the backend by identity (SIGTERM/wait/SIGKILL) on the
+        # supervised worker, then drop the in-memory and durable lines just like force_drop would.
+        # `force_drop` is idempotent, so calling it here after the reap completes the teardown
+        # without duplicating the unwind logic.
         transport = self._transaction._transports[self._session.provider]
         if self._state.backend_pid is not None:
             proxy = getattr(transport, "_proxy", None)
@@ -73,6 +83,14 @@ class _SessionSubscriber:
                 # (out of scope here).
                 with contextlib.suppress(Exception):
                     proxy.stop_by_identity(self._state.backend_pid, self._state.backend_start)
+        self.force_drop(event)
+
+    def force_drop(self, event: LifecycleEvent) -> None:
+        # NON-BLOCKING out-of-band release: pop the in-memory token/lease/guard, deregister the
+        # admission handle (confirm_reaped → abandon), and delete the durable record. NO
+        # proxy.stop_by_identity — the blocking signal sequence belongs to `invalidate` (which the
+        # dispatcher supervises with a deadline). Idempotent: a clean invalidate already popped
+        # everything, so each step is a no-op the second time around.
         if self._state.lease_token is not None:
             self._transaction._leases.release(self._session.target_key, self._state.lease_token)
         if self._state.guard_token is not None:
@@ -80,15 +98,15 @@ class _SessionSubscriber:
         self._transaction._tokens.pop(self._session.session_id, None)
         # Deregister the cancelled promoted binding so reopen() is not blocked by `bindings_outstanding`.
         # invalidate_lifecycle ran close_admission (which set the cancel fence and recorded the target
-        # as closed) before emit, so confirm_reaped → abandon is the §5.4 contract: the reaper has now
-        # reclaimed the backend/lease/guard above, confirm_reaped proves it, abandon deregisters it.
+        # as closed) before emit, so confirm_reaped → abandon is the §5.4 contract.
         if self._state.admission_handle is not None:
             with contextlib.suppress(Exception):
                 self._transaction._admission.confirm_reaped(self._state.admission_handle)
                 self._transaction._admission.abandon(self._state.admission_handle)
         self._transaction._handles.pop(self._session.session_id, None)
         # state.session_id is always set here: the READY record is committed before
-        # _subscribe_session is called, so the unconditional delete is safe.
+        # _subscribe_session is called, so the unconditional delete is safe (idempotent if already
+        # deleted by a prior invalidate).
         self._transaction._registry.delete_record(self._session.target_key)
 
 
@@ -267,21 +285,31 @@ class TransportTransaction:
             # helper (Finding #5) — durable tombstone + admission cache together, never one alone.
             #
             # Finding F3: hold the admission key lock across promote → register → clear_recovery
-            # → subscribe so a concurrent `invalidate_lifecycle` cannot cancel the freshly-promoted
-            # handle in the gap between `promote()` (which only succeeds under the lock) and
-            # `_subscribe_session()` (which registers the dispatcher subscriber that drives
-            # force_drop). Without the extended critical section, a cancel between promote and
-            # subscribe leaves the binding promoted-but-cancelled, with no subscriber to tear it
-            # down — close() would later swallow the resulting `admission_cancelled` and the
+            # (cache only) → subscribe so a concurrent `invalidate_lifecycle` cannot cancel the
+            # freshly-promoted handle in the gap between `promote()` (which only succeeds under
+            # the lock) and `_subscribe_session()` (which registers the dispatcher subscriber that
+            # drives force_drop). Without the extended critical section, a cancel between promote
+            # and subscribe leaves the binding promoted-but-cancelled, with no subscriber to tear
+            # it down — close() would later swallow the resulting `admission_cancelled` and the
             # backend/lease/guard would leak. The key lock is re-entrant (RLock), so `promote()`'s
             # own internal lock acquisition is a no-op.
+            #
+            # Finding F4: durable tombstone I/O (clear_tombstone → unlink + fsync_dir) runs AFTER
+            # the lock is released, so a slow filesystem doesn't stall the admission table. The
+            # in-memory admission cache update (`clear_recovery_required`) stays inside the lock;
+            # if the process dies between the cache update and the durable unlink, `reconcile()`
+            # on the next start re-asserts the persisted tombstone into the cache — the worst case
+            # is a stale tombstone that the existing generation gate in admission treats as a
+            # no-op once the snapshot has advanced.
             with self._admission.key_lock(request.target_key):
                 self._admission.promote(handle)
                 self._handles[session_id] = handle
                 state = replace(state, admission_handle=handle)
                 if recovery:
-                    self._clear_recovery(request.target_key, request.generation)
+                    self._clear_recovery_cache(request.target_key, request.generation)
                 self._subscribe_session(session, state)
+            if recovery:
+                self._clear_recovery_durable(request.target_key, request.generation)
             return session
         except BaseException:
             self._rollback(request.target_key, state, transport, handle)
@@ -363,12 +391,18 @@ class TransportTransaction:
         self._registry.write_tombstone(RecoveryTombstone(target_key=target_key, generation=generation, reason=reason))
         self._admission.mark_recovery_required(target_key, generation)
 
-    def _clear_recovery(self, target_key: TargetKey, generation: int) -> None:
-        """Clearance counterpart of `_mark_recovery`: every clearance path (recovery attach, reset
-        advancing generation, probe→EXECUTING) routes here so the tombstone and the cache clear
-        together — never one without the other."""
-        self._registry.clear_tombstone(target_key, expected_generation=generation)
+    def _clear_recovery_cache(self, target_key: TargetKey, generation: int) -> None:
+        """In-memory half of the dual-write clearance: drops the admission cache flag. Safe to
+        call under the admission key lock — no file I/O. Always paired with
+        `_clear_recovery_durable`; a crash between them is recovered by `reconcile()` re-asserting
+        the persisted tombstone into the cache on next start."""
         self._admission.clear_recovery_required(target_key, generation)
+
+    def _clear_recovery_durable(self, target_key: TargetKey, generation: int) -> None:
+        """Durable half of the dual-write clearance: unlinks the on-disk tombstone (`unlink` +
+        `_fsync_dir`). MUST be called outside the admission key lock so a slow filesystem doesn't
+        stall the admission table (Finding F4)."""
+        self._registry.clear_tombstone(target_key, expected_generation=generation)
 
 
 def _crash(crash_after: frozenset[str], label: str) -> None:

@@ -289,6 +289,26 @@ class FakeTestProvider:
         return self.result
 
 
+class CancelAwareTestProvider(FakeTestProvider):
+    """FakeTestProvider that blocks in execute_tests until the watcher fires the cancel fence —
+    the shared harness used by every halt-cancel conformance test. cancel_observed is set when the
+    provider returns through the cancelled branch, so a test can assert the fence reached this far
+    rather than the response shape alone (which the run_tests handler shapes on its own)."""
+
+    def __init__(self, *, result: TestExecutionResult | None = None) -> None:
+        super().__init__(result=result)
+        self.cancel_observed = threading.Event()
+
+    def execute_tests(self, plan: object, *, cancel: object = None) -> TestExecutionResult:
+        self.executions += 1
+        if cancel is not None and cancel.wait(5) and cancel.is_set():
+            self.cancel_observed.set()
+            return TestExecutionResult(
+                status=StepStatus.FAILED, summary="cancelled", artifacts=[], details={"cancelled": True}
+            )
+        return self.result
+
+
 def create_booted_run(tmp_path: Path, *, run_id: str = "run-abc123", test_suite: str | None = None) -> Path:
     source = make_source_tree(tmp_path / run_id)
     artifact_root = tmp_path / "runs"

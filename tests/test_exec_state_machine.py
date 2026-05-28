@@ -568,8 +568,9 @@ class ExecStateMachine(RuleBasedStateMachine):
             f"tombstone_gen={self.tombstone_gen}, gen={self.shadow_generation}, "
             f"recovery={recovery}, closed={self.closed}"
         )
-        # Dual-write clearance mirrors the transaction's `_clear_recovery`: clear the cache here
-        # (a real transaction would also `registry.clear_tombstone`; the registry is not modelled).
+        # Dual-write clearance mirrors the transaction's `_clear_recovery_cache` +
+        # `_clear_recovery_durable` pair: clear the cache here (a real transaction would also
+        # `registry.clear_tombstone`; the registry is not modelled).
         self.admission.clear_recovery_required(KEY, self.shadow_generation)
         self.tombstone_gen = None
         self.transport_handles.append(handle)

@@ -95,10 +95,34 @@ def test_transport_close_reaps_and_clears(tmp_path):
     closed = transport_close_handler(run_id=RUN_ID, session_id=session_id, transaction=txn, session_registry=reg)
 
     assert closed.ok is True
+    # Live close: the response distinguishes "I closed it" from "it was already gone".
+    assert closed.data["already_closed"] is False
     # close() reaped the backend (FakeQemuTransport.close recorded the id) and deleted the record.
     assert reg.read_record(KEY) is None
     # the promoted admission binding was deregistered, so a reopen is not blocked.
     assert admission._bindings.get(KEY, []) == []
+
+
+def test_transport_close_signals_already_closed_when_record_reaped(tmp_path):
+    """A `transport.close` arriving after the record was reaped out-of-band (e.g. by
+    `reconcile()` on restart, or by a CRASHED lifecycle event driving force_drop) returns success
+    AND `data["already_closed"] is True` — distinguishing it from a close that actually tore the
+    session down. Mirrors `transport.inject_break`'s explicit `unknown_session` outcome and stops
+    the handler from misleadingly logging "transport session X closed" when the reaper got there
+    first."""
+    response, txn, _admission, reg = _open(tmp_path)
+    session_id = response.data["session_id"]
+    # Out-of-band reap: simulate reconcile()/lifecycle force_drop deleting the durable record
+    # before the close call arrives. The handler should still return success but flag the state.
+    reg.delete_record(KEY)
+    assert reg.read_record(KEY) is None
+
+    closed = transport_close_handler(run_id=RUN_ID, session_id=session_id, transaction=txn, session_registry=reg)
+
+    assert closed.ok is True
+    assert closed.data["already_closed"] is True
+    assert closed.data["session_id"] == session_id
+    assert "already closed" in closed.summary
 
 
 def test_inject_break_writes_halted_before_break(tmp_path):

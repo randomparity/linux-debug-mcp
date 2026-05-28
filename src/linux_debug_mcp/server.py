@@ -1721,9 +1721,18 @@ def _halt_debug_transport(
     kernel). The durable HALTED record is what the run-tests probe reads, and
     note_execution_transition bumps the execution epoch so a pre-halt EXECUTING ssh proof can never
     be replayed across the halt. The ordering (durable write, then note) makes target.run_tests
-    reject with `target_halted` for the whole window the debugger owns the kernel."""
+    reject with `target_halted` for the whole window the debugger owns the kernel.
+
+    Spec §4.6 / ADR-0006 async-halt cancellation: after recording the transition, immediately
+    cancel the fence on every in-flight ssh-tier binding admitted at-or-before this halt's epoch.
+    Without this call the run-tests watcher would poll until the SSH provider's per-command
+    timeout (default 30s); with it, an admitted run_tests racing the halt observes the cancel
+    fence and rolls back in <5s. The two calls are not atomic — a fresh `admit_ssh_tier` admitted
+    between them carries the post-bump epoch (so its stamped proof at the old epoch is already
+    stale and rejected) and is correctly left untouched here."""
     session_registry.write_record(session.model_copy(update={"execution_state": ExecutionState.HALTED}))
-    admission.note_execution_transition(session.target_key, session.generation)
+    halt_epoch = admission.note_execution_transition(session.target_key, session.generation)
+    admission.cancel_ssh_tier(session.target_key, session.generation, halt_epoch=halt_epoch)
 
 
 def debug_start_session_handler(
@@ -2639,24 +2648,36 @@ def transport_close_handler(
 ) -> ToolResponse:
     """transport.close: tear down an open transport session — close the backend, release the
     guard/lease, deregister the admission binding, and delete the durable record. An unknown
-    session id is a no-op success (the record is already gone). A session that exists but
-    belongs to a different run is refused as `session_run_mismatch` (Finding F7) — never close
-    another run's session."""
+    session id is a no-op success (the record is already gone) but the response is marked
+    `data["already_closed"] = True` so the caller can distinguish "I closed a live session" from
+    "the session was already gone" (e.g. reaped out-of-band by reconcile() / lifecycle force_drop).
+    A session that exists but belongs to a different run is refused as `session_run_mismatch`
+    (Finding F7) — never close another run's session."""
     if transaction is None or session_registry is None:
         return _transport_disabled_failure(run_id=run_id)
     try:
-        _resolve_session_for_run(session_registry=session_registry, session_id=session_id, run_id=run_id)
+        record = _resolve_session_for_run(session_registry=session_registry, session_id=session_id, run_id=run_id)
     except _SessionRunMismatch as exc:
         return _configuration_failure(
             run_id=run_id,
             message=str(exc),
             details={"code": "session_run_mismatch"},
         )
+    if record is None:
+        # The record was reaped out-of-band (reconcile() on restart, or a CRASHED/RESETTING
+        # lifecycle event drove force_drop) before this close arrived. transaction.close would
+        # no-op anyway; surface the distinction explicitly so callers can tell.
+        return ToolResponse.success(
+            summary=f"transport session {session_id} already closed",
+            run_id=run_id,
+            data={"session_id": session_id, "already_closed": True},
+            suggested_next_actions=["transport.open"],
+        )
     transaction.close(session_id)
     return ToolResponse.success(
         summary=f"transport session {session_id} closed",
         run_id=run_id,
-        data={"session_id": session_id},
+        data={"session_id": session_id, "already_closed": False},
         suggested_next_actions=["transport.open"],
     )
 

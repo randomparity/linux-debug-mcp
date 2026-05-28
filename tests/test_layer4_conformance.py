@@ -32,6 +32,7 @@ from _layer4_fakes import (
 from conftest import (
     LEGACY_FENCE_KEY,
     LEGACY_FENCE_RUN_ID,
+    CancelAwareTestProvider,
     FakeBootProvider,
     FakeTestProvider,
     create_booted_run,
@@ -50,6 +51,7 @@ from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import TRANSPORT_DESTRUCTIVE_PERMISSIONS
 from linux_debug_mcp.coordination.admission import (
     AdmissionError,
+    AdmissionOp,
     AdmissionService,
     SnapshotStore,
     TargetSnapshot,
@@ -64,7 +66,6 @@ from linux_debug_mcp.coordination.registry import (
 )
 from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import ErrorCategory, StepResult, StepStatus
-from linux_debug_mcp.providers.local_ssh_tests import TestExecutionResult
 from linux_debug_mcp.providers.qemu_gdbstub import DebugProviderResult
 from linux_debug_mcp.safety.redaction import REDACTION, Redactor
 from linux_debug_mcp.seams.guard import InProcessStopCapableGuard
@@ -80,6 +81,7 @@ from linux_debug_mcp.seams.target import (
     publish_ready_snapshot,
 )
 from linux_debug_mcp.server import (
+    _halt_debug_transport,
     debug_continue_handler,
     debug_read_registers_handler,
     target_boot_handler,
@@ -534,32 +536,24 @@ def test_run_tests_admitted_while_executing(tmp_path: Path) -> None:
 def test_async_halt_cancels_in_flight_run_tests(tmp_path: Path) -> None:
     """An admitted run_tests that spans a HALTED transition must: (a) be cancelled in <5s by the
     watcher, (b) terminalize its run_tests step to FAILED, (c) leave NO leftover watcher thread,
-    AND (d) deregister its promoted ssh-tier handle (B-punch Fix 2)."""
+    AND (d) deregister its promoted ssh-tier handle (B-punch Fix 2).
+
+    The halt is driven through the PRODUCTION helper `_halt_debug_transport`, not via a manual
+    `note_execution_transition` + `cancel_ssh_tier` from the test thread, so the assertion
+    `elapsed < 5` is what proves the production halt path delivers the cancel — without that wiring
+    the watcher polls until the SSH provider's own timeout (≈30s)."""
     artifact_root = create_booted_run(tmp_path)
     reg = _make_fresh_registry(tmp_path)
     _write_executing_record(reg, FRESH_KEY)
     admission = _seed_run_tests_admission()
-
-    class _CancelAwareProvider(FakeTestProvider):
-        def __init__(self) -> None:
-            super().__init__()
-            self.cancel_observed = threading.Event()
-
-        def execute_tests(self, plan: object, *, cancel: Any = None) -> TestExecutionResult:
-            self.executions += 1
-            if cancel is not None and cancel.wait(5) and cancel.is_set():
-                self.cancel_observed.set()
-                return TestExecutionResult(
-                    status=StepStatus.FAILED, summary="cancelled", artifacts=[], details={"cancelled": True}
-                )
-            return self.result
-
-    provider = _CancelAwareProvider()
+    provider = CancelAwareTestProvider()
 
     def _halt() -> None:
         time.sleep(0.2)
-        halt_epoch = admission.note_execution_transition(FRESH_KEY, 1)
-        admission.cancel_ssh_tier(FRESH_KEY, 1, halt_epoch=halt_epoch)
+        # Read the executing record back so the helper writes HALTED over the SAME row the
+        # run_tests probe is reading; matches the production caller (which has the live session).
+        record = next(r for r in reg.list_records() if r.target_key == FRESH_KEY)
+        _halt_debug_transport(session=record, admission=admission, session_registry=reg)
 
     live_before = set(threading.enumerate())
     timer = threading.Thread(target=_halt, daemon=True)
@@ -585,6 +579,89 @@ def test_async_halt_cancels_in_flight_run_tests(tmp_path: Path) -> None:
     assert step is not None and step.status is StepStatus.FAILED
     # B-punch Fix 2: the promoted ssh-tier handle is reaped, so reopen()/admit isn't blocked.
     assert admission._bindings.get(FRESH_KEY, []) == []
+
+
+def test_inject_break_cancels_in_flight_run_tests_end_to_end(tmp_path: Path) -> None:
+    """End-to-end async-halt cancel via the PRODUCTION inject_break path: open a transport session
+    through `transport.open`, race `transport.inject_break` against an in-flight
+    `target.run_tests`, and assert the run is cancelled in <5s. This is the integration assertion
+    the suite was missing — `test_async_halt_cancels_in_flight_run_tests` drives `_halt_debug_transport`
+    directly; this drives it through the actual inject_break tool handler, so a regression in the
+    handler's call site (Fix 1's `cancel_ssh_tier` invocation) is detected here even if the helper
+    itself stays correct in isolation.
+    """
+    artifact_root = create_booted_run(tmp_path)
+    reg = _make_fresh_registry(tmp_path)
+    admission = _seed_run_tests_admission()
+    txn = TransportTransaction(
+        admission=admission,
+        registry=reg,
+        guard=InProcessStopCapableGuard(),
+        leases=ConsoleLeaseManager(),
+        secrets=EnvSecretsResolver([]),
+        break_policy=FakeBreakPolicy(),
+        transports={"qemu-gdbstub": FakeQemuTransport()},
+    )
+
+    open_response = transport_open_handler(
+        run_id=RUN_ID_FRESH,
+        transaction=txn,
+        admission=admission,
+        session_registry=reg,
+    )
+    assert open_response.ok is True
+    session_id = open_response.data["session_id"]
+
+    provider = CancelAwareTestProvider()
+
+    def _ok_break(**kwargs: Any) -> None:
+        return None
+
+    def _probe_halted(session: Any) -> bool:
+        return True
+
+    def _inject() -> None:
+        time.sleep(0.2)
+        result = transport_inject_break_handler(
+            run_id=RUN_ID_FRESH,
+            session_id=session_id,
+            acknowledged_permissions=INJECT_PERMS,
+            transaction=txn,
+            admission=admission,
+            session_registry=reg,
+            break_mechanism=_ok_break,
+            probe_halted=_probe_halted,
+        )
+        # If inject_break itself fails, surface that in the test by recording on the closure —
+        # the outer assertions would otherwise blame the run_tests handler for a missed cancel.
+        assert result.ok is True, result.error.message if not result.ok else ""
+
+    live_before = set(threading.enumerate())
+    timer = threading.Thread(target=_inject, daemon=True)
+    timer.start()
+    start = time.monotonic()
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID_FRESH,
+        provider=provider,
+        rootfs_profiles={"minimal": rootfs(tmp_path)},
+        admission=admission,
+        session_registry=reg,
+    )
+    elapsed = time.monotonic() - start
+    timer.join(timeout=2)
+
+    assert provider.cancel_observed.is_set()
+    assert response.ok is False
+    assert elapsed < 5
+    leftover = [t for t in threading.enumerate() if t.is_alive() and t not in live_before and t is not timer]
+    assert leftover == []
+    step = ArtifactStore(artifact_root, create_root=False).load_manifest(RUN_ID_FRESH).step_results.get("run_tests")
+    assert step is not None and step.status is StepStatus.FAILED
+    # The SSH_TIER binding was cancelled and reaped; the TRANSPORT_OPEN binding remains live
+    # (inject_break does NOT close the transport — that's transport.close's job).
+    ssh_tier_bindings = [h for h in admission._bindings.get(FRESH_KEY, ()) if h.op is AdmissionOp.SSH_TIER]
+    assert ssh_tier_bindings == []
 
 
 def test_cancel_bridge_watcher_torn_down_no_leak(tmp_path: Path) -> None:

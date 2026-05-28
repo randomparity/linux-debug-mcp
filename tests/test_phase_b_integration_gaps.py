@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from _layer4_fakes import KEY, PLATFORM, FakeQemuTransport
-from conftest import FakeTestProvider, create_booted_run, rootfs
+from conftest import CancelAwareTestProvider, FakeTestProvider, create_booted_run, rootfs
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import DebugProfile
@@ -50,6 +50,7 @@ from linux_debug_mcp.seams.target import (
     publish_ready_snapshot,
 )
 from linux_debug_mcp.server import (
+    _halt_debug_transport,
     create_app,
     debug_start_session_handler,
     target_run_tests_handler,
@@ -171,32 +172,21 @@ def test_run_tests_halt_during_execute_deregisters_ssh_tier_handle(tmp_path: Pat
     # handle in admission._bindings — without the rollback, reopen()/admit would block with
     # `bindings_outstanding`. Asserts the live AdmissionService (NOT a spy) records an empty
     # binding list for the target after the halt-cancelled run terminalizes.
+    #
+    # The halt is driven through the PRODUCTION helper `_halt_debug_transport`, so the rollback is
+    # proven against the production code path (a test-thread `cancel_ssh_tier` would still pass
+    # even if `_halt_debug_transport` itself never delivered the cancel — Fix 1 forecloses that).
     artifact_root = create_booted_run(tmp_path)
     test_key = TargetKey(provisioner="local-qemu", target_id="run-abc123")
     reg = _make_test_registry(tmp_path)
     _executing_record(reg, test_key)
     admission = _seed_run_tests_admission()
-
-    class CancelAwareProvider(FakeTestProvider):
-        def __init__(self) -> None:
-            super().__init__()
-            self.cancel_observed = threading.Event()
-
-        def execute_tests(self, plan: object, *, cancel: Any = None) -> TestExecutionResult:
-            self.executions += 1
-            if cancel is not None and cancel.wait(5) and cancel.is_set():
-                self.cancel_observed.set()
-                return TestExecutionResult(
-                    status=StepStatus.FAILED, summary="cancelled", artifacts=[], details={"cancelled": True}
-                )
-            return self.result
-
-    provider = CancelAwareProvider()
+    provider = CancelAwareTestProvider()
 
     def _halt() -> None:
         time.sleep(0.2)
-        halt_epoch = admission.note_execution_transition(test_key, 1)
-        admission.cancel_ssh_tier(test_key, 1, halt_epoch=halt_epoch)
+        record = next(r for r in reg.list_records() if r.target_key == test_key)
+        _halt_debug_transport(session=record, admission=admission, session_registry=reg)
 
     timer = threading.Thread(target=_halt, daemon=True)
     timer.start()
