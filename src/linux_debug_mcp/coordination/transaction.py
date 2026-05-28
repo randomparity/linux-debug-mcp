@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import threading
 import time
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from linux_debug_mcp.coordination.admission import AdmissionHandle, AdmissionService
@@ -24,6 +25,19 @@ from linux_debug_mcp.transport.base import (
 )
 
 _ATTACH_DEADLINE_SECONDS = 30.0
+
+
+@dataclass(frozen=True)
+class _OpenState:
+    """The resources an in-flight open() has acquired so far, in acquisition order. open() rebuilds
+    it with `replace()` as each step succeeds and hands it to `_rollback`, which unwinds in reverse.
+    Frozen so a rollback can never accidentally mutate it mid-unwind."""
+
+    guard_token: GuardToken | None = None
+    lease_token: str | None = None
+    session_id: str | None = None
+    backend_pid: int | None = None
+    backend_start: str | None = None
 
 
 class TransportTransaction:
@@ -59,6 +73,30 @@ class TransportTransaction:
         recovery: bool = False,
         crash_after: frozenset[str] = frozenset(),
     ) -> TransportSession:
+        """Run the §4.3 write-ahead open transaction and return a READY ownership record.
+
+        Admits the request, selects a break-capable channel, acquires the stop-capable guard and
+        (if the provider owns a console) the console lease, resolves secrets, writes the durable
+        OPENING record, attaches the backend, and commits a READY record under admission promote.
+
+        Args:
+            request: The settled-contract open request (target_key, generation, transport_ref,
+                required_caps, platform, optional lease).
+            recovery: When True, admit through the recovery gate (`admit_recovery`) and clear the
+                recovery tombstone on commit — the one path permitted while a target is
+                recovery_required.
+            crash_after: Crash-point labels for the write-ahead test seam; raising at a labeled
+                durable stage exercises rollback/reconciliation. Empty in production.
+
+        Returns:
+            The committed READY `TransportSession` (record_state == READY).
+
+        Raises:
+            Any error from admission, selection, the guard/lease, secret resolution, or attach. On
+            ANY failure the transaction rolls back fully in reverse order — guard, lease, durable
+            record, and backend are all released/deleted — leaking nothing, and the error
+            propagates unchanged.
+        """
         transport = self._transports[request.transport_ref.provider]
         capability = transport.capability
         # (1) pre-attach endpoint-safety refusal — trusted metadata, before any acquisition.
@@ -66,11 +104,7 @@ class TransportTransaction:
         # (2) admission.
         admit = self._admission.admit_recovery if recovery else self._admission.admit
         handle = admit(request.target_key, request)
-        guard_token: GuardToken | None = None
-        lease_token: str | None = None
-        session_id: str | None = None
-        backend_pid: int | None = None
-        backend_start: str | None = None
+        state = _OpenState()
         try:
             # (3) break-plan selection (authoritative channel from the handle).
             selection = select_stop_capable_channel(
@@ -83,10 +117,11 @@ class TransportTransaction:
             _crash(crash_after, "selected")
             # (4) stop-capable guard (target-wide single holder).
             guard_token = self._guard.acquire(request.target_key)
+            state = replace(state, guard_token=guard_token)
             _crash(crash_after, "guard")
             # (5) console lease (only providers that own a console).
             if capability.provides_console:
-                lease_token = self._leases.acquire(request.target_key, LeaseOwner.TRANSPORT)
+                state = replace(state, lease_token=self._leases.acquire(request.target_key, LeaseOwner.TRANSPORT))
             _crash(crash_after, "lease")
             # (6) secrets (never persisted/logged).
             self._secrets.resolve(list(handle.channel.secret_refs))
@@ -94,6 +129,7 @@ class TransportTransaction:
             # session_id (stop_guard_token persists only its secret as an audit marker — ADR 0003).
             session_id = new_session_id()
             self._tokens[session_id] = guard_token
+            state = replace(state, session_id=session_id)
             record = TransportSession(
                 session_id=session_id,
                 target_key=request.target_key,
@@ -101,7 +137,7 @@ class TransportTransaction:
                 provider=capability.provider_name,
                 channel_id=handle.channel.channel_id,
                 record_state=RecordState.OPENING,
-                console_lease_token=lease_token,
+                console_lease_token=state.lease_token,
                 stop_guard_token=guard_token.secret,
                 attach_epoch=handle.admit_epoch,
                 break_plan=selection.break_plan,
@@ -113,23 +149,32 @@ class TransportTransaction:
 
             # (8) attach. The on_partial closure WRITES THROUGH backend_pid/start-time into the
             # durable OPENING record the instant "backend_process" is reported — before attach()
-            # returns — so a death before READY is reapable (Finding #1).
+            # returns — so a death before READY is reapable (Finding #1). It also records the pid on
+            # the unwind state so a crash before READY can reap the backend.
+            backend_pid: int | None = None
+            backend_start: str | None = None
+
             def on_partial(label: str, resource: object) -> None:
-                nonlocal backend_pid, backend_start
+                nonlocal backend_pid, backend_start, state
                 if label == "backend_process" and isinstance(resource, dict):
                     backend_pid, backend_start = resource["pid"], resource.get("start_time")
+                    state = replace(state, backend_pid=backend_pid, backend_start=backend_start)
                     self._registry.write_record(
                         record.model_copy(update=dict(backend_pid=backend_pid, backend_start_time=backend_start))
                     )
 
             attachment = transport.attach(
                 request,
+                # caller-driven attach cancellation is wired in A9; here the deadline is the only bound.
                 cancel=threading.Event(),
                 deadline=time.monotonic() + _ATTACH_DEADLINE_SECONDS,
                 on_partial=on_partial,
             )
             if attachment.backend_pid is not None:
+                # transports that report the pid on the returned attachment rather than via the
+                # on_partial("backend_process") partial (redundant-but-harmless when both fire).
                 backend_pid, backend_start = attachment.backend_pid, attachment.backend_start_time
+                state = replace(state, backend_pid=backend_pid, backend_start=backend_start)
             # (9) assemble + loopback assert + READY record.
             for endpoint in (attachment.console_endpoint, attachment.rsp_endpoint):
                 if endpoint is not None:
@@ -153,41 +198,48 @@ class TransportTransaction:
                 self._clear_recovery(request.target_key, request.generation)
             return session
         except BaseException:
-            self._rollback(
-                request.target_key, handle, guard_token, lease_token, session_id, backend_pid, backend_start, transport
-            )
+            self._rollback(request.target_key, state, transport, handle)
             raise
 
     def _rollback(
         self,
         target_key: TargetKey,
-        handle: AdmissionHandle,
-        guard_token: GuardToken | None,
-        lease_token: str | None,
-        session_id: str | None,
-        backend_pid: int | None,
-        backend_start: str | None,
+        state: _OpenState,
         transport: Transport,
+        handle: AdmissionHandle,
     ) -> None:
         # reverse order; each guarded so a partial rollback still completes.
-        if backend_pid is not None:
+        if state.backend_pid is not None:
             proxy = getattr(transport, "_proxy", None)
             if proxy is not None:
-                # rollback is best-effort; a reap failure must never mask the original error.
+                # best-effort reap reaching the concrete transport's proxy; a reap failure must
+                # never mask the original error.
+                # TODO: a Transport.reap_backend() hook would avoid the private-attribute reach
+                # (out of scope here — would touch the Transport ABC + Layer-3 impls).
                 with contextlib.suppress(Exception):
-                    proxy.stop_by_identity(backend_pid, backend_start)
-        if session_id is not None:
-            self._tokens.pop(session_id, None)
+                    proxy.stop_by_identity(state.backend_pid, state.backend_start)
+        if state.session_id is not None:
+            self._tokens.pop(state.session_id, None)
             self._registry.delete_record(target_key)
-        if lease_token is not None:
-            self._leases.release(target_key, lease_token)
-        if guard_token is not None:
-            self._guard.release(target_key, guard_token)  # FENCED by-token release (ADR 0002)
+        if state.lease_token is not None:
+            self._leases.release(target_key, state.lease_token)
+        if state.guard_token is not None:
+            self._guard.release(target_key, state.guard_token)  # FENCED by-token release (ADR 0002)
         # rollback is best-effort; an admission-rollback failure must never mask the original error.
         with contextlib.suppress(Exception):
             self._admission.rollback(handle)
 
     def close(self, session_id: str, *, force: bool = False) -> None:
+        """Tear down an open session: write CLOSING, close the backend, release the lease and the
+        stop-capable guard, then delete the durable record.
+
+        Args:
+            session_id: The session to close. Unknown ids are a no-op.
+            force: When False (the default), a session closed while HALTED/UNKNOWN leaves a
+                recovery tombstone (dual-write to admission) so the parked kernel stays gated. When
+                True, that close-while-halted tombstone is skipped and the record is deleted
+                cleanly — the caller asserts the target needs no recovery gating.
+        """
         # load the durable record by scanning (close is keyed by session_id; the record is by
         # TargetKey, so resolve via list_records — small set).
         record = next((r for r in self._registry.list_records() if r.session_id == session_id), None)
@@ -203,6 +255,8 @@ class TransportTransaction:
         token = self._tokens.pop(session_id, None)
         if token is not None:
             self._guard.release(record.target_key, token)
+        # TODO(A9): deregister the promoted AdmissionHandle (admission.complete/rollback) — handle
+        # tracking is wired in A9.
         # close-while-halted marks recovery via the DUAL-WRITE helper (Finding #5): durable
         # tombstone + admission cache together, never one alone. Otherwise delete cleanly.
         if record.execution_state in (ExecutionState.HALTED, ExecutionState.UNKNOWN) and not force:
