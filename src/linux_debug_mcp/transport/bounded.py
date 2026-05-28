@@ -64,6 +64,35 @@ def connect_tcp(host: str, port: int, *, deadline: Deadline, cancel: threading.E
     return sock
 
 
+def wait_for_listener(host: str, port: int, *, deadline: Deadline, cancel: threading.Event) -> None:
+    """Block until something is listening on host:port, bounded by deadline + cancel.
+
+    Polls connect_tcp with exponential backoff (10ms → 200ms cap) and swallows the transient
+    ECONNREFUSED / BoundedIOTimeout that mean "nobody is listening yet". A successful connect
+    is closed immediately — this is a readiness probe, not a usable connection. Raises
+    BoundedIOTimeout when the deadline expires without a listener appearing.
+
+    Use at process-startup boundaries (e.g. just after fork+exec of a server) where the bind+
+    listen syscalls race the parent's first connect attempt. Do NOT use on hot paths that
+    must fail fast on a closed port — connect_tcp's single-attempt semantics are the right
+    fit there.
+    """
+    backoff = 0.01
+    while True:
+        check_not_cancelled(cancel)
+        if deadline.expired():
+            raise BoundedIOTimeout(f"listener never appeared on {host}:{port} before the deadline")
+        try:
+            sock = connect_tcp(host, port, deadline=deadline, cancel=cancel)
+        except (BoundedIOTimeout, OSError):
+            # Sleep at most until the deadline so we never overshoot.
+            time.sleep(min(backoff, deadline.remaining()))
+            backoff = min(backoff * 2, 0.2)
+            continue
+        sock.close()
+        return
+
+
 def allocate_loopback_ports(count: int) -> list[tuple[int, socket.socket]]:
     """Bind `count` ephemeral 127.0.0.1 ports and return (port, held_socket) pairs.
 

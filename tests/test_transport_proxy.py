@@ -2,6 +2,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
@@ -190,6 +191,53 @@ def test_verify_fails_closed_when_ownership_is_unknown_even_with_a_live_listener
             backend._verify_identity(handle, deadline=Deadline.after(0.5), cancel=threading.Event())
     finally:
         listener.close()
+
+
+def test_verify_waits_for_a_listener_that_comes_up_after_spawn():
+    """agent-proxy's bind+listen happens AFTER fork+exec returns — on a slow host the parent's
+    immediate connect_tcp loses that race and gets ECONNREFUSED before the child has reached
+    setup_local_port's listen(). _verify_identity must poll for the listener within the
+    deadline rather than fail closed on the first refusal; otherwise start()'s respawn loop
+    just hits the same race on every attempt (gated CI failure on ubuntu-24.04, round-7+)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()  # release the port — connect_tcp gets ECONNREFUSED until the thread re-binds
+
+    listener_holder: list[socket.socket] = []
+
+    def _bind_after_delay():
+        time.sleep(0.3)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", port))
+        s.listen(5)
+        listener_holder.append(s)
+
+    t = threading.Thread(target=_bind_after_delay, daemon=True)
+    t.start()
+    backend = AgentProxyBackend(spawner=_FakeSpawner(pid=6000), identity_probe=_Probe())
+    handle = ProxyHandle(process=object(), backend_pid=6000, backend_start_time="t", console_port=port, gdb_port=port)
+    try:
+        backend._verify_identity(handle, deadline=Deadline.after(3.0), cancel=threading.Event())
+    finally:
+        t.join(timeout=2.0)
+        if listener_holder:
+            listener_holder[0].close()
+
+
+def test_verify_still_fails_closed_when_the_listener_never_comes_up():
+    """The polling fix must remain bounded: if no listener appears before the deadline
+    expires, _verify_identity must raise ProxyIdentityError rather than block forever."""
+    # Pick a port nobody is listening on — bind+close to find a free port, never re-listen.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    backend = AgentProxyBackend(spawner=_FakeSpawner(pid=6000), identity_probe=_Probe())
+    handle = ProxyHandle(process=object(), backend_pid=6000, backend_start_time="t", console_port=port, gdb_port=port)
+    with pytest.raises(ProxyIdentityError):
+        backend._verify_identity(handle, deadline=Deadline.after(0.3), cancel=threading.Event())
 
 
 def test_start_retries_after_a_foreign_bind_and_reaps_only_our_own_child(monkeypatch):

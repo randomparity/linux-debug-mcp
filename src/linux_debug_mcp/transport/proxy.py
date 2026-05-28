@@ -18,6 +18,7 @@ from linux_debug_mcp.transport.bounded import (
     check_not_cancelled,
     connect_tcp,
     spawn,
+    wait_for_listener,
 )
 
 AGENT_PROXY = "agent-proxy"
@@ -209,11 +210,15 @@ class AgentProxyBackend:
         if not self._identity.looks_like(handle.backend_pid, "agent-proxy"):
             raise ProxyIdentityError("spawned child is not agent-proxy")
         for port in (handle.console_port, handle.gdb_port):
+            # bind+listen races fork+exec: on a slow runner the child hasn't reached
+            # setup_local_port's listen() by the time the parent connects, so a single
+            # connect_tcp would get ECONNREFUSED and start()'s respawn loop would just
+            # hit the same race on every attempt. Poll for the listener within the
+            # shared deadline before checking ownership.
             try:
-                conn = connect_tcp("127.0.0.1", port, deadline=deadline, cancel=cancel)
+                wait_for_listener("127.0.0.1", port, deadline=deadline, cancel=cancel)
             except (BoundedIOTimeout, OSError) as exc:
                 raise ProxyIdentityError(f"allocated port {port} has no listener") from exc
-            conn.close()
             # Address-specific (F2): prove ownership of the exact 127.0.0.1:port we advertise.
             if self._identity.owns_listener(handle.backend_pid, "127.0.0.1", port) is not True:
                 raise ProxyIdentityError(
