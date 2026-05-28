@@ -2313,8 +2313,12 @@ def debug_introspect_run_handler(
         # The dir mode (0o700 on sensitive_call_dir) already blocks other
         # local users; the explicit 0o600 chmod makes that explicit and
         # survives any future relocation.
+        # Iter-3 finding 2: skip the exists() probe — `chmod` itself raises
+        # FileNotFoundError for a missing path, and a concurrent delete
+        # between exists() and chmod() would turn a benign race into a
+        # handler crash that drops the call's manifest record.
         for _raw_path in (stdout_path, stderr_path):
-            if _raw_path.exists():
+            with contextlib.suppress(FileNotFoundError):
                 _raw_path.chmod(0o600)
 
         finished_at_complete = now()

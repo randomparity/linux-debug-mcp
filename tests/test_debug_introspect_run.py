@@ -1008,6 +1008,53 @@ def test_request_json_replaces_script_with_sha256_pointer(tmp_path: Path) -> Non
 # ---------------------------------------------------------------------------
 
 
+def test_chmod_survives_missing_raw_file_race(tmp_path: Path) -> None:
+    # Iter-3 finding 2: a concurrent delete between SSH-write and our
+    # chmod 0600 must not crash the handler with FileNotFoundError.
+    # Simulate by having the FakeSshRunner produce a result, then unlink
+    # the raw files before the handler reaches its chmod loop. Without
+    # the fix the handler would raise FileNotFoundError into the outer
+    # `except Exception` envelope and drop the manifest record.
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+
+    class _DeletingFakeSsh(FakeSshRunner):
+        def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None):
+            result = super().run(
+                argv,
+                timeout=timeout,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                cancel=cancel,
+                stdin=stdin,
+            )
+            stdout_path.unlink(missing_ok=True)
+            stderr_path.unlink(missing_ok=True)
+            return result
+
+    ssh = _DeletingFakeSsh(results=[_happy_ssh_result()])
+    # No exception escapes the handler — the response is a structured
+    # ToolResponse, not a Python crash. (The call ends up reporting
+    # wrapper_crash because stdout was deleted, but the manifest still
+    # gets an introspect:<call_id> entry rather than being abandoned.)
+    response = debug_introspect_run_handler(
+        _make_request(run_id),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=ssh,
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is False
+    assert response.error.details["code"] == "wrapper_crash"
+    manifest = store.load_manifest(run_id)
+    introspect_steps = [n for n in manifest.step_results if n.startswith("introspect:")]
+    assert len(introspect_steps) == 1
+    assert manifest.step_results[introspect_steps[0]].status == StepStatus.FAILED
+
+
 def test_raw_stdout_and_stderr_are_sensitive_artifacts(tmp_path: Path) -> None:
     # Iter-2 finding 2: SSH stdout/stderr are now routed directly to
     # `<sensitive>/stdout.raw` and `<sensitive>/stderr.raw` (mode 0600)

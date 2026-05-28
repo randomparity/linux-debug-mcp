@@ -172,8 +172,11 @@ An `emits` entry of the form `{"__emit_unserializable__": true, "error_type": ".
 | Manifest absent or run_id invalid | `CONFIGURATION_ERROR` | (existing path-safety codes) | Pre-SSH |
 | Introspect call budget exhausted for run (≥ `MAX_INTROSPECT_CALLS_PER_RUN`) | `CONFIGURATION_ERROR` | `manifest_call_budget_exhausted` | Pre-SSH |
 | `<run>/sensitive/` mode is more permissive than `0700` (legacy run from before R2-F4, or chmoded out-of-band) | `CONFIGURATION_ERROR` | `sensitive_dir_too_permissive` | Pre-SSH (§5.2 step 4b) |
-| `sudo -n true` preflight fails (sudo wants a password) | `CONFIGURATION_ERROR` | `sudo_requires_password` | Pre-SSH (preflight, §5.2 step 5) |
-| Target snapshot absent / not READY/EXECUTING | `READINESS_FAILURE` | `target_not_ready` | Pre-admission |
+| `sudo -n true` preflight fails (sudo wants a password) | `CONFIGURATION_ERROR` | `sudo_requires_password` | Pre-SSH (preflight, §5.2 step 5; skipped when `ssh_user == "root"`, iter-1 finding 6) |
+| Request `target_ref` / `target_profile` / `rootfs_profile` / `debug_profile` does not match the recorded manifest values (iter-1 findings 1, 3) | `CONFIGURATION_ERROR` | `manifest_profile_mismatch` | Pre-SSH |
+| `admission` or `session_registry` not wired into the server (iter-1 finding 7) | `READINESS_FAILURE` | `admission_service_unavailable` | Pre-admission |
+| `admission.current_snapshot` returns None — boot has not published a READY snapshot for this `target_key` (iter-1 finding 7) | `READINESS_FAILURE` | `snapshot_missing` | Pre-admission |
+| Target snapshot present but not READY/EXECUTING | `READINESS_FAILURE` | `target_not_ready` | Pre-admission |
 | Target `HALTED` (admission rejects) | `READINESS_FAILURE` | `target_halted` | Admission |
 | `ExecutionProof` stale / `UNKNOWN` | `READINESS_FAILURE` | `execution_state_unknown` | Admission |
 | Stale handle / wrong generation | `STALE_HANDLE` | `stale_handle` | Admission |
@@ -206,13 +209,19 @@ The new operation `debug.introspect.run` is appended to `ALLOWED_DEBUG_OPERATION
 
 ### 4.1 Invocation
 
-The host invokes:
+The host invokes (iter-1 finding 6 — when `ssh_user != "root"`):
 
 ```
 ssh <ssh_args> <user>@<host> -- 'timeout --kill-after=2s <user_timeout>s sudo python3 -'
 ```
 
-with the rendered wrapper piped on stdin. `<user>` and `<ssh_args>` come from `rootfs_profile` exactly as `LocalSshTestProvider` resolves them. `sudo` is used because drgn needs `/proc/kcore` access; if `ssh_user` is already root it is a no-op. Passwordless sudo is a documented prerequisite (the smoke-tests path makes the same assumption).
+When `ssh_user == "root"`, the host **drops the `sudo` prefix entirely** (and skips the §5.2 step 5 sudo preflight). `sudo` was previously documented as a "no-op" for root logins, but invoking it required sudo to be present on the target and produced an opaque in-SSH failure when it wasn't. Iter-1 finding 6 makes the root-login path equivalent to:
+
+```
+ssh <ssh_args> root@<host> -- 'timeout --kill-after=2s <user_timeout>s python3 -'
+```
+
+The rendered wrapper is piped on stdin in both shapes. `<user>` and `<ssh_args>` come from `rootfs_profile` exactly as `LocalSshTestProvider` resolves them. For non-root logins, passwordless `sudo` is a documented prerequisite (the smoke-tests path makes the same assumption).
 
 ### 4.2 Wrapper template
 
@@ -612,8 +621,12 @@ No introspect-level lock is required for ordering across calls — the manifest 
                               # including the base64-encoded user script body
                               # (base64 is transport encoding, not redaction —
                               # see §6.3); file mode 0600
-          stdout.raw          # only present on wrapper_crash where SSH stdout
-                              # was not valid JSON; file mode 0600
+          stdout.raw          # raw SSH stdout — present on every call that
+                              # reached SSH (iter-2 finding 2 made this
+                              # unconditional; previously only on wrapper_crash);
+                              # file mode 0600
+          stderr.raw          # raw SSH stderr — present on every call that
+                              # reached SSH (iter-2 finding 2); file mode 0600
 ```
 
 `request.json` and `wrapper.skeleton.py` are written before SSH invocation (§5.2 step 8); the sibling `wrapper.py` (full source) is written under `<run>/sensitive/debug/introspect/<call_id>/` in the same step with mode `0600`. The `sensitive/` subtree exists project-wide for forensic reproducibility (see `artifacts/store.py`) and is **not** listed in the response's `artifacts` array — files under it are referenced by `ArtifactRef`s in the step record with `sensitive=True` (§6.2) so consumers of the manifest can filter, but agents never receive their paths in a `ToolResponse`.
@@ -624,7 +637,9 @@ No introspect-level lock is required for ordering across calls — the manifest 
 
 Runs whose `create_run` predates the R2-F4 change have `<run>/sensitive/` at the system umask (typically `0755`). The introspect handler does **not** migrate them — chmod-on-call would muddle the per-run-property invariant and risks fighting an operator who deliberately tightened or loosened the mode out of band. Instead the handler **fails loudly** (R3-F4, refined by R4-F1): the per-call preflight at §5.2 step 4b stat()s `<run>/sensitive/` **before any SSH round trip** — ahead of sudo preflight (step 5) and admission (step 6) — and returns `CONFIGURATION_ERROR` / `sensitive_dir_too_permissive` whenever the mode is more permissive than `0o700` (see also the §3.3 row of the same name). A legacy run therefore cannot be used with `debug.introspect.run` until the operator remediates — either by re-running `kernel.create_run` (the recommended path; the introspect call budget and per-run isolation make this the natural workflow) or by `chmod 0700 <run>/sensitive` by hand. The fail-loud posture is intentional and matches the existing sudo-preflight stance: silently letting a call land under a world-readable parent would render the `0600` mode on `wrapper.py` ineffective, breaking the file-mode contract advertised in §6.1. The hardened mode is asserted in tests against fresh runs (`test_sensitive_run_subdir_is_mode_0700`, §9.1); the fail-loud path is asserted in `test_legacy_sensitive_dir_rejected` (§9.1).
 
-`stderr.log` is streamed to disk during the call as raw bytes, then rewritten in-place under the manifest lock with the text-mode `Redactor` applied (see §6.3). `stdout.json` is **not** streamed verbatim: SSH stdout is captured to a temporary path during the call, the host then parses it as JSON, passes the parsed structure through `Redactor.redact_value`, and persists the result via `json.dumps` to `stdout.json`. On a wrapper crash where stdout is not valid JSON, the temporary capture is moved to `<run>/sensitive/debug/introspect/<call_id>/stdout.raw` instead and `stdout.json` is absent for that call — the raw file may carry secrets that the text-mode redactor cannot reliably scrub from unstructured binary, so it stays under `sensitive/`. `result.json` is written after the host finishes post-processing. `request.json` and `wrapper.skeleton.py` are present on every successful admission; later files are present whenever the call reached SSH.
+**SSH output routing (iter-2 finding 2).** SSH stdout and stderr are written **directly** to `<run>/sensitive/debug/introspect/<call_id>/stdout.raw` and `.../stderr.raw` (mode `0600`), not to a temporary `.tmp` path under the agent-visible directory. The motivation: raw stdout may contain unredacted user-script `user_stdout`, drgn output, and traceback text; raw stderr may carry secret-bearing diagnostics. Routing straight to `sensitive/` makes the protection uniform across success and failure paths and removes the previous design's reliance on post-hoc relocation, which left `.tmp` files in the agent-visible directory on every non-`wrapper_crash` path.
+
+After SSH returns, the handler `chmod 0600`s both files (defense-in-depth on top of the `0700` directory mode). The redacted, agent-visible `stdout.json` is then produced by `json.loads(raw_stdout_bytes)` → `Redactor.redact_value(parsed)` → `json.dumps(...)` → `<run>/debug/introspect/<call_id>/stdout.json`. `stderr.log` is the text-mode redacted copy of stderr.raw, written into the same agent-visible directory. On a wrapper crash where stdout is not valid JSON, `stdout.json` is absent for that call (only `stdout.raw` carries the failed payload). `request.json` and `wrapper.skeleton.py` are present on every successful admission; the SSH-output files are present whenever the call reached SSH.
 
 ### 6.2 Step record
 
@@ -638,10 +653,15 @@ StepResult(
              ArtifactRef("sensitive/debug/introspect/<call_id>/wrapper.py",
                          ..., sensitive=True),     # full user script, mode 0600
              ArtifactRef("stdout.json", ..., sensitive=False),
-             # ArtifactRef("sensitive/debug/introspect/<call_id>/stdout.raw",
-             #             ..., sensitive=True) — only on wrapper_crash
              ArtifactRef("stderr.log", ..., sensitive=False),
-             ArtifactRef("result.json", ..., sensitive=False)],
+             # Iter-2 finding 2: registered on EVERY call that reached SSH
+             # (not just wrapper_crash). Files live at
+             # `sensitive/debug/introspect/<call_id>/{stdout,stderr}.raw`,
+             # mode 0600, sensitive=True.
+             ArtifactRef("sensitive/debug/introspect/<call_id>/stdout.raw",
+                         ..., sensitive=True),
+             ArtifactRef("sensitive/debug/introspect/<call_id>/stderr.raw",
+                         ..., sensitive=True)],
   error_category=None | ErrorCategory.X,
   diagnostic=None | "<short redacted summary>",
   details={
@@ -675,7 +695,7 @@ Applied to:
 - `user_stdout_snippet`, `drgn_stderr_snippet`
 - Every response-level diagnostic string, including the **sudo preflight** diagnostic (§5.2 step 5) and the **`ssh_failure`** diagnostic (§5.2 step 9) — both **redact first, then truncate** captured remote stderr to 256 bytes before embedding it. The ordering is load-bearing (R2-F3): `Redactor.redact_text` does literal substring replacement against `secret_values`, so truncating before redacting could split an `ssh_key_ref` and leave an unmatched prefix in the diagnostic. Step 5 (§5.2) and step 9 (§5.2) each make this ordering explicit; this bullet is the cross-cutting statement of the same rule.
 - The persisted `stdout.json` and `stderr.log` (not only the in-response snippets — the artifact files are part of the manifest's referenced surface, and the contract is that secrets never reach the manifest)
-- `request.json`'s `script` field (in case a credential was pasted in)
+- **`request.json`'s `script` field (iter-1 finding 5).** The handler replaces the user-supplied script with `"sha256:<hex>"` *before* the redactor walks the dict, mirroring `wrapper.skeleton.py`. The plaintext script is only persisted to `<run>/sensitive/debug/introspect/<call_id>/wrapper.py` (mode 0600); `request.json` carries the digest only. The Redactor pass remains as a defense-in-depth pass against any other field that might be added to the request schema in the future.
 
 Mechanism per file:
 
