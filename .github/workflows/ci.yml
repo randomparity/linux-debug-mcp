@@ -100,3 +100,16 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
       - run: uv run --with 'zizmor==1.25.2' zizmor .github/workflows
+
+  supply-chain-runtime:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+      - run: |
+          set -euo pipefail
+          uv venv --allow-existing
+          uv pip install -e .
+          uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
