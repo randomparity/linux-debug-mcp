@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -31,9 +32,16 @@ from linux_debug_mcp.config import (
     merge_kernel_args,
     missing_destructive_permissions,
 )
-from linux_debug_mcp.coordination.admission import AdmissionError, AdmissionHandle, AdmissionService, TargetSnapshot
+from linux_debug_mcp.coordination.admission import (
+    AdmissionError,
+    AdmissionHandle,
+    AdmissionService,
+    SnapshotStore,
+    TargetSnapshot,
+)
 from linux_debug_mcp.coordination.endpoint_safety import EndpointSafetyError
 from linux_debug_mcp.coordination.exec_probe import probe_execution_state
+from linux_debug_mcp.coordination.lease import ConsoleLeaseManager
 from linux_debug_mcp.coordination.registry import SessionRegistry
 from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
@@ -69,7 +77,10 @@ from linux_debug_mcp.providers.stubs import (
 )
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_rootfs_source, validate_source_path
 from linux_debug_mcp.safety.redaction import Redactor
-from linux_debug_mcp.seams.guard import GuardConflict
+from linux_debug_mcp.safety.runtime_locks import private_runtime_registry_dir
+from linux_debug_mcp.seams.break_policy import ReferenceBreakPolicy
+from linux_debug_mcp.seams.guard import GuardConflict, InProcessStopCapableGuard
+from linux_debug_mcp.seams.secrets import EnvSecretsResolver
 from linux_debug_mcp.seams.target import (
     BreakHint,
     ConsoleKind,
@@ -77,8 +88,20 @@ from linux_debug_mcp.seams.target import (
     TargetKey,
     publish_ready_snapshot,
 )
-from linux_debug_mcp.transport.base import ExecutionState, LineRole, OpenRequest, TransportRef, TransportSession
+from linux_debug_mcp.transport.base import (
+    EndpointExposure,
+    ExecutionState,
+    LineRole,
+    OpenRequest,
+    Transport,
+    TransportLocality,
+    TransportRef,
+    TransportRegistry,
+    TransportSession,
+)
 from linux_debug_mcp.transport.break_inject import InjectBreakError, inject_break
+from linux_debug_mcp.transport.proxy import AgentProxyBackend
+from linux_debug_mcp.transport.qemu_gdbstub import QemuGdbstubTransport
 
 DEFAULT_ARTIFACT_ROOT = Path(".linux-debug-mcp/runs")
 SERVER_CONFIG_ENV_VAR = "LINUX_DEBUG_MCP_CONFIG"
@@ -2989,12 +3012,125 @@ def load_server_config() -> ServerConfig | None:
         raise ValueError(f"invalid server config at {config_path}: {exc}") from exc
 
 
-def create_app(config: ServerConfig | None = None) -> FastMCP:
+@dataclass
+class _TransportMachinery:
+    """The Layer-4 coordination collaborators create_app threads into the transport/debug/run_tests
+    tool wrappers (ADR 0005). One AdmissionService over one SnapshotStore so the boot snapshot
+    producer and the transport gates share authoritative facts; one durable SessionRegistry holding
+    the host-global single-instance flock + ownership records."""
+
+    session_registry: SessionRegistry
+    admission: AdmissionService
+    transaction: TransportTransaction
+    transport_registry: TransportRegistry
+
+
+def _default_local_transports() -> dict[str, Transport]:
+    """The local-only x86_64 stop-capable transport map (CLAUDE.md: local QEMU gdbstub today). The
+    qemu-gdbstub RSP passthrough is the one stop-capable provider the boot snapshot advertises; the
+    serial-local/agent-proxy console transport is a gated C3 integration concern."""
+    qemu = QemuGdbstubTransport()
+    return {qemu.capability.provider_name: qemu}
+
+
+def _build_transport_registry(transports: dict[str, Transport]) -> TransportRegistry:
+    registry = TransportRegistry()
+    for transport in transports.values():
+        registry.register(transport.capability)
+    return registry
+
+
+def _validate_transport_registry(registry: TransportRegistry) -> None:
+    """Startup capability belt (spec §8.4): re-check every registered transport so a misconfigured
+    registry fails loud before serving. TransportCapability's model validator already rejects
+    REMOTE+loopback_local at construction, but a forged/corrupt registry state could bypass it; this
+    re-asserts the invariant on the live registry so trusted metadata can never authorize an off-host
+    raw TCP endpoint."""
+    for capability in registry.list_capabilities():
+        if (
+            capability.locality is TransportLocality.REMOTE
+            and capability.endpoint_exposure is EndpointExposure.LOOPBACK_LOCAL
+        ):
+            raise ValueError(
+                f"transport {capability.provider_name!r} is REMOTE but advertises loopback_local "
+                "endpoint exposure; remote/out-of-band transports are structurally brokered_required "
+                "(§3.2, §8.4) — refusing to serve a misconfigured transport registry"
+            )
+
+
+def _build_transport_machinery(
+    *,
+    session_registry: SessionRegistry | None,
+    transport_registry: TransportRegistry | None,
+) -> _TransportMachinery:
+    """Construct the Layer-4 machinery, acquire the single-instance flock, and run crash
+    reconciliation BEFORE returning — so no tool can admit before reconcile has reaped orphan
+    backends and re-asserted recovery tombstones (ADR 0005, spec §10.2).
+
+    A default (uninjected) `session_registry` is rooted at a fresh per-process temp dir, NOT the
+    host-global `private_runtime_registry_dir()`: many tests construct create_app() repeatedly in one
+    process, and the production single-instance flock is host-global, so production wires the real
+    registry explicitly in main(); the default stays test-safe (no cross-test flock contention).
+    """
+    transports = _default_local_transports()
+    transport_registry = transport_registry if transport_registry is not None else _build_transport_registry(transports)
+    _validate_transport_registry(transport_registry)
+
+    if session_registry is None:
+        session_registry = SessionRegistry(directory=Path(tempfile.mkdtemp(prefix="linux-debug-mcp-registry-")))
+
+    snapshot_store = SnapshotStore()
+    admission = AdmissionService(snapshot_store)
+    transaction = TransportTransaction(
+        admission=admission,
+        registry=session_registry,
+        guard=InProcessStopCapableGuard(),
+        leases=ConsoleLeaseManager(),
+        secrets=EnvSecretsResolver([]),
+        break_policy=ReferenceBreakPolicy(),
+        transports=transports,
+    )
+
+    # Single-instance flock + reconcile-before-serve: acquire the host-global lock, then reap orphan
+    # backends / re-assert durable tombstones BEFORE any tool can admit. acquire_instance_lock()
+    # raises InstanceLockError on a 2nd live instance; it propagates out of create_app unchanged so
+    # the process fails loud rather than admitting alongside the first. The fenced reaper is the
+    # ADR-0004 start-time probe (AgentProxyBackend.stop_by_identity): it signals a pid ONLY when the
+    # live start-time fingerprint matches the durable record, so a reused pid is never killed. The
+    # lock is held for the process lifetime — create_app has no teardown hook, so this is
+    # acquire-on-construct, release-on-process-exit.
+    session_registry.acquire_instance_lock()
+    session_registry.reconcile(proxy=AgentProxyBackend(), admission=admission)
+    return _TransportMachinery(
+        session_registry=session_registry,
+        admission=admission,
+        transaction=transaction,
+        transport_registry=transport_registry,
+    )
+
+
+def create_app(
+    config: ServerConfig | None = None,
+    *,
+    session_registry: SessionRegistry | None = None,
+    transport_registry: TransportRegistry | None = None,
+) -> FastMCP:
     app = FastMCP("linux-debug-mcp")
     # Operator-configured sensitive paths are the only ServerConfig field consumed today; they
     # are threaded into the rootfs-source validation in kernel.create_run and target.boot.
     # Profiles remain code-defined (the DEFAULT_* registries) — wiring those is separate work.
     sensitive_paths = list(config.sensitive_paths) if config is not None else []
+
+    # Construct the Layer-4 transport machinery, acquire the single-instance flock, validate the
+    # capability registry, and reconcile crashes BEFORE registering (and therefore before serving)
+    # any tool — so a transport/debug/run_tests op can never admit ahead of crash recovery.
+    machinery = _build_transport_machinery(
+        session_registry=session_registry,
+        transport_registry=transport_registry,
+    )
+    transport_transaction = machinery.transaction
+    admission_service = machinery.admission
+    durable_registry = machinery.session_registry
 
     @app.tool(name="host.check_prerequisites")
     def host_check_prerequisites(
@@ -3351,6 +3487,7 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             force_reboot=force_reboot,
             boot_overrides=boot_overrides,
             sensitive_paths=sensitive_paths,
+            admission=admission_service,
         ).model_dump(mode="json")
 
     @app.tool(name="target.run_tests")
@@ -3369,6 +3506,8 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             commands=commands,
             force_rerun=force_rerun,
             attempt=attempt,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="artifacts.collect")
@@ -3395,6 +3534,9 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             run_id=run_id,
             debug_profile=debug_profile,
             new_session=new_session,
+            transaction=transport_transaction,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.read_registers")
@@ -3535,15 +3677,27 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
             artifact_root=Path(artifact_root),
             run_id=run_id,
             debug_session_id=debug_session_id,
+            transaction=transport_transaction,
         ).model_dump(mode="json")
 
     @app.tool(name="transport.open")
     def transport_open(run_id: str, recovery: bool = False) -> dict[str, Any]:
-        return transport_open_handler(run_id=run_id, recovery=recovery).model_dump(mode="json")
+        return transport_open_handler(
+            run_id=run_id,
+            recovery=recovery,
+            transaction=transport_transaction,
+            admission=admission_service,
+            session_registry=durable_registry,
+        ).model_dump(mode="json")
 
     @app.tool(name="transport.close")
     def transport_close(run_id: str, session_id: str) -> dict[str, Any]:
-        return transport_close_handler(run_id=run_id, session_id=session_id).model_dump(mode="json")
+        return transport_close_handler(
+            run_id=run_id,
+            session_id=session_id,
+            transaction=transport_transaction,
+            session_registry=durable_registry,
+        ).model_dump(mode="json")
 
     @app.tool(name="transport.inject_break")
     def transport_inject_break(
@@ -3551,10 +3705,18 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
         session_id: str,
         acknowledged_permissions: list[str] | None = None,
     ) -> dict[str, Any]:
+        # The real break_mechanism args (proxy/proxy_handle/ssh_runner/ssh_argv_prefix) belong to the
+        # gated agent-proxy/PTY harness (a C3 integration concern); the only local-qemu break is
+        # gdbstub-native, which needs no injection. So the wrapper keeps the default mechanism: B5's
+        # handler fails closed to UNKNOWN+failure on any mechanism error, so a missing-harness call is
+        # safe. Full break wiring is deferred to C3.
         return transport_inject_break_handler(
             run_id=run_id,
             session_id=session_id,
             acknowledged_permissions=acknowledged_permissions,
+            transaction=transport_transaction,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="workflow.build_boot_test")
@@ -3618,4 +3780,9 @@ def create_app(config: ServerConfig | None = None) -> FastMCP:
 
 def main() -> None:
     configure_logging()
-    create_app(load_server_config()).run()
+    # Production wires the host-global durable registry explicitly so the single-instance flock +
+    # crash reconciliation are host-wide (ADR 0005): a second server process fails loud on the shared
+    # instance.lock. The default create_app() registry is a per-process temp dir (test-safe), so this
+    # injection is the one place the real host-global path is taken.
+    registry = SessionRegistry(directory=private_runtime_registry_dir())
+    create_app(load_server_config(), session_registry=registry).run()
