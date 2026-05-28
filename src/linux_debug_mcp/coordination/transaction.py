@@ -39,6 +39,10 @@ class _OpenState:
     session_id: str | None = None
     backend_pid: int | None = None
     backend_start: str | None = None
+    # The promoted admission binding for the committed session. Carried on the frozen state so the
+    # lifecycle subscriber's force_drop() can deregister it (confirm_reaped → abandon) out-of-band,
+    # the same way close() deregisters it (complete) on the in-owner path.
+    admission_handle: AdmissionHandle | None = None
 
 
 class _SessionSubscriber:
@@ -74,6 +78,15 @@ class _SessionSubscriber:
         if self._state.guard_token is not None:
             self._transaction._guard.release(self._session.target_key, self._state.guard_token)  # FENCED (ADR 0002)
         self._transaction._tokens.pop(self._session.session_id, None)
+        # Deregister the cancelled promoted binding so reopen() is not blocked by `bindings_outstanding`.
+        # invalidate_lifecycle ran close_admission (which set the cancel fence and recorded the target
+        # as closed) before emit, so confirm_reaped → abandon is the §5.4 contract: the reaper has now
+        # reclaimed the backend/lease/guard above, confirm_reaped proves it, abandon deregisters it.
+        if self._state.admission_handle is not None:
+            with contextlib.suppress(Exception):
+                self._transaction._admission.confirm_reaped(self._state.admission_handle)
+                self._transaction._admission.abandon(self._state.admission_handle)
+        self._transaction._handles.pop(self._session.session_id, None)
         # state.session_id is always set here: the READY record is committed before
         # _subscribe_session is called, so the unconditional delete is safe.
         self._transaction._registry.delete_record(self._session.target_key)
@@ -104,6 +117,10 @@ class TransportTransaction:
         # Finding #4: the fenced GuardToken is held in-process (the frozen stop_guard_token: str
         # cannot carry the fence — ADR 0003); close()/lifecycle release by this token, not revoke().
         self._tokens: dict[str, GuardToken] = {}
+        # The promoted AdmissionHandle for each live session, keyed by session_id. close() deregisters
+        # it (complete); force_drop deregisters it (confirm_reaped → abandon). Without this the
+        # promoted binding lingers and blocks the next reopen()/admit (`bindings_outstanding`).
+        self._handles: dict[str, AdmissionHandle] = {}
         self._dispatcher: LifecycleDispatcher | None = None
 
     def bind_lifecycle(self, dispatcher: LifecycleDispatcher) -> None:
@@ -249,6 +266,8 @@ class TransportTransaction:
             # (10) commit. A recovery attach clears the recovery gate through the DUAL-WRITE
             # helper (Finding #5) — durable tombstone + admission cache together, never one alone.
             self._admission.promote(handle)
+            self._handles[session_id] = handle
+            state = replace(state, admission_handle=handle)
             if recovery:
                 self._clear_recovery(request.target_key, request.generation)
             self._subscribe_session(session, state)
@@ -311,8 +330,15 @@ class TransportTransaction:
         token = self._tokens.pop(session_id, None)
         if token is not None:
             self._guard.release(record.target_key, token)
-        # TODO(A9): deregister the promoted AdmissionHandle (admission.complete/rollback) — handle
-        # tracking is wired in A9.
+        # Deregister the promoted admission binding for this cleanly-closed session. complete() is the
+        # success-terminal disposal for an already-PROMOTED session (its guard for a cancelled/closed
+        # handle does not apply to a clean close); without it the binding lingers PROMOTED and blocks
+        # a later reopen() with `bindings_outstanding`. Guarded so a disposal hiccup can't mask the
+        # teardown — a lifecycle invalidation's force_drop deregisters via confirm_reaped → abandon.
+        handle = self._handles.pop(session_id, None)
+        if handle is not None:
+            with contextlib.suppress(Exception):
+                self._admission.complete(handle)
         # close-while-halted marks recovery via the DUAL-WRITE helper (Finding #5): durable
         # tombstone + admission cache together, never one alone. Otherwise delete cleanly.
         if record.execution_state in (ExecutionState.HALTED, ExecutionState.UNKNOWN) and not force:

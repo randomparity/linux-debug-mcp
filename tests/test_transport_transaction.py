@@ -7,6 +7,7 @@ from _layer4_fakes import (
     make_request,
 )
 
+from linux_debug_mcp.coordination.admission import TargetSnapshot
 from linux_debug_mcp.coordination.endpoint_safety import EndpointSafetyError
 from linux_debug_mcp.coordination.lease import ConsoleLeaseManager, LeaseOwner
 from linux_debug_mcp.coordination.registry import SessionRegistry
@@ -93,3 +94,53 @@ def test_lifecycle_invalidation_revokes_guard_and_reaps(tmp_path):
     assert reg.read_record(KEY) is None
     # guard is free → a new incarnation (after a generation bump) could acquire
     assert guard.acquire(KEY) is not None
+
+
+def _bump_generation(admission, *, generation: int) -> None:
+    """Publish a strictly-newer authoritative snapshot for KEY (the §4.5 step-5 generation bump),
+    reusing the current snapshot's facts so only the generation advances."""
+    current = admission.current_snapshot(KEY)
+    admission.publish_snapshot(
+        KEY,
+        TargetSnapshot(
+            generation=generation,
+            transports=current.transports,
+            platform=current.platform,
+            state=current.state,
+        ),
+    )
+
+
+def test_open_close_open_succeeds(tmp_path):
+    # A cleanly-closed session must leave NO admission binding behind, so a fresh open on the same
+    # target admits and reaches READY again. Before the fix the first promoted handle was never
+    # deregistered, so it lingered PROMOTED in the binding table.
+    transport = FakeQemuTransport()
+    txn, admission = build_txn(transport, registry=SessionRegistry(directory=tmp_path))
+    first = txn.open(make_request())
+    txn.close(first.session_id)
+    # close() deregistered the promoted handle → no binding outstanding for the target.
+    assert admission._bindings.get(KEY, []) == []
+    second = txn.open(make_request())
+    assert second.record_state is RecordState.READY
+
+
+def test_lifecycle_invalidation_then_reopen_succeeds(tmp_path):
+    # After a CRASHED invalidation force-drops the session, the promoted handle must be
+    # deregistered (confirm_reaped → abandon), so once the snapshot advances admission can reopen
+    # and admit the next incarnation. Before the fix the cancelled-but-undisposed handle blocked
+    # reopen() with `bindings_outstanding`.
+    transport = FakeQemuTransport()
+    guard, leases, reg = InProcessStopCapableGuard(), ConsoleLeaseManager(), SessionRegistry(directory=tmp_path)
+    dispatcher = InProcessLifecycleDispatcher()
+    txn, admission = build_txn(transport, guard=guard, leases=leases, registry=reg)
+    txn.bind_lifecycle(dispatcher)
+    txn.open(make_request())
+    admission.invalidate_lifecycle(LifecycleEvent(target_key=KEY, kind=LifecycleKind.CRASHED), dispatcher, generation=1)
+    # force_drop deregistered the handle → no binding outstanding blocks reopen.
+    assert admission._bindings.get(KEY, []) == []
+    # §4.5 step 5: bump the authoritative generation, then admission can reopen for the next open.
+    _bump_generation(admission, generation=2)
+    admission.reopen(KEY)
+    second = txn.open(make_request(generation=2))
+    assert second.record_state is RecordState.READY
