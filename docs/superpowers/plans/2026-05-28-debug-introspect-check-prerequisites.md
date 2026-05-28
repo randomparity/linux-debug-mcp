@@ -1291,11 +1291,30 @@ def test_concurrent_probes_get_distinct_dirs(tmp_path: Path) -> None:
         )
         ids.add(resp.data["probe_id"])
     assert len(ids) == 2
+
+
+def test_ssh_connect_failure_exit_255(tmp_path: Path) -> None:
+    run_id = _booted_run(tmp_path)
+    secret = "/secret/id_ed25519"  # pragma: allowlist secret
+    runner = FakeSshRunner(results=[SshCommandResult(
+        exit_status=255, stdout="",
+        stderr_snippet=f"ssh: connect using key {secret}: Connection refused",
+    )])
+    resp = debug_introspect_check_prerequisites_handler(
+        _req(run_id),
+        artifact_root=tmp_path,
+        rootfs_profiles=_rootfs(ssh_key_ref=secret),
+        ssh_runner=runner,
+    )
+    assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert resp.error.details["code"] == "ssh_connect_failure"
+    assert "Connection refused" in resp.error.details["stderr"]
+    assert secret not in json.dumps(resp.model_dump(mode="json"))
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run python -m pytest tests/test_debug_introspect_check_prereqs.py -q -k "usable or drgn_missing or python3_missing or garbage or oversized or ssh_timeout or redaction or concurrent"`
+Run: `uv run python -m pytest tests/test_debug_introspect_check_prereqs.py -q -k "usable or drgn_missing or python3_missing or garbage or oversized or ssh_timeout or ssh_connect or redaction or concurrent"`
 Expected: FAIL — `NotImplementedError: SSH body added in Task 8`.
 
 - [ ] **Step 3: Implement the SSH body + assembly helpers**
@@ -1373,23 +1392,31 @@ Replace the `raise NotImplementedError(...)` line in `debug_introspect_check_pre
         with contextlib.suppress(FileNotFoundError):
             _path.chmod(0o600)
 
-    return _assemble_probe_response(ctx, ssh_result, stdout_path, stderr_path, agent_dir, probe_id)
+    return _assemble_probe_response(
+        ctx,
+        ssh_result=ssh_result,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        agent_dir=agent_dir,
+        probe_id=probe_id,
+    )
 ```
 
 Add the three helper functions immediately after the handler:
 
 ```python
 def _read_capped(path: Path, cap: int) -> str | None:
-    """Read up to *cap* bytes; None if the file exceeds *cap* (oversized)."""
+    """Read the file iff its byte size is within *cap*; None if oversized."""
     if not path.exists():
         return ""
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        data = handle.read(cap + 1)
-    return None if len(data) > cap else data
+    if path.stat().st_size > cap:
+        return None
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def _assemble_probe_response(
     ctx: _ProbeContext,
+    *,
     ssh_result: SshCommandResult,
     stdout_path: Path,
     stderr_path: Path,
@@ -1419,7 +1446,24 @@ def _assemble_probe_response(
 
     if parsed is None and ssh_result.exit_status == 127:
         checks, verdict = python_missing_checks()
-        return _probe_success(ctx, agent_dir, stdout_path, stderr_path, probe_id, checks, verdict, parsed=None)
+        return _probe_success(
+            ctx,
+            agent_dir=agent_dir,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            probe_id=probe_id,
+            checks=checks,
+            verdict=verdict,
+            parsed=None,
+        )
+    if parsed is None and ssh_result.exit_status == 255:
+        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="probe ssh transport failed before the target ran",
+            details={"code": "ssh_connect_failure", "stderr": snippet},
+        )
     if not isinstance(parsed, dict):
         snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
         return ToolResponse.failure(
@@ -1430,18 +1474,27 @@ def _assemble_probe_response(
         )
 
     checks, verdict = build_probe_checks(parsed, host_build_id=ctx.host_build_id)
-    return _probe_success(ctx, agent_dir, stdout_path, stderr_path, probe_id, checks, verdict, parsed=parsed)
+    return _probe_success(
+        ctx,
+        agent_dir=agent_dir,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        probe_id=probe_id,
+        checks=checks,
+        verdict=verdict,
+        parsed=parsed,
+    )
 
 
 def _probe_success(
     ctx: _ProbeContext,
+    *,
     agent_dir: Path,
     stdout_path: Path,
     stderr_path: Path,
     probe_id: str,
     checks: list[PrerequisiteCheck],
     verdict: str,
-    *,
     parsed: dict[str, Any] | None,
 ) -> ToolResponse:
     artifacts = [
@@ -1577,7 +1630,12 @@ import sys
 
 import pytest
 
-from linux_debug_mcp.prereqs.drgn_probe import PROBE_SCRIPT, normalize_build_id
+from linux_debug_mcp.prereqs.drgn_probe import (
+    USABLE,
+    PROBE_SCRIPT,
+    build_probe_checks,
+    normalize_build_id,
+)
 
 drgn = pytest.importorskip("drgn")
 
@@ -1602,6 +1660,21 @@ def test_probe_running_build_id_matches_drgn() -> None:
     except Exception as exc:  # noqa: BLE001 - environment-dependent skip
         pytest.skip(f"drgn could not attach to the live kernel: {exc}")
     assert normalize_build_id(doc["running_build_id"]) == normalize_build_id(drgn_bid)
+    checks, verdict = build_probe_checks(doc, host_build_id=drgn_bid)
+    by = {c.check_id: c for c in checks}
+    # drgn may attach via debuginfod or BTF — sources PROBE_SCRIPT does not
+    # enumerate. Only cross-check DWARF agreement when the probe found a local
+    # vmlinux whose build-id matches the running kernel; otherwise there is no
+    # shared local artifact for the probe and drgn to agree on.
+    running = normalize_build_id(doc["running_build_id"])
+    local_match = any(
+        normalize_build_id(c.get("file_build_id")) == running
+        for c in doc["vmlinux_debuginfo"]["candidates"]
+    )
+    if not local_match:
+        pytest.skip("no local DWARF vmlinux matching the running kernel (drgn used debuginfod/BTF)")
+    assert by["target.vmlinux_debuginfo"].details["build_id_verified"] is True
+    assert verdict == USABLE
 ```
 
 - [ ] **Step 2: Run it (skips cleanly if drgn/kernel unavailable)**
@@ -1655,7 +1728,9 @@ gh pr create --fill --base main
 - §6 error handling (run-not-found, not-booted, access_method, missing ssh field, timeout bound, oversized/garbage stdout, python3-missing, ssh failure) → Tasks 7, 8.
 - §7 redaction, `sensitive/` placement, per-probe_id isolation → Task 8 (`_probe_success`, `sensitive_dir`, `redactor`; tests `test_redaction_*`, `test_concurrent_*`).
 - §8 capability wiring → Task 6.
-- §9 testing matrix + gated real-drgn → Tasks 4, 7, 8, 10.
+- §9 testing matrix + gated real-drgn → Tasks 4, 7, 8, 10. The Task 10 gated cross-check always asserts the probe's `running_build_id` matches drgn's. The stronger DWARF agreement assert (`build_id_verified` + `USABLE`) is **conditional on the probe finding a local vmlinux whose build-id matches the running kernel** — the one case where the probe and drgn share a local artifact to agree on; it skips when drgn resolves debuginfo via debuginfod/BTF (sources `PROBE_SCRIPT` does not enumerate), preserving §5's "BTF-only ⇒ UNKNOWN, never a false verdict" semantics. The dedicated SSH connect-failure row (exit 255 → `ssh_connect_failure`) is covered by `test_ssh_connect_failure_exit_255` in Task 8, which also asserts the redactor strips the configured `ssh_key_ref` from the connect-failure path.
+
+**Param-limit compliance:** `_assemble_probe_response` and `_probe_success` take `ctx` positionally and make every remaining parameter keyword-only (leading `*`), so each has exactly one positional param — within CLAUDE.md "Hard limits" §2 (≤5), which `just lint` does not enforce (ruff omits `PLR0913`).
 
 **Placeholder scan:** No TBD/TODO; every code step shows full code. The Task 7 handler intentionally raises `NotImplementedError` only as an explicit TDD intermediate, replaced in Task 8 Step 3.
 
