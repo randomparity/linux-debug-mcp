@@ -409,7 +409,11 @@ class ServerConfig(ConfigModel):
 
     @field_validator("build_profiles", "rootfs_profiles", "target_profiles", "debug_profiles", "test_suites")
     @classmethod
-    def profile_keys_match_names(cls, value: dict[str, ConfigModel], info: ValidationInfo) -> dict[str, ConfigModel]:
+    def profile_keys_match_names(
+        cls,
+        value: dict[str, BuildProfile | RootfsProfile | TargetProfile | DebugProfile | TestSuiteProfile],
+        info: ValidationInfo,
+    ) -> dict[str, BuildProfile | RootfsProfile | TargetProfile | DebugProfile | TestSuiteProfile]:
         for key, profile in value.items():
             if key != profile.name:
                 raise ValueError(f"{info.field_name} profile key must match profile name")
