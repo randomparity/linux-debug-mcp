@@ -692,26 +692,58 @@ def test_build_id_missing_fails_build(tmp_path: Path,
 def test_build_id_missing_failure_preserves_vmlinux_artifact(
     tmp_path: Path, stub_build_provider,
 ) -> None:
-    # Plan review finding 6: build artifacts MUST survive a build_id extraction
-    # failure so operators can diagnose why readelf came up empty without
-    # re-running the build. The provider hoists `_detect_artifacts` before the
-    # extraction call and re-raises with the artifacts attached; the handler
-    # threads `exc.artifacts` into the FAILED StepResult.
+    # Plan review finding 6 (R6-F2 rewrite): build artifacts MUST survive a
+    # build_id extraction failure so operators can diagnose why readelf came
+    # up empty without re-running the build. Round-6 review caught that the
+    # prior shape (patching `_extract_build_id` with
+    # `side_effect=BuildIdMissing(..., artifacts=fake_artifacts)`) was inert
+    # because the provider's catch arm at Step 4.5 *re-wraps* the exception
+    # with `artifacts=build_artifacts` from `self._detect_artifacts(...)` —
+    # the injected payload was unconditionally overwritten with whatever the
+    # on-disk detection returned (empty, in the original test environment).
+    #
+    # This rewrite exercises the FULL provider hoist + handler consume path:
+    # we mock at the deepest seam (`subprocess.run` inside `_extract_build_id`)
+    # so readelf returns cleanly but with no Build ID note, and we pre-create
+    # the artifacts that `self._detect_artifacts(plan, log_path, summary_path)`
+    # will discover on disk (paths per `local_kernel_build.py:334-342`). The
+    # provider's re-wrap then carries the real on-disk artifacts, and the
+    # handler at Step 4.7 threads them into the FAILED StepResult.
     store = ArtifactStore(artifact_root=tmp_path)
     manifest = store.create_run(RunRequest(run_id="r1"))
-    fake_artifacts = [
-        ArtifactRef(path="/tmp/vmlinux", kind="vmlinux"),
-        ArtifactRef(path="/tmp/build.log", kind="build-log"),
-    ]
+    # Pre-create the artifacts at the paths `_detect_artifacts` checks
+    # (see `local_kernel_build.py:334-342`: log_path, plan.output_path/".config",
+    # plan.output_path/"vmlinux"). Match `stub_build_provider`'s plan layout
+    # — see the fixture body for the exact attribute names (likely `last_plan`
+    # / `last_log_path` if the fixture follows `FakeRunner` at
+    # tests/test_local_kernel_build.py:95-133; if not, extend it minimally to
+    # record the last plan or compute the same paths the fixture's plan_build
+    # call produces).
+    output = stub_build_provider.last_plan.output_path
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "vmlinux").write_text("symbols", encoding="utf-8")
+    (output / ".config").write_text("CONFIG_X=y\n", encoding="utf-8")
+    log_path = stub_build_provider.last_log_path
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("build log", encoding="utf-8")
+
+    # Mock readelf to return cleanly but with no Build ID note. The provider's
+    # `_extract_build_id` will raise `BuildIdMissing`; the Step 4.5 arm will
+    # re-wrap it with `artifacts=self._detect_artifacts(...)`, which now sees
+    # the on-disk vmlinux + .config + build log.
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="no notes here\n", stderr="",
+    )
     with patch(
-        "linux_debug_mcp.providers.local_kernel_build._extract_build_id",
-        side_effect=BuildIdMissing("no Build ID note", artifacts=fake_artifacts),
+        "linux_debug_mcp.providers.local_kernel_build.subprocess.run",
+        return_value=fake,
     ):
         response = kernel_build_handler(
             artifact_root=tmp_path, run_id=manifest.run_id,
             provider=stub_build_provider,
         )
     assert response.ok is False
+    assert response.error.details["code"] == "build_id_missing"
     final = store.load_manifest(manifest.run_id)
     artifact_kinds = {a.kind for a in final.step_results["build"].artifacts}
     assert "vmlinux" in artifact_kinds
@@ -719,9 +751,42 @@ def test_build_id_missing_failure_preserves_vmlinux_artifact(
 ```
 
 If `ArtifactRef` is not yet imported in this test module, add it from
-`linux_debug_mcp.domain`. If no `stub_build_provider` fixture/helper exists in this file today, look at how the rest of `tests/test_local_kernel_build.py` exercises `kernel_build_handler` and copy that scaffolding — it most likely uses a `FakeKernelBuildProvider` defined at module scope. Match the existing convention; do not invent a new fake unless none exists.
+`linux_debug_mcp.domain`. `subprocess` must also be imported at the top of the
+test module (the R6-F2 rewrite mocks at the `subprocess.run` seam, not at
+`_extract_build_id`). If no `stub_build_provider` fixture/helper exists in this
+file today, look at how the rest of `tests/test_local_kernel_build.py`
+exercises `kernel_build_handler` and copy that scaffolding — it most likely
+uses a `FakeKernelBuildProvider` defined at module scope. Match the existing
+convention; do not invent a new fake unless none exists.
 
-Note on the test's patch shape: patching `_extract_build_id` directly bypasses the provider-side `_detect_artifacts` hoist (Step 4.5). The test instead constructs `BuildIdMissing(..., artifacts=fake_artifacts)` to simulate what Step 4.5 would have done — the assertion validates that the *handler* (Step 4.7) consumes `exc.artifacts`. A separate provider-integration test (e.g. an existing build-success test extended with a malformed vmlinux fixture) would exercise the Step 4.5 hoist directly; add one if the existing fixtures support it.
+If the fixture does not already record `last_plan` / `last_log_path` (the two
+attributes the R6-F2 test reads), pick **one** of these — do NOT silently
+assume the attribute exists:
+
+  (a) Match the existing `FakeRunner` pattern at
+  `tests/test_local_kernel_build.py:95-133` and have the test compute the
+  same paths the fixture's `plan_build` call produces (typically
+  `tmp_path / "runs" / "r1" / "build"` for `output_path` and
+  `tmp_path / "runs" / "r1" / "logs" / "build.log"` for `log_path`); or
+
+  (b) Extend the fixture minimally to record the last plan and log path so
+  the test can read them by attribute. This is the cleaner option if multiple
+  later tests want the same anchors.
+
+Note on the patch shape (R6-F2 framing): the round-6 adversarial review
+caught that mocking `_extract_build_id` directly bypassed the
+provider-side `_detect_artifacts` hoist — the provider's
+`except BuildIdMissing as exc: raise BuildIdMissing(str(exc),
+artifacts=build_artifacts) from exc` arm at Step 4.5 unconditionally
+overrode whatever `artifacts=` payload the mocked exception carried,
+replacing it with whatever `_detect_artifacts(plan, log_path, summary_path)`
+returned on disk (empty list in the original tmp_path environment). The
+rewrite mocks at the `subprocess.run` seam *inside* `_extract_build_id` and
+pre-creates the discoverable artifacts on disk, so the full hoist +
+re-wrap + handler-consume chain is exercised end-to-end. A second
+provider-integration test (e.g. an existing build-success test extended with
+a malformed vmlinux fixture) would exercise the same hoist from a slightly
+different angle; add one if the existing fixtures support it.
 
 Run: `uv run python -m pytest tests/test_local_kernel_build.py::test_readelf_unavailable_fails_build tests/test_local_kernel_build.py::test_build_id_missing_fails_build -v`
 
@@ -1379,7 +1444,13 @@ class SshRunner(Protocol):
 
 - [ ] **Step 8.5.3: Extend the production implementer**
 
-In `src/linux_debug_mcp/providers/local_ssh_tests.py:94-105+`, add `stdin: str | None = None` to `SubprocessSshRunner.run` and route it to the underlying `subprocess.Popen`/`subprocess.run`. Read the current body first — it is a `Popen` loop with `stdout_file`/`stderr_file` handles and a `cancel` check, not a one-shot `subprocess.run`. The minimal change is to pass `stdin=subprocess.PIPE` and call `proc.communicate(input=stdin)` when `stdin is not None`; otherwise fall through to today's behavior. Confirm by reading the existing `Popen` invocation and matching its IO semantics.
+In `src/linux_debug_mcp/providers/local_ssh_tests.py:94-148`, add `stdin: str | None = None` to `SubprocessSshRunner.run` and write it to the child's stdin **before** the existing poll-and-cancel loop. Read the current body first to confirm the layout — it is a `Popen` invocation with `stdout_file`/`stderr_file` handles followed by a 0.1-second `proc.wait(timeout=0.1)` polling loop that handles cancel and timeout via `os.killpg(...)`. No `stdin` is wired today.
+
+The round-6 review (R6-F4) caught that the prior draft left this as a `pass # ← engineer: integrate per the comment above` placeholder and waved at a writer-thread design. That is not necessary for the spec'd payload size:
+
+- The wrapper text is bounded by `SCRIPT_BYTE_CAP` (the rendered Python wrapper is the user script — capped at 256 KiB per spec §3.1 — plus a fixed prelude of low single-digit KiB). The rendered wrapper sits comfortably under 264 KiB total, and the **typical** wrapper is much smaller (user scripts are usually a few KiB).
+- Linux's default pipe buffer is 64 KiB. A synchronous `proc.stdin.write(stdin); proc.stdin.close()` before the polling loop is non-blocking when the rendered wrapper fits in the pipe buffer.
+- **Caveat for the implementer:** the user script's 256 KiB cap means the rendered wrapper *can* exceed the 64 KiB pipe buffer in the worst case. If a future version of the wrapper template grows the prelude past ~60 KiB, or if the spec's user-script cap is raised, the synchronous write below will block until the remote starts reading and the polling loop is delayed for that duration. For today's spec the worst-case write *can* exceed 64 KiB; the write blocks until the remote drains the pipe, but the poll loop has not started yet so cancel/timeout simply wait for the write to finish (≤ the user-script cap). If this latency ever becomes a real problem in practice, the fix is a short writer thread that `close()`s stdin and lets the existing poll loop run unchanged. Today's payload sizes do not warrant that complexity.
 
 ```python
 def run(
@@ -1390,28 +1461,77 @@ def run(
     stdout_path: Path,
     stderr_path: Path,
     cancel: threading.Event | None = None,
-    stdin: str | None = None,
+    stdin: str | None = None,           # R6-F4: spec §4.1 wrapper-on-stdin API
 ) -> SshCommandResult:
-    # (existing setup block — keep unchanged)
-    proc = subprocess.Popen(
-        argv,
-        stdout=stdout_file,
-        stderr=stderr_file,
-        stdin=subprocess.PIPE if stdin is not None else None,
-        text=True,
-        # (existing Popen kwargs — keep unchanged)
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stderr_path.parent.mkdir(parents=True, exist_ok=True)
+    cancelled_flag = False
+    timed_out_flag = False
+    with (
+        stdout_path.open("w", encoding="utf-8") as stdout_file,
+        stderr_path.open("w", encoding="utf-8") as stderr_file,
+    ):
+        proc = subprocess.Popen(
+            argv,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            stdin=subprocess.PIPE if stdin is not None else None,
+            text=True,
+            shell=False,
+            start_new_session=True,
+        )
+        # R6-F4: write the wrapper on stdin and close so the remote can EOF
+        # and begin executing. The wrapper is bounded by SCRIPT_BYTE_CAP +
+        # prelude (see the prose above for the size analysis). For today's
+        # spec the write is short-lived; the existing poll-and-cancel loop
+        # below remains the single source of truth for cancel/timeout. If the
+        # remote exits mid-write (unusual — readiness has already been gated
+        # by admission), BrokenPipeError is suppressed so the existing poll
+        # loop reports the real process outcome (nonzero exit / signal via
+        # the killpg path) instead of masking it with a stdin error.
+        if stdin is not None:
+            assert proc.stdin is not None
+            try:
+                proc.stdin.write(stdin)
+            except BrokenPipeError:
+                pass
+            finally:
+                with contextlib.suppress(Exception):
+                    proc.stdin.close()
+        ticks = 0
+        while True:
+            try:
+                proc.wait(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                ticks += 1
+                if cancel is not None and cancel.is_set():
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
+                    cancelled_flag = True
+                    break
+                if ticks * 0.1 >= timeout:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
+                    timed_out_flag = True
+                    break
+    # existing tail — unchanged: -1 sentinel on cancel/timeout, build
+    # SshCommandResult from exit status and snippet reads.
+    exit_status = -1 if (cancelled_flag or timed_out_flag) else proc.returncode
+    return SshCommandResult(
+        exit_status=exit_status,
+        stdout_snippet=self._read_snippet(stdout_path),
+        stderr_snippet=self._read_snippet(stderr_path),
+        timed_out=timed_out_flag,
+        cancelled=cancelled_flag,
     )
-    if stdin is not None:
-        # Write the wrapper on stdin and close it so the remote can EOF.
-        # `communicate` blocks for the process — the existing cancel loop
-        # must be reconciled with this. Read the current body before
-        # blindly substituting `communicate`; the cleanest path is a
-        # short writer thread that closes stdin and lets the existing
-        # poll/cancel loop finish unchanged.
-        pass  # ← engineer: integrate per the comment above
 ```
 
-The `pass` placeholder in the body is an integration note, not a literal: read the existing `SubprocessSshRunner.run` body and pick the integration that preserves the cancel-and-timeout behavior. Keep the change small.
+`contextlib` must be importable from the top of `local_ssh_tests.py`. Verify with `rg '^import contextlib' src/linux_debug_mcp/providers/local_ssh_tests.py`. If the module does not already import it, add `import contextlib` near the existing `import os`/`import shlex`/`import shutil` block at the top of the file as part of this step's edit.
+
+The `BrokenPipeError` suppression is **intentional** — the existing polling loop will see the process exit (cancel / timeout / normal) and report it correctly via the existing `exit_status` / `timed_out_flag` / `cancelled_flag` plumbing. Surfacing a stdin write error would mask the real process outcome and confuse the handler-side branching in Task 9.7.
+
+The fall-through case (`stdin is None`) preserves today's behavior bit-for-bit: `subprocess.PIPE` is not wired, the stdin block does not execute, and the poll loop runs unchanged. The pre-R6-F4 `pass` placeholder has been removed.
 
 - [ ] **Step 8.5.4: Update every fake**
 
@@ -1473,6 +1593,117 @@ git commit -m "transport: extend SshRunner.run protocol with stdin (+ fix test_b
 ```
 
 Keep this commit separate from Task 9's handler change so a future `git bisect` can attribute regressions cleanly (transport widening vs. handler logic).
+
+---
+
+## Task 8.6: Lift SSH argv construction to a module-level helper (R6-F5)
+
+**Goal:** Single source of truth for SSH argv shape. Today the production argv lives at `LocalSshTestProvider._ssh_argv` (`src/linux_debug_mcp/providers/local_ssh_tests.py:381-414`); the round-6 review (R6-F5) caught that Step 9.3 step 5 and Step 9.6 of the introspect handler reference `resolved_rootfs.ssh_args()` / `resolved_rootfs.ssh_argv()` — methods that do not exist on `RootfsProfile` (confirmed at `src/linux_debug_mcp/config.py:254-277`: the Pydantic model has fields only, no methods). Both call sites must instead delegate to the lifted helper.
+
+**Files:**
+- Modify: `src/linux_debug_mcp/providers/local_ssh_tests.py` (lift `_ssh_argv` to module scope; update existing call sites)
+
+- [ ] **Step 8.6.1: Lift `_ssh_argv` to a module-level function**
+
+Extract the body of `LocalSshTestProvider._ssh_argv` (currently at `local_ssh_tests.py:381-414`) into a module-level function above the class. The current method already takes no instance state (verify with a quick read — the body references only `rootfs_profile`, `known_hosts_path`, `command`, `command_timeout`), so the lift is a pure relocation with no logic change:
+
+```python
+def build_ssh_argv(
+    *,
+    rootfs_profile: RootfsProfile,
+    known_hosts_path: Path,
+    command: list[str],
+    command_timeout: int,
+) -> list[str]:
+    """Construct the canonical `ssh` argv for invoking *command* on the
+    rootfs's remote shell. Single source of truth for SSH argv shape — both
+    `LocalSshTestProvider` and `debug_introspect_run_handler` call this.
+
+    Spec §5.2 step 5 + step 9: the introspect handler reuses the same
+    transport that `target.run_tests` already exercises, so the argv layout
+    (BatchMode, UserKnownHostsFile, ConnectTimeout, StrictHostKeyChecking,
+    sorted extra `-o` options, `-p <port>`, optional `-i <key_ref>`, and
+    `-- user@host <quoted-command>`) is identical across both callers. R6-F5
+    eliminated the prior plan's fictional `RootfsProfile.ssh_args()` /
+    `ssh_argv()` method references.
+    """
+    configured_timeout = rootfs_profile.ssh_options.get("ConnectTimeout")
+    if configured_timeout is not None and int(configured_timeout) > command_timeout:
+        raise ValueError("ConnectTimeout cannot exceed command timeout")
+    connect_timeout = configured_timeout or str(min(command_timeout, 10))
+    strict_host_key_checking = rootfs_profile.ssh_options.get(
+        "StrictHostKeyChecking", "accept-new",
+    )
+    ssh_argv = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", f"UserKnownHostsFile={known_hosts_path}",
+        "-o", f"ConnectTimeout={connect_timeout}",
+        "-o", f"StrictHostKeyChecking={strict_host_key_checking}",
+    ]
+    for key in sorted(rootfs_profile.ssh_options):
+        if key in {"ConnectTimeout", "StrictHostKeyChecking"}:
+            continue
+        ssh_argv.extend(["-o", f"{key}={rootfs_profile.ssh_options[key]}"])
+    ssh_argv.extend(["-p", str(rootfs_profile.ssh_port)])
+    if rootfs_profile.ssh_key_ref:
+        ssh_argv.extend(["-i", rootfs_profile.ssh_key_ref])
+    remote_command = " ".join(shlex.quote(item) for item in command)
+    ssh_argv.extend([
+        "--",
+        f"{rootfs_profile.ssh_user}@{rootfs_profile.ssh_host}",
+        remote_command,
+    ])
+    return ssh_argv
+```
+
+The body is the verbatim contents of today's `_ssh_argv` method with `self.` references stripped (none exist; the current method already takes only keyword arguments). Re-read `local_ssh_tests.py:381-414` to confirm before lifting; if any line uses `self`, surface it as a blocker rather than guessing.
+
+- [ ] **Step 8.6.2: Delete the instance method and update its call sites**
+
+Two options:
+
+  (a) Delete `LocalSshTestProvider._ssh_argv` entirely and update both existing call sites (`local_ssh_tests.py:~343` and `:~368` — verify with `rg 'self\._ssh_argv' src/linux_debug_mcp/providers/local_ssh_tests.py`) to call `build_ssh_argv(...)` directly.
+
+  (b) Replace `_ssh_argv` with a thin shim that delegates to `build_ssh_argv`. Discouraged — the shim adds an unused indirection layer.
+
+Pick (a). Option (b) is listed only so the round-6 reviewer has the rejected alternative on file (see CLAUDE.md ADR guidance — when an obvious alternative exists, name it and explain why it was rejected). The shim version is rejected because the indirection produces zero behavioural change while masking the actual call graph; deleting the method and updating two call sites is a smaller, more reviewable diff.
+
+```bash
+# Before the edit, confirm the call-site inventory.
+rg -n 'self\._ssh_argv' src/linux_debug_mcp/providers/local_ssh_tests.py
+```
+
+Each match becomes:
+
+```python
+build_ssh_argv(
+    rootfs_profile=...,
+    known_hosts_path=...,
+    command=[...],
+    command_timeout=...,
+)
+```
+
+with the same keyword-argument values. The existing test coverage on `LocalSshTestProvider` continues to exercise the helper through these call sites — no provider tests need to change.
+
+- [ ] **Step 8.6.3: `ty check` gate + full suite**
+
+```bash
+uv run ty check src
+uv run python -m pytest -q
+```
+
+Both must be green before moving on to Task 9. If `ty check` flags an import cycle (e.g. the introspect handler in Task 9 will eventually import `build_ssh_argv` from `local_ssh_tests`), confirm the import is one-way — `server.py → local_ssh_tests` is fine; the reverse is not.
+
+- [ ] **Step 8.6.4: Commit as a single, isolated change**
+
+```bash
+git add src/linux_debug_mcp/providers/local_ssh_tests.py
+git commit -m "transport: lift _ssh_argv to module-level build_ssh_argv helper"
+```
+
+Keep this commit separate from Task 9's handler change. The introspect handler in Task 9 imports `build_ssh_argv` from this module; a future `git bisect` should attribute any regression cleanly to "helper lift" vs. "handler logic" vs. "transport widening".
 
 ---
 
@@ -1541,6 +1772,7 @@ from linux_debug_mcp.providers.local_drgn_introspect import (
     user_script_sha256,
     SCRIPT_BYTE_CAP,
 )
+from linux_debug_mcp.providers.local_ssh_tests import build_ssh_argv  # R6-F5
 from linux_debug_mcp.config import (
     MAX_INTROSPECT_CALLS_PER_RUN,
     PRELUDE_WARNING_FRACTION_PCT,
@@ -1645,15 +1877,19 @@ if resolved_rootfs.ssh_user != "root":
             details={"code": "sudo_requires_password"},
         )
 ```
-   If a `_build_sudo_preflight_argv`-style helper doesn't exist in `local_ssh_tests.py`, build the argv inline:
+   If a `_build_sudo_preflight_argv`-style helper doesn't exist in `local_ssh_tests.py`, build the argv via the module-level `build_ssh_argv` helper introduced in Task 8.6 (R6-F5 fix — `RootfsProfile` does NOT have a `ssh_args()` / `ssh_argv()` method, see `src/linux_debug_mcp/config.py:254-277` — the round-6 review caught the prior plan's reference to those non-existent methods). `build_ssh_argv` is already imported in Step 9.2's import block:
    ```python
-   sudo_argv = [
-       "ssh", *resolved_rootfs.ssh_args(),  # however the existing code constructs args
-       f"{resolved_rootfs.ssh_user}@{resolved_rootfs.ssh_host}",
-       "sudo", "-n", "true",
-   ]
+   # known_hosts_path comes from the same place target_run_tests_handler
+   # reads it from — `<run>/sensitive/known_hosts` per the existing test
+   # transport. Confirm by reading target_run_tests_handler before wiring.
+   sudo_argv = build_ssh_argv(
+       rootfs_profile=resolved_rootfs,
+       known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
+       command=["sudo", "-n", "true"],
+       command_timeout=5,
+   )
    ```
-   Match whatever pattern `target_run_tests_handler` uses today.
+   The returned argv already starts with `"ssh"` and ends with `-- user@host <quoted-command>`; do not prepend an extra `"ssh"` or append a separate `user@host` token. Match whatever pattern `target_run_tests_handler` uses today for the `known_hosts_path` source.
 
 The plain code listing above is dense — review §5.2 again to ensure no step is skipped. The order is load-bearing (preflight cost is paid only after cheap checks succeed).
 
@@ -1684,60 +1920,132 @@ except AdmissionError as exc:
 
 Reuse `_admission_error_to_failure` if it exists in `server.py`; otherwise inline a mapping over `exc.code` (`target_halted`, `execution_state_unknown`, `stale_handle`) to the §3.3 row. Look at how `target_run_tests_handler` maps admission errors (`server.py:~1560`).
 
-- [ ] **Step 9.5: Implement steps 7–8 — mint `call_id`, render wrapper, persist artifacts**
+- [ ] **Step 9.5: Implement steps 7–8 — mint `call_id`, render wrapper, persist artifacts (with R6-F3 admission rollback envelope)**
+
+R6-F3 finding: Step 9.4 acquired an admission handle. Steps 9.5–9.10 **must** either run `admission.complete(handle)` (happy path, Step 9.6) or `admission.rollback(handle)` on every exit — otherwise the handle lingers in `admission._bindings` and blocks any subsequent `reopen()` / `admit()` with `bindings_outstanding` (`src/linux_debug_mcp/coordination/admission.py:845,902-906`). The prior plan's `WrapperRenderError` arm returned `ToolResponse.failure(...)` without rolling back, leaving the handle leaked.
+
+This step adopts the canonical envelope from `target_run_tests_handler` (`src/linux_debug_mcp/server.py:1588-1620`): an outer `try/except Exception` arm guards Steps 9.5–9.10 against any unhandled exception between admit and complete, and an inner `try/except WrapperRenderError` arm cleans up the orphan directories + writes a forensic `StepResult` + returns a typed failure with `code="wrapper_render_error"` (R6-F3 new error code — see the §3.3 note below). The outer arm exists *only* to roll back admission on programmer-error exceptions; it then re-raises, so the standard outer-handler error path produces the response.
 
 Per spec §5.2 steps 7–8:
 ```python
-call_id = uuid.uuid4().hex
-agent_dir = store.run_dir(run_id) / "debug" / "introspect" / call_id
-sensitive_dir = (store.run_dir(run_id) / "sensitive"
-                 / "debug" / "introspect" / call_id)
-agent_dir.mkdir(parents=True, mode=0o700)
-sensitive_dir.mkdir(parents=True, mode=0o700)
-# Defensive chmod — parent-of-parent under sensitive/ may have inherited
-# umask if the intermediate `debug/` dir was created here for the first time.
-sensitive_dir.chmod(0o700)
-sensitive_dir.parent.chmod(0o700)
-sensitive_dir.parent.parent.chmod(0o700)
-
+# R6-F3: Step 9.4 admitted us — Steps 9.5–9.10 must always complete (Step 9.6
+# happy path) or roll back (this envelope) the admission handle. Mirrors the
+# pattern at server.py:1588-1620 in target_run_tests_handler.
 try:
-    wrapper = render_wrapper(
-        user_script=request.script,
-        expected_build_id=build_id,
-        call_id=call_id,
-    )
-    skeleton = render_wrapper_skeleton(
-        expected_build_id=build_id,
-        call_id=call_id,
-        user_script_sha256_hex=user_script_sha256(request.script),
-    )
-except WrapperRenderError as exc:
-    # provenance_corrupt is already caught at step 4; reaching here implies
-    # a programmer error (call_id regex). Surface as INFRASTRUCTURE_FAILURE.
-    return ToolResponse.failure(
-        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-        run_id=run_id, message=f"wrapper render error: {exc}",
-        details={"code": "wrapper_crash"},
+    call_id = uuid.uuid4().hex
+    agent_dir = store.run_dir(run_id) / "debug" / "introspect" / call_id
+    sensitive_dir = (store.run_dir(run_id) / "sensitive"
+                     / "debug" / "introspect" / call_id)
+    agent_dir.mkdir(parents=True, mode=0o700)
+    sensitive_dir.mkdir(parents=True, mode=0o700)
+    # Defensive chmod — parent-of-parent under sensitive/ may have inherited
+    # umask if the intermediate `debug/` dir was created here for the first time.
+    sensitive_dir.chmod(0o700)
+    sensitive_dir.parent.chmod(0o700)
+    sensitive_dir.parent.parent.chmod(0o700)
+
+    try:
+        wrapper = render_wrapper(
+            user_script=request.script,
+            expected_build_id=build_id,
+            call_id=call_id,
+        )
+        skeleton = render_wrapper_skeleton(
+            expected_build_id=build_id,
+            call_id=call_id,
+            user_script_sha256_hex=user_script_sha256(request.script),
+        )
+    except WrapperRenderError as exc:
+        # R6-F3: this is the host-side render failure (`provenance_corrupt` is
+        # already caught at step 4; reaching here implies a programmer error
+        # — call_id regex, template substitution, etc.). The wrapper never
+        # ran on the target, so there is no JSON document, no stdout, and no
+        # stderr to redact. We must:
+        #   (a) Release the admission handle so the target unblocks for the
+        #       next caller. Guarded with `contextlib.suppress(Exception)` so a
+        #       disposal hiccup never masks the original render-failure detail
+        #       (mirror of server.py:1597-1599).
+        #   (b) Remove the just-created `agent_dir` and `sensitive_dir` so the
+        #       run's debug/introspect/ tree does not accumulate empty
+        #       directories the operator would have to clean up manually.
+        #       `shutil.rmtree(..., ignore_errors=True)` matches the only
+        #       existing rmtree usage in the codebase (artifacts/store.py:83,87
+        #       in the create_run error path); see CLAUDE.md "Replace, don't
+        #       deprecate".
+        #   (c) Write a FAILED StepResult under `introspect:<call_id>` so the
+        #       manifest carries a forensic record. The step shape is direct
+        #       (not via `_record_introspect_failure`) because that helper
+        #       persists stderr/stdout files we never produced — see the note
+        #       in Step 9.7's helper docstring.
+        with contextlib.suppress(Exception):
+            admission.rollback(handle)
+        shutil.rmtree(agent_dir, ignore_errors=True)
+        shutil.rmtree(sensitive_dir, ignore_errors=True)
+        failed = StepResult(
+            step_name=f"introspect:{call_id}",
+            status=StepStatus.FAILED,
+            summary=f"wrapper render error: {exc}",
+            artifacts=[],
+            details={
+                "call_id": call_id,
+                "code": "wrapper_render_error",
+                "ssh_user": resolved_rootfs.ssh_user,
+                "outcome_status": None,
+                "timeout_seconds": request.timeout_seconds,
+                "duration_ms": 0,           # SSH was never invoked
+                "wrapper_exit_code": None,
+            },
+        )
+        _record_terminal_introspect_result(store, run_id, failed)
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"wrapper render error: {exc}",
+            details={"code": "wrapper_render_error", "call_id": call_id},
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+
+    (sensitive_dir / "wrapper.py").write_text(wrapper, encoding="utf-8")
+    (sensitive_dir / "wrapper.py").chmod(0o600)
+    (agent_dir / "wrapper.skeleton.py").write_text(skeleton, encoding="utf-8")
+
+    redacted_request = redactor.redact_value(request.model_dump(mode="json"))
+    (agent_dir / "request.json").write_text(
+        json.dumps(redacted_request), encoding="utf-8",
     )
 
-(sensitive_dir / "wrapper.py").write_text(wrapper, encoding="utf-8")
-(sensitive_dir / "wrapper.py").chmod(0o600)
-(agent_dir / "wrapper.skeleton.py").write_text(skeleton, encoding="utf-8")
-
-redacted_request = redactor.redact_value(request.model_dump(mode="json"))
-(agent_dir / "request.json").write_text(json.dumps(redacted_request), encoding="utf-8")
+    # Steps 9.6–9.10 follow inside this outer `try` — the `except Exception`
+    # arm at the bottom of Step 9.10 rolls back the admission handle and
+    # re-raises so an unhandled exception between here and the happy-path
+    # `admission.complete(handle)` (Step 9.6) does not leak the handle.
 ```
+
+**§3.3 error-code addendum:** R6-F3 introduces a new error code `wrapper_render_error`, distinct from the existing `wrapper_crash`:
+
+  - `wrapper_render_error` — the host-side `render_wrapper(...)` raised before SSH was ever invoked. No JSON document was ever expected, no agent stdout/stderr exists. ErrorCategory: `INFRASTRUCTURE_FAILURE`. Surfaces in `details["code"]` and the FAILED `StepResult.details["code"]`.
+  - `wrapper_crash` — the wrapper ran on the target and exited without producing a parseable JSON document on stdout (Step 9.7's `parsed is None` branch). ErrorCategory: `INFRASTRUCTURE_FAILURE`. This is unchanged.
+
+When implementing this plan, append the `wrapper_render_error` row to the spec's §3.3 error-code table. The plan only references §3.3 inline (see Step 9.3 step 3, Step 9.4); update those references to acknowledge the new code so future readers do not assume the taxonomy is closed.
+
+**`contextlib` import:** R6-F3 uses `contextlib.suppress(Exception)`. `server.py` already imports `contextlib` (verify with `rg '^import contextlib' src/linux_debug_mcp/server.py`); if it does not, add `import contextlib` to the existing import block as part of this step.
+
+**`shutil` import:** Same check — `shutil` must be available in `server.py`. Verify with `rg '^import shutil' src/linux_debug_mcp/server.py`; add if missing.
 
 - [ ] **Step 9.6: Implement steps 9–10 — SSH invocation + cancellation watcher**
 
-Per spec §5.2 steps 9–10 (cancellation watcher is **verbatim** from `_run_admitted` in `target.run_tests`):
+Per spec §5.2 steps 9–10 (cancellation watcher is **verbatim** from `_run_admitted` in `target.run_tests`). The argv is built via the module-level helper introduced in Task 8.6 (R6-F5 — `resolved_rootfs.ssh_argv()` does not exist). `build_ssh_argv` is already imported in Step 9.2's import block:
 ```python
 user_timeout = request.timeout_seconds
-ssh_argv = [
-    "ssh", *resolved_rootfs.ssh_argv(),
-    f"{resolved_rootfs.ssh_user}@{resolved_rootfs.ssh_host}",
-    "--", f"timeout --kill-after=2s {user_timeout}s sudo python3 -",
-]
+# Match the known_hosts_path source target_run_tests_handler uses today
+# (`<run>/sensitive/known_hosts` per the existing transport — re-read that
+# handler if the path differs).
+ssh_argv = build_ssh_argv(
+    rootfs_profile=resolved_rootfs,
+    known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
+    command=["timeout", "--kill-after=2s", f"{user_timeout}s",
+             "sudo", "python3", "-"],
+    command_timeout=user_timeout + 10,
+)
 stdout_path = agent_dir / "stdout.raw.tmp"
 stderr_path = agent_dir / "stderr.raw.tmp"
 
@@ -1805,6 +2113,12 @@ def _record_introspect_failure(
     - `ssh_user` is required (no "unknown" placeholder) so the failure record
       is always actionable. The previous `extra_details` escape hatch has been
       removed — every field every caller writes now lives in the signature.
+
+    Note (R6-F3): the `WrapperRenderError` path in Step 9.5 does NOT call
+    this helper — the render failure happens before SSH runs, so there is no
+    stderr/stdout text to redact and no `stderr.log` / `stdout.json` to
+    persist. That path writes the FAILED `StepResult` directly. See Step 9.5
+    for the rationale and the direct-write code shape.
     """
     (agent_dir / "stderr.log").write_text(
         redactor.redact_text(raw_stderr), encoding="utf-8"
@@ -2058,37 +2372,55 @@ def _record_terminal_introspect_result(
             delay *= 2
 ```
 
-- [ ] **Step 9.10: Build the success `ToolResponse`**
+- [ ] **Step 9.10: Build the success `ToolResponse` and close the R6-F3 envelope**
 
-Final piece:
+Final piece. Note the indentation: the `return ToolResponse.success(...)` and its inputs all live inside the outer `try:` opened at the top of Step 9.5. After the `return`, the matching `except Exception` arm closes the envelope and rolls back the admission handle if any unhandled exception escaped Steps 9.5–9.10 between admit and the happy-path `admission.complete(handle)` in Step 9.6:
+
 ```python
-public_artifacts = [a for a in artifacts if not a.sensitive]
-return ToolResponse.success(
-    summary=f"introspect call {call_id[:8]} ok",
-    run_id=run_id,
-    status=StepStatus.SUCCEEDED,
-    artifacts=public_artifacts,
-    suggested_next_actions=["artifacts.get_manifest", "debug.introspect.run"],
-    data={
-        "call_id": call_id,
-        "status": status,
-        "outcome": outcome,
-        "emits": emits,
-        "user_stdout_snippet": user_stdout_snippet,
-        "drgn_stderr_snippet": drgn_stderr_snippet,
-        "build_id": redacted_payload.get("build_id"),
-        "truncated": truncated,
-        "started_at": started_at.isoformat(),
-        "finished_at": finished_at.isoformat(),
-        "duration_ms": duration_ms,
-        "prelude_ms": prelude_ms,
-        "artifacts": [a.model_dump(mode="json") for a in public_artifacts],
-        "diagnostic": diagnostic,
-    },
-)
+    public_artifacts = [a for a in artifacts if not a.sensitive]
+    return ToolResponse.success(
+        summary=f"introspect call {call_id[:8]} ok",
+        run_id=run_id,
+        status=StepStatus.SUCCEEDED,
+        artifacts=public_artifacts,
+        suggested_next_actions=["artifacts.get_manifest", "debug.introspect.run"],
+        data={
+            "call_id": call_id,
+            "status": status,
+            "outcome": outcome,
+            "emits": emits,
+            "user_stdout_snippet": user_stdout_snippet,
+            "drgn_stderr_snippet": drgn_stderr_snippet,
+            "build_id": redacted_payload.get("build_id"),
+            "truncated": truncated,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "duration_ms": duration_ms,
+            "prelude_ms": prelude_ms,
+            "artifacts": [a.model_dump(mode="json") for a in public_artifacts],
+            "diagnostic": diagnostic,
+        },
+    )
+
+except Exception:
+    # R6-F3: any unhandled exception between admit (Step 9.4) and
+    # complete()/rollback() must release the admission handle or it lingers
+    # in admission._bindings and blocks subsequent admit() calls with
+    # `bindings_outstanding`. Guarded with contextlib.suppress so a disposal
+    # hiccup never masks the original exception detail (mirror of
+    # server.py:1614-1620). Re-raise so the outer handler error path produces
+    # the response — this arm exists *only* to roll back admission, not to
+    # convert the exception to a typed failure.
+    with contextlib.suppress(Exception):
+        admission.rollback(handle)
+    raise
 ```
 
+The implementer must thread the indentation correctly: every code block in Steps 9.5–9.10 is one level deeper than the surrounding handler body because they all live inside the outer `try:` opened at Step 9.5. The `except Exception:` above is the matching tail; once it lands, the handler structure is closed.
+
 Verify `ToolResponse.success` accepts a `data` dict on inspection of `domain.py:209` — it does. The `data` dict is the agent-facing payload.
+
+The `WrapperRenderError` arm in Step 9.5 short-circuits with its own typed failure (after rollback + cleanup); it does NOT reach this outer `except Exception`. Step 9.6's `admission.complete(handle)` happens on the happy SSH path; on AdmissionError it returns via `_admission_error_to_failure` without re-raising — that path does not reach the outer envelope either. The outer arm therefore catches only programmer-error exceptions (broken invariants, unhandled provider crashes).
 
 - [ ] **Step 9.11: Lint, type-check, commit**
 
@@ -2272,6 +2604,10 @@ class FakeAdmissionService:
     admit_raises: BaseException | None = None
     complete_raises: BaseException | None = None
     handle: FakeAdmissionHandle = field(default_factory=FakeAdmissionHandle)
+    # R6-F3: track rollback() invocations so the
+    # test_wrapper_render_error_rolls_back_admission test below can assert
+    # the orphan admission handle was deregistered.
+    rollback_calls: list[FakeAdmissionHandle] = field(default_factory=list)
 
     def current_snapshot(self, target_key):
         return self.snapshot
@@ -2285,6 +2621,12 @@ class FakeAdmissionService:
     def complete(self, handle):
         if self.complete_raises is not None:
             raise self.complete_raises
+
+    def rollback(self, handle) -> None:
+        # R6-F3: real AdmissionService.rollback(handle) deregisters the
+        # admitted ssh-tier handle (coordination/admission.py:902-906). The
+        # fake just records the call so tests can assert it happened.
+        self.rollback_calls.append(handle)
 
 
 def _make_request(run_id: str, **overrides) -> DebugIntrospectRunRequest:
@@ -2376,11 +2718,14 @@ def test_provenance_missing_when_manifest_lacks_build_id(tmp_path: Path) -> None
     )
     assert response.ok is False
     assert response.error.details["code"] == "provenance_missing"
-    # Plan review finding 3: the diagnostic must point at `kernel.create_run`,
-    # NOT `force_rebuild` (which is rejected at server.py:942-947) and NOT
-    # "rerun kernel.build" (which is a no-op on SUCCEEDED at server.py:957).
+    # Plan review finding 3 (R6-F1 refinement): the diagnostic must direct the
+    # operator at `kernel.create_run` as the recovery action. The explanatory
+    # mention of `force_rebuild` in the message body is intentional — it tells
+    # operators *why* a rebuild flag is not a path forward (the message is
+    # operator-facing, and naming the rejected flag is more useful than hiding
+    # it). The previous negative substring assertion has been removed because
+    # it contradicted the message it was meant to guard.
     assert "kernel.create_run" in response.error.message
-    assert "force_rebuild" not in response.error.message
 
 
 def test_malformed_build_id_in_manifest_rejected(tmp_path: Path) -> None:
@@ -2754,6 +3099,77 @@ def test_budget_soft_cap_overshoot_under_concurrency(
     assert response3.error.details["code"] == "manifest_call_budget_exhausted"
     assert ssh3.calls == []
 ```
+
+**R6-F3 companion test — `test_wrapper_render_error_rolls_back_admission`.** This is not in spec §9.1 (the round-6 review surfaced it after the spec was frozen) but is required to lock in the R6-F3 cleanup envelope on Step 9.5's `WrapperRenderError` arm. Patch `render_wrapper` to raise `WrapperRenderError`, then assert all three cleanup obligations were met:
+
+```python
+def test_wrapper_render_error_rolls_back_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # R6-F3: the WrapperRenderError arm in Step 9.5 must (a) release the
+    # admission handle, (b) clean up the orphan agent_dir + sensitive_dir,
+    # and (c) leave a forensic FAILED StepResult under introspect:<call_id>
+    # so the operator can trace the failure via `artifacts.get_manifest`.
+    from linux_debug_mcp.providers.local_drgn_introspect import (
+        WrapperRenderError,
+    )
+
+    def _boom(**_kwargs):
+        raise WrapperRenderError("test forced render failure")
+
+    monkeypatch.setattr(
+        "linux_debug_mcp.server.render_wrapper", _boom,
+    )
+
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    admission = FakeAdmissionService(snapshot=_make_snapshot(run_id))
+    ssh = FakeSshRunner()
+    response = debug_introspect_run_handler(
+        _make_request(run_id),
+        artifact_root=tmp_path,
+        target_profiles=targets, rootfs_profiles=rootfs, debug_profiles=debug,
+        ssh_runner=ssh, admission=admission,
+    )
+
+    # (a) Admission handle was rolled back — the orphan would otherwise leak
+    # in admission._bindings (see coordination/admission.py:902-906).
+    assert admission.rollback_calls == [admission.handle]
+
+    # (b) Both orphan directories were removed — no stray empty dirs accumulate
+    # in the run's debug/introspect/ tree across repeated render failures.
+    intro_root = store.run_dir(run_id) / "debug" / "introspect"
+    sensitive_intro_root = (store.run_dir(run_id) / "sensitive"
+                            / "debug" / "introspect")
+    # call_id is one level under intro_root; expect zero subdirs.
+    if intro_root.exists():
+        assert list(intro_root.iterdir()) == []
+    if sensitive_intro_root.exists():
+        assert list(sensitive_intro_root.iterdir()) == []
+
+    # (c) Forensic FAILED StepResult is recorded under introspect:<call_id>
+    # with the new R6-F3 code so the operator can trace via the manifest.
+    manifest = store.load_manifest(run_id)
+    introspect_steps = {
+        name: result
+        for name, result in manifest.step_results.items()
+        if name.startswith("introspect:")
+    }
+    assert len(introspect_steps) == 1, introspect_steps
+    name, step = next(iter(introspect_steps.items()))
+    assert step.status == StepStatus.FAILED
+    assert step.details["code"] == "wrapper_render_error"
+    # The recorded call_id must match the one the response surfaces so the
+    # operator can correlate the response with the manifest entry.
+    call_id_in_step_name = name[len("introspect:"):]
+    assert step.details["call_id"] == call_id_in_step_name
+    assert response.error.details["code"] == "wrapper_render_error"
+    assert response.error.details["call_id"] == call_id_in_step_name
+    # The wrapper never ran on the target — SSH must not have been called.
+    assert ssh.calls == []
+```
+
+If `_bootstrap_run_with_build`, `_profiles`, or `_make_snapshot` are not yet defined in the file when this test is added, define them per the existing pattern used by the other inline tests (`test_invalid_timeout_rejected`, `test_call_budget_exhausted`, etc.). The monkeypatch target string is `linux_debug_mcp.server.render_wrapper` because `server.py` imports the symbol by name (Step 9.2's import block) — patching `linux_debug_mcp.providers.local_drgn_introspect.render_wrapper` would NOT affect what the handler sees (same reason `test_call_budget_exhausted` patches `server.MAX_INTROSPECT_CALLS_PER_RUN` rather than `config.MAX_…`).
 
 Add the remaining §9.1 tests, each with a complete body. They are mechanical applications of the pattern (bootstrap → fakes → call → assert). The full list, with the FakeSshRunner / FakeAdmissionService configuration each one needs:
 
