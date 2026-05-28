@@ -19,7 +19,7 @@ from pydantic import ValidationError
 from linux_debug_mcp.artifacts.manifest import BootAttempt, RunManifest
 from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
 from linux_debug_mcp.config import (
-    SPRINT_4_DEBUG_OPERATIONS,
+    ALLOWED_DEBUG_OPERATIONS,
     BootOverrides,
     BuildOverrides,
     BuildProfile,
@@ -454,7 +454,7 @@ def _debug_boot_metadata(boot_result: StepResult, *, kernel_image: ArtifactRef) 
 
 
 def _ensure_debug_operation_enabled(profile: DebugProfile, operation: str) -> None:
-    if operation not in set(SPRINT_4_DEBUG_OPERATIONS):
+    if operation not in set(ALLOWED_DEBUG_OPERATIONS):
         raise ProviderDebugError(
             "unsupported debug operation",
             category=ErrorCategory.CONFIGURATION_ERROR,

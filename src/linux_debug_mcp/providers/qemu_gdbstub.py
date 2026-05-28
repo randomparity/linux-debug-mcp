@@ -16,7 +16,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from linux_debug_mcp.config import SPRINT_4_DEBUG_OPERATIONS, DebugProfile
+from linux_debug_mcp.config import ALLOWED_DEBUG_OPERATIONS, DebugProfile
 from linux_debug_mcp.domain import (
     ArtifactRef,
     ErrorCategory,
@@ -33,7 +33,7 @@ MAX_RESPONSE_SNIPPET = 4096
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$]*\Z")
 REGISTER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*\Z")
 LINUX_BANNER_RELEASE_PATTERN = re.compile(r"Linux version\s+([^\s]+)")
-QEMU_GDBSTUB_OPERATIONS = ["workflow.build_boot_debug", *SPRINT_4_DEBUG_OPERATIONS]
+QEMU_GDBSTUB_OPERATIONS = ["workflow.build_boot_debug", *ALLOWED_DEBUG_OPERATIONS]
 
 
 def _has_control_character(value: str) -> bool:

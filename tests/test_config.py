@@ -4,6 +4,9 @@ import pytest
 from pydantic import ValidationError
 
 from linux_debug_mcp.config import (
+    ALLOWED_DEBUG_OPERATIONS,
+    MAX_INTROSPECT_CALLS_PER_RUN,
+    PRELUDE_WARNING_FRACTION_PCT,
     ArtifactPolicy,
     BuildProfile,
     DebugProfile,
@@ -137,6 +140,7 @@ def test_default_debug_profile_matches_sprint_4_policy() -> None:
         "debug.evaluate",
         "debug.end_session",
         "transport.inject_break",
+        "debug.introspect.run",
     ]
 
 
@@ -304,3 +308,15 @@ def test_build_profile_rejects_invalid_jobs() -> None:
 def test_build_profile_rejects_targets_that_can_change_make_policy(target: str) -> None:
     with pytest.raises(ValidationError):
         BuildProfile(name="bad", architecture="x86_64", targets=[target])
+
+
+def test_allowed_debug_operations_includes_introspect_run() -> None:
+    assert "debug.introspect.run" in ALLOWED_DEBUG_OPERATIONS
+
+
+def test_max_introspect_calls_per_run_default() -> None:
+    assert MAX_INTROSPECT_CALLS_PER_RUN == 1000
+
+
+def test_prelude_warning_fraction_pct_default() -> None:
+    assert PRELUDE_WARNING_FRACTION_PCT == 40

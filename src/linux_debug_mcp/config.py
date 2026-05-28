@@ -92,7 +92,7 @@ _ALLOWED_SSH_OPTIONS = {
     "LogLevel": {"values": {"ERROR", "QUIET", "VERBOSE"}},
     "StrictHostKeyChecking": {"values": {"accept-new", "yes"}},
 }
-SPRINT_4_DEBUG_OPERATIONS = [
+ALLOWED_DEBUG_OPERATIONS = [
     "debug.start_session",
     "debug.interrupt",
     "debug.continue",
@@ -109,7 +109,16 @@ SPRINT_4_DEBUG_OPERATIONS = [
     # read-only profile can refuse it. Kept in this list (not a transport-only list) because the
     # gate is per-DebugProfile and the existing `_ensure_debug_operation_enabled` consumes it.
     "transport.inject_break",
+    "debug.introspect.run",
 ]
+
+# Spec §5.2 step 4a: soft cap on introspect step records per run. The handler enforces this
+# once, without holding the manifest lock — see spec §5.3 "Soft-cap semantics".
+MAX_INTROSPECT_CALLS_PER_RUN = 1000
+
+# Spec §11 open risk 4a: integer-percent threshold for the host-side prelude-cost warning;
+# fires when `prelude_ms * 100 >= PRELUDE_WARNING_FRACTION_PCT * timeout_seconds * 1000`.
+PRELUDE_WARNING_FRACTION_PCT = 40
 TRANSPORT_OPERATIONS = [
     "transport.open",
     "transport.status",
@@ -374,7 +383,7 @@ class BootOverrides(ConfigModel):
 
 class DebugProfile(ConfigModel):
     name: str
-    enabled_operations: list[str] = Field(default_factory=lambda: list(SPRINT_4_DEBUG_OPERATIONS))
+    enabled_operations: list[str] = Field(default_factory=lambda: list(ALLOWED_DEBUG_OPERATIONS))
     kaslr_policy: Literal["disabled"] = "disabled"
     symbol_identity_required: bool = True
     evaluation_mode: Literal["predefined_inspectors"] = "predefined_inspectors"
@@ -382,7 +391,7 @@ class DebugProfile(ConfigModel):
     @field_validator("enabled_operations")
     @classmethod
     def validate_enabled_operations(cls, value: list[str]) -> list[str]:
-        supported = set(SPRINT_4_DEBUG_OPERATIONS)
+        supported = set(ALLOWED_DEBUG_OPERATIONS)
         for operation in value:
             if operation not in supported:
                 raise ValueError(f"unsupported debug operation: {operation}")
