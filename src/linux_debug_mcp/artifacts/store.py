@@ -69,6 +69,11 @@ class ArtifactStore:
             created_run_dir = True
             for subdir in self.SUBDIRS:
                 (run_dir / subdir).mkdir()
+            # Spec §6.1 R2-F4: <run>/sensitive/ must be 0700 so the 0600 file
+            # mode on wrapper.py (spec §6.1) is load-bearing against other
+            # local users. mkdir's `mode=` arg is masked by umask on POSIX; an
+            # explicit chmod after the fact is the only portable guarantee.
+            (run_dir / "sensitive").chmod(0o700)
 
             manifest = RunManifest.create(
                 run_id=run_id,
