@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from conftest import make_source_tree
+from conftest import FakeTestProvider, create_booted_run, make_source_tree, rootfs
 
 from linux_debug_mcp.artifacts.manifest import BootAttempt
 from linux_debug_mcp.artifacts.store import ArtifactStore
@@ -10,63 +10,10 @@ from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider, Test
 from linux_debug_mcp.server import create_run_handler, target_run_tests_handler
 
 
-class FakeTestProvider:
-    name = "local-ssh-tests"
-
-    def __init__(self, *, result: TestExecutionResult | None = None) -> None:
-        self.result = result or TestExecutionResult(
-            status=StepStatus.SUCCEEDED,
-            summary="test suite smoke-basic passed: 1 passed, 0 failed",
-            artifacts=[],
-            details={"counts": {"passed": 1, "failed": 0}, "commands": []},
-        )
-        self.plans: list[dict[str, object]] = []
-        self.executions = 0
-        self.planned_rootfs: RootfsProfile | None = None
-
-    def plan_tests(self, **kwargs: object) -> object:
-        self.plans.append(kwargs)
-        self.planned_rootfs = kwargs.get("rootfs_profile")  # type: ignore[assignment]
-        return {"plan": kwargs}
-
-    def execute_tests(self, plan: object) -> TestExecutionResult:
-        self.executions += 1
-        return self.result
-
-
 class PlanRejectingProvider(FakeTestProvider):
     def plan_tests(self, **kwargs: object) -> object:
         self.plans.append(kwargs)
         raise ValueError("ConnectTimeout cannot exceed command timeout")
-
-
-def create_booted_run(tmp_path: Path, *, run_id: str = "run-abc123", test_suite: str | None = None) -> Path:
-    source = make_source_tree(tmp_path / run_id)
-    artifact_root = tmp_path / "runs"
-    response = create_run_handler(
-        artifact_root=artifact_root,
-        source_path=str(source),
-        build_profile="x86_64-default",
-        target_profile="local-qemu",
-        rootfs_profile="minimal",
-        run_id=run_id,
-        test_suite=test_suite,
-    )
-    assert response.ok is True
-    store = ArtifactStore(artifact_root, create_root=False)
-    store.record_step_result(run_id, StepResult(step_name="build", status=StepStatus.SUCCEEDED, summary="build ok"))
-    store.record_step_result(run_id, StepResult(step_name="boot", status=StepStatus.SUCCEEDED, summary="boot ok"))
-    return artifact_root
-
-
-def rootfs(tmp_path: Path) -> RootfsProfile:
-    return RootfsProfile(
-        name="minimal",
-        source=str(tmp_path / "rootfs.qcow2"),
-        access_method="ssh_and_serial",
-        ssh_host="127.0.0.1",
-        ssh_user="root",
-    )
 
 
 def suites() -> dict[str, TestSuiteProfile]:
