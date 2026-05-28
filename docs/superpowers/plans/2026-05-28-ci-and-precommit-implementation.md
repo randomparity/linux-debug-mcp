@@ -676,7 +676,7 @@ Append after `tests:`:
             echo '## ty check'
             echo
             echo '```'
-            uv run ty check src 2>&1 | tee /tmp/ty.log || status=$?
+            uv run ty check src 2>&1 || status=$?
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
