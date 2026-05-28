@@ -304,8 +304,10 @@ class AdmissionService:
     def current_snapshot(self, target_key: TargetKey) -> TargetSnapshot | None:
         """The authoritative TargetSnapshot for a key (or None if none was published). Read under
         the same per-TargetKey lock as admit/publish so a caller (e.g. the ssh-tier gate in
-        target.run_tests) reads `generation`/`platform` consistently — never re-derives them — and
-        feeds them straight back into admit_ssh_tier without a publish interleaving in between."""
+        target.run_tests) reads `generation`/`platform` as one consistent snapshot — never
+        re-derives them. The lock is released when this returns, so a publish CAN interleave before
+        the caller's subsequent admit_ssh_tier; that is caught by admit's own re-bind + generation/
+        epoch fence (which reject a stale admit), not excluded here."""
         with self._key_lock(target_key):
             return self._store.get(target_key)
 

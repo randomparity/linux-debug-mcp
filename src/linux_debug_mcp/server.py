@@ -29,7 +29,7 @@ from linux_debug_mcp.config import (
     merge_config_lines,
     merge_kernel_args,
 )
-from linux_debug_mcp.coordination.admission import AdmissionError, AdmissionService
+from linux_debug_mcp.coordination.admission import AdmissionError, AdmissionHandle, AdmissionService
 from linux_debug_mcp.coordination.exec_probe import probe_execution_state
 from linux_debug_mcp.coordination.registry import SessionRegistry
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
@@ -51,7 +51,7 @@ from linux_debug_mcp.providers.contracts import (
 )
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
-from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider
+from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider, TestExecutionResult, TestPlan
 from linux_debug_mcp.providers.qemu_gdbstub import (
     DebugProviderResult,
     DebugSession,
@@ -225,7 +225,7 @@ def _admit_run_tests_ssh_tier(
     run_id: str,
     admission: AdmissionService | None,
     session_registry: SessionRegistry | None,
-):
+) -> AdmissionHandle | None:
     """The §5.6 ssh-tier execution-state gate for target.run_tests. Returns an AdmissionHandle when
     both `admission` and `session_registry` are supplied, else None — when either is absent the gate
     is inert and the caller runs ungated (every legacy caller passes neither). Reads `generation` and
@@ -262,10 +262,10 @@ def _admit_run_tests_ssh_tier(
 def _execute_tests_under_gate(
     *,
     provider: LocalSshTestProvider,
-    plan: Any,
+    plan: TestPlan,
     admission: AdmissionService | None,
-    handle: Any,
-):
+    handle: AdmissionHandle | None,
+) -> TestExecutionResult:
     """Run the ssh-tier test execution under the admission handle's cancel fence (§5.6) and dispose
     the handle. When `handle` is None the gate is inert: run ungated, no cancel. Otherwise bridge the
     handle's private halt-cancel into the runner's own Event with a TEARDOWN-BOUNDED daemon watcher
@@ -1505,7 +1505,7 @@ def target_run_tests_handler(
                     summary="test run spanned an execution-state transition (target halted)",
                     details={"provider": provider.name, "code": exc.code, "error": str(exc)},
                 )
-                store.record_step_result(run_id, terminal, replace_succeeded=True)
+                store.record_step_result(run_id, terminal, replace_succeeded=force_rerun)
                 return ToolResponse.failure(
                     category=exc.category,
                     message=str(exc),

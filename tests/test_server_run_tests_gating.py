@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from conftest import FakeTestProvider, create_booted_run, rootfs
 
+from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore
 from linux_debug_mcp.coordination.registry import SessionRegistry
 from linux_debug_mcp.domain import ErrorCategory, StepResult, StepStatus
@@ -13,6 +14,7 @@ from linux_debug_mcp.seams.target import (
     ConsoleKind,
     PlatformMetadata,
     TargetKey,
+    publish_ready_snapshot,
 )
 from linux_debug_mcp.server import target_run_tests_handler
 from linux_debug_mcp.transport.base import (
@@ -37,8 +39,6 @@ CHANNEL = TransportRef(provider="qemu-gdbstub", channel_id="rsp0", line_role=Lin
 
 
 def _seed_admission(generation: int = 1) -> AdmissionService:
-    from linux_debug_mcp.seams.target import publish_ready_snapshot
-
     admission = AdmissionService(SnapshotStore())
     publish_ready_snapshot(admission, target_key=KEY, generation=generation, transports=[CHANNEL], platform=PLATFORM)
     return admission
@@ -84,8 +84,6 @@ def test_fresh_run_rejected_while_halted(tmp_path):
 
 def test_cached_succeeded_served_while_halted(tmp_path):
     artifact_root = create_booted_run(tmp_path)
-    from linux_debug_mcp.artifacts.store import ArtifactStore
-
     ArtifactStore(artifact_root, create_root=False).record_step_result(
         RUN_ID, StepResult(step_name="run_tests", status=StepStatus.SUCCEEDED, summary="cached pass")
     )
@@ -158,8 +156,6 @@ def test_admitted_then_halted_run_is_cancelled(tmp_path):
     assert elapsed < 5
     leftover = [t for t in threading.enumerate() if t.is_alive() and t not in live_before and t is not timer]
     assert leftover == []
-    from linux_debug_mcp.artifacts.store import ArtifactStore
-
     step = ArtifactStore(artifact_root, create_root=False).load_manifest(RUN_ID).step_results.get("run_tests")
     assert step is not None and step.status == StepStatus.FAILED
 
