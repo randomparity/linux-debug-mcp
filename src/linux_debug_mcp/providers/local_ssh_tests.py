@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -63,6 +64,10 @@ class SshCommandResult:
     stderr_snippet: str = ""
     timed_out: bool = False
     cancelled: bool = False
+    # True when the stdin writer thread observed BrokenPipeError / OSError
+    # before delivering the full payload. The caller cannot trust that the
+    # remote process saw the complete script — surface as a transport failure.
+    stdin_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -87,6 +92,7 @@ class SshRunner(Protocol):
         stdout_path: Path,
         stderr_path: Path,
         cancel: threading.Event | None = None,
+        stdin: str | None = None,
     ) -> SshCommandResult:
         raise NotImplementedError
 
@@ -103,6 +109,7 @@ class SubprocessSshRunner:
         stdout_path: Path,
         stderr_path: Path,
         cancel: threading.Event | None = None,
+        stdin: str | None = None,
     ) -> SshCommandResult:
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
         stderr_path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,10 +123,39 @@ class SubprocessSshRunner:
                 argv,
                 stdout=stdout_file,
                 stderr=stderr_file,
+                stdin=subprocess.PIPE if stdin is not None else None,
                 text=True,
                 shell=False,
                 start_new_session=True,
             )
+            stdin_thread: threading.Thread | None = None
+            # The writer thread records partial-write/EPIPE failures here so
+            # the caller can distinguish a transport failure (truncated wrapper
+            # payload) from a clean wrapper run that emitted a non-JSON crash.
+            stdin_write_error: list[BaseException] = []
+            if stdin is not None:
+                # R6-F4 + iter-1 finding 4: the wrapper payload can be ~264 KiB,
+                # which exceeds Linux's default 64 KiB pipe buffer. Writing in
+                # the main thread would block until the remote drains the
+                # buffer, neutering the cancel/timeout poll below. Pushing the
+                # write into a daemon thread keeps the poll loop responsive;
+                # killing the process group closes the pipe so the writer
+                # observes BrokenPipeError and exits.
+                assert proc.stdin is not None
+                stdin_handle = proc.stdin
+                payload = stdin
+
+                def _write_stdin() -> None:
+                    try:
+                        stdin_handle.write(payload)
+                    except (BrokenPipeError, ValueError, OSError) as exc:
+                        stdin_write_error.append(exc)
+                    finally:
+                        with contextlib.suppress(Exception):
+                            stdin_handle.close()
+
+                stdin_thread = threading.Thread(target=_write_stdin, daemon=True)
+                stdin_thread.start()
             ticks = 0
             while True:
                 try:
@@ -128,15 +164,19 @@ class SubprocessSshRunner:
                 except subprocess.TimeoutExpired:
                     ticks += 1
                     if cancel is not None and cancel.is_set():
-                        os.killpg(proc.pid, signal.SIGKILL)
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(proc.pid, signal.SIGKILL)
                         proc.wait()
                         cancelled_flag = True
                         break
                     if ticks * 0.1 >= timeout:
-                        os.killpg(proc.pid, signal.SIGKILL)
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(proc.pid, signal.SIGKILL)
                         proc.wait()
                         timed_out_flag = True
                         break
+            if stdin_thread is not None:
+                stdin_thread.join(timeout=2)
         # -1 sentinel: process was killed (cancel/timeout), so there is no real exit code.
         exit_status = -1 if (cancelled_flag or timed_out_flag) else proc.returncode
         return SshCommandResult(
@@ -145,6 +185,7 @@ class SubprocessSshRunner:
             stderr_snippet=self._read_snippet(stderr_path),
             timed_out=timed_out_flag,
             cancelled=cancelled_flag,
+            stdin_failed=bool(stdin_write_error),
         )
 
     def _read_snippet(self, path: Path) -> str:
@@ -152,6 +193,52 @@ class SubprocessSshRunner:
             return ""
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             return handle.read(_SNIPPET_LIMIT)
+
+
+def build_ssh_argv(
+    *,
+    rootfs_profile: RootfsProfile,
+    known_hosts_path: Path,
+    command: list[str],
+    command_timeout: int,
+) -> list[str]:
+    """Construct the canonical ``ssh`` argv for invoking *command* on the
+    rootfs's remote shell.
+
+    Single source of truth for SSH argv shape — both
+    ``LocalSshTestProvider`` (test-run paths, dmesg) and
+    ``debug_introspect_run_handler`` (sudo preflight, wrapper invocation)
+    call this. R6-F5: the introspect handler previously referenced
+    ``RootfsProfile.ssh_args()`` / ``.ssh_argv()`` methods that do not
+    exist on the Pydantic model (config.py:254-277); lifting this helper
+    to module scope eliminates that fictional API.
+    """
+    configured_timeout = rootfs_profile.ssh_options.get("ConnectTimeout")
+    if configured_timeout is not None and int(configured_timeout) > command_timeout:
+        raise ValueError("ConnectTimeout cannot exceed command timeout")
+    connect_timeout = configured_timeout or str(min(command_timeout, 10))
+    strict_host_key_checking = rootfs_profile.ssh_options.get("StrictHostKeyChecking", "accept-new")
+    ssh_argv = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"UserKnownHostsFile={known_hosts_path}",
+        "-o",
+        f"ConnectTimeout={connect_timeout}",
+        "-o",
+        f"StrictHostKeyChecking={strict_host_key_checking}",
+    ]
+    for key in sorted(rootfs_profile.ssh_options):
+        if key in {"ConnectTimeout", "StrictHostKeyChecking"}:
+            continue
+        ssh_argv.extend(["-o", f"{key}={rootfs_profile.ssh_options[key]}"])
+    ssh_argv.extend(["-p", str(rootfs_profile.ssh_port)])
+    if rootfs_profile.ssh_key_ref:
+        ssh_argv.extend(["-i", rootfs_profile.ssh_key_ref])
+    remote_command = " ".join(shlex.quote(item) for item in command)
+    ssh_argv.extend(["--", f"{rootfs_profile.ssh_user}@{rootfs_profile.ssh_host}", remote_command])
+    return ssh_argv
 
 
 class LocalSshTestProvider:
@@ -340,7 +427,7 @@ class LocalSshTestProvider:
         return PlannedTestCommand(
             label=label,
             argv=command.argv,
-            ssh_argv=self._ssh_argv(
+            ssh_argv=build_ssh_argv(
                 rootfs_profile=rootfs_profile,
                 known_hosts_path=known_hosts_path,
                 command=command.argv,
@@ -365,7 +452,7 @@ class LocalSshTestProvider:
         return PlannedTestCommand(
             label="dmesg",
             argv=argv,
-            ssh_argv=self._ssh_argv(
+            ssh_argv=build_ssh_argv(
                 rootfs_profile=rootfs_profile,
                 known_hosts_path=known_hosts_path,
                 command=argv,
@@ -377,41 +464,6 @@ class LocalSshTestProvider:
             stderr_path=attempt_dir / "dmesg.stderr.txt",
             metadata_path=attempt_dir / "dmesg.command.json",
         )
-
-    def _ssh_argv(
-        self,
-        *,
-        rootfs_profile: RootfsProfile,
-        known_hosts_path: Path,
-        command: list[str],
-        command_timeout: int,
-    ) -> list[str]:
-        configured_timeout = rootfs_profile.ssh_options.get("ConnectTimeout")
-        if configured_timeout is not None and int(configured_timeout) > command_timeout:
-            raise ValueError("ConnectTimeout cannot exceed command timeout")
-        connect_timeout = configured_timeout or str(min(command_timeout, 10))
-        strict_host_key_checking = rootfs_profile.ssh_options.get("StrictHostKeyChecking", "accept-new")
-        ssh_argv = [
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            f"UserKnownHostsFile={known_hosts_path}",
-            "-o",
-            f"ConnectTimeout={connect_timeout}",
-            "-o",
-            f"StrictHostKeyChecking={strict_host_key_checking}",
-        ]
-        for key in sorted(rootfs_profile.ssh_options):
-            if key in {"ConnectTimeout", "StrictHostKeyChecking"}:
-                continue
-            ssh_argv.extend(["-o", f"{key}={rootfs_profile.ssh_options[key]}"])
-        ssh_argv.extend(["-p", str(rootfs_profile.ssh_port)])
-        if rootfs_profile.ssh_key_ref:
-            ssh_argv.extend(["-i", rootfs_profile.ssh_key_ref])
-        remote_command = " ".join(shlex.quote(item) for item in command)
-        ssh_argv.extend(["--", f"{rootfs_profile.ssh_user}@{rootfs_profile.ssh_host}", remote_command])
-        return ssh_argv
 
     def _run_dmesg(self, plan: TestPlan) -> dict[str, object]:
         command = plan.dmesg_command

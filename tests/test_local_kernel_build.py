@@ -3,13 +3,28 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from conftest import add_merge_config_script
 
 from linux_debug_mcp.config import BuildProfile
 from linux_debug_mcp.domain import ErrorCategory
-from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
+from linux_debug_mcp.providers.local_kernel_build import (
+    BuildIdMissing,
+    LocalKernelBuildProvider,
+    ReadelfUnavailable,
+    _extract_build_id,
+)
+
+# Task 4 R2-F6: the build success path now calls `_extract_build_id` against
+# vmlinux. Tests in this file that exercise provider.execute_build produce
+# fake vmlinux text files via FakeRunner, so the real readelf invocation
+# would fail. The autouse fixture in tests/conftest.py default-stubs
+# `_extract_build_id` to a constant. The direct-call `test_extract_build_id_*`
+# tests below capture the original function reference at module-load time
+# (before the fixture runs) and patch `subprocess.run` deeper to exercise
+# the real `_extract_build_id` body.
 
 
 def test_plan_build_uses_per_run_output_and_argv_entries(tmp_path: Path) -> None:
@@ -551,3 +566,77 @@ def test_execute_summary_records_source_revision(tmp_path: Path) -> None:
     assert summary["source_revision"]["commit"] is None
     assert summary["source_revision"]["dirty"] is None
     assert summary["source_revision"]["reason"]
+
+
+def test_extract_build_id_returns_hex_on_success(tmp_path: Path) -> None:
+    vmlinux = tmp_path / "vmlinux"
+    vmlinux.write_bytes(b"")
+    fake = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=(
+            "    Owner          Data size  Description\n"
+            "    GNU            0x14       NT_GNU_BUILD_ID (unique build ID bitstring)\n"
+            "    Build ID: 0123456789abcdef0123456789abcdef01234567\n"  # pragma: allowlist secret
+        ),
+        stderr="",
+    )
+    with patch(
+        "linux_debug_mcp.providers.local_kernel_build.subprocess.run",
+        return_value=fake,
+    ):
+        assert _extract_build_id(vmlinux) == "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
+
+
+def test_extract_build_id_raises_readelf_unavailable_on_missing_binary(tmp_path: Path) -> None:
+    vmlinux = tmp_path / "vmlinux"
+    vmlinux.write_bytes(b"")
+    with (
+        patch(
+            "linux_debug_mcp.providers.local_kernel_build.subprocess.run",
+            side_effect=FileNotFoundError("readelf"),
+        ),
+        pytest.raises(ReadelfUnavailable),
+    ):
+        _extract_build_id(vmlinux)
+
+
+def test_extract_build_id_raises_readelf_unavailable_on_nonzero_exit(tmp_path: Path) -> None:
+    vmlinux = tmp_path / "vmlinux"
+    vmlinux.write_bytes(b"")
+    fake = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="error")
+    with (
+        patch(
+            "linux_debug_mcp.providers.local_kernel_build.subprocess.run",
+            return_value=fake,
+        ),
+        pytest.raises(ReadelfUnavailable),
+    ):
+        _extract_build_id(vmlinux)
+
+
+def test_extract_build_id_raises_readelf_unavailable_on_timeout(tmp_path: Path) -> None:
+    vmlinux = tmp_path / "vmlinux"
+    vmlinux.write_bytes(b"")
+    with (
+        patch(
+            "linux_debug_mcp.providers.local_kernel_build.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=["readelf"], timeout=10),
+        ),
+        pytest.raises(ReadelfUnavailable),
+    ):
+        _extract_build_id(vmlinux)
+
+
+def test_extract_build_id_raises_build_id_missing_when_no_note(tmp_path: Path) -> None:
+    vmlinux = tmp_path / "vmlinux"
+    vmlinux.write_bytes(b"")
+    fake = subprocess.CompletedProcess(args=[], returncode=0, stdout="no notes here\n", stderr="")
+    with (
+        patch(
+            "linux_debug_mcp.providers.local_kernel_build.subprocess.run",
+            return_value=fake,
+        ),
+        pytest.raises(BuildIdMissing),
+    ):
+        _extract_build_id(vmlinux)

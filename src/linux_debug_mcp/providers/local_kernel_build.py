@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -25,6 +26,67 @@ class ConfigMergeError(Exception):
     def __init__(self, message: str, *, diagnostic: str | None = None) -> None:
         super().__init__(message)
         self.diagnostic = diagnostic
+
+
+class ReadelfUnavailable(Exception):
+    """``readelf`` failed — binary missing, non-zero exit, or timed out.
+
+    Spec §7 R2-F6: distinct from ``BuildIdMissing`` so the caller can map
+    each to its own ``(ErrorCategory, code)`` without inspecting auxiliary
+    state.
+
+    The optional ``artifacts`` payload carries the build artifacts that DID
+    get produced (vmlinux may be present, ``.config`` and build log
+    certainly are) so the handler can attach them to the FAILED
+    ``StepResult`` for forensic recovery. Without this, the operator would
+    see a build failure with zero artifacts even though the kernel built
+    fine — build_id extraction is the only thing that failed.
+    """
+
+    def __init__(self, message: str, *, artifacts: list[ArtifactRef] | None = None) -> None:
+        super().__init__(message)
+        self.artifacts: list[ArtifactRef] = artifacts or []
+
+
+class BuildIdMissing(Exception):
+    """``readelf`` ran cleanly but the vmlinux carries no ``.note.gnu.build-id``.
+
+    Same ``artifacts`` contract as ``ReadelfUnavailable`` — see that
+    docstring.
+    """
+
+    def __init__(self, message: str, *, artifacts: list[ArtifactRef] | None = None) -> None:
+        super().__init__(message)
+        self.artifacts: list[ArtifactRef] = artifacts or []
+
+
+_BUILD_ID_LINE = re.compile(r"\s*Build ID:\s*([0-9a-fA-F]+)")
+
+
+def _extract_build_id(vmlinux: Path) -> str:
+    """Return the lower-case hex ``.note.gnu.build-id`` of *vmlinux*.
+
+    Spec §7. Raises ``ReadelfUnavailable`` when the binary cannot be
+    invoked / returns non-zero / times out. Raises ``BuildIdMissing`` when
+    ``readelf`` succeeded but the note is absent.
+    """
+    try:
+        proc = subprocess.run(
+            ["readelf", "-n", str(vmlinux)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        raise ReadelfUnavailable(str(exc)) from exc
+    if proc.returncode != 0:
+        raise ReadelfUnavailable(f"readelf exit={proc.returncode}: {proc.stderr[:200]}")
+    for line in proc.stdout.splitlines():
+        match = _BUILD_ID_LINE.match(line)
+        if match:
+            return match.group(1).lower()
+    raise BuildIdMissing(f"no Build ID note in {vmlinux}")
 
 
 @dataclass(frozen=True)
@@ -321,6 +383,17 @@ class LocalKernelBuildProvider:
                 error_category=ErrorCategory.BUILD_FAILURE,
                 diagnostic=self._log_tail(log_path),
             )
+        # Plan review finding 6: the build succeeded — vmlinux, .config, and
+        # build-log all exist. If `_extract_build_id` fails, re-raise with the
+        # artifacts attached so the handler can persist them in the FAILED
+        # StepResult; operators need them to diagnose why readelf came up empty
+        # without re-running the build. Spec §7 R2-F6.
+        try:
+            details["build_id"] = _extract_build_id(plan.output_path / "vmlinux")
+        except ReadelfUnavailable as exc:
+            raise ReadelfUnavailable(str(exc), artifacts=self._existing_artifacts(artifacts)) from exc
+        except BuildIdMissing as exc:
+            raise BuildIdMissing(str(exc), artifacts=self._existing_artifacts(artifacts)) from exc
         return self._finalize_build_result(
             plan=plan,
             log_path=log_path,
@@ -330,6 +403,16 @@ class LocalKernelBuildProvider:
             status=StepStatus.SUCCEEDED,
             summary="kernel build succeeded",
         )
+
+    def _existing_artifacts(self, artifacts: list[ArtifactRef]) -> list[ArtifactRef]:
+        """Filter to artifacts whose files exist on disk.
+
+        Spec §7 R2-F6: when re-raising on readelf failure, the summary file has
+        not been written yet (write happens in ``_finalize_build_result``). Drop
+        any ArtifactRef pointing at a non-existent path so the manifest does
+        not claim a build-summary that the operator cannot read.
+        """
+        return [artifact for artifact in artifacts if Path(artifact.path).is_file()]
 
     def _detect_artifacts(self, *, plan: BuildPlan, log_path: Path, summary_path: Path) -> list[ArtifactRef]:
         candidates = [

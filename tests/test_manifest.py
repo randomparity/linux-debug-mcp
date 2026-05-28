@@ -1,6 +1,8 @@
+import pytest
+
 from linux_debug_mcp.artifacts.manifest import BootAttempt, RunManifest
 from linux_debug_mcp.config import RootfsProfile, TargetProfile
-from linux_debug_mcp.domain import RunRequest, StepStatus
+from linux_debug_mcp.domain import RunRequest, StepResult, StepStatus
 
 
 def _request():
@@ -46,3 +48,66 @@ def test_schema_version_1_manifest_still_loads():
     assert manifest.schema_version == 1
     assert manifest.boot_attempts == []
     assert manifest.resolved_build_profile is None
+
+
+def _make_manifest() -> RunManifest:
+    return RunManifest.create(run_id="run-1", request=_request())
+
+
+def test_append_step_result_grows_step_results() -> None:
+    manifest = _make_manifest()
+    first = StepResult(
+        step_name="introspect:abc",
+        status=StepStatus.SUCCEEDED,
+        summary="ok",
+        details={},
+        artifacts=[],
+    )
+    second = StepResult(
+        step_name="introspect:def",
+        status=StepStatus.SUCCEEDED,
+        summary="ok",
+        details={},
+        artifacts=[],
+    )
+    updated = manifest.append_step_result(first).append_step_result(second)
+    assert set(updated.step_results.keys()) == {"introspect:abc", "introspect:def"}
+
+
+def test_append_step_result_leaves_steps_unchanged() -> None:
+    # Plan review finding 1: `RunManifest.steps` is the *planned* list seeded by
+    # `RunManifest.create` — exactly 6 entries. `append_step_result` may only grow
+    # `step_results`; mutating `steps` would conflate planned-vs-executed.
+    manifest = _make_manifest()
+    original_steps = list(manifest.steps)
+    result = StepResult(
+        step_name="introspect:abc",
+        status=StepStatus.SUCCEEDED,
+        summary="ok",
+        details={},
+        artifacts=[],
+    )
+    updated = manifest.append_step_result(result)
+    assert updated.steps == original_steps
+    assert "introspect:abc" in updated.step_results
+
+
+def test_append_step_result_rejects_existing_name() -> None:
+    manifest = _make_manifest()
+    first = StepResult(
+        step_name="introspect:abc",
+        status=StepStatus.SUCCEEDED,
+        summary="ok",
+        details={},
+        artifacts=[],
+    )
+    second = StepResult(
+        step_name="introspect:abc",
+        status=StepStatus.SUCCEEDED,
+        summary="dup",
+        details={},
+        artifacts=[],
+    )
+    updated = manifest.append_step_result(first)
+    with pytest.raises(ValueError, match="step name already recorded"):
+        updated.append_step_result(second)

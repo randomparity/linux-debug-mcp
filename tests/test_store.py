@@ -1,5 +1,7 @@
+import pytest
+
 from linux_debug_mcp.artifacts.manifest import BootAttempt
-from linux_debug_mcp.artifacts.store import ArtifactStore
+from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
 from linux_debug_mcp.config import BuildProfile, RootfsProfile, TargetProfile
 from linux_debug_mcp.domain import RunRequest, StepResult, StepStatus
 
@@ -53,3 +55,40 @@ def test_record_boot_attempt_replaces_succeeded_boot(tmp_path):
     reloaded = store.load_manifest(manifest.run_id)
     assert reloaded.step_results["boot"].summary == "boot-2"
     assert [a.attempt for a in reloaded.boot_attempts] == [2]
+
+
+def test_record_step_result_append_true_grows_results(tmp_path):
+    store = _store(tmp_path)
+    manifest = store.create_run(_request())
+    first = StepResult(
+        step_name="introspect:aaa",
+        status=StepStatus.SUCCEEDED,
+        summary="ok",
+        details={},
+        artifacts=[],
+    )
+    second = StepResult(
+        step_name="introspect:bbb",
+        status=StepStatus.SUCCEEDED,
+        summary="ok",
+        details={},
+        artifacts=[],
+    )
+    store.record_step_result(manifest.run_id, first, append=True)
+    final = store.record_step_result(manifest.run_id, second, append=True)
+    assert set(final.step_results.keys()) == {"introspect:aaa", "introspect:bbb"}
+
+
+def test_record_step_result_append_true_rejects_collision(tmp_path):
+    store = _store(tmp_path)
+    manifest = store.create_run(_request())
+    first = StepResult(
+        step_name="introspect:aaa",
+        status=StepStatus.SUCCEEDED,
+        summary="ok",
+        details={},
+        artifacts=[],
+    )
+    store.record_step_result(manifest.run_id, first, append=True)
+    with pytest.raises(ManifestStateError):
+        store.record_step_result(manifest.run_id, first, append=True)

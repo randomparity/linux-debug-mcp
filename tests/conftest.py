@@ -3,6 +3,9 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import DebugProfile, RootfsProfile, TargetProfile
@@ -22,6 +25,22 @@ from linux_debug_mcp.seams.target import (
 )
 from linux_debug_mcp.server import create_run_handler
 from linux_debug_mcp.transport.base import LineRole, TransportRef
+
+
+@pytest.fixture(autouse=True)
+def _stub_extract_build_id():
+    """Task 4 R2-F6: the build success path now extracts a build_id by running
+    readelf against vmlinux. Most tests fake the build runner and never
+    produce a real vmlinux, so default-stub the helper to a constant. Tests
+    that exercise the real `_extract_build_id` body capture the function
+    reference at module-load time (before this fixture runs) and patch
+    ``subprocess.run`` deeper to drive readelf behaviour.
+    """
+    with patch(
+        "linux_debug_mcp.providers.local_kernel_build._extract_build_id",
+        return_value="0123456789abcdef0123456789abcdef01234567",  # pragma: allowlist secret
+    ):
+        yield
 
 
 def make_source_tree(base: Path, *, with_config: bool = False) -> Path:

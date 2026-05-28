@@ -1,11 +1,25 @@
+import subprocess
 import threading
 from pathlib import Path
+from unittest.mock import patch
 
 from conftest import NoopBuildRunner as NoopRunner
 from conftest import add_merge_config_script, make_source_tree
 
-from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
+from linux_debug_mcp.providers.local_kernel_build import (
+    LocalKernelBuildProvider,
+)
+from linux_debug_mcp.providers.local_kernel_build import (
+    _extract_build_id as _REAL_EXTRACT_BUILD_ID,
+)
 from linux_debug_mcp.server import create_run_handler, kernel_build_handler
+
+# Task 4 R2-F6: the build success path now extracts and records build_id by
+# running readelf against vmlinux. Most handler/workflow tests in this suite
+# do not produce a real vmlinux (runners are faked), so conftest.py installs
+# an autouse fixture that stubs `_extract_build_id` to a constant. Tests
+# that need the real body re-patch via _REAL_EXTRACT_BUILD_ID (captured at
+# module-load time, before the autouse fixture runs).
 
 
 class BlockingRunner(NoopRunner):
@@ -405,3 +419,114 @@ def test_kernel_build_concurrent_calls_only_start_one_subprocess(tmp_path: Path)
     assert second.error is not None
     assert second.error.category == "infrastructure_failure"
     assert "build is locked" in second.error.message
+
+
+def test_readelf_unavailable_fails_build(tmp_path: Path) -> None:
+    # Spec §9.1 / §7 R2-F6: ReadelfUnavailable -> step FAILED;
+    # ErrorCategory.INFRASTRUCTURE_FAILURE; code=readelf_unavailable.
+    from linux_debug_mcp.artifacts.store import ArtifactStore
+    from linux_debug_mcp.domain import StepStatus
+    from linux_debug_mcp.providers.local_kernel_build import ReadelfUnavailable
+
+    _, artifact_root = create_run(tmp_path)
+    build_dir = artifact_root / "run-abc123" / "build"
+    (build_dir / "arch" / "x86" / "boot").mkdir(parents=True)
+    (build_dir / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
+
+    with patch(
+        "linux_debug_mcp.providers.local_kernel_build._extract_build_id",
+        side_effect=ReadelfUnavailable("readelf not found"),
+    ):
+        response = kernel_build_handler(
+            artifact_root=artifact_root,
+            run_id="run-abc123",
+            provider=LocalKernelBuildProvider(runner=NoopRunner()),
+        )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "infrastructure_failure"
+    assert response.error.details["code"] == "readelf_unavailable"
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
+    assert manifest.step_results["build"].status == StepStatus.FAILED
+
+
+def test_build_id_missing_fails_build(tmp_path: Path) -> None:
+    # Spec §9.1 / §7 R2-F6: BuildIdMissing -> step FAILED;
+    # ErrorCategory.BUILD_FAILURE; code=build_id_missing.
+    from linux_debug_mcp.artifacts.store import ArtifactStore
+    from linux_debug_mcp.domain import StepStatus
+    from linux_debug_mcp.providers.local_kernel_build import BuildIdMissing
+
+    _, artifact_root = create_run(tmp_path)
+    build_dir = artifact_root / "run-abc123" / "build"
+    (build_dir / "arch" / "x86" / "boot").mkdir(parents=True)
+    (build_dir / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
+
+    with patch(
+        "linux_debug_mcp.providers.local_kernel_build._extract_build_id",
+        side_effect=BuildIdMissing("no Build ID note"),
+    ):
+        response = kernel_build_handler(
+            artifact_root=artifact_root,
+            run_id="run-abc123",
+            provider=LocalKernelBuildProvider(runner=NoopRunner()),
+        )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "build_failure"
+    assert response.error.details["code"] == "build_id_missing"
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
+    assert manifest.step_results["build"].status == StepStatus.FAILED
+
+
+def test_build_id_missing_failure_preserves_vmlinux_artifact(tmp_path: Path) -> None:
+    # Plan review finding 6 (R6-F2 rewrite): build artifacts MUST survive a
+    # build_id extraction failure so operators can diagnose why readelf came up
+    # empty without re-running the build. Round-6 review caught that patching
+    # `_extract_build_id` with `side_effect=BuildIdMissing(..., artifacts=...)`
+    # was inert because the provider's catch arm re-wraps with
+    # `artifacts=self._detect_artifacts(...)` — the injected payload was
+    # unconditionally overwritten.
+    #
+    # This test exercises the FULL provider hoist + handler consume path:
+    # restore the real `_extract_build_id` (overriding the module's autouse
+    # stub), mock at the deepest seam (`subprocess.run`) so readelf returns
+    # cleanly with no Build ID note, and pre-create the artifacts that
+    # `_detect_artifacts` discovers on disk (paths per local_kernel_build.py).
+    from linux_debug_mcp.artifacts.store import ArtifactStore
+
+    _, artifact_root = create_run(tmp_path)
+    build_dir = artifact_root / "run-abc123" / "build"
+    (build_dir / "arch" / "x86" / "boot").mkdir(parents=True)
+    (build_dir / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
+    # Pre-create vmlinux on disk so `_detect_artifacts` lists it.
+    (build_dir / "vmlinux").write_text("symbols", encoding="utf-8")
+
+    fake = subprocess.CompletedProcess(args=[], returncode=0, stdout="no notes here\n", stderr="")
+    # Restore the real `_extract_build_id` (the module's autouse fixture stubs
+    # it) so the provider invokes the real readelf-running body, and mock the
+    # `subprocess.run` seam underneath so readelf returns "no Build ID note".
+    with (
+        patch(
+            "linux_debug_mcp.providers.local_kernel_build._extract_build_id",
+            _REAL_EXTRACT_BUILD_ID,
+        ),
+        patch(
+            "linux_debug_mcp.providers.local_kernel_build.subprocess.run",
+            return_value=fake,
+        ),
+    ):
+        response = kernel_build_handler(
+            artifact_root=artifact_root,
+            run_id="run-abc123",
+            provider=LocalKernelBuildProvider(runner=NoopRunner()),
+        )
+
+    assert response.ok is False
+    assert response.error.details["code"] == "build_id_missing"
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
+    artifact_kinds = {a.kind for a in manifest.step_results["build"].artifacts}
+    assert "vmlinux" in artifact_kinds
+    assert "build-log" in artifact_kinds
