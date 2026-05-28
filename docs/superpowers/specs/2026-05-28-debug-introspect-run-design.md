@@ -176,7 +176,7 @@ An `emits` entry of the form `{"__emit_unserializable__": true, "error_type": ".
 | Request `target_ref` / `target_profile` / `rootfs_profile` / `debug_profile` does not match the recorded manifest values (iter-1 findings 1, 3) | `CONFIGURATION_ERROR` | `manifest_profile_mismatch` | Pre-SSH |
 | `admission` or `session_registry` not wired into the server (iter-1 finding 7) | `READINESS_FAILURE` | `admission_service_unavailable` | Pre-admission |
 | `admission.current_snapshot` returns None — boot has not published a READY snapshot for this `target_key` (iter-1 finding 7) | `READINESS_FAILURE` | `snapshot_missing` | Pre-admission |
-| Target snapshot present but not READY/EXECUTING | `READINESS_FAILURE` | `target_not_ready` | Pre-admission |
+| Target snapshot present but not READY/EXECUTING | `READINESS_FAILURE` | `target_not_ready` | Admission (raised by `admit_ssh_tier` via `_reject_non_live`) |
 | Target `HALTED` (admission rejects) | `READINESS_FAILURE` | `target_halted` | Admission |
 | `ExecutionProof` stale / `UNKNOWN` | `READINESS_FAILURE` | `execution_state_unknown` | Admission |
 | Stale handle / wrong generation | `STALE_HANDLE` | `stale_handle` | Admission |
@@ -534,7 +534,7 @@ def debug_introspect_run_handler(
   captured stderr through `redactor.redact_text(...)` before embedding it in
   the response.
 
-1. **Profile resolution + path validation.** Mirror `target_run_tests_handler`: resolve `target_profile`/`rootfs_profile`/`debug_profile` from request overrides + recorded manifest defaults; `validate_run_id`; load `manifest.json`. Construct the per-call `Redactor` (see prologue) immediately after the rootfs profile is resolved.
+1. **Profile resolution + path validation.** `validate_run_id`; load `manifest.json`. Iter-1 finding 1: any request-supplied `target_ref` / `target_profile` / `rootfs_profile` / `debug_profile` must match the manifest's recorded values — divergence returns `CONFIGURATION_ERROR` / `manifest_profile_mismatch` (see §3.3) without an admission round trip. When a field is omitted, the manifest value is used. After the equality check passes, resolve each profile against the in-memory registry (the manifest-recorded name is the lookup key). Construct the per-call `Redactor` (see prologue) immediately after the rootfs profile is resolved.
 2. **Operation gating.** `_ensure_debug_operation_enabled(resolved_debug_profile, "debug.introspect.run")`.
 3. **Request invariants.** Reject `allow_write=true`. Validate `timeout_seconds in [5, 300]`. Validate `script` non-empty, ≤ 256 KiB.
 4. **Build_id from manifest.** Read `manifest.steps["build"].details["build_id"]`. Missing → `CONFIGURATION_ERROR` / `provenance_missing`. Present but failing the `^[0-9a-f]{8,}$` regex check (the §3.1 host-side validation) → `INFRASTRUCTURE_FAILURE` / `provenance_corrupt`. This is the minimal `KernelProvenance` consumer (§7); the regex check exists so the wrapper's `${EXPECTED_BUILD_ID}` comparison can be unconditional (§4.2 dropped its truthy guard for F4).
@@ -556,9 +556,13 @@ def debug_introspect_run_handler(
    - the full rendered wrapper as `<run>/sensitive/debug/introspect/<call_id>/wrapper.py` (mode 0600 — the script body is in here verbatim, see §6.3),
    - a `<run>/debug/introspect/<call_id>/wrapper.skeleton.py` containing the rendered wrapper with the user-script base64 body replaced by the placeholder `# <user script: sha256:<hex>; full source under sensitive/debug/introspect/<call_id>/wrapper.py>`, where `<hex>` is `hashlib.sha256(base64.b64decode(USER_SCRIPT_B64)).hexdigest()` — the sha256 of the **decoded user script bytes**, not of the rendered wrapper (R2-F7; see §6.3 for the canonical definition),
    - the redacted `request.json` under `<run>/debug/introspect/<call_id>/`.
-9. **SSH invocation.** Reuse `SshRunner`:
+9. **SSH invocation.** Reuse `SshRunner`. The remote command shape depends on `rootfs_profile.ssh_user`:
    ```
+   # non-root user (sudo preflight in step 5 has validated passwordless sudo):
    ssh <ssh_args> <user>@<host> 'timeout --kill-after=2s <user_timeout>s sudo python3 -'
+
+   # ssh_user == "root" (iter-1 finding 6 — sudo skipped along with its preflight):
+   ssh <ssh_args> root@<host>   'timeout --kill-after=2s <user_timeout>s python3 -'
    ```
    stdin = wrapper string. Host-side `SshRunner.run(..., timeout=user_timeout + 10, cancel=cancel_event, stdout_path=stdout_path, stderr_path=stderr_path)`. The `ssh_failure` diagnostic — when SSH connect/auth fails — passes captured stderr through `redactor.redact_text(...)` **first**, then truncates the redacted output to 256 bytes (matching the sudo preflight cap in step 5). The redact-before-truncate ordering is mandatory for the same reason as step 5 (R2-F3): truncating first could split an `ssh_key_ref` mid-secret, leaving an unmatched prefix in the diagnostic.
 10. **Cancellation bridge** — verbatim from `_run_admitted` in `target.run_tests`:
