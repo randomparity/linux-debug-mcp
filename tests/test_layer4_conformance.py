@@ -29,7 +29,17 @@ from _layer4_fakes import (
     make_request,
     seed_snapshot,
 )
-from conftest import FakeTestProvider, create_booted_run, rootfs
+from conftest import (
+    LEGACY_FENCE_KEY,
+    LEGACY_FENCE_RUN_ID,
+    FakeTestProvider,
+    create_booted_run,
+    legacy_fence_build_transaction,
+    legacy_fence_make_registry,
+    legacy_fence_profiles,
+    rootfs,
+    seed_legacy_debug_session,
+)
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import TRANSPORT_DESTRUCTIVE_PERMISSIONS
@@ -50,6 +60,7 @@ from linux_debug_mcp.coordination.registry import (
 from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import ErrorCategory, StepResult, StepStatus
 from linux_debug_mcp.providers.local_ssh_tests import TestExecutionResult
+from linux_debug_mcp.providers.qemu_gdbstub import DebugProviderResult
 from linux_debug_mcp.safety.redaction import REDACTION, Redactor
 from linux_debug_mcp.seams.guard import InProcessStopCapableGuard
 from linux_debug_mcp.seams.lifecycle import (
@@ -64,6 +75,7 @@ from linux_debug_mcp.seams.target import (
     publish_ready_snapshot,
 )
 from linux_debug_mcp.server import (
+    debug_continue_handler,
     debug_read_registers_handler,
     target_run_tests_handler,
     transport_inject_break_handler,
@@ -770,28 +782,10 @@ def test_legacy_debug_session_refused_on_load(tmp_path: Path) -> None:
     """A persisted DebugSession with no SessionRegistry record (the pre-Layer-4 shape) makes a
     debug.* mutating op (e.g. debug.continue) refuse with DEBUG_ATTACH_FAILURE /
     legacy_session_no_ownership AND dual-write a recovery_required tombstone."""
-    # Reuse the seeding helper from the dedicated legacy-fence test module — the conformance
-    # suite asserts the same invariant from the §10.2 frame.
-    from test_server_legacy_session_fence import (  # noqa: PLC0415
-        KEY as LEGACY_KEY,
-    )
-    from test_server_legacy_session_fence import (
-        RUN_ID as LEGACY_RUN_ID,
-    )
-    from test_server_legacy_session_fence import (
-        _build_transaction,
-        _make_registry,
-        _profiles,
-        _seed_legacy_debug_session,
-    )
-
-    from linux_debug_mcp.providers.qemu_gdbstub import DebugProviderResult  # noqa: PLC0415
-    from linux_debug_mcp.server import debug_continue_handler  # noqa: PLC0415
-
-    artifact_root = _seed_legacy_debug_session(tmp_path)
-    registry = _make_registry(tmp_path)
-    _txn, admission = _build_transaction(registry=registry)
-    assert registry.read_record(LEGACY_KEY) is None
+    artifact_root = seed_legacy_debug_session(tmp_path)
+    registry = legacy_fence_make_registry(tmp_path)
+    _txn, admission = legacy_fence_build_transaction(registry=registry)
+    assert registry.read_record(LEGACY_FENCE_KEY) is None
 
     class _ExplodingProvider:
         name = "local-qemu-gdbstub"
@@ -801,9 +795,9 @@ def test_legacy_debug_session_refused_on_load(tmp_path: Path) -> None:
 
     response = debug_continue_handler(
         artifact_root=artifact_root,
-        run_id=LEGACY_RUN_ID,
+        run_id=LEGACY_FENCE_RUN_ID,
         provider=_ExplodingProvider(),
-        debug_profiles=_profiles(),
+        debug_profiles=legacy_fence_profiles(),
         admission=admission,
         session_registry=registry,
     )
@@ -812,9 +806,9 @@ def test_legacy_debug_session_refused_on_load(tmp_path: Path) -> None:
     assert response.error.category is ErrorCategory.DEBUG_ATTACH_FAILURE
     assert response.error.details["code"] == "legacy_session_no_ownership"
     # dual-write: durable tombstone + admission cache.
-    tombstone = registry.read_tombstone(LEGACY_KEY)
+    tombstone = registry.read_tombstone(LEGACY_FENCE_KEY)
     assert tombstone is not None
-    assert admission._recovery_required.get(LEGACY_KEY) == tombstone.generation
+    assert admission._recovery_required.get(LEGACY_FENCE_KEY) == tombstone.generation
 
 
 # ---------------------------------------------------------------------------

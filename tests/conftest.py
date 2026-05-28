@@ -5,11 +5,23 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import RootfsProfile, TargetProfile
-from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
+from linux_debug_mcp.config import DebugProfile, RootfsProfile, TargetProfile
+from linux_debug_mcp.coordination.admission import AdmissionService
+from linux_debug_mcp.coordination.registry import SessionRegistry
+from linux_debug_mcp.coordination.transaction import TransportTransaction
+from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
 from linux_debug_mcp.providers.libvirt_qemu import BootExecutionResult, ProviderBootError
 from linux_debug_mcp.providers.local_ssh_tests import TestExecutionResult
+from linux_debug_mcp.providers.qemu_gdbstub import DebugSession
+from linux_debug_mcp.seams.target import (
+    BreakHint,
+    ConsoleKind,
+    PlatformMetadata,
+    TargetKey,
+    publish_ready_snapshot,
+)
 from linux_debug_mcp.server import create_run_handler
+from linux_debug_mcp.transport.base import LineRole, TransportRef
 
 
 def make_source_tree(base: Path, *, with_config: bool = False) -> Path:
@@ -304,3 +316,145 @@ def rootfs(tmp_path: Path) -> RootfsProfile:
         ssh_host="127.0.0.1",
         ssh_user="root",
     )
+
+
+# ---------------------------------------------------------------------------
+# Shared legacy-fence helpers (from test_server_legacy_session_fence)
+#
+# These seed a pre-Layer-4 DebugSession (raw gdbstub_endpoint, NO durable SessionRegistry
+# ownership record) and build the Layer-4 transaction/admission trio against it. Lifted here
+# so the dedicated B7 fence tests AND the §10.2 conformance suite share one source — a
+# contract change touches this file, not a test-to-test-module import.
+# ---------------------------------------------------------------------------
+
+
+LEGACY_FENCE_RUN_ID = "run-1"
+LEGACY_FENCE_KEY = TargetKey(provisioner="local-qemu", target_id=LEGACY_FENCE_RUN_ID)
+LEGACY_FENCE_GDBSTUB_ENDPOINT = {"host": "127.0.0.1", "port": 1234}
+LEGACY_FENCE_RSP_CHANNEL = TransportRef(
+    provider="qemu-gdbstub",
+    channel_id="rsp0",
+    line_role=LineRole.RSP,
+    caps=("rsp",),
+    target_ref=LEGACY_FENCE_GDBSTUB_ENDPOINT,
+)
+LEGACY_FENCE_PLATFORM_WITH_SSH = PlatformMetadata(
+    console_kind=ConsoleKind.UART,
+    console_count=1,
+    dedicated_debug_line=False,
+    ssh_reachable=True,
+    break_hints=[BreakHint.GDBSTUB_NATIVE],
+)
+
+
+def legacy_fence_profiles() -> dict[str, DebugProfile]:
+    return {"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")}
+
+
+def legacy_fence_make_registry(tmp_path: Path) -> SessionRegistry:
+    directory = tmp_path / "reg"
+    directory.mkdir(parents=True, exist_ok=True)
+    return SessionRegistry(directory=directory)
+
+
+def legacy_fence_build_transaction(
+    *,
+    registry: SessionRegistry,
+    generation: int = 1,
+) -> tuple[TransportTransaction, AdmissionService]:
+    # Imported lazily so conftest stays decoupled from the _layer4_fakes test harness at module
+    # load (conftest already loads for every test; _layer4_fakes only when a Layer-4 test needs it).
+    from _layer4_fakes import FakeQemuTransport, build_txn  # noqa: PLC0415
+
+    txn, admission = build_txn(FakeQemuTransport(), registry=registry, generation=generation)
+    publish_ready_snapshot(
+        admission,
+        target_key=LEGACY_FENCE_KEY,
+        generation=generation,
+        transports=[LEGACY_FENCE_RSP_CHANNEL],
+        platform=LEGACY_FENCE_PLATFORM_WITH_SSH,
+    )
+    return txn, admission
+
+
+def seed_legacy_debug_session(tmp_path: Path) -> Path:
+    """Create a run whose manifest records an ATTACHED, HALTED ('stopped') DebugSession with a raw
+    gdbstub_endpoint and NO matching SessionRegistry ownership record — the pre-Layer-4 shape."""
+    artifact_root = tmp_path / "runs"
+    source = tmp_path / "source"
+    source.mkdir()
+    store = ArtifactStore(artifact_root, source_paths=[source])
+    manifest = store.create_run(
+        RunRequest(
+            source_path=str(source),
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+            debug_profile="qemu-gdbstub-default",
+            run_id=LEGACY_FENCE_RUN_ID,
+        )
+    )
+    run_dir = store.run_dir(manifest.run_id)
+    vmlinux = run_dir / "build" / "vmlinux"
+    kernel = run_dir / "build" / "bzImage"
+    vmlinux.write_text("vmlinux", encoding="utf-8")
+    kernel.write_text("kernel", encoding="utf-8")
+    store.record_step_result(
+        manifest.run_id,
+        StepResult(
+            step_name="build",
+            status=StepStatus.SUCCEEDED,
+            summary="built",
+            artifacts=[
+                ArtifactRef(path=str(kernel), kind="kernel-image"),
+                ArtifactRef(path=str(vmlinux), kind="vmlinux"),
+            ],
+            details={"kernel_release": "6.9.0-test"},
+        ),
+    )
+    store.record_step_result(
+        manifest.run_id,
+        StepResult(
+            step_name="boot",
+            status=StepStatus.SUCCEEDED,
+            summary="booted",
+            details={"debug_boot": True, "gdbstub_endpoint": LEGACY_FENCE_GDBSTUB_ENDPOINT},
+        ),
+    )
+
+    session_path = run_dir / "debug" / "sessions" / "debug-1.json"
+    transcript_path = run_dir / "debug" / "attempt-001" / "transcript.txt"
+    commands_path = run_dir / "debug" / "attempt-001" / "commands.jsonl"
+    summary_path = run_dir / "debug" / "attempt-001" / "debug-summary.json"
+    for path in [session_path, transcript_path, commands_path, summary_path]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+    session = DebugSession(
+        session_id="debug-1",
+        run_id=manifest.run_id,
+        provider_name="local-qemu-gdbstub",
+        gdbstub_endpoint=LEGACY_FENCE_GDBSTUB_ENDPOINT,
+        vmlinux_path=str(vmlinux),
+        selected_debug_profile="qemu-gdbstub-default",
+        attach_status="attached",
+        started_at="2026-05-20T00:00:00+00:00",
+        current_execution_state="stopped",
+        transcript_path=str(transcript_path),
+        command_metadata_path=str(commands_path),
+        latest_summary_path=str(summary_path),
+        symbol_identity_validation={"same_run_artifact_linkage": True, "live_banner_match": True},
+    )
+    session_path.write_text(session.model_dump_json(indent=2), encoding="utf-8")
+    # Record the debug step pointing at the legacy session file — NO transport_session_id, the
+    # hallmark of a pre-Layer-4 session (no ownership binding).
+    store.record_step_result(
+        manifest.run_id,
+        StepResult(
+            step_name="debug",
+            status=StepStatus.SUCCEEDED,
+            summary="debug session started",
+            artifacts=[ArtifactRef(path=str(session_path), kind="debug-session")],
+            details={"debug_session_id": "debug-1", "session_path": str(session_path)},
+        ),
+    )
+    return artifact_root
