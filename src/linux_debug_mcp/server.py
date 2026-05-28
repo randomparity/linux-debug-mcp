@@ -31,7 +31,7 @@ from linux_debug_mcp.config import (
     merge_kernel_args,
     missing_destructive_permissions,
 )
-from linux_debug_mcp.coordination.admission import AdmissionError, AdmissionHandle, AdmissionService
+from linux_debug_mcp.coordination.admission import AdmissionError, AdmissionHandle, AdmissionService, TargetSnapshot
 from linux_debug_mcp.coordination.endpoint_safety import EndpointSafetyError
 from linux_debug_mcp.coordination.exec_probe import probe_execution_state
 from linux_debug_mcp.coordination.registry import SessionRegistry
@@ -242,13 +242,7 @@ def _admit_run_tests_ssh_tier(
     if admission is None or session_registry is None:
         return None
     target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
-    snapshot = admission.current_snapshot(target_key)
-    if snapshot is None:
-        raise AdmissionError(
-            "no authoritative snapshot for target; boot must publish a READY snapshot first",
-            category=ErrorCategory.READINESS_FAILURE,
-            code="stale_handle",
-        )
+    snapshot = _require_snapshot(admission, target_key)
     proof = probe_execution_state(
         registry=session_registry, admission=admission, target_key=target_key, generation=snapshot.generation
     )
@@ -1580,11 +1574,11 @@ def target_run_tests_handler(
     )
 
 
-def _debug_open_request(*, run_id: str, gdbstub_endpoint: dict[str, Any], admission: AdmissionService) -> OpenRequest:
-    """Build the §4.3 transport.open request for the recorded gdbstub endpoint, reading
-    `generation`/`platform` from the authoritative snapshot the boot step published (never
-    re-deriving them — ADR 0007). The RSP channel mirrors the boot snapshot producer."""
-    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+def _require_snapshot(admission: AdmissionService, target_key: TargetKey) -> TargetSnapshot:
+    """Read the authoritative snapshot for a target, raising the standard `stale_handle`
+    AdmissionError when boot has not published one yet. Single source of the
+    `current_snapshot(...) → raise if None` check shared by every snapshot-reading path
+    (transport.open request builders + inject_break)."""
     snapshot = admission.current_snapshot(target_key)
     if snapshot is None:
         raise AdmissionError(
@@ -1592,6 +1586,15 @@ def _debug_open_request(*, run_id: str, gdbstub_endpoint: dict[str, Any], admiss
             category=ErrorCategory.READINESS_FAILURE,
             code="stale_handle",
         )
+    return snapshot
+
+
+def _debug_open_request(*, run_id: str, gdbstub_endpoint: dict[str, Any], admission: AdmissionService) -> OpenRequest:
+    """Build the §4.3 transport.open request for the recorded gdbstub endpoint, reading
+    `generation`/`platform` from the authoritative snapshot the boot step published (never
+    re-deriving them — ADR 0007). The RSP channel mirrors the boot snapshot producer."""
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    snapshot = _require_snapshot(admission, target_key)
     return OpenRequest(
         target_key=target_key,
         generation=snapshot.generation,
@@ -2247,13 +2250,7 @@ def _transport_open_request(*, run_id: str, admission: AdmissionService) -> Open
     snapshot naming an unregistered provider flows through to the transaction's lookup (mapped to
     CONFIGURATION_ERROR by the handler), not silently rewritten to qemu-gdbstub."""
     target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
-    snapshot = admission.current_snapshot(target_key)
-    if snapshot is None:
-        raise AdmissionError(
-            "no authoritative snapshot for target; boot must publish a READY snapshot first",
-            category=ErrorCategory.READINESS_FAILURE,
-            code="stale_handle",
-        )
+    snapshot = _require_snapshot(admission, target_key)
     rsp_channel = next((ref for ref in snapshot.transports if ref.line_role is LineRole.RSP), None)
     if rsp_channel is None:
         raise AdmissionError(
@@ -2355,7 +2352,7 @@ def transport_inject_break_handler(
     transaction: TransportTransaction | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
-    inject_break: Callable[..., None] = inject_break,
+    break_mechanism: Callable[..., None] = inject_break,
 ) -> ToolResponse:
     """transport.inject_break: drop the target kernel into the debugger over an open session.
 
@@ -2364,8 +2361,9 @@ def transport_inject_break_handler(
     `execution_state=HALTED` BEFORE the break mechanism runs (so a death during the break can never
     strand the record as EXECUTING and let an ssh-tier op admit against a halted kernel), and the
     execution epoch is bumped to invalidate any pre-halt EXECUTING proof. If the break is
-    unconfirmable (the mechanism raises/times out), the record is written `UNKNOWN` — never left
-    EXECUTING."""
+    unconfirmable — the mechanism raises a known `InjectBreakError` OR any other exception (an
+    OSError, or the B6 real-mechanism missing-kwargs trap) — the record is written `UNKNOWN`,
+    NEVER left EXECUTING and never stranded at the optimistic HALTED."""
     if transaction is None or admission is None or session_registry is None:
         return _transport_disabled_failure(run_id=run_id)
     missing = missing_destructive_permissions("transport.inject_break", acknowledged_permissions or [])
@@ -2383,18 +2381,30 @@ def transport_inject_break_handler(
             details={"code": "unknown_session"},
         )
     # Persist HALTED + bump the execution epoch BEFORE the break runs (the ordering target.run_tests
-    # depends on to reject `target_halted` for the whole window the debugger owns the kernel).
-    session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.HALTED}))
-    admission.note_execution_transition(record.target_key, record.generation)
+    # depends on to reject `target_halted` for the whole window the debugger owns the kernel). Reuse
+    # the one helper that defines the durable-write-then-note ordering.
+    _halt_debug_transport(session=record, admission=admission, session_registry=session_registry)
     try:
-        inject_break(method="auto", break_plan=record.break_plan)
+        break_mechanism(method="auto", break_plan=record.break_plan)
     except InjectBreakError as exc:
-        # An unconfirmable break must never leave a stale EXECUTING (it was already overwritten to
-        # HALTED above) — record UNKNOWN so admission fails closed until a fresh probe runs.
+        # A KNOWN break failure: record UNKNOWN (never the stale optimistic HALTED) and surface the
+        # mechanism's own ErrorCategory so admission fails closed until a fresh probe runs.
         session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
         return ToolResponse.failure(
             category=exc.category,
             message=str(exc),
+            run_id=run_id,
+            details={"code": "break_unconfirmed", "execution_state": ExecutionState.UNKNOWN.value},
+            suggested_next_actions=["transport.status"],
+        )
+    except Exception as exc:
+        # ANY other mechanism failure (OSError, a missing-kwargs TypeError from a real wiring bug)
+        # MUST hold the same invariant: an unconfirmable break can never leave EXECUTING or a stale
+        # HALTED, so fail closed to UNKNOWN rather than crash after the durable HALTED write.
+        session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            message=f"break mechanism failed unexpectedly: {exc}",
             run_id=run_id,
             details={"code": "break_unconfirmed", "execution_state": ExecutionState.UNKNOWN.value},
             suggested_next_actions=["transport.status"],

@@ -118,7 +118,7 @@ def test_inject_break_writes_halted_before_break(tmp_path):
         transaction=txn,
         admission=admission,
         session_registry=reg,
-        inject_break=spy_break,
+        break_mechanism=spy_break,
     )
 
     assert result.ok is True
@@ -141,11 +141,38 @@ def test_inject_break_timeout_records_unknown_not_executing(tmp_path):
         transaction=txn,
         admission=admission,
         session_registry=reg,
-        inject_break=timing_out_break,
+        break_mechanism=timing_out_break,
     )
 
     assert result.ok is False
     # an unconfirmable break must NEVER leave a stale EXECUTING: fail closed to UNKNOWN.
+    assert reg.read_record(KEY).execution_state is ExecutionState.UNKNOWN
+
+
+def test_inject_break_unexpected_error_also_records_unknown(tmp_path):
+    # The unconfirmable-break ⇒ UNKNOWN invariant must hold for ANY mechanism failure, not just
+    # InjectBreakError: an OSError/TypeError (e.g. the B6 real-mechanism missing-kwargs trap) raised
+    # AFTER the optimistic HALTED write must still fail closed to UNKNOWN and return a failure —
+    # never a stale HALTED, never EXECUTING, never an escaping crash.
+    response, txn, admission, reg = _open(tmp_path)
+    session_id = response.data["session_id"]
+
+    def exploding_break(**kwargs):
+        raise OSError("proxy socket vanished mid-break")
+
+    result = transport_inject_break_handler(
+        run_id=RUN_ID,
+        session_id=session_id,
+        acknowledged_permissions=INJECT_PERMS,
+        transaction=txn,
+        admission=admission,
+        session_registry=reg,
+        break_mechanism=exploding_break,
+    )
+
+    assert result.ok is False
+    assert result.error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    # NOT stranded at the optimistic HALTED, NOT left EXECUTING — fail closed to UNKNOWN.
     assert reg.read_record(KEY).execution_state is ExecutionState.UNKNOWN
 
 
@@ -164,7 +191,7 @@ def test_inject_break_requires_destructive_permission(tmp_path):
         transaction=txn,
         admission=admission,
         session_registry=reg,
-        inject_break=spy_break,
+        break_mechanism=spy_break,
     )
     assert refused.ok is False
     assert refused.error.category is ErrorCategory.CONFIGURATION_ERROR
@@ -179,7 +206,7 @@ def test_inject_break_requires_destructive_permission(tmp_path):
         transaction=txn,
         admission=admission,
         session_registry=reg,
-        inject_break=spy_break,
+        break_mechanism=spy_break,
     )
     assert granted.ok is True
     assert len(calls) == 1  # with the permission, the break proceeds
