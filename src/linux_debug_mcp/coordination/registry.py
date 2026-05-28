@@ -161,7 +161,29 @@ class SessionRegistry:
             return None
         return TransportSession.model_validate_json(path.read_text(encoding="utf-8"))
 
-    def delete_record(self, target_key: TargetKey) -> None:
+    def delete_record(self, target_key: TargetKey, *, expected_session_id: str | None = None) -> None:
+        """Delete the durable ownership record for `target_key`.
+
+        When `expected_session_id` is set, the on-disk record is read first and only unlinked
+        if its `session_id` matches. This prevents a stale subscriber (e.g. one whose session
+        already cleanly closed but whose dispatcher binding lingered) or a wedge-tail unblock
+        from erasing the FRESH session's record after a new incarnation has written its own
+        owner-*.json at the same target_key path. Without the fence, `delete_record` is keyed
+        only by `target_key` and a stale caller has no way to express "delete only if it's
+        still mine".
+
+        Read→check→unlink is not atomic, so a concurrent `write_record` between the read and
+        the unlink could be lost. The window is microseconds (an in-memory check between two
+        syscalls); the alternative — per-target locking in the registry itself — is a much
+        larger refactor that would also need to cover `write_record`, `reconcile`, and
+        `list_records`. The narrow residual TOCTOU is documented and accepted; it is orders of
+        magnitude smaller than the original race ("stale subscriber unconditionally erases a
+        fresh session's record").
+        """
+        if expected_session_id is not None:
+            existing = self.read_record(target_key)
+            if existing is None or existing.session_id != expected_session_id:
+                return
         path = self._record_path(target_key)
         existed = path.exists()
         path.unlink(missing_ok=True)
@@ -277,5 +299,5 @@ class SessionRegistry:
                         record.session_id,
                         record.target_key,
                     )
-            self.delete_record(record.target_key)
+            self.delete_record(record.target_key, expected_session_id=record.session_id)
         return report

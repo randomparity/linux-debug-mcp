@@ -124,13 +124,19 @@ class FakeBlockingReapProxy:
     drive the lifecycle dispatcher's `teardown_deadline` path and observe what runs while the
     `invalidate` worker is wedged on the SIGTERM/wait/SIGKILL sequence. Used to verify Fix B:
     when invalidate is wedged, force_drop must leave the durable record intact so
-    `SessionRegistry.reconcile()` can reap the orphan on the next process start."""
+    `SessionRegistry.reconcile()` can reap the orphan on the next process start.
+
+    `entered` fires as the FIRST action of `stop_by_identity`, so a test that needs to assert
+    "the invalidate worker is genuinely wedged inside the proxy" can wait on `entered` rather
+    than racing thread-startup vs. `outstanding_overdue()` snapshotting on heavily-loaded CI."""
 
     def __init__(self) -> None:
         self._block = threading.Event()
+        self.entered = threading.Event()
         self.reaped: list[tuple[int, str | None]] = []
 
     def stop_by_identity(self, pid: int, start_time: str | None) -> bool:
+        self.entered.set()
         self.reaped.append((pid, start_time))
         self._block.wait()
         return True

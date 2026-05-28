@@ -78,11 +78,15 @@ def test_on_partial_writes_backend_pid_through_before_ready(tmp_path):
 def test_close_reaps_and_clears(tmp_path):
     transport = FakeQemuTransport()
     reg = SessionRegistry(directory=tmp_path)
+    dispatcher = InProcessLifecycleDispatcher()
     txn, _ = build_txn(transport, registry=reg)
+    txn.bind_lifecycle(dispatcher)
     session = txn.open(make_request())
     txn.close(session.session_id)
     assert transport.closed == [session.session_id]
     assert reg.read_record(KEY) is None
+    # close() unsubscribes from the lifecycle dispatcher — no stale binding accretes.
+    assert dispatcher._subscribers.get(KEY, {}) == {}
 
 
 def test_lifecycle_invalidation_revokes_guard_and_reaps(tmp_path):
@@ -95,6 +99,8 @@ def test_lifecycle_invalidation_revokes_guard_and_reaps(tmp_path):
     # an invalidation tears the session down: admission closed, guard freed (FENCED release), record gone
     admission.invalidate_lifecycle(LifecycleEvent(target_key=KEY, kind=LifecycleKind.CRASHED), dispatcher, generation=1)
     assert reg.read_record(KEY) is None
+    # force_drop unsubscribes from the lifecycle dispatcher — no stale binding accretes.
+    assert dispatcher._subscribers.get(KEY, {}) == {}
     # guard is free → a new incarnation (after a generation bump) could acquire
     assert guard.acquire(KEY) is not None
 
@@ -119,11 +125,15 @@ def test_open_close_open_succeeds(tmp_path):
     # target admits and reaches READY again. Before the fix the first promoted handle was never
     # deregistered, so it lingered PROMOTED in the binding table.
     transport = FakeQemuTransport()
+    dispatcher = InProcessLifecycleDispatcher()
     txn, admission = build_txn(transport, registry=SessionRegistry(directory=tmp_path))
+    txn.bind_lifecycle(dispatcher)
     first = txn.open(make_request())
     txn.close(first.session_id)
     # close() deregistered the promoted handle → no binding outstanding for the target.
     assert admission._bindings.get(KEY, []) == []
+    # close() unsubscribes from the lifecycle dispatcher → no stale binding accretes across cycles.
+    assert dispatcher._subscribers.get(KEY, {}) == {}
     second = txn.open(make_request())
     assert second.record_state is RecordState.READY
 
@@ -142,6 +152,8 @@ def test_lifecycle_invalidation_then_reopen_succeeds(tmp_path):
     admission.invalidate_lifecycle(LifecycleEvent(target_key=KEY, kind=LifecycleKind.CRASHED), dispatcher, generation=1)
     # force_drop deregistered the handle → no binding outstanding blocks reopen.
     assert admission._bindings.get(KEY, []) == []
+    # force_drop unsubscribed from the lifecycle dispatcher → no stale binding accretes.
+    assert dispatcher._subscribers.get(KEY, {}) == {}
     # §4.5 step 5: bump the authoritative generation, then admission can reopen for the next open.
     _bump_generation(admission, generation=2)
     admission.reopen(KEY)
@@ -176,6 +188,8 @@ def test_lifecycle_invalidation_between_promote_and_subscribe_force_drops_cleanl
     )
     assert reg.read_record(KEY) is None
     assert admission._bindings.get(KEY, []) == []
+    # force_drop unsubscribed from the lifecycle dispatcher → no stale binding accretes.
+    assert dispatcher._subscribers.get(KEY, {}) == {}
     # close() on the long-dead session_id is now a no-op (record is gone) — it must NOT raise,
     # nor leak the cancelled binding back into the table.
     txn.close(session.session_id)
@@ -183,19 +197,23 @@ def test_lifecycle_invalidation_between_promote_and_subscribe_force_drops_cleanl
 
 
 def test_recovery_clear_failure_restores_cache_gate(tmp_path):
-    """Fix A — when the post-lock durable tombstone clear (`clear_tombstone`) raises (EIO, EACCES,
-    …), the in-memory admission cache MUST be restored to its parked generation so the gate stays
-    fail-closed.
+    """When the durable tombstone clear (`clear_tombstone`) raises (EIO, EACCES, …), the
+    in-memory admission cache MUST be at its parked generation so the gate stays fail-closed —
+    cache and on-disk tombstone agree, the next non-recovery `admit()` is rejected
+    `recovery_required`.
 
-    Before the fix, the admission cache was cleared inside the key lock and the durable I/O ran
-    outside it. An OSError in `clear_tombstone` would propagate to the outer
-    `except BaseException: self._rollback(...)`, but rollback does NOT re-mark
-    `recovery_required` — so the in-memory gate was clear while the on-disk tombstone was still
-    present, and a subsequent non-recovery `admit()` would slip past the cache check.
+    The dual-write clearance now runs durable-first: the cache is cleared only AFTER
+    `_clear_recovery_durable` succeeds. An OSError leaves both halves marked end-to-end with
+    no try/except-restore handshake. The earlier ordering (cache cleared inside the admission
+    key lock, durable I/O outside) opened a window — scaling with filesystem latency — where a
+    concurrent non-recovery admit could slip past the cleared cache while the durable I/O was
+    still in flight. The test name preserves the contract — "the cache gate is asserted after
+    a durable failure" — even though the mechanism is now keep-by-construction rather than
+    restore-on-failure.
     """
 
     class FailingClearRegistry(SessionRegistry):
-        def clear_tombstone(self, target_key, *, expected_generation):  # type: ignore[override]
+        def clear_tombstone(self, target_key, *, expected_generation):
             raise OSError("simulated EIO")
 
     reg = FailingClearRegistry(directory=tmp_path)
@@ -245,6 +263,12 @@ def test_force_drop_keeps_durable_record_when_invalidate_wedged(tmp_path):
             dispatcher,
             generation=session.generation,
         )
+        # Confirm the invalidate worker is genuinely wedged INSIDE `proxy.stop_by_identity` —
+        # not just-started-but-not-yet-entered (which would let it finish before the
+        # `outstanding_overdue() == 1` assertion lands on a heavily-loaded CI host). `entered`
+        # is set by the first line of `stop_by_identity`; the only way to leave it now is
+        # `proxy.unblock()` in the finally block below.
+        assert proxy.entered.wait(timeout=2.0)
         # The durable record persists — it is the only trace reconcile() will find on the next
         # process start to drive a fingerprint-fenced reap.
         assert reg.read_record(KEY) is not None
@@ -262,4 +286,78 @@ def test_force_drop_keeps_durable_record_when_invalidate_wedged(tmp_path):
     deadline = time.monotonic() + 5.0
     while reg.read_record(KEY) is not None and time.monotonic() < deadline:
         time.sleep(0.02)
+    assert reg.read_record(KEY) is None
+
+
+def test_close_unsubscribes_from_lifecycle_dispatcher(tmp_path):
+    """A cleanly-closed session must remove its dispatcher subscriber. Stale subscribers
+    left behind would receive every future invalidate_lifecycle event for the target_key —
+    each one driving a force_drop that, before the session-id fence, would erase a
+    fresh session's record at the same target_key path. Regression for the HIGH finding."""
+    transport = FakeQemuTransport()
+    dispatcher = InProcessLifecycleDispatcher()
+    txn, _ = build_txn(transport, registry=SessionRegistry(directory=tmp_path))
+    txn.bind_lifecycle(dispatcher)
+    session = txn.open(make_request())
+    # Baseline: the subscriber is registered.
+    assert session.session_id in dispatcher._subscribers.get(KEY, {})
+    txn.close(session.session_id)
+    # close() unsubscribed → no stale subscriber remains.
+    assert dispatcher._subscribers.get(KEY, {}) == {}
+
+
+def test_force_drop_unsubscribes_after_dispatcher_invocation(tmp_path):
+    """A force_drop driven by `invalidate_lifecycle` must remove the dispatcher subscriber
+    that just ran. Without the unsubscribe, the cancelled-handle subscriber would still
+    receive the NEXT invalidate for this target_key and re-run its tear-down. Regression
+    for the HIGH finding via the lifecycle-invalidation path (the other entry into the
+    stale-subscriber bug)."""
+    transport = FakeQemuTransport()
+    guard, leases, reg = InProcessStopCapableGuard(), ConsoleLeaseManager(), SessionRegistry(directory=tmp_path)
+    dispatcher = InProcessLifecycleDispatcher()
+    txn, admission = build_txn(transport, guard=guard, leases=leases, registry=reg)
+    txn.bind_lifecycle(dispatcher)
+    session = txn.open(make_request())
+    assert session.session_id in dispatcher._subscribers.get(KEY, {})
+    admission.invalidate_lifecycle(
+        LifecycleEvent(target_key=KEY, kind=LifecycleKind.CRASHED), dispatcher, generation=session.generation
+    )
+    # force_drop unsubscribed → no stale subscriber remains for a future invalidate.
+    assert dispatcher._subscribers.get(KEY, {}) == {}
+
+
+def test_delete_record_session_id_fence_skips_on_mismatch(tmp_path):
+    """Registry-level contract for the session-id fence on `delete_record`: a delete keyed by
+    a NON-matching `expected_session_id` is a no-op; a delete keyed by the MATCHING
+    `expected_session_id` removes the record. The fence is the second of the two layers
+    closing the HIGH finding — even if a stale caller (or wedge-tail unblock) reaches
+    `delete_record`, it can no longer erase a fresh session's record at the same target_key
+    path."""
+    from datetime import UTC, datetime
+
+    from linux_debug_mcp.transport.base import ExecutionState as ES
+    from linux_debug_mcp.transport.base import TransportSession as TS
+    from linux_debug_mcp.transport.base import new_session_id
+
+    fresh_id = new_session_id()
+    stale_id = new_session_id()
+    reg = SessionRegistry(directory=tmp_path)
+    fresh = TS(
+        session_id=fresh_id,
+        target_key=KEY,
+        generation=1,
+        provider="qemu-gdbstub",
+        channel_id="rsp0",
+        record_state=RecordState.READY,
+        attach_epoch=0,
+        execution_state=ES.EXECUTING,
+        created_at=datetime.now(UTC),
+    )
+    reg.write_record(fresh)
+    # A stale caller whose remembered session_id does NOT match the on-disk record must NOT
+    # erase the fresh record.
+    reg.delete_record(KEY, expected_session_id=stale_id)
+    assert reg.read_record(KEY) is not None
+    # The current owner can still delete it cleanly.
+    reg.delete_record(KEY, expected_session_id=fresh_id)
     assert reg.read_record(KEY) is None

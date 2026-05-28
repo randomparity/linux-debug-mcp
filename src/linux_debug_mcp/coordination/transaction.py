@@ -126,9 +126,22 @@ class _SessionSubscriber:
         # finds the orphan PID and reaps it via `stop_by_identity(record.backend_pid, …)`. If the
         # wedge later resolves, invalidate sets `_killed` and re-calls force_drop, which then
         # deletes the record. delete_record is idempotent (unlink + missing_ok=True), so a
-        # double-delete on the unwedge path is harmless.
+        # double-delete on the unwedge path is harmless. The `expected_session_id` fence prevents
+        # a stale subscriber from erasing a fresh session's record that has overwritten the old
+        # one at the same target_key path (e.g. a wedge-tail unblock running after a new session
+        # has admitted — the wedged worker's force_drop tail would otherwise unconditionally
+        # delete by target_key).
         if self._killed.is_set():
-            self._transaction._registry.delete_record(self._session.target_key)
+            self._transaction._registry.delete_record(
+                self._session.target_key, expected_session_id=self._session.session_id
+            )
+        # Drop the dispatcher binding now that we've torn down everything this subscriber owned.
+        # Stale subscribers left in the map would receive every future invalidate_lifecycle for
+        # this target_key — and each of their force_drops would attempt a delete_record (now
+        # session-id fenced). The fence makes the unsubscribe belt-and-suspenders, but removing
+        # the entry also keeps `_subscribers` from accreting indefinitely as sessions cycle.
+        if self._transaction._dispatcher is not None:
+            self._transaction._dispatcher.unsubscribe(self._session.target_key, self._session.session_id)
 
 
 class TransportTransaction:
@@ -305,45 +318,39 @@ class TransportTransaction:
             # (10) commit. A recovery attach clears the recovery gate through the DUAL-WRITE
             # helper (Finding #5) — durable tombstone + admission cache together, never one alone.
             #
-            # Finding F3: hold the admission key lock across promote → register → clear_recovery
-            # (cache only) → subscribe so a concurrent `invalidate_lifecycle` cannot cancel the
-            # freshly-promoted handle in the gap between `promote()` (which only succeeds under
-            # the lock) and `_subscribe_session()` (which registers the dispatcher subscriber that
-            # drives force_drop). Without the extended critical section, a cancel between promote
-            # and subscribe leaves the binding promoted-but-cancelled, with no subscriber to tear
-            # it down — close() would later swallow the resulting `admission_cancelled` and the
+            # Finding F3: hold the admission key lock across promote → register → subscribe so a
+            # concurrent `invalidate_lifecycle` cannot cancel the freshly-promoted handle in the
+            # gap between `promote()` (which only succeeds under the lock) and
+            # `_subscribe_session()` (which registers the dispatcher subscriber that drives
+            # force_drop). Without the extended critical section, a cancel between promote and
+            # subscribe leaves the binding promoted-but-cancelled, with no subscriber to tear it
+            # down — close() would later swallow the resulting `admission_cancelled` and the
             # backend/lease/guard would leak. The key lock is re-entrant (RLock), so `promote()`'s
             # own internal lock acquisition is a no-op.
-            #
-            # Finding F4: durable tombstone I/O (clear_tombstone → unlink + fsync_dir) runs AFTER
-            # the lock is released, so a slow filesystem doesn't stall the admission table. The
-            # in-memory admission cache update (`clear_recovery_required`) stays inside the lock;
-            # if the process dies between the cache update and the durable unlink, `reconcile()`
-            # on the next start re-asserts the persisted tombstone into the cache — the worst case
-            # is a stale tombstone that the existing generation gate in admission treats as a
-            # no-op once the snapshot has advanced.
             with self._admission.key_lock(request.target_key):
                 self._admission.promote(handle)
                 self._handles[session_id] = handle
                 state = replace(state, admission_handle=handle)
-                if recovery:
-                    self._clear_recovery_cache(request.target_key, request.generation)
                 self._subscribe_session(session, state)
             if recovery:
-                # F4-followup: durable I/O runs outside the lock to keep the admission table
-                # responsive under a slow filesystem, but a raise here (EIO on `_fsync_dir`,
-                # EACCES, ENOSPC, …) would leave the in-memory cache CLEARED while the on-disk
-                # tombstone is STILL PRESENT — a subsequent non-recovery admit() would slip past
-                # the gate. Restore the cache to the parked generation before propagating, so the
-                # gate is fail-closed end-to-end (cache + tombstone agree). The outer rollback
-                # still runs and unwinds the rest of the open. `mark_recovery_required` is
-                # generation-fenced (never regresses a newer mark), takes its own key lock, and is
-                # idempotent — safe to call here.
-                try:
-                    self._clear_recovery_durable(request.target_key, request.generation)
-                except BaseException:
-                    self._admission.mark_recovery_required(request.target_key, request.generation)
-                    raise
+                # Recovery-gate clearance runs OUTSIDE the admission key lock (Finding F4: a slow
+                # filesystem must not stall the admission table) and **durable-first**: the
+                # in-memory cache is cleared only AFTER the durable tombstone unlink succeeds.
+                # Consequences:
+                #   * A raise from `_clear_recovery_durable` (EIO on `_fsync_dir`, EACCES,
+                #     ENOSPC, …) leaves the cache STILL MARKED and the tombstone STILL PRESENT —
+                #     the gate is fail-closed end-to-end with no try/except-restore handshake.
+                #   * Concurrent non-recovery `admit()` during the durable I/O sees the cache
+                #     still set and is correctly rejected `recovery_required` (the prior
+                #     ordering — clear cache inside the lock, then run durable I/O outside —
+                #     opened a millisecond-to-seconds window scaling with filesystem latency
+                #     where a non-recovery admit could slip past the gate while the durable I/O
+                #     was still in flight).
+                #   * If the process dies between the durable unlink and the cache clear,
+                #     `reconcile()` on the next start finds no tombstone (it's already gone) so
+                #     the cache stays clear — same outcome, just reached via cold restart.
+                self._clear_recovery_durable(request.target_key, request.generation)
+                self._clear_recovery_cache(request.target_key, request.generation)
             return session
         except BaseException:
             self._rollback(request.target_key, state, transport, handle)
@@ -369,7 +376,9 @@ class TransportTransaction:
         if state.session_id is not None:
             self._tokens.pop(state.session_id, None)
             self._handles.pop(state.session_id, None)  # keep _handles symmetric with _tokens
-            self._registry.delete_record(target_key)
+            # Session-id fenced: rollback only erases the record this in-flight open() wrote
+            # (the OPENING/READY record carries `session_id == state.session_id` by construction).
+            self._registry.delete_record(target_key, expected_session_id=state.session_id)
         if state.lease_token is not None:
             self._leases.release(target_key, state.lease_token)
         if state.guard_token is not None:
@@ -417,7 +426,16 @@ class TransportTransaction:
         # tombstone + admission cache together, never one alone. Otherwise delete cleanly.
         if record.execution_state in (ExecutionState.HALTED, ExecutionState.UNKNOWN) and not force:
             self._mark_recovery(record.target_key, record.generation, reason="closed_while_halted")
-        self._registry.delete_record(record.target_key)
+        # Session-id fenced delete: protects against the close() running for a recycled session_id
+        # racing a new session that may have just claimed the same target_key.
+        self._registry.delete_record(record.target_key, expected_session_id=record.session_id)
+        # Drop the lifecycle binding for this cleanly-closed session. Without this, the dispatcher
+        # would keep delivering future invalidate_lifecycle events to the stale subscriber, and
+        # every one of those force_drops would re-attempt a record delete (now session-id fenced,
+        # so a no-op, but unnecessary work). Idempotent — unsubscribing an already-removed name
+        # is a no-op.
+        if self._dispatcher is not None:
+            self._dispatcher.unsubscribe(record.target_key, session_id)
 
     def _mark_recovery(self, target_key: TargetKey, generation: int, *, reason: str) -> None:
         """Single source of truth is the durable tombstone; admission's `_recovery_required` is a
