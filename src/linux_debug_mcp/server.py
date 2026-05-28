@@ -80,6 +80,7 @@ from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, Provider
 from linux_debug_mcp.providers.local_drgn_introspect import (
     _BUILD_ID_RE,
     SCRIPT_BYTE_CAP,
+    TARGET_PYTHON_ARGV,
     WrapperRenderError,
     render_wrapper,
     render_wrapper_skeleton,
@@ -2302,7 +2303,7 @@ def debug_introspect_run_handler(
         remote_argv = ["timeout", "--kill-after=2s", f"{user_timeout}s"]
         if use_sudo:
             remote_argv.append("sudo")
-        remote_argv.extend(["python3", "-"])
+        remote_argv.extend(TARGET_PYTHON_ARGV)
         try:
             ssh_argv = build_ssh_argv(
                 rootfs_profile=resolved_rootfs,

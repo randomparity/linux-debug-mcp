@@ -27,6 +27,13 @@ _CALL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 # Spec §3.1: 256 KiB script cap (enforced by the handler, not Pydantic).
 SCRIPT_BYTE_CAP = 256 * 1024
 
+# Spec §4 (shared-interpreter invariant): the single interpreter invocation
+# consumed by BOTH debug.introspect.run (server.debug_introspect_run_handler)
+# and debug.introspect.check_prerequisites (the probe). drgn installed for an
+# interpreter other than this one is reported missing by design, because the
+# runner would equally fail to import it.
+TARGET_PYTHON_ARGV = ["python3", "-"]
+
 
 class WrapperRenderError(ValueError):
     """Raised when a non-user template input fails its host-side
