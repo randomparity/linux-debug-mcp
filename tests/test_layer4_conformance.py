@@ -816,19 +816,25 @@ def test_legacy_debug_session_refused_on_load(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_secret_refs_never_surfaced_in_response_or_record(tmp_path: Path) -> None:
-    """Open a session whose channel carries `secret_refs=("env:LDM_CONFORMANCE_SECRET",)`; the raw
-    secret_ref string MUST NOT appear in the transport.open response body OR the durable record's
-    JSON. The resolver knows the ref so open() proceeds to READY, exercising the full happy path."""
+def test_secret_refs_never_surfaced_in_response_or_record(tmp_path: Path, monkeypatch) -> None:
+    """Open a session whose channel carries a secret ref pointing at a REAL env var holding a known
+    literal secret value. Neither the raw secret_ref string NOR the resolved literal secret value
+    may appear in the transport.open response body OR the durable record's JSON. The resolver
+    returns a non-empty dict, exercising the full happy path through resolve()."""
     from linux_debug_mcp.safety.secrets import SecretReference, SecretReferenceKind
 
-    raw_secret_ref = "env:LDM_CONFORMANCE_SECRET"
+    # A real env var with a known literal value; the resolver returns it to the transaction, which
+    # MUST hold the §3.4/§8 invariant that resolved values are never surfaced/persisted.
+    env_var_name = "LDM_CONFORMANCE_SECRET_VALUE"
+    raw_secret_value = "TOP_SECRET_LITERAL_xyzzy"
+    monkeypatch.setenv(env_var_name, raw_secret_value)
+
     secret_channel = TransportRef(
         provider="qemu-gdbstub",
         channel_id="rsp0",
         line_role=LineRole.RSP,
         caps=("rsp",),
-        secret_refs=(raw_secret_ref,),
+        secret_refs=(env_var_name,),
     )
     reg = SessionRegistry(directory=tmp_path)
     store = SnapshotStore()
@@ -839,14 +845,14 @@ def test_secret_refs_never_surfaced_in_response_or_record(tmp_path: Path) -> Non
         registry=reg,
         guard=InProcessStopCapableGuard(),
         leases=ConsoleLeaseManager(),
-        # Resolver knows the ref but the env var is unset and not required → resolve() returns {}.
+        # Resolver reads the env var; resolve() returns {env_var_name: raw_secret_value}.
         secrets=EnvSecretsResolver(
             [
                 SecretReference(
                     kind=SecretReferenceKind.ENV,
                     label="conformance",
-                    reference=raw_secret_ref,
-                    required=False,
+                    reference=env_var_name,
+                    required=True,
                 )
             ]
         ),
@@ -856,16 +862,19 @@ def test_secret_refs_never_surfaced_in_response_or_record(tmp_path: Path) -> Non
 
     response = transport_open_handler(run_id="run-1", transaction=txn, admission=admission, session_registry=reg)
     assert response.ok is True
+
     # The RAW secret_ref string is never echoed back to the agent OR persisted into the record.
     response_text = response.model_dump_json()
-    assert raw_secret_ref not in response_text
+    assert env_var_name not in response_text
 
     record = reg.read_record(KEY)
     assert record is not None
     record_text = record.model_dump_json()
-    assert raw_secret_ref not in record_text
-    # And the response itself never reports a resolved secret VALUE (the resolver returned none here).
-    assert "LDM_CONFORMANCE_SECRET" not in response_text
+    assert env_var_name not in record_text
+    # And — the load-bearing assertion — the resolved literal SECRET VALUE never appears in either
+    # the response body or the durable record JSON. A leak here is the spec §3.4/§8 violation.
+    assert raw_secret_value not in response_text
+    assert raw_secret_value not in record_text
 
 
 def test_console_and_gdb_transcript_redacted_into_durable_record(tmp_path: Path) -> None:

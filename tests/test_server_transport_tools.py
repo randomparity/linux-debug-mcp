@@ -63,7 +63,9 @@ def test_transport_open_returns_session_and_records_endpoint(tmp_path):
     assert record is not None
     assert record.session_id == session_id
     assert "debug.start_session" in response.suggested_next_actions
-    assert "transport.status" in response.suggested_next_actions
+    # transport.status is Layer 5 and not yet registered; the suggestion must point only at
+    # currently registered tools (no phantom features).
+    assert "transport.status" not in response.suggested_next_actions
 
 
 def test_transport_open_recovery_clears_tombstone(tmp_path):

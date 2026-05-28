@@ -2457,7 +2457,7 @@ def transport_open_handler(
             message=str(exc),
             run_id=run_id,
             details={"code": getattr(exc, "code", "stop_capable_conflict")},
-            suggested_next_actions=["transport.status"],
+            suggested_next_actions=["providers.list"],
         )
     except AdmissionError as exc:
         return ToolResponse.failure(
@@ -2465,7 +2465,7 @@ def transport_open_handler(
             message=str(exc),
             run_id=run_id,
             details={"code": exc.code},
-            suggested_next_actions=["transport.status"],
+            suggested_next_actions=["providers.list"],
         )
     return ToolResponse.success(
         summary=f"transport session {session.session_id} open",
@@ -2478,7 +2478,7 @@ def transport_open_handler(
             "rsp_endpoint": session.rsp_endpoint.model_dump(mode="json") if session.rsp_endpoint else None,
             "console_endpoint": session.console_endpoint.model_dump(mode="json") if session.console_endpoint else None,
         },
-        suggested_next_actions=["debug.start_session", "transport.status"],
+        suggested_next_actions=["debug.start_session"],
     )
 
 
@@ -2554,7 +2554,7 @@ def transport_inject_break_handler(
             message=str(exc),
             run_id=run_id,
             details={"code": "break_unconfirmed", "execution_state": ExecutionState.UNKNOWN.value},
-            suggested_next_actions=["transport.status"],
+            suggested_next_actions=["providers.list"],
         )
     except Exception as exc:
         # ANY other mechanism failure (OSError, a missing-kwargs TypeError from a real wiring bug)
@@ -2566,13 +2566,13 @@ def transport_inject_break_handler(
             message=f"break mechanism failed unexpectedly: {exc}",
             run_id=run_id,
             details={"code": "break_unconfirmed", "execution_state": ExecutionState.UNKNOWN.value},
-            suggested_next_actions=["transport.status"],
+            suggested_next_actions=["providers.list"],
         )
     return ToolResponse.success(
         summary=f"break injected on transport session {session_id}; target halted",
         run_id=run_id,
         data={"session_id": session_id, "execution_state": ExecutionState.HALTED.value},
-        suggested_next_actions=["debug.start_session", "transport.status"],
+        suggested_next_actions=["debug.start_session"],
     )
 
 
