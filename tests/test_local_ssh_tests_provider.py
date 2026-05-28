@@ -1,3 +1,5 @@
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -5,7 +7,12 @@ import pytest
 
 from linux_debug_mcp.config import RootfsProfile, TestCommand, TestSuiteProfile
 from linux_debug_mcp.domain import ErrorCategory, StepStatus
-from linux_debug_mcp.providers.local_ssh_tests import _SNIPPET_LIMIT, LocalSshTestProvider, SshCommandResult
+from linux_debug_mcp.providers.local_ssh_tests import (
+    _SNIPPET_LIMIT,
+    LocalSshTestProvider,
+    SshCommandResult,
+    SubprocessSshRunner,
+)
 
 
 @dataclass
@@ -21,7 +28,15 @@ class FakeSshRunner:
     def which(self, command: str) -> str | None:
         return f"/usr/bin/{command}" if self.available else None
 
-    def run(self, argv: list[str], *, timeout: int, stdout_path: Path, stderr_path: Path) -> SshCommandResult:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        stdout_path: Path,
+        stderr_path: Path,
+        cancel: threading.Event | None = None,
+    ) -> SshCommandResult:
         self.calls.append({"argv": argv, "timeout": timeout, "stdout_path": stdout_path, "stderr_path": stderr_path})
         result = self.results.pop(0) if self.results else SshCommandResult(exit_status=0, stdout="ok\n", stderr="")
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -254,3 +269,16 @@ def test_summary_redacts_key_path_and_secret_like_output(tmp_path: Path) -> None
     assert "secret-token-value" not in combined
     assert "hunter2" not in combined
     assert "[REDACTED]" in combined
+
+
+def test_run_is_killed_on_cancel(tmp_path: Path) -> None:
+    runner = SubprocessSshRunner()
+    cancel = threading.Event()
+    out, err = tmp_path / "o", tmp_path / "e"
+    t = threading.Timer(0.2, cancel.set)
+    t.start()
+    start = time.monotonic()
+    result = runner.run(["sleep", "30"], timeout=30, stdout_path=out, stderr_path=err, cancel=cancel)
+    t.cancel()
+    assert time.monotonic() - start < 5  # killed, not waited 30s
+    assert result.cancelled is True

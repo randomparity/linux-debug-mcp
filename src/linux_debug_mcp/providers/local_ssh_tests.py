@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
+import signal
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -59,6 +62,7 @@ class SshCommandResult:
     stdout_snippet: str = ""
     stderr_snippet: str = ""
     timed_out: bool = False
+    cancelled: bool = False
 
 
 @dataclass(frozen=True)
@@ -75,7 +79,15 @@ class SshRunner(Protocol):
     def which(self, command: str) -> str | None:
         raise NotImplementedError
 
-    def run(self, argv: list[str], *, timeout: int, stdout_path: Path, stderr_path: Path) -> SshCommandResult:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        stdout_path: Path,
+        stderr_path: Path,
+        cancel: threading.Event | None = None,
+    ) -> SshCommandResult:
         raise NotImplementedError
 
 
@@ -83,35 +95,59 @@ class SubprocessSshRunner:
     def which(self, command: str) -> str | None:
         return shutil.which(command)
 
-    def run(self, argv: list[str], *, timeout: int, stdout_path: Path, stderr_path: Path) -> SshCommandResult:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        stdout_path: Path,
+        stderr_path: Path,
+        cancel: threading.Event | None = None,
+    ) -> SshCommandResult:
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
         stderr_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with (
-                stdout_path.open("w", encoding="utf-8") as stdout_file,
-                stderr_path.open("w", encoding="utf-8") as stderr_file,
-            ):
-                completed = subprocess.run(
-                    argv,
-                    check=False,
-                    stdout=stdout_file,
-                    stderr=stderr_file,
-                    text=True,
-                    timeout=timeout,
-                    shell=False,
-                )
-            return SshCommandResult(
-                exit_status=completed.returncode,
-                stdout_snippet=self._read_snippet(stdout_path),
-                stderr_snippet=self._read_snippet(stderr_path),
+        with (
+            stdout_path.open("w", encoding="utf-8") as stdout_file,
+            stderr_path.open("w", encoding="utf-8") as stderr_file,
+        ):
+            proc = subprocess.Popen(
+                argv,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                text=True,
+                shell=False,
+                start_new_session=True,
             )
-        except subprocess.TimeoutExpired:
-            return SshCommandResult(
-                exit_status=-1,
-                stdout_snippet=self._read_snippet(stdout_path),
-                stderr_snippet=self._read_snippet(stderr_path),
-                timed_out=True,
-            )
+            waited = 0.0
+            while True:
+                try:
+                    proc.wait(timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    waited += 0.1
+                    if cancel is not None and cancel.is_set():
+                        os.killpg(proc.pid, signal.SIGKILL)
+                        proc.wait()
+                        return SshCommandResult(
+                            exit_status=-1,
+                            stdout_snippet=self._read_snippet(stdout_path),
+                            stderr_snippet=self._read_snippet(stderr_path),
+                            cancelled=True,
+                        )
+                    if waited >= timeout:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                        proc.wait()
+                        return SshCommandResult(
+                            exit_status=-1,
+                            stdout_snippet=self._read_snippet(stdout_path),
+                            stderr_snippet=self._read_snippet(stderr_path),
+                            timed_out=True,
+                        )
+        return SshCommandResult(
+            exit_status=proc.returncode,
+            stdout_snippet=self._read_snippet(stdout_path),
+            stderr_snippet=self._read_snippet(stderr_path),
+        )
 
     def _read_snippet(self, path: Path) -> str:
         if not path.exists():
@@ -199,7 +235,7 @@ class LocalSshTestProvider:
             redactor=redactor,
         )
 
-    def execute_tests(self, plan: TestPlan) -> TestExecutionResult:
+    def execute_tests(self, plan: TestPlan, *, cancel: threading.Event | None = None) -> TestExecutionResult:
         started_at = datetime.now(UTC)
         plan.attempt_dir.mkdir(parents=True, exist_ok=True)
         plan.summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,6 +274,7 @@ class LocalSshTestProvider:
                 timeout=command.timeout_seconds,
                 stdout_path=command.stdout_path,
                 stderr_path=command.stderr_path,
+                cancel=cancel,
             )
             ended = datetime.now(UTC)
             metadata = self._command_metadata(
