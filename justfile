@@ -44,9 +44,8 @@ check-docs:
     ! rg -n "sprin[t]|Sprin[t]|SPRIN[T]" README.md docs -g '!docs/superpowers/**'
 
 audit:
-    uv venv --allow-existing
-    uv pip install -e .
-    uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
+    uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > /tmp/runtime-reqs.txt
+    uv run --with 'pip-audit==2.10.0' pip-audit --strict -r /tmp/runtime-reqs.txt
 
 lint-workflows: sync-dev
     uv run --with 'zizmor==1.25.2' zizmor .github/workflows

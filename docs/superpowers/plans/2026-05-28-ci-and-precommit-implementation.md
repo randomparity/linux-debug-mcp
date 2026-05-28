@@ -351,9 +351,8 @@ recipe):
 ```just
 
 audit:
-    uv venv --allow-existing
-    uv pip install -e .
-    uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
+    uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > /tmp/runtime-reqs.txt
+    uv run --with 'pip-audit==2.10.0' pip-audit --strict -r /tmp/runtime-reqs.txt
 
 lint-workflows: sync-dev
     uv run --with 'zizmor==1.25.2' zizmor .github/workflows
@@ -395,11 +394,13 @@ git add justfile
 git commit -m "build: add audit and lint-workflows recipes
 
 - audit: self-contained pip-audit run mirroring supply-chain-runtime
-  in ci.yml step-for-step (uv venv --allow-existing + uv pip install -e .
-  + uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv).
-  Deliberately NOT chained off sync-dev: sync-dev installs dev extras
-  (ruff, ty, pre-commit) that the runtime audit must not see. A local
-  pass on this recipe gives the same guarantee CI gives.
+  in ci.yml step-for-step (uv export --no-emit-project --no-dev
+  --no-default-groups --format requirements-txt > /tmp/runtime-reqs.txt
+  + uv run --with 'pip-audit==2.10.0' pip-audit --strict -r
+  /tmp/runtime-reqs.txt). The export form audits the locked closure
+  that would ship; no install step needed, so dev extras (ruff, ty,
+  pre-commit) can never leak into the runtime audit. A local pass on
+  this recipe gives the same guarantee CI gives.
 - lint-workflows: zizmor (security audit, default persona -- NOT
   --persona=auditor; see the spec's 'Considered & rejected' entry) +
   actionlint (syntax/shellcheck) on .github/workflows/. Chained off
@@ -819,9 +820,8 @@ Append after `workflow-hygiene:`:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
       - run: |
           set -euo pipefail
-          uv venv --allow-existing
-          uv pip install -e .
-          uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
+          uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > /tmp/runtime-reqs.txt
+          uv run --with 'pip-audit==2.10.0' pip-audit --strict -r /tmp/runtime-reqs.txt
 ```
 
 - [ ] **Step 2: Lint the workflow**
@@ -834,18 +834,21 @@ Expected: pass.
 
 ```bash
 git add .github/workflows/ci.yml
-git commit -m "ci: add supply-chain-runtime job (pip-audit, production extras only)
+git commit -m "ci: add supply-chain-runtime job (pip-audit, locked runtime closure)
 
-uv pip install -e . (no [dev,test] extras) + uv run --with
-'pip-audit==2.10.0' pip-audit --strict --path .venv. This is the
-production-surface audit and the hard gate. --strict upgrades
-unresolved/skipped packages to failures; --path .venv points pip-audit
-at the venv that uv pip install populated so it reads installed-package
-metadata directly without re-invoking pip under the uv-managed env
-(--disable-pip would have needed -r requirements.txt).
+uv export --no-emit-project --no-dev --no-default-groups --format
+requirements-txt > /tmp/runtime-reqs.txt + uv run --with
+'pip-audit==2.10.0' pip-audit --strict -r /tmp/runtime-reqs.txt.
+This is the production-surface audit and the hard gate; the export
+form pins to the locked closure that would actually ship, so the
+audit reflects production rather than the pyproject.toml's
+unconstrained version range. --strict upgrades unresolved/skipped
+packages to failures so silent gaps in the lock are caught.
 
 Mirrors the justfile audit recipe step-for-step; a local 'just audit'
-pass is the same guarantee this job gives."
+pass is the same guarantee this job gives. See the spec's 'Considered
+& rejected' entries for why --disable-pip, --path .venv, and bare
+project-path forms were not used."
 ```
 
 ---
@@ -870,9 +873,8 @@ Append after `supply-chain-runtime:`:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
       - run: |
           set -euo pipefail
-          uv venv --allow-existing
-          uv pip install -e '.[dev,test]'
-          uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
+          uv export --no-emit-project --extra dev --extra test --format requirements-txt > /tmp/dev-reqs.txt
+          uv run --with 'pip-audit==2.10.0' pip-audit --strict -r /tmp/dev-reqs.txt
 ```
 
 - [ ] **Step 2: Lint the workflow**
@@ -887,11 +889,12 @@ Expected: pass.
 git add .github/workflows/ci.yml
 git commit -m "ci: add supply-chain-dev advisory job
 
-Same pip-audit invocation as supply-chain-runtime (--strict --path .venv),
-but installs '.[dev,test]' extras and is continue-on-error: true. A CVE
-in pytest, ruff, ty, etc. should not gate a production code merge -- it
-is tracked, not gated. Findings still appear in the run summary so the
-team can triage them on the same SLA as runtime advisories."
+Same pip-audit invocation shape as supply-chain-runtime (uv export +
+pip-audit -r), but exports the dev+test extras instead of the runtime
+closure and is continue-on-error: true. A CVE in pytest, ruff, ty,
+etc. should not gate a production code merge -- it is tracked, not
+gated. Findings still appear in the run summary so the team can triage
+them on the same SLA as runtime advisories."
 ```
 
 ---

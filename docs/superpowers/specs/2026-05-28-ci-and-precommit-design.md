@@ -212,9 +212,8 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
       - run: |
           set -euo pipefail
-          uv venv --allow-existing
-          uv pip install -e .
-          uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
+          uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > /tmp/runtime-reqs.txt
+          uv run --with 'pip-audit==2.10.0' pip-audit --strict -r /tmp/runtime-reqs.txt
 
   supply-chain-dev:
     runs-on: ubuntu-24.04
@@ -226,9 +225,8 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
       - run: |
           set -euo pipefail
-          uv venv --allow-existing
-          uv pip install -e '.[dev,test]'
-          uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
+          uv export --no-emit-project --extra dev --extra test --format requirements-txt > /tmp/dev-reqs.txt
+          uv run --with 'pip-audit==2.10.0' pip-audit --strict -r /tmp/dev-reqs.txt
 
   package-smoke:
     runs-on: ubuntu-24.04
@@ -278,22 +276,28 @@ Notes and invariants:
 - **`docs` job** installs `ripgrep` and `just` from apt rather than pulling in
   the full uv toolchain — `check-docs` only needs those two and the workspace
   itself.
-- **Supply chain is two jobs, not one.** `supply-chain-runtime` installs the
-  package with no extras (`uv pip install -e .`) and runs `pip-audit
-  --strict --path .venv` as a hard gate — this is the surface that ships to
-  users. `supply-chain-dev` installs `.[dev,test]` and runs the same audit
-  with `continue-on-error: true` — advisory only, because a CVE in a
-  developer tool should not gate a production code merge. `--path .venv`
-  points pip-audit at the venv that `uv pip install` populated, so
-  pip-audit reads the installed-package metadata directly without
-  re-invoking pip under uv-managed envs (the older `--disable-pip` flag
-  required `-r requirements.txt`, which is extra machinery for the same
-  result). `--strict` upgrades unresolved/skipped packages to failures so
-  silent gaps in the lock are caught. `pip-audit` itself is pinned via
-  `uv run --with 'pip-audit==2.10.0'` so the gate version is independent
-  of the project's dev extras. Both the CI jobs and the justfile `audit`
-  recipe pin pip-audit at the same exact version; bumps are deliberate,
-  single-commit edits.
+- **Supply chain is two jobs, not one.** `supply-chain-runtime` exports
+  the runtime-only locked closure (`uv export --no-emit-project --no-dev
+  --no-default-groups`) and feeds the resulting `requirements.txt` to
+  `pip-audit --strict -r` as a hard gate — this is the surface that
+  ships to users. `supply-chain-dev` exports the dev+test locked closure
+  (`--extra dev --extra test`) and runs the same audit with
+  `continue-on-error: true` — advisory only, because a CVE in a
+  developer tool should not gate a production code merge. The
+  `uv export → pip-audit -r` shape was chosen after two earlier
+  invocation attempts failed: `pip-audit --strict --disable-pip` (errors
+  at startup; the flag only works with `-r`) and `pip-audit --strict
+  --path .venv` (passes an empty package set because `pip list --path`
+  expects a `site-packages` directory, not a venv root — the gate
+  was permanently vacuous before this correction). The export form
+  audits exactly the locked versions that would be installed in
+  production, has the same shape across both jobs, and exits non-zero
+  on any failure. `--strict` upgrades unresolved/skipped packages to
+  failures so silent gaps in the lock are caught. `pip-audit` itself is
+  pinned via `uv run --with 'pip-audit==2.10.0'` so the gate version is
+  independent of the project's dev extras. Both the CI jobs and the
+  justfile `audit` recipe pin pip-audit at the same exact version;
+  bumps are deliberate, single-commit edits.
 
 ## `pyproject.toml` changes
 
@@ -337,9 +341,8 @@ shell snippets out of YAML:
 
 ```just
 audit:
-    uv venv --allow-existing
-    uv pip install -e .
-    uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
+    uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > /tmp/runtime-reqs.txt
+    uv run --with 'pip-audit==2.10.0' pip-audit --strict -r /tmp/runtime-reqs.txt
 
 lint-workflows: sync-dev
     uv run --with 'zizmor==1.25.2' zizmor .github/workflows
@@ -549,14 +552,35 @@ accordingly (see "Coverage floor" above).
   `transport-integration.yml` is restructured to use environments,
   flipping back to `--persona=auditor` is a one-line edit at both
   sites.
-- **`pip-audit --disable-pip` (drop the `--path .venv` flag).**
+- **`pip-audit --strict --disable-pip` (the original spec shape).**
   Rejected: pip-audit 2.10.0 only honors `--disable-pip` when paired
-  with `-r/--requirement`. Used bare, it errors out at startup.
-  `--path .venv` audits the venv that `uv pip install` populated,
-  reading installed metadata directly without re-invoking pip — same
-  no-pip-invocation guarantee under uv-managed envs, no
-  requirements.txt indirection. Applied at all three sites
-  (`supply-chain-runtime`, `supply-chain-dev`, justfile `audit`).
+  with `-r/--requirement`. Used bare against an installed venv, it
+  errors at startup.
+- **`pip-audit --strict --path .venv` (replacement attempt).**
+  Rejected after the code-quality review of Task 11 caught the
+  silent-failure mode: `--path <venv-root>` delegates to `pip list
+  --path`, which expects a `site-packages` directory, not the venv
+  root. Pointed at the venv root, it returns an empty package list
+  with exit 0, and `--strict` does not fire because collection
+  "succeeded" (just empty). The job would have audited zero packages
+  and reported clean on every run — the exact false-pass mode the
+  spec exists to prevent. Discovered before merge by independent
+  empirical verification (`pip list -v --format=json --path .venv` →
+  0 packages; `pip-audit --path .venv -f json` → `{"dependencies":
+  []}`). Applied to all three sites (`supply-chain-runtime`,
+  `supply-chain-dev`, justfile `audit`).
+- **`pip-audit --strict <project_path>` (`pip-audit --strict .`).**
+  Rejected as the uniform shape because it only honors
+  `[project.dependencies]` from `pyproject.toml`, not
+  `[project.optional-dependencies]`. It works for
+  `supply-chain-runtime` (29 packages) but cannot express
+  `supply-chain-dev`'s 53-package surface; using a different
+  invocation per job would defeat the "mirror step-for-step" property
+  the spec wants between the two jobs (and between
+  `supply-chain-runtime` and the justfile `audit` recipe). The chosen
+  `uv export → pip-audit -r` shape is uniform across all three sites,
+  audits the locked closure that would ship, and pip-audit's `-r`
+  mode is the canonical way to feed it an explicit set of versions.
 
 ## Out-of-scope follow-ups
 

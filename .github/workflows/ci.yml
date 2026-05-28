@@ -110,6 +110,5 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
       - run: |
           set -euo pipefail
-          uv venv --allow-existing
-          uv pip install -e .
-          uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
+          uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > /tmp/runtime-reqs.txt
+          uv run --with 'pip-audit==2.10.0' pip-audit --strict -r /tmp/runtime-reqs.txt
