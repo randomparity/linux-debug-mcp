@@ -945,7 +945,7 @@ def _publish_boot_ready_snapshot(
         console_kind=ConsoleKind.UART,
         console_count=1,
         dedicated_debug_line=False,
-        ssh_reachable=rootfs_profile.ssh_host is not None and rootfs_profile.ssh_port is not None,
+        ssh_reachable=rootfs_profile.ssh_host is not None,
         break_hints=[BreakHint.GDBSTUB_NATIVE],
     )
     publish_ready_snapshot(
