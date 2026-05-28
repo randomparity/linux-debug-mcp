@@ -2784,6 +2784,8 @@ def workflow_build_boot_test_handler(
     force_reboot: bool = False,
     force_rerun_tests: bool = False,
     force_recollect: bool = False,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     if run_id is not None:
         try:
@@ -2871,6 +2873,7 @@ def workflow_build_boot_test_handler(
         target_profile=target_profile,
         rootfs_profile=rootfs_profile,
         force_reboot=force_reboot,
+        admission=admission,
     )
     if not boot_response.ok:
         collect_response = artifacts_collect_handler(
@@ -2892,6 +2895,8 @@ def workflow_build_boot_test_handler(
         test_suite=test_suite,
         commands=commands,
         force_rerun=force_rerun_tests,
+        admission=admission,
+        session_registry=session_registry,
     )
     collect_response = artifacts_collect_handler(
         artifact_root=artifact_root,
@@ -2951,6 +2956,9 @@ def workflow_build_boot_debug_handler(
     force_rebuild: bool = False,
     force_reboot: bool = False,
     new_session: bool = False,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    transaction: TransportTransaction | None = None,
 ) -> ToolResponse:
     if run_id is not None:
         try:
@@ -3038,6 +3046,7 @@ def workflow_build_boot_debug_handler(
         target_profile=target_profile,
         rootfs_profile=rootfs_profile,
         force_reboot=force_reboot,
+        admission=admission,
     )
     if not boot_response.ok:
         return _workflow_failure_response(
@@ -3053,6 +3062,9 @@ def workflow_build_boot_debug_handler(
         run_id=run_id,
         debug_profile=debug_profile,
         new_session=new_session,
+        transaction=transaction,
+        admission=admission,
+        session_registry=session_registry,
     )
     if not debug_response.ok:
         return _workflow_failure_response(
@@ -3913,6 +3925,8 @@ def create_app(
             force_reboot=force_reboot,
             force_rerun_tests=force_rerun_tests,
             force_recollect=force_recollect,
+            admission=admission_service,
+            session_registry=durable_registry,
         ).model_dump(mode="json")
 
     @app.tool(name="workflow.build_boot_debug")
@@ -3939,6 +3953,9 @@ def create_app(
             force_rebuild=force_rebuild,
             force_reboot=force_reboot,
             new_session=new_session,
+            admission=admission_service,
+            session_registry=durable_registry,
+            transaction=transport_transaction,
         ).model_dump(mode="json")
 
     return app
