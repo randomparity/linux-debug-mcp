@@ -29,3 +29,32 @@ jobs:
           uv venv --allow-existing
           uv pip install -e '.[dev,test]'
           uv run pre-commit run --all-files --show-diff-on-failure
+
+  tests:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+      - run: |
+          set -euo pipefail
+          uv venv --allow-existing --python ${{ matrix.python-version }}
+          uv pip install -e '.[dev,test]'
+          uv run python -m pytest \
+            --cov=src/linux_debug_mcp \
+            --cov-report=xml \
+            --cov-report=term \
+            --cov-fail-under=85
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: coverage-${{ matrix.python-version }}
+          path: coverage.xml
