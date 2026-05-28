@@ -20,8 +20,8 @@ package-smoke jobs that today only exist in the global standards document.
 - No change to the test suite itself beyond enabling `pytest-cov`. The one
   pre-existing local failure (see "Known precondition" below) is called out as a
   blocker for the implementation plan, not silently worked around.
-- No `mypy`/`pyright`. The advisory type-checker is Astral's `ty`, per the
-  global standard.
+- No `mypy`/`pyright`. The type-checker is Astral's `ty`, per the global
+  standard. It runs as a hard gate (see "Notes and invariants").
 - No coverage upload to a third-party service (Codecov, etc.). Coverage is
   enforced via `--cov-fail-under` and the XML report is retained as a workflow
   artifact only.
@@ -36,7 +36,7 @@ Two complementary layers share the hook list:
    pass.
 2. **CI** (`.github/workflows/ci.yml`) runs the pre-commit job plus the checks
    that are too heavy, too environment-coupled, or too network-dependent for
-   per-commit hooks: pytest matrix with coverage, advisory `ty` typecheck,
+   per-commit hooks: pytest matrix with coverage, hard-gating `ty` typecheck,
    `just check-docs`, `zizmor` workflow audit, `pip-audit` supply-chain audit,
    and a `uv build` + stdio-startup smoke test.
 
@@ -163,7 +163,6 @@ jobs:
 
   typecheck:
     runs-on: ubuntu-24.04
-    continue-on-error: true
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -267,13 +266,17 @@ Notes and invariants:
   the runner total) and re-justify the floor — lowering it if necessary —
   before `tests` becomes a required check. Plan to ratchet via PR once the
   suite is stable in CI.
-- **`typecheck` is `continue-on-error: true`.** The `run:` block tees `ty
-  check src` into `$GITHUB_STEP_SUMMARY` inside a fenced code block, so
-  findings are visible directly from the workflow run summary rather than
-  buried in the step log. Job status still propagates via `exit "$status"`,
-  but `continue-on-error: true` keeps it from blocking the PR. This is the
-  explicit choice made in brainstorming: keep CLAUDE.md honest about the gap,
-  give the team data, do not gate yet.
+- **`typecheck` is a hard gate.** The `run:` block tees `ty check src` into
+  `$GITHUB_STEP_SUMMARY` inside a fenced code block, so findings are visible
+  directly from the workflow run summary rather than buried in the step log;
+  the captured `status` is propagated via `exit "$status"` so any ty finding
+  fails the PR. The `status=0` / `|| status=$?` dance is retained so the
+  closing code-fence still writes to the summary on failure — without it,
+  `set -e` would abort mid-block and leave the summary unclosed. The gate was
+  flipped from advisory to hard once the existing src baseline was cleaned
+  (see "Considered & rejected"): the baseline now has zero ty findings, so
+  any regression a PR introduces is the only new finding the job will see,
+  which is the regression-catching behavior the gate exists for.
 - **`docs` job** installs `ripgrep` and `just` from apt rather than pulling in
   the full uv toolchain — `check-docs` only needs those two and the workspace
   itself.
@@ -308,7 +311,7 @@ dev = [
   "detect-secrets>=1.5,<2",
   "pre-commit>=4.3,<5",
   "ruff>=0.15,<1",
-  "ty>=0.0.40,<0.1",
+  "ty==0.0.40",
 ]
 test = [
   "pytest>=8.2,<9",
@@ -327,13 +330,16 @@ exclude_also = [
 ]
 
 [tool.ty.rules]
-# Permissive starting profile — advisory only in CI. Tighten incrementally.
+# Minimal rule overrides — ty defaults are strict enough for the project's hard-gating
+# `ci / typecheck` job. Tighten further by adding entries here, not by raising defaults.
 unresolved-import = "warn"
 ```
 
 `pyproject.toml` keeps its current `[tool.ruff]` block; only the version floor
-moves. `ty`'s rule block stays minimal so the advisory job emits signal without
-drowning out the team.
+moves. `ty` is exact-pinned (`==0.0.40`) at the same site philosophy as
+`zizmor==1.25.2` / `pip-audit==2.10.0`: pre-1.0 minor bumps can introduce new
+findings, so every bump is a deliberate, reviewable edit. The rule block stays
+minimal so the gate fails on signal, not noise.
 
 ## `justfile` additions
 
@@ -366,10 +372,10 @@ The current text says "There is no separate type-checker configured; do not
 invoke `ty` or `mypy` here." Replace with:
 
 > Python 3.11+. Ruff is the linter/formatter (line length 120, selects
-> `E,F,I,UP,B,SIM`). `ty check src` runs in CI as an **advisory** job
-> (`continue-on-error: true`); type errors do not block PRs but are surfaced in
-> the run summary. Do not invoke `mypy` or `pyright`. The hard-fail checks per
-> commit are ruff, the pre-commit hygiene hooks, and `detect-secrets`.
+> `E,F,I,UP,B,SIM`). `ty check src` runs in CI as a **hard-gating** job; type
+> errors block PRs and are also surfaced in the run summary. Do not invoke
+> `mypy` or `pyright`. The hard-fail checks per commit are ruff, the
+> pre-commit hygiene hooks, `detect-secrets`, and `ty`.
 
 No other CLAUDE.md sections need to move.
 
@@ -379,9 +385,9 @@ No other CLAUDE.md sections need to move.
   `continue-on-error` on it; the lint stage is a hard gate.
 - `tests` is a hard gate at the 85 % floor. A 3.11-only or 3.13-only failure
   fails the matrix (because `fail-fast: false` lets both branches report).
-- `typecheck` is advisory (`continue-on-error: true`). It writes findings to
-  `$GITHUB_STEP_SUMMARY` but does not block the PR. If we decide to harden it
-  later, removing `continue-on-error: true` is the only edit.
+- `typecheck` is a hard gate. It writes findings to `$GITHUB_STEP_SUMMARY`
+  AND fails the PR on any ty error. The hard-gate flip was the only edit
+  needed once the existing baseline was cleaned.
 - `supply-chain-dev` is advisory (`continue-on-error: true`) because it
   audits the dev/test extras; a CVE in `pytest` or `ruff` should not gate a
   production code merge.
@@ -501,10 +507,18 @@ final step is a repo-settings change, not a code change.
   this size of project: more YAML to keep in sync, duplicated checkout/uv
   setup, and one badge per file. A single `ci.yml` with named jobs gives the
   same per-job re-run granularity without the duplication.
-- **Adopt `ty` strictly from day one.** Rejected because the codebase has not
-  been written against any typechecker; gating on first-run findings would
-  block unrelated PRs. Advisory mode produces the same signal without the
-  disruption, with a clear future tightening path.
+- **Adopt `ty` as a hard gate from day one.** Rejected for the initial spec
+  because the codebase had not been written against any typechecker; gating
+  on first-run findings would have blocked unrelated PRs. Advisory mode for
+  the first run produced the same signal without disruption. After the
+  baseline was cleaned (PR #49), the follow-up edit flipped `typecheck` to
+  a hard gate — the deferral path the spec explicitly anticipated.
+- **Loose-pin `ty` (`>=0.0.40,<0.1`).** Rejected once `typecheck` became a
+  hard gate: `ty` is pre-1.0, and a 0.0.x minor bump can introduce new
+  findings or false positives that would block every PR on a transparent
+  Dependabot bump. Exact pin (`ty==0.0.40`) makes every bump a deliberate,
+  reviewable edit and matches the `zizmor==1.25.2` / `pip-audit==2.10.0`
+  precedent.
 - **Run `zizmor` as a pre-commit hook.** Rejected because it hits the GitHub
   advisory database for some checks and is slower than the per-commit budget.
   Kept as a CI-only check with a `just lint-workflows` local recipe for
@@ -599,8 +613,9 @@ final step is a repo-settings change, not a code change.
 ## Out-of-scope follow-ups
 
 - Ratcheting `--cov-fail-under` upward as coverage stabilizes.
-- Tightening `[tool.ty.rules]` and eventually flipping `typecheck` to a hard
-  gate.
+- Tightening `[tool.ty.rules]` beyond the minimal `unresolved-import = "warn"`
+  override now that `typecheck` is hard-gated. Adopt rule tightenings one at a
+  time so each tightening's findings can be triaged on a single PR.
 - Adding `pip-audit` and `zizmor` to `.pre-commit-config.yaml` once they are
   fast enough or have offline modes that fit a per-commit budget.
 - Caching uv's wheel cache between runs via `astral-sh/setup-uv`'s
