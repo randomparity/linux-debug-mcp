@@ -64,7 +64,11 @@ from linux_debug_mcp.providers.contracts import (
     ReserveProvisionBootRequest,
 )
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
-from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
+from linux_debug_mcp.providers.local_kernel_build import (
+    BuildIdMissing,
+    LocalKernelBuildProvider,
+    ReadelfUnavailable,
+)
 from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider, TestExecutionResult, TestPlan
 from linux_debug_mcp.providers.qemu_gdbstub import (
     DebugProviderResult,
@@ -995,6 +999,55 @@ def kernel_build_handler(
             store.record_step_result(run_id, running)
             try:
                 execution = provider.execute_build(plan=plan, log_path=log_path, summary_path=summary_path)
+            except ReadelfUnavailable as exc:
+                # Plan review finding 6 / spec §7 R2-F6: exc.artifacts carries the
+                # build artifacts the provider already produced (vmlinux, .config,
+                # build-log). Persist them in the FAILED StepResult so operators can
+                # inspect why readelf came up empty without re-running the build.
+                failed = StepResult(
+                    step_name="build",
+                    status=StepStatus.FAILED,
+                    summary="readelf unavailable while extracting build_id",
+                    artifacts=exc.artifacts,
+                    details={"code": "readelf_unavailable", "error": str(exc), "provider": provider.name},
+                )
+                _record_terminal_build_result(store, run_id, failed)
+                return ToolResponse.failure(
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    message=(
+                        "readelf unavailable while extracting build_id; "
+                        "the recorded FAILED build step retains vmlinux and the build log "
+                        "for forensic inspection"
+                    ),
+                    run_id=run_id,
+                    details={"code": "readelf_unavailable"},
+                    artifacts=exc.artifacts,
+                    suggested_next_actions=["artifacts.get_manifest"],
+                )
+            except BuildIdMissing as exc:
+                # Plan review finding 6 / spec §7 R2-F6: same artifact-preservation
+                # rationale as ReadelfUnavailable above.
+                failed = StepResult(
+                    step_name="build",
+                    status=StepStatus.FAILED,
+                    summary="vmlinux has no .note.gnu.build-id",
+                    artifacts=exc.artifacts,
+                    details={"code": "build_id_missing", "error": str(exc), "provider": provider.name},
+                )
+                _record_terminal_build_result(store, run_id, failed)
+                return ToolResponse.failure(
+                    category=ErrorCategory.BUILD_FAILURE,
+                    message=(
+                        "vmlinux has no .note.gnu.build-id; rebuild with LD_BUILD_ID=sha1 "
+                        "or equivalent (spec §7). The FAILED build step retains vmlinux "
+                        "and the build log so the failure can be diagnosed without "
+                        "re-running the build."
+                    ),
+                    run_id=run_id,
+                    details={"code": "build_id_missing"},
+                    artifacts=exc.artifacts,
+                    suggested_next_actions=["artifacts.get_manifest"],
+                )
             except Exception as exc:
                 result = StepResult(
                     step_name="build",
