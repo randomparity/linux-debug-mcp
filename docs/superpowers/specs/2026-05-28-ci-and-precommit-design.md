@@ -201,7 +201,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
-      - run: uv run --with 'zizmor==1.25.2' zizmor --persona=auditor .github/workflows
+      - run: uv run --with 'zizmor==1.25.2' zizmor .github/workflows
 
   supply-chain-runtime:
     runs-on: ubuntu-24.04
@@ -214,7 +214,7 @@ jobs:
           set -euo pipefail
           uv venv --allow-existing
           uv pip install -e .
-          uv run --with 'pip-audit==2.10.0' pip-audit --strict --disable-pip
+          uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
 
   supply-chain-dev:
     runs-on: ubuntu-24.04
@@ -228,7 +228,7 @@ jobs:
           set -euo pipefail
           uv venv --allow-existing
           uv pip install -e '.[dev,test]'
-          uv run --with 'pip-audit==2.10.0' pip-audit --strict --disable-pip
+          uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
 
   package-smoke:
     runs-on: ubuntu-24.04
@@ -280,16 +280,20 @@ Notes and invariants:
   itself.
 - **Supply chain is two jobs, not one.** `supply-chain-runtime` installs the
   package with no extras (`uv pip install -e .`) and runs `pip-audit
-  --strict --disable-pip` as a hard gate — this is the surface that ships to
+  --strict --path .venv` as a hard gate — this is the surface that ships to
   users. `supply-chain-dev` installs `.[dev,test]` and runs the same audit
   with `continue-on-error: true` — advisory only, because a CVE in a
-  developer tool should not gate a production code merge. `--disable-pip`
-  keeps pip-audit from invoking pip directly under uv-managed envs;
-  `--strict` upgrades unresolved/skipped packages to failures so silent gaps
-  in the lock are caught. `pip-audit` itself is pinned via `uv run --with
-  'pip-audit==2.10.0'` so the gate version is independent of the project's
-  dev extras. Both the CI jobs and the justfile `audit` recipe pin pip-audit
-  at the same exact version; bumps are deliberate, single-commit edits.
+  developer tool should not gate a production code merge. `--path .venv`
+  points pip-audit at the venv that `uv pip install` populated, so
+  pip-audit reads the installed-package metadata directly without
+  re-invoking pip under uv-managed envs (the older `--disable-pip` flag
+  required `-r requirements.txt`, which is extra machinery for the same
+  result). `--strict` upgrades unresolved/skipped packages to failures so
+  silent gaps in the lock are caught. `pip-audit` itself is pinned via
+  `uv run --with 'pip-audit==2.10.0'` so the gate version is independent
+  of the project's dev extras. Both the CI jobs and the justfile `audit`
+  recipe pin pip-audit at the same exact version; bumps are deliberate,
+  single-commit edits.
 
 ## `pyproject.toml` changes
 
@@ -335,10 +339,10 @@ shell snippets out of YAML:
 audit:
     uv venv --allow-existing
     uv pip install -e .
-    uv run --with 'pip-audit==2.10.0' pip-audit --strict --disable-pip
+    uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
 
 lint-workflows: sync-dev
-    uv run --with 'zizmor==1.25.2' zizmor --persona=auditor .github/workflows
+    uv run --with 'zizmor==1.25.2' zizmor .github/workflows
     uv run --with 'actionlint-py' actionlint .github/workflows
 ```
 
@@ -531,6 +535,28 @@ accordingly (see "Coverage floor" above).
   quiet week is "never." The whole point of the `supply-chain-runtime`
   hard gate is that a runtime CVE in `main` gets caught quickly; a daily
   cron is the cheapest enforcement of that promise.
+- **Run `zizmor --persona=auditor` (paranoid mode) instead of the
+  default persona.** Rejected on the existing-surface tradeoff: auditor
+  surfaces additional defensive findings (e.g., `secrets-outside-env`
+  on jobs that already pin secrets via `secrets:` rather than via a
+  GitHub `environment:`) that are real but require structural rework
+  on `transport-integration.yml`, which the spec's non-goals
+  explicitly exclude. The default persona catches the actionable
+  classes (credential-persistence, untrusted-checkout,
+  excessive-permissions, action-pinning) without the rework
+  obligation, and is what we run in both CI (`workflow-hygiene` job)
+  and the `just lint-workflows` recipe. If/when
+  `transport-integration.yml` is restructured to use environments,
+  flipping back to `--persona=auditor` is a one-line edit at both
+  sites.
+- **`pip-audit --disable-pip` (drop the `--path .venv` flag).**
+  Rejected: pip-audit 2.10.0 only honors `--disable-pip` when paired
+  with `-r/--requirement`. Used bare, it errors out at startup.
+  `--path .venv` audits the venv that `uv pip install` populated,
+  reading installed metadata directly without re-invoking pip — same
+  no-pip-invocation guarantee under uv-managed envs, no
+  requirements.txt indirection. Applied at all three sites
+  (`supply-chain-runtime`, `supply-chain-dev`, justfile `audit`).
 
 ## Out-of-scope follow-ups
 

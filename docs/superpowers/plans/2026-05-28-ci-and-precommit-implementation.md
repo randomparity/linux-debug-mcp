@@ -353,10 +353,10 @@ recipe):
 audit:
     uv venv --allow-existing
     uv pip install -e .
-    uv run --with 'pip-audit==2.10.0' pip-audit --strict --disable-pip
+    uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
 
 lint-workflows: sync-dev
-    uv run --with 'zizmor==1.25.2' zizmor --persona=auditor .github/workflows
+    uv run --with 'zizmor==1.25.2' zizmor .github/workflows
     uv run --with 'actionlint-py' actionlint .github/workflows
 ```
 
@@ -396,13 +396,15 @@ git commit -m "build: add audit and lint-workflows recipes
 
 - audit: self-contained pip-audit run mirroring supply-chain-runtime
   in ci.yml step-for-step (uv venv --allow-existing + uv pip install -e .
-  + uv run --with 'pip-audit==2.10.0' pip-audit --strict --disable-pip).
+  + uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv).
   Deliberately NOT chained off sync-dev: sync-dev installs dev extras
   (ruff, ty, pre-commit) that the runtime audit must not see. A local
   pass on this recipe gives the same guarantee CI gives.
-- lint-workflows: zizmor (security audit) + actionlint (syntax/shellcheck)
-  on .github/workflows/. Chained off sync-dev because it audits the
-  workflow files rather than the package surface."
+- lint-workflows: zizmor (security audit, default persona -- NOT
+  --persona=auditor; see the spec's 'Considered & rejected' entry) +
+  actionlint (syntax/shellcheck) on .github/workflows/. Chained off
+  sync-dev because it audits the workflow files rather than the
+  package surface."
 ```
 
 ---
@@ -772,7 +774,7 @@ Append after `docs:`:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
-      - run: uv run --with 'zizmor==1.25.2' zizmor --persona=auditor .github/workflows
+      - run: uv run --with 'zizmor==1.25.2' zizmor .github/workflows
 ```
 
 - [ ] **Step 2: Lint the workflow**
@@ -789,10 +791,11 @@ and exactly what the job exists to do.
 git add .github/workflows/ci.yml
 git commit -m "ci: add workflow-hygiene job (zizmor audit)
 
-uv run --with 'zizmor==1.25.2' zizmor --persona=auditor .github/workflows
-on ubuntu-24.04. Single source of truth for zizmor's version — same pin
-as the justfile's lint-workflows recipe, deliberately not in
-[project.optional-dependencies] (rejected alternative in the spec)."
+uv run --with 'zizmor==1.25.2' zizmor .github/workflows on ubuntu-24.04.
+Default persona (NOT --persona=auditor) -- see the spec's 'Considered
+& rejected' entry on persona choice. Single source of truth for
+zizmor's version: same pin as the justfile's lint-workflows recipe,
+deliberately not in [project.optional-dependencies]."
 ```
 
 ---
@@ -818,7 +821,7 @@ Append after `workflow-hygiene:`:
           set -euo pipefail
           uv venv --allow-existing
           uv pip install -e .
-          uv run --with 'pip-audit==2.10.0' pip-audit --strict --disable-pip
+          uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
 ```
 
 - [ ] **Step 2: Lint the workflow**
@@ -834,10 +837,12 @@ git add .github/workflows/ci.yml
 git commit -m "ci: add supply-chain-runtime job (pip-audit, production extras only)
 
 uv pip install -e . (no [dev,test] extras) + uv run --with
-'pip-audit==2.10.0' pip-audit --strict --disable-pip. This is the
+'pip-audit==2.10.0' pip-audit --strict --path .venv. This is the
 production-surface audit and the hard gate. --strict upgrades
-unresolved/skipped packages to failures; --disable-pip keeps pip-audit
-from invoking pip directly under uv-managed envs.
+unresolved/skipped packages to failures; --path .venv points pip-audit
+at the venv that uv pip install populated so it reads installed-package
+metadata directly without re-invoking pip under the uv-managed env
+(--disable-pip would have needed -r requirements.txt).
 
 Mirrors the justfile audit recipe step-for-step; a local 'just audit'
 pass is the same guarantee this job gives."
@@ -867,7 +872,7 @@ Append after `supply-chain-runtime:`:
           set -euo pipefail
           uv venv --allow-existing
           uv pip install -e '.[dev,test]'
-          uv run --with 'pip-audit==2.10.0' pip-audit --strict --disable-pip
+          uv run --with 'pip-audit==2.10.0' pip-audit --strict --path .venv
 ```
 
 - [ ] **Step 2: Lint the workflow**
@@ -882,10 +887,10 @@ Expected: pass.
 git add .github/workflows/ci.yml
 git commit -m "ci: add supply-chain-dev advisory job
 
-Same pip-audit invocation as supply-chain-runtime, but installs
-'.[dev,test]' extras and is continue-on-error: true. A CVE in pytest,
-ruff, ty, etc. should not gate a production code merge -- it is
-tracked, not gated. Findings still appear in the run summary so the
+Same pip-audit invocation as supply-chain-runtime (--strict --path .venv),
+but installs '.[dev,test]' extras and is continue-on-error: true. A CVE
+in pytest, ruff, ty, etc. should not gate a production code merge -- it
+is tracked, not gated. Findings still appear in the run summary so the
 team can triage them on the same SLA as runtime advisories."
 ```
 
