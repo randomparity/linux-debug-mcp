@@ -42,3 +42,11 @@ check-docs:
     # and spec artifacts are internal history and legitimately cite code constants
     # (e.g. SPRINT_4_DEBUG_OPERATIONS), so they are excluded.
     ! rg -n "sprin[t]|Sprin[t]|SPRIN[T]" README.md docs -g '!docs/superpowers/**'
+
+audit:
+    uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > /tmp/runtime-reqs.txt
+    uv run --with 'pip-audit==2.10.0' pip-audit --strict -r /tmp/runtime-reqs.txt
+
+lint-workflows: sync-dev
+    uv run --with 'zizmor==1.25.2' zizmor .github/workflows
+    uv run --with 'actionlint-py==1.7.12.24' actionlint

@@ -59,17 +59,23 @@ def test_probe_protocol_accepts_a_fake():
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc/net is Linux-only")
 def test_proc_probe_owns_listener_matches_our_own_listening_socket():
     import socket
+    import subprocess
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
     port = listener.getsockname()[1]
+    # A foreign PID we own: same UID, so /proc/<pid>/fd is readable (unlike
+    # PID 1, which is root-owned and would make owns_listener return None
+    # "indeterminable" rather than False on an unprivileged runner).
+    foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
     try:
         probe = ProcProcessIdentityProbe()
         assert probe.owns_listener(os.getpid(), "127.0.0.1", port) is True
-        # A pid that is not us does not own our listener.
-        assert probe.owns_listener(1, "127.0.0.1", port) is False
+        assert probe.owns_listener(foreign.pid, "127.0.0.1", port) is False
     finally:
+        foreign.terminate()
+        foreign.wait(timeout=5)
         listener.close()
 
 
