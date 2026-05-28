@@ -84,11 +84,13 @@ def test_second_instance_fails_loud(tmp_path):
 
 
 class _FakeProxy:
-    def __init__(self) -> None:
+    def __init__(self, *, kills_live_backend: bool = False) -> None:
         self.reaped: list[tuple[int, str | None]] = []
+        self._kills_live_backend = kills_live_backend
 
-    def stop_by_identity(self, pid: int, start_time: str | None) -> None:
+    def stop_by_identity(self, pid: int, start_time: str | None) -> bool:
         self.reaped.append((pid, start_time))
+        return self._kills_live_backend
 
 
 class _RecordingAdmission:
@@ -135,3 +137,72 @@ def test_reconcile_is_idempotent_across_two_restarts(tmp_path):
     reg2.reconcile(proxy=_FakeProxy(), admission=admission2)
     assert reg2.read_tombstone(key) is not None
     assert admission2.marked == [(key, 7)]  # re-marked from the durable tombstone, idempotent
+
+
+def test_atomic_write_fsyncs_parent_dir_for_durability(tmp_path, monkeypatch):
+    """Finding F4: `_atomic_write_json` (and tombstone/delete paths) must fsync the parent
+    directory after `os.replace`, otherwise the rename can be lost on power loss and a stale
+    prior record survives. Monkeypatch `os.fsync` to record the fds it was called with; the
+    test asserts BOTH the regular file fd AND the parent directory fd were fsynced."""
+    import os as _os
+
+    fsynced_fds: list[int] = []
+    dir_fds: set[int] = set()
+    real_open = _os.open
+    real_fsync = _os.fsync
+
+    def recording_open(path, flags, *a, **kw):
+        fd = real_open(path, flags, *a, **kw)
+        if flags & _os.O_DIRECTORY:
+            dir_fds.add(fd)
+        return fd
+
+    def recording_fsync(fd):
+        fsynced_fds.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(_os, "open", recording_open)
+    monkeypatch.setattr(_os, "fsync", recording_fsync)
+
+    reg = SessionRegistry(directory=tmp_path)
+    reg.write_record(_session(_key(), backend_pid=None, execution_state=ExecutionState.EXECUTING))
+    # At least one fd was a directory fd and at least one fd was a regular file fd.
+    assert len(fsynced_fds) >= 2, fsynced_fds
+    assert dir_fds & set(fsynced_fds), (
+        f"parent dir was NOT fsynced after os.replace: dir_fds={dir_fds}, fsynced={fsynced_fds}"
+    )
+
+
+def test_reconcile_logs_callback_exceptions(tmp_path, caplog):
+    """Finding F9: a buggy `on_orphan_reaped` callback no longer silently disappears via
+    `contextlib.suppress`. It is collected into the `OrphanReapReport.failures` list AND logged
+    through the project logger, so an operator can triage the missing lifecycle event. The
+    remaining reap work (durable record delete) still runs — a buggy callback cannot block
+    cleanup."""
+    import logging
+
+    captured: list[str] = []
+
+    def boom(reap):
+        captured.append(reap.session_id)
+        raise RuntimeError("subscriber raised intentionally")
+
+    reg = SessionRegistry(directory=tmp_path, on_orphan_reaped=boom)
+    key = _key()
+    record = _session(key, backend_pid=4321, backend_start_time="ABC", execution_state=ExecutionState.EXECUTING)
+    reg.write_record(record)
+
+    with caplog.at_level(logging.ERROR, logger="linux_debug_mcp.coordination.registry"):
+        report = reg.reconcile(proxy=_FakeProxy(), admission=_RecordingAdmission())
+
+    # The callback ran exactly once …
+    assert captured == [record.session_id]
+    # … its failure was collected, not swallowed …
+    assert len(report.failures) == 1
+    failed_record, failed_exc = report.failures[0]
+    assert failed_record.session_id == record.session_id
+    assert isinstance(failed_exc, RuntimeError)
+    # … logged at ERROR via the project logger …
+    assert any("on_orphan_reaped" in entry.message for entry in caplog.records)
+    # … and the durable record was STILL deleted — buggy callback never blocks reap work.
+    assert reg.read_record(key) is None

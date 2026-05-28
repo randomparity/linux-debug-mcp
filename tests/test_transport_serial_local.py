@@ -564,6 +564,7 @@ class _RecordingProxy:
 
     def stop_by_identity(self, pid, start_time):
         self.stopped_by_identity.append((pid, start_time))
+        return False
 
 
 def test_console_plus_gdb_path_delegates_to_proxy_and_returns_tcp_endpoints(tmp_path):

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import threading
 import uuid
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -265,6 +266,19 @@ class AdmissionService:
                 lock = threading.RLock()
                 self._key_locks[target_key] = lock
             return lock
+
+    @contextlib.contextmanager
+    def key_lock(self, target_key: TargetKey) -> Iterator[None]:
+        """Public re-entrant per-TargetKey lock context. Used by the open() transaction to extend
+        the admission critical section across `promote → register handle → clear recovery →
+        subscribe to dispatcher` so a concurrent `invalidate_lifecycle` cannot cancel a freshly
+        promoted handle between promote and subscribe (Finding F3)."""
+        lock = self._key_lock(target_key)
+        lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
 
     # --- ADR 0006: the (generation, execution_epoch) fence model -------------------------
     # The async-halt gate is ONE state machine. `generation` rejects prior-incarnation events;
@@ -915,7 +929,12 @@ class AdmissionService:
                 del self._recovery_required[target_key]
 
     def invalidate_lifecycle(
-        self, event: LifecycleEvent, dispatcher: LifecycleDispatcher, generation: int
+        self,
+        event: LifecycleEvent,
+        dispatcher: LifecycleDispatcher,
+        generation: int,
+        *,
+        close_admission: bool = True,
     ) -> InvalidationResult:
         """§4.5 steps 1→2 in the **mandatory** order, enforced in one place so teardown can never
         run while admission is still open. `generation` is the incarnation this transition tears
@@ -934,9 +953,17 @@ class AdmissionService:
         skipped: no close, and crucially **no `emit`**, so a delayed gen-N retry cannot tear down a
         gen-(N+1) subscriber/session that was admitted after reopen. The staleness decision and the
         close happen atomically under the key lock; `emit` runs outside it (bounded teardown must
-        not hold the admission lock)."""
+        not hold the admission lock).
+
+        **Finding F1**: `close_admission=False` skips step 1 — the cancel fence and `_closed_at`
+        write — and only emits the lifecycle event. Used by `SessionRegistry.reconcile()` when the
+        durable record's backend is already dead (or never had a fenceable pid), so admission must
+        not be locked-closed on next startup. The stale-retry guard still runs: a delayed-retry
+        of a prior incarnation's invalidation is a complete no-op regardless of `close_admission`.
+        """
         with self._key_lock(event.target_key):
             if self._is_stale_lifecycle_close(event.target_key, generation):
                 return InvalidationResult(target_key=event.target_key, kind=event.kind)  # stale: no teardown
-            self.close_admission(event.target_key, generation)  # step 1: mandatory, generation-fenced
-        return dispatcher.emit(event)  # step 2: teardown only — admission already closed
+            if close_admission:
+                self.close_admission(event.target_key, generation)  # step 1: generation-fenced
+        return dispatcher.emit(event)  # step 2: teardown only — admission already closed if requested

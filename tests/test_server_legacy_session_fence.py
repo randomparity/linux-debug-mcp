@@ -214,3 +214,44 @@ def test_legacy_session_end_session_writes_tombstone_after_detach(tmp_path: Path
     )
     assert tests.ok is False
     assert tests.error.category == ErrorCategory.READINESS_FAILURE
+
+
+# ---------------------------------------------------------------------------
+# Finding F8 — debug.read_* must run the ownership assertion (no tombstone — reads are
+# non-destructive), so a legacy DebugSession can't halt the kernel via `target remote` against
+# a run the durable model has no record for.
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_session_refused_in_debug_read_when_session_registry_wired(tmp_path: Path) -> None:
+    """F8: when `session_registry` is threaded into a `debug.read_*` handler and no durable
+    record exists for the run, the handler refuses with `legacy_session_no_ownership` BEFORE the
+    provider runs. The non-wired path (legacy callers — session_registry omitted) is unchanged
+    and the provider runs normally."""
+    from linux_debug_mcp.server import debug_read_registers_handler
+
+    class _ExplodingReadProvider:
+        name = "local-qemu-gdbstub"
+
+        def read_registers(self, **kwargs):  # noqa: ANN003
+            raise AssertionError("provider invoked: a legacy session's read was silently resumed, not fenced")
+
+    artifact_root = _seed_legacy_debug_session(tmp_path)
+    registry = _make_registry(tmp_path)
+    # legacy shape: no ownership record for KEY.
+    assert registry.read_record(KEY) is None
+
+    response = debug_read_registers_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        registers=["pc"],
+        provider=_ExplodingReadProvider(),
+        debug_profiles=_profiles(),
+        session_registry=registry,
+    )
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert response.error.details["code"] == "legacy_session_no_ownership"
+    # F8 is read-non-destructive: no tombstone is written on the read path (the mutating-op
+    # `_fence_legacy_debug_session` is the one that tombstones — `_assert_layer4_ownership` does not).
+    assert registry.read_tombstone(KEY) is None

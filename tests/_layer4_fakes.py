@@ -6,11 +6,10 @@ from __future__ import annotations
 
 import threading
 
-from linux_debug_mcp.coordination.registry import SessionRegistry
-from linux_debug_mcp.coordination.transaction import TransportTransaction
-
 from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore, TargetSnapshot
 from linux_debug_mcp.coordination.lease import ConsoleLeaseManager
+from linux_debug_mcp.coordination.registry import SessionRegistry
+from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.seams.guard import InProcessStopCapableGuard
 from linux_debug_mcp.seams.secrets import EnvSecretsResolver
 from linux_debug_mcp.seams.target import BreakHint, ConsoleKind, PlatformMetadata, TargetKey, TargetState
@@ -105,13 +104,19 @@ class FakeBreakPolicy:
 
 
 class FakeReapProxy:
-    """Records start-time-fenced reaps so reconcile-after-death tests assert reap-by-identity."""
+    """Records start-time-fenced reaps so reconcile-after-death tests assert reap-by-identity.
 
-    def __init__(self) -> None:
+    `kills_live_backend` controls the bool returned from `stop_by_identity` (Finding F1): True
+    simulates a live orphan we just killed, False simulates a dead/unfenceable record where the
+    reaper signaled nothing. Default False matches the cold-restart case where backends are dead."""
+
+    def __init__(self, *, kills_live_backend: bool = False) -> None:
         self.reaped: list[tuple[int, str | None]] = []
+        self._kills_live_backend = kills_live_backend
 
-    def stop_by_identity(self, pid: int, start_time: str | None) -> None:
+    def stop_by_identity(self, pid: int, start_time: str | None) -> bool:
         self.reaped.append((pid, start_time))
+        return self._kills_live_backend
 
 
 class FakeSshRunner:

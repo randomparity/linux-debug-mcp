@@ -73,7 +73,7 @@ class ProxyBackend(Protocol):
 
     def stop(self, handle: ProxyHandle) -> None: ...
 
-    def stop_by_identity(self, pid: int, start_time: str | None) -> None: ...
+    def stop_by_identity(self, pid: int, start_time: str | None) -> bool: ...
 
 
 class ProxyIdentityError(Exception):
@@ -287,33 +287,40 @@ class AgentProxyBackend:
             return
         self._reap(handle.process)
 
-    def stop_by_identity(self, pid: int, start_time: str | None) -> None:
+    def stop_by_identity(self, pid: int, start_time: str | None) -> bool:
         # Stateless fenced reaper for crash recovery (round-6 F1): used by Layer-4
         # reconciliation when the in-memory ProxyHandle/Popen is gone and only the durable
         # (pid, start_time) survives. Signal by pid ONLY when the live start-time fingerprint
         # matches — a reused pid is never signalled; a None fingerprint is unfenceable and
         # refuses to signal (leak > kill-wrong-process). os.kill is safe here precisely
         # because the fingerprint match proves it is still our old child.
+        #
+        # Returns True iff we issued a kill against a fingerprint-matched live backend (Finding
+        # F1). False on a None fingerprint, a missing/mismatched live identity, or an immediate
+        # ProcessLookupError/PermissionError — i.e. no live backend was reaped. Reconciliation
+        # uses this to decide whether to close admission (live orphan we just killed) vs. only
+        # emit the lifecycle event (record present but backend already dead / unfenceable).
         if start_time is None:
-            return
+            return False
         observed = self._identity.identity(pid)
         if observed is None or observed.start_time != start_time:
-            return
+            return False
         try:
             os.kill(pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
-            return
+            return False
         deadline = Deadline.after(self.TERM_GRACE)
         while not deadline.expired():
             if not self._identity.is_alive(pid):
-                return
+                return True
             time.sleep(0.05)
         recheck = self._identity.identity(pid)
         if recheck is not None and recheck.start_time == start_time:
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
-                return
+                return True  # we SIGTERM'd a live backend; SIGKILL race is post-reap
+        return True
 
     def _identity_current(self, handle: ProxyHandle) -> bool:
         if not self._identity.is_alive(handle.backend_pid):

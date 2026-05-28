@@ -753,10 +753,15 @@ def test_cached_running_terminalized_while_halted(tmp_path: Path) -> None:
 
 def test_gdbstub_reads_exempt_from_ssh_gate() -> None:
     """B4 invariant (re-asserted): debug.* read handlers run under the StopCapableGuard, NOT the
-    ssh-tier admission gate, so they take no `admission` parameter."""
+    ssh-tier admission gate, so they take no `admission` parameter. Finding F8 added
+    `session_registry` to the signature so the read path can run `_assert_layer4_ownership`
+    (closes the legacy-fence bypass), but `admission` is still absent — the read/ssh-tier
+    structural separation holds."""
     parameters = inspect.signature(debug_read_registers_handler).parameters
     assert "admission" not in parameters
-    assert "session_registry" not in parameters
+    # session_registry IS expected now (F8) — it carries the ownership assertion, not ssh-tier
+    # admission. The B4 invariant is specifically about admission, not the registry.
+    assert "session_registry" in parameters
 
 
 # ---------------------------------------------------------------------------
@@ -1092,19 +1097,16 @@ def _seed_executing_session_for_break(tmp_path: Path):
 
 
 def test_inject_break_silent_failure_falls_to_unknown(tmp_path: Path) -> None:
-    """Finding #4: when `break_mechanism` returns success but the post-probe reports a state
-    other than HALTED (a silent-no-op mechanism), the handler MUST dual-write UNKNOWN to the
-    durable record and return DEBUG_ATTACH_FAILURE/break_unconfirmed — never leave a falsely
-    optimistic HALTED in the record."""
+    """Finding #4 / Findings F2+F5: when `break_mechanism` returns success but the post-probe
+    (bounded RSP `?` exchange — `probe_rsp_halted`) does NOT observe a stop reply, the handler
+    MUST dual-write UNKNOWN to the durable record and return DEBUG_ATTACH_FAILURE/
+    break_unconfirmed — never leave a falsely optimistic HALTED in the record. (The cached-flag
+    `probe_execution_state` was rejected for this path: `_halt_debug_transport` writes HALTED to
+    the very flag, so reading it back was circular — see ADR 0001.)"""
     reg, txn, admission, session_id = _seed_executing_session_for_break(tmp_path)
 
     def _silent_break(**kwargs: Any) -> None:
         return None  # mechanism reports success without raising
-
-    def _probe_returns_executing(*, registry, admission, target_key, generation):
-        from linux_debug_mcp.coordination.admission import ExecutionProof
-
-        return ExecutionProof(generation=generation, epoch=0, state=ExecutionState.EXECUTING)
 
     result = transport_inject_break_handler(
         run_id="run-1",
@@ -1114,7 +1116,7 @@ def test_inject_break_silent_failure_falls_to_unknown(tmp_path: Path) -> None:
         admission=admission,
         session_registry=reg,
         break_mechanism=_silent_break,
-        probe_execution_state=_probe_returns_executing,
+        probe_halted=lambda _session: False,  # RSP `?` produced no stop reply
     )
     assert result.ok is False
     assert result.error.category is ErrorCategory.DEBUG_ATTACH_FAILURE
@@ -1123,17 +1125,13 @@ def test_inject_break_silent_failure_falls_to_unknown(tmp_path: Path) -> None:
 
 
 def test_inject_break_genuine_success_keeps_halted(tmp_path: Path) -> None:
-    """The post-probe ratifies a real halt: when probe returns HALTED, the handler reports
-    success and the durable record stays HALTED (no dual-write to UNKNOWN, no failure response)."""
+    """The post-probe ratifies a real halt: when `probe_rsp_halted` returns True (a `T..`/`S..`
+    stop reply was observed), the handler reports success and the durable record stays HALTED
+    (no dual-write to UNKNOWN, no failure response)."""
     reg, txn, admission, session_id = _seed_executing_session_for_break(tmp_path)
 
     def _ok_break(**kwargs: Any) -> None:
         return None
-
-    def _probe_returns_halted(*, registry, admission, target_key, generation):
-        from linux_debug_mcp.coordination.admission import ExecutionProof
-
-        return ExecutionProof(generation=generation, epoch=0, state=ExecutionState.HALTED)
 
     result = transport_inject_break_handler(
         run_id="run-1",
@@ -1143,7 +1141,7 @@ def test_inject_break_genuine_success_keeps_halted(tmp_path: Path) -> None:
         admission=admission,
         session_registry=reg,
         break_mechanism=_ok_break,
-        probe_execution_state=_probe_returns_halted,
+        probe_halted=lambda _session: True,
     )
     assert result.ok is True
     assert reg.read_record(KEY).execution_state is ExecutionState.HALTED
@@ -1157,7 +1155,7 @@ def test_inject_break_probe_timeout_falls_to_unknown(tmp_path: Path) -> None:
     def _ok_break(**kwargs: Any) -> None:
         return None
 
-    def _probe_raises(*, registry, admission, target_key, generation):
+    def _probe_raises(_session):
         raise TimeoutError("probe timed out")
 
     result = transport_inject_break_handler(
@@ -1168,8 +1166,175 @@ def test_inject_break_probe_timeout_falls_to_unknown(tmp_path: Path) -> None:
         admission=admission,
         session_registry=reg,
         break_mechanism=_ok_break,
-        probe_execution_state=_probe_raises,
+        probe_halted=_probe_raises,
     )
     assert result.ok is False
     assert result.error.details["code"] == "break_unconfirmed"
     assert reg.read_record(KEY).execution_state is ExecutionState.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# Finding F1 — reconcile() must not permanently lock admission after restart
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_with_dead_backend_does_not_lock_admission(tmp_path: Path) -> None:
+    """Finding F1: when `stop_by_identity` does NOT kill a live backend (dead pid / unfenceable /
+    None pid), the orphan-reap callback MUST NOT close admission. Otherwise a single surviving
+    durable record from a prior server lifetime permanently bricks the target until process
+    restart, because no production code path ever calls `reopen()`."""
+    from linux_debug_mcp.coordination.registry import OrphanReap
+
+    # Seed a record whose backend the reaper will NOT kill (FakeReapProxy default is
+    # kills_live_backend=False, mirroring the dead-backend / qemu-gdbstub case).
+    reg = SessionRegistry(directory=tmp_path)
+    reg.write_record(
+        TransportSession(
+            session_id=new_session_id(),
+            target_key=KEY,
+            generation=1,
+            provider="qemu-gdbstub",
+            channel_id="rsp0",
+            record_state=RecordState.OPENING,
+            backend_pid=4321,
+            backend_start_time="dead",
+            execution_state=ExecutionState.EXECUTING,
+            created_at=datetime.now(UTC),
+        )
+    )
+
+    dispatcher = InProcessLifecycleDispatcher()
+    admission = AdmissionService(SnapshotStore())
+    seen: list[OrphanReap] = []
+
+    def on_reap(reap: OrphanReap) -> None:
+        seen.append(reap)
+        admission.invalidate_lifecycle(
+            LifecycleEvent(target_key=reap.target_key, kind=LifecycleKind.CRASHED),
+            dispatcher,
+            generation=reap.record.generation,
+            close_admission=reap.close_admission_required,
+        )
+
+    reaper_reg = SessionRegistry(directory=tmp_path, on_orphan_reaped=on_reap)
+    reaper_reg.reconcile(proxy=FakeReapProxy(kills_live_backend=False), admission=admission)
+
+    assert len(seen) == 1 and seen[0].close_admission_required is False
+    # admission was NOT closed — _closed_at is empty for the target.
+    assert KEY not in admission._closed_at
+    # the record was still deleted by reconcile.
+    assert reaper_reg.read_record(KEY) is None
+
+
+def test_reconcile_with_live_orphan_closes_admission_and_recovers_via_reopen(tmp_path: Path) -> None:
+    """Finding F1, mirror: when `stop_by_identity` DID kill a fingerprint-matched live backend,
+    `close_admission=True` is required — the §4.5 cancel-fence runs against any subscriber. A
+    subsequent `publish_snapshot` at a higher generation + `reopen()` re-admits cleanly."""
+    from linux_debug_mcp.coordination.registry import OrphanReap
+
+    reg = SessionRegistry(directory=tmp_path)
+    reg.write_record(
+        TransportSession(
+            session_id=new_session_id(),
+            target_key=KEY,
+            generation=1,
+            provider="qemu-gdbstub",
+            channel_id="rsp0",
+            record_state=RecordState.OPENING,
+            backend_pid=4321,
+            backend_start_time="alive",
+            execution_state=ExecutionState.EXECUTING,
+            created_at=datetime.now(UTC),
+        )
+    )
+
+    store = SnapshotStore()
+    seed_snapshot(store, generation=1, state=TargetState.READY)
+    admission = AdmissionService(store)
+    dispatcher = InProcessLifecycleDispatcher()
+    seen: list[OrphanReap] = []
+
+    def on_reap(reap: OrphanReap) -> None:
+        seen.append(reap)
+        admission.invalidate_lifecycle(
+            LifecycleEvent(target_key=reap.target_key, kind=LifecycleKind.CRASHED),
+            dispatcher,
+            generation=reap.record.generation,
+            close_admission=reap.close_admission_required,
+        )
+
+    reaper_reg = SessionRegistry(directory=tmp_path, on_orphan_reaped=on_reap)
+    reaper_reg.reconcile(proxy=FakeReapProxy(kills_live_backend=True), admission=admission)
+
+    assert len(seen) == 1 and seen[0].close_admission_required is True
+    # admission IS closed at the record's generation — a live orphan was reaped.
+    assert admission._closed_at.get(KEY) == 1
+    # Publish a fresh snapshot at a higher generation (the production target.boot path), then
+    # reopen() succeeds — the target is admittable again.
+    seed_snapshot(store, generation=2, state=TargetState.READY)
+    admission.reopen(KEY)
+    assert KEY not in admission._closed_at
+
+
+def test_crash_recovery_round_trip_admits_after_restart(tmp_path: Path) -> None:
+    """End-to-end smoke for Finding F1: simulate a server crash mid-`transport.open` by writing a
+    durable session record with a backend_pid that is NOT alive, then start a fresh registry +
+    admission over the SAME directory, run reconcile, and verify a subsequent `transport.open`
+    against a freshly-published snapshot SUCCEEDS — never `admission_closed`."""
+    reg_first = SessionRegistry(directory=tmp_path)
+    # A surviving OPENING record from a previous server lifetime — no live backend.
+    reg_first.write_record(
+        TransportSession(
+            session_id=new_session_id(),
+            target_key=KEY,
+            generation=1,
+            provider="qemu-gdbstub",
+            channel_id="rsp0",
+            record_state=RecordState.OPENING,
+            backend_pid=None,  # qemu-gdbstub case: no fenceable pid
+            execution_state=ExecutionState.EXECUTING,
+            created_at=datetime.now(UTC),
+        )
+    )
+
+    # "Restart" — fresh registry, fresh admission, the same on-disk state.
+    reg = SessionRegistry(directory=tmp_path)
+    store = SnapshotStore()
+    seed_snapshot(store, generation=2, state=TargetState.READY)
+    admission = AdmissionService(store)
+    dispatcher = InProcessLifecycleDispatcher()
+
+    def on_reap(reap):
+        admission.invalidate_lifecycle(
+            LifecycleEvent(target_key=reap.target_key, kind=LifecycleKind.CRASHED),
+            dispatcher,
+            generation=reap.record.generation,
+            close_admission=reap.close_admission_required,
+        )
+
+    reg._on_orphan_reaped = on_reap
+    reg.reconcile(proxy=FakeReapProxy(kills_live_backend=False), admission=admission)
+    # The stale record is gone and admission is NOT closed (no live backend was reaped).
+    assert reg.read_record(KEY) is None
+    assert KEY not in admission._closed_at
+
+    # Now wire a fresh transaction over the cleaned-up state — transport.open admits cleanly.
+    transport = FakeQemuTransport()
+    txn = TransportTransaction(
+        admission=admission,
+        registry=reg,
+        guard=InProcessStopCapableGuard(),
+        leases=ConsoleLeaseManager(),
+        secrets=EnvSecretsResolver([]),
+        break_policy=FakeBreakPolicy(),
+        transports={transport.capability.provider_name: transport},
+    )
+    txn.bind_lifecycle(dispatcher)
+    response = transport_open_handler(
+        run_id="run-1",
+        transaction=txn,
+        admission=admission,
+        session_registry=reg,
+    )
+    # Without the F1 fix this would fail with category=READINESS_FAILURE/code=admission_closed.
+    assert response.ok is True, response.model_dump()

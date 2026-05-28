@@ -303,7 +303,9 @@ def test_second_stop_capable_session_refused(tmp_path: Path) -> None:
     )
 
     assert second.ok is False
-    assert second.error.category == ErrorCategory.DEBUG_ATTACH_FAILURE
+    # Finding F13: guard/endpoint conflicts now route through TRANSPORT_CONFLICT, not the
+    # gdb-attach-specific DEBUG_ATTACH_FAILURE.
+    assert second.error.category == ErrorCategory.TRANSPORT_CONFLICT
 
 
 def test_recovery_attach_clears_tombstone(tmp_path: Path) -> None:

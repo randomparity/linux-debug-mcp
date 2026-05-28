@@ -121,6 +121,7 @@ def test_inject_break_writes_halted_before_break(tmp_path):
         admission=admission,
         session_registry=reg,
         break_mechanism=spy_break,
+        probe_halted=lambda _session: True,  # F2: RSP `?` observes a stop reply
     )
 
     assert result.ok is True
@@ -209,6 +210,7 @@ def test_inject_break_requires_destructive_permission(tmp_path):
         admission=admission,
         session_registry=reg,
         break_mechanism=spy_break,
+        probe_halted=lambda _session: True,
     )
     assert granted.ok is True
     assert len(calls) == 1  # with the permission, the break proceeds
@@ -252,3 +254,124 @@ def test_break_plan_native_helper_is_a_noop_for_inject():
     plan = BreakPlan(method=BreakMethod.GDBSTUB_NATIVE, channel_id="rsp0", rationale="rsp")
     assert plan.method is BreakMethod.GDBSTUB_NATIVE
     assert set(TRANSPORT_DESTRUCTIVE_PERMISSIONS) == {"transport.inject_break"}
+
+
+# ---------------------------------------------------------------------------
+# Finding F2 — inject_break post-probe rejects when kernel did not actually halt
+# ---------------------------------------------------------------------------
+
+
+def test_inject_break_post_probe_rejects_when_kernel_did_not_halt(tmp_path):
+    """F2: when the break mechanism returns success but the bounded RSP `?` probe does NOT
+    observe a stop reply, the handler MUST dual-write UNKNOWN and return DEBUG_ATTACH_FAILURE/
+    break_unconfirmed. The prior cached-flag implementation was unreachable here because
+    `_halt_debug_transport` writes HALTED to the flag the probe would have read."""
+    response, txn, admission, reg = _open(tmp_path)
+    session_id = response.data["session_id"]
+
+    def silent_break(**_kwargs):
+        return None
+
+    result = transport_inject_break_handler(
+        run_id=RUN_ID,
+        session_id=session_id,
+        acknowledged_permissions=INJECT_PERMS,
+        transaction=txn,
+        admission=admission,
+        session_registry=reg,
+        break_mechanism=silent_break,
+        probe_halted=lambda _session: False,  # RSP `?` produced no stop reply
+    )
+
+    assert result.ok is False
+    assert result.error.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert result.error.details["code"] == "break_unconfirmed"
+    assert reg.read_record(KEY).execution_state is ExecutionState.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# Finding F7 — session_id ↔ run_id validation
+# ---------------------------------------------------------------------------
+
+
+def test_inject_break_rejects_session_from_different_run(tmp_path):
+    """F7: a caller cannot halt run-B's kernel by passing its session_id under run_id=run-A.
+    Refused as session_run_mismatch BEFORE `_halt_debug_transport` writes HALTED, so the
+    other run's durable record stays EXECUTING."""
+    response, txn, admission, reg = _open(tmp_path)
+    session_id = response.data["session_id"]
+    other_run = "different-run"
+
+    result = transport_inject_break_handler(
+        run_id=other_run,
+        session_id=session_id,
+        acknowledged_permissions=INJECT_PERMS,
+        transaction=txn,
+        admission=admission,
+        session_registry=reg,
+        probe_halted=lambda _session: True,  # would otherwise succeed
+    )
+
+    assert result.ok is False
+    assert result.error.category is ErrorCategory.CONFIGURATION_ERROR
+    assert result.error.details["code"] == "session_run_mismatch"
+    # the durable record stays untouched for run-1 — never halted on behalf of "different-run"
+    assert reg.read_record(KEY).execution_state is ExecutionState.EXECUTING
+
+
+def test_close_rejects_session_from_different_run(tmp_path):
+    """F7: same fence for `transport.close` — never tear down some OTHER run's session."""
+    response, txn, _admission, reg = _open(tmp_path)
+    session_id = response.data["session_id"]
+
+    result = transport_close_handler(
+        run_id="different-run",
+        session_id=session_id,
+        transaction=txn,
+        session_registry=reg,
+    )
+
+    assert result.ok is False
+    assert result.error.category is ErrorCategory.CONFIGURATION_ERROR
+    assert result.error.details["code"] == "session_run_mismatch"
+    # the durable record (and so the live session) survives — run-1 is intact.
+    assert reg.read_record(KEY) is not None
+
+
+# ---------------------------------------------------------------------------
+# Finding F14 — inject_break gated by DebugProfile.enabled_operations
+# ---------------------------------------------------------------------------
+
+
+def test_inject_break_refused_when_profile_does_not_enable_it(tmp_path):
+    """F14: inject_break is destructive — a `DebugProfile` whose `enabled_operations` omits
+    `transport.inject_break` MUST refuse the call before the break mechanism runs, before the
+    durable record is updated. The kernel stays EXECUTING."""
+    from linux_debug_mcp.config import DebugProfile
+
+    response, txn, admission, reg = _open(tmp_path)
+    session_id = response.data["session_id"]
+    called: list[str] = []
+
+    def spy_break(**kwargs):
+        called.append(kwargs["method"])
+
+    read_only_profiles = {"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default", enabled_operations=[])}
+
+    result = transport_inject_break_handler(
+        run_id=RUN_ID,
+        session_id=session_id,
+        acknowledged_permissions=INJECT_PERMS,
+        transaction=txn,
+        admission=admission,
+        session_registry=reg,
+        debug_profiles=read_only_profiles,
+        break_mechanism=spy_break,
+        probe_halted=lambda _session: True,
+    )
+
+    assert result.ok is False
+    assert result.error.category is ErrorCategory.CONFIGURATION_ERROR
+    # the break mechanism was never invoked and the durable record stays EXECUTING.
+    assert called == []
+    assert reg.read_record(KEY).execution_state is ExecutionState.EXECUTING

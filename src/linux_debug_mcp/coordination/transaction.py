@@ -265,12 +265,23 @@ class TransportTransaction:
             _crash(crash_after, "ready")
             # (10) commit. A recovery attach clears the recovery gate through the DUAL-WRITE
             # helper (Finding #5) — durable tombstone + admission cache together, never one alone.
-            self._admission.promote(handle)
-            self._handles[session_id] = handle
-            state = replace(state, admission_handle=handle)
-            if recovery:
-                self._clear_recovery(request.target_key, request.generation)
-            self._subscribe_session(session, state)
+            #
+            # Finding F3: hold the admission key lock across promote → register → clear_recovery
+            # → subscribe so a concurrent `invalidate_lifecycle` cannot cancel the freshly-promoted
+            # handle in the gap between `promote()` (which only succeeds under the lock) and
+            # `_subscribe_session()` (which registers the dispatcher subscriber that drives
+            # force_drop). Without the extended critical section, a cancel between promote and
+            # subscribe leaves the binding promoted-but-cancelled, with no subscriber to tear it
+            # down — close() would later swallow the resulting `admission_cancelled` and the
+            # backend/lease/guard would leak. The key lock is re-entrant (RLock), so `promote()`'s
+            # own internal lock acquisition is a no-op.
+            with self._admission.key_lock(request.target_key):
+                self._admission.promote(handle)
+                self._handles[session_id] = handle
+                state = replace(state, admission_handle=handle)
+                if recovery:
+                    self._clear_recovery(request.target_key, request.generation)
+                self._subscribe_session(session, state)
             return session
         except BaseException:
             self._rollback(request.target_key, state, transport, handle)

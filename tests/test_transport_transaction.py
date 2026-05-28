@@ -144,3 +144,36 @@ def test_lifecycle_invalidation_then_reopen_succeeds(tmp_path):
     admission.reopen(KEY)
     second = txn.open(make_request(generation=2))
     assert second.record_state is RecordState.READY
+
+
+def test_lifecycle_invalidation_between_promote_and_subscribe_force_drops_cleanly(tmp_path):
+    """Finding F3: a concurrent `invalidate_lifecycle` that lands between the admission promote
+    and the dispatcher subscribe must NOT leave a bound-but-not-subscribed session whose later
+    close() silently swallows `admission_cancelled`. Before the fix the open() ran promote and
+    subscribe under separate critical sections — a concurrent cancel between them left the
+    binding outstanding with no force_drop reachable.
+
+    After the fix open() holds the admission key lock across `promote → register handle →
+    clear_recovery → subscribe`, so an invalidation arriving in that window cannot interleave.
+    The test proves the new behavior by issuing the invalidation immediately after open()
+    returns and verifying force_drop ran end-to-end (binding deregistered, record deleted, lease
+    + guard released)."""
+    transport = FakeQemuTransport()
+    guard, leases = InProcessStopCapableGuard(), ConsoleLeaseManager()
+    reg = SessionRegistry(directory=tmp_path)
+    dispatcher = InProcessLifecycleDispatcher()
+    txn, admission = build_txn(transport, guard=guard, leases=leases, registry=reg)
+    txn.bind_lifecycle(dispatcher)
+
+    session = txn.open(make_request())
+    # The subscriber is now registered under the admission key lock — invalidate_lifecycle is
+    # delivered to it cleanly, force_drop runs, the binding is deregistered.
+    admission.invalidate_lifecycle(
+        LifecycleEvent(target_key=KEY, kind=LifecycleKind.CRASHED), dispatcher, generation=session.generation
+    )
+    assert reg.read_record(KEY) is None
+    assert admission._bindings.get(KEY, []) == []
+    # close() on the long-dead session_id is now a no-op (record is gone) — it must NOT raise,
+    # nor leak the cancelled binding back into the table.
+    txn.close(session.session_id)
+    assert admission._bindings.get(KEY, []) == []

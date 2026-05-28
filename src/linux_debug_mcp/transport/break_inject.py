@@ -7,9 +7,19 @@ from linux_debug_mcp.transport.base import BreakMethod, BreakPlan
 
 
 class InjectBreakError(Exception):
-    def __init__(self, message: str, *, category: ErrorCategory) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: ErrorCategory,
+        details: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.category = category
+        # Finding F15: optional structured details carried into the failure response. The handler
+        # passes the dict through `Redactor.redact_value` before surfacing it, so a mechanism that
+        # attaches an endpoint path or secret-looking value to context never leaks raw.
+        self.details: dict[str, object] = dict(details or {})
 
 
 _REQUESTABLE = {"auto", "uart_break", "agent_proxy_break", "sysrq_g"}

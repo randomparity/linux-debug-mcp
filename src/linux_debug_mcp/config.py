@@ -104,6 +104,11 @@ SPRINT_4_DEBUG_OPERATIONS = [
     "debug.read_memory",
     "debug.evaluate",
     "debug.end_session",
+    # Finding F14: transport.inject_break is destructive (halts the kernel) — gate it through the
+    # same DebugProfile.enabled_operations contract as every other halting/mutating debug op so a
+    # read-only profile can refuse it. Kept in this list (not a transport-only list) because the
+    # gate is per-DebugProfile and the existing `_ensure_debug_operation_enabled` consumes it.
+    "transport.inject_break",
 ]
 TRANSPORT_OPERATIONS = [
     "transport.open",
