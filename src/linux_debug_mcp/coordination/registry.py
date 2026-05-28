@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -17,6 +19,22 @@ class _ReapProxy(Protocol):
 
 class _RecoveryMarker(Protocol):
     def mark_recovery_required(self, target_key: TargetKey, generation: int) -> None: ...
+
+
+@dataclass(frozen=True)
+class OrphanReap:
+    """Per-reap callback payload (Finding #3 / ADR 0006). One record reaped by
+    `SessionRegistry.reconcile()`: a durable record whose `backend_pid` either did not match a
+    live process by start-time fingerprint, or whose `execution_state` was HALTED/UNKNOWN. The
+    server's `_build_transport_machinery` closure consumes this and drives
+    `admission.invalidate_lifecycle(target_key, CRASHED)` — the production source of `LifecycleEvent`
+    in #10. Carries the durable record itself so the callback can read any field (backend_pid,
+    backend_start_time, etc.) without re-loading from disk."""
+
+    target_key: TargetKey
+    session_id: str
+    record: TransportSession
+    reason: str = "backend_died"
 
 
 @dataclass(frozen=True)
@@ -50,11 +68,23 @@ class InstanceLockError(RuntimeError):
 class SessionRegistry:
     """Durable, host-global ownership store (ADR 0005). One JSON record + optional tombstone
     per TargetKey, filenames derived from `TargetKey.recovery_key()` so opaque key parts are
-    never path segments. Atomic writes; the flock + reaper live in later tasks (A3/A4)."""
+    never path segments. Atomic writes; the flock + reaper live in later tasks (A3/A4).
 
-    def __init__(self, *, directory: Path) -> None:
+    `on_orphan_reaped` is the optional production lifecycle-source callback (Finding #3 /
+    ADR 0006): every successful reap inside `reconcile()` invokes it BEFORE the record is
+    deleted, so the closure can drive `admission.invalidate_lifecycle(..., CRASHED)` and run
+    the §4.5 chain end-to-end. Defaults to `None` (tests that don't need the production
+    lifecycle source omit the parameter and behavior is unchanged)."""
+
+    def __init__(
+        self,
+        *,
+        directory: Path,
+        on_orphan_reaped: Callable[[OrphanReap], None] | None = None,
+    ) -> None:
         self._dir = directory
         self._lock_fd: int | None = None
+        self._on_orphan_reaped = on_orphan_reaped
 
     def acquire_instance_lock(self) -> None:
         path = self._dir / "instance.lock"
@@ -127,7 +157,13 @@ class SessionRegistry:
         """Crash reconciliation (ADR 0005, spec §4.7/§10.2). MUST run after
         acquire_instance_lock() and BEFORE admission accepts its first admit. Reaps live
         orphan backends (start-time fenced — never a foreign pid), re-asserts every durable
-        tombstone into admission, and tombstones any record left HALTED/UNKNOWN."""
+        tombstone into admission, and tombstones any record left HALTED/UNKNOWN.
+
+        When `on_orphan_reaped` was wired at construction (Finding #3), every record reaped
+        here fires the callback BEFORE deletion — that is the production source of
+        `LifecycleEvent` in #10, so `admission.invalidate_lifecycle(target_key, CRASHED)` runs
+        the §4.5 close+emit chain against this same admission/dispatcher pair.
+        """
         # 1. re-assert persisted tombstones (durable across restarts)
         for path in self._dir.glob("tomb-*.json"):
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -148,4 +184,17 @@ class SessionRegistry:
                     )
                 )
                 admission.mark_recovery_required(record.target_key, record.generation)
+            # The production lifecycle-source callback (Finding #3): notify BEFORE the record is
+            # deleted so the consumer can read `backend_pid`/etc. off the snapshot if it needs
+            # them. Suppressed: a buggy/raising callback must never block the remaining reap
+            # work — the durable record delete below must always run.
+            if self._on_orphan_reaped is not None:
+                with contextlib.suppress(Exception):
+                    self._on_orphan_reaped(
+                        OrphanReap(
+                            target_key=record.target_key,
+                            session_id=record.session_id,
+                            record=record,
+                        )
+                    )
             self.delete_record(record.target_key)

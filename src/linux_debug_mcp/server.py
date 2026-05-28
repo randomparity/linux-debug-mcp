@@ -43,7 +43,7 @@ from linux_debug_mcp.coordination.admission import (
 from linux_debug_mcp.coordination.endpoint_safety import EndpointSafetyError
 from linux_debug_mcp.coordination.exec_probe import probe_execution_state
 from linux_debug_mcp.coordination.lease import ConsoleLeaseManager
-from linux_debug_mcp.coordination.registry import RecoveryTombstone, SessionRegistry
+from linux_debug_mcp.coordination.registry import OrphanReap, RecoveryTombstone, SessionRegistry
 from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from linux_debug_mcp.logging import configure_logging
@@ -81,7 +81,12 @@ from linux_debug_mcp.safety.redaction import Redactor
 from linux_debug_mcp.safety.runtime_locks import private_runtime_registry_dir
 from linux_debug_mcp.seams.break_policy import ReferenceBreakPolicy
 from linux_debug_mcp.seams.guard import GuardConflict, InProcessStopCapableGuard
-from linux_debug_mcp.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleDispatcher
+from linux_debug_mcp.seams.lifecycle import (
+    InProcessLifecycleDispatcher,
+    LifecycleDispatcher,
+    LifecycleEvent,
+    LifecycleKind,
+)
 from linux_debug_mcp.seams.secrets import EnvSecretsResolver
 from linux_debug_mcp.seams.target import (
     BreakHint,
@@ -1035,6 +1040,46 @@ def kernel_build_handler(
     )
 
 
+def _short_circuit_boot_success(
+    *,
+    run_id: str,
+    result: StepResult,
+    admission: AdmissionService | None,
+    manifest: RunManifest,
+    rootfs_profile: RootfsProfile,
+) -> ToolResponse:
+    """Republish the boot READY snapshot before returning the recorded-SUCCEEDED short-circuit.
+
+    A long-lived server boots a target, then restarts: `AdmissionService._store` is empty (the
+    in-memory snapshot doesn't survive the process). Re-invoking `target.boot` short-circuits on
+    the recorded SUCCEEDED step and returns immediately. Without this helper, the snapshot stays
+    empty and the next `target.run_tests` / `debug.start_session` fails at `_require_snapshot`.
+
+    Republishing the same `TargetSnapshot` to the same `TargetKey` is idempotent on
+    `SnapshotStore` (`put()` enforces non-regression but accepts equal-generation writes), so two
+    consecutive short-circuit calls in one process leave the store unchanged after the second.
+    `admission is None` (defensive — matches the optional-deps style elsewhere) is a no-op.
+    """
+    if admission is not None:
+        details = result.details if isinstance(result.details, dict) else {}
+        gdbstub_endpoint = details.get("gdbstub_endpoint") if isinstance(details, dict) else None
+        if gdbstub_endpoint is not None and not isinstance(gdbstub_endpoint, dict):
+            gdbstub_endpoint = None  # malformed recorded value → publish without gdbstub
+        # The generation passed to _publish_boot_ready_snapshot at first-boot time is the boot
+        # `attempt` counter (see execute_boot). For a short-circuit, the SUCCEEDED step
+        # corresponds to the last recorded boot_attempts entry — the same attempt number that
+        # produced the recorded snapshot, so the republish carries an IDENTICAL generation.
+        attempt = manifest.boot_attempts[-1].attempt if manifest.boot_attempts else 1
+        _publish_boot_ready_snapshot(
+            admission,
+            run_id=run_id,
+            generation=attempt,
+            gdbstub_endpoint=gdbstub_endpoint,
+            rootfs_profile=rootfs_profile,
+        )
+    return _recorded_boot_success_response(run_id=run_id, result=result)
+
+
 def _publish_boot_ready_snapshot(
     admission: AdmissionService,
     *,
@@ -1202,7 +1247,13 @@ def target_boot_handler(
 
     existing = manifest.step_results.get("boot")
     if existing and existing.status == StepStatus.SUCCEEDED and not force_reboot and not has_new_boot_overrides:
-        return _recorded_boot_success_response(run_id=run_id, result=existing)
+        return _short_circuit_boot_success(
+            run_id=run_id,
+            result=existing,
+            admission=admission,
+            manifest=manifest,
+            rootfs_profile=resolved_rootfs_profile,
+        )
 
     provider = provider or LibvirtQemuProvider()
 
@@ -1331,7 +1382,13 @@ def target_boot_handler(
                 and not force_reboot
                 and not has_new_boot_overrides
             ):
-                return _recorded_boot_success_response(run_id=run_id, result=locked_existing)
+                return _short_circuit_boot_success(
+                    run_id=run_id,
+                    result=locked_existing,
+                    admission=admission,
+                    manifest=locked_manifest,
+                    rootfs_profile=resolved_rootfs_profile,
+                )
             next_attempt = len(locked_manifest.boot_attempts) + 1
             retrying_after_failure = bool(locked_existing and locked_existing.status == StepStatus.FAILED)
             replace_succeeded = (
@@ -2512,6 +2569,7 @@ def transport_inject_break_handler(
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
     break_mechanism: Callable[..., None] = inject_break,
+    probe_execution_state: Callable[..., Any] = probe_execution_state,
 ) -> ToolResponse:
     """transport.inject_break: drop the target kernel into the debugger over an open session.
 
@@ -2522,7 +2580,15 @@ def transport_inject_break_handler(
     execution epoch is bumped to invalidate any pre-halt EXECUTING proof. If the break is
     unconfirmable — the mechanism raises a known `InjectBreakError` OR any other exception (an
     OSError, or the B6 real-mechanism missing-kwargs trap) — the record is written `UNKNOWN`,
-    NEVER left EXECUTING and never stranded at the optimistic HALTED."""
+    NEVER left EXECUTING and never stranded at the optimistic HALTED.
+
+    Finding #4 / ADR 0006: after the mechanism returns successfully, the handler RE-PROBES the
+    execution state. The mechanism's return value alone is not authoritative — a silent-no-op
+    wiring or a misconfigured `break_plan` can return success while the kernel keeps running. If
+    the probe observes anything other than HALTED (including a probe exception / timeout), the
+    handler dual-writes UNKNOWN to the durable record and returns
+    DEBUG_ATTACH_FAILURE/break_unconfirmed — preserving the existing fail-closed posture.
+    """
     if transaction is None or admission is None or session_registry is None:
         return _transport_disabled_failure(run_id=run_id)
     missing = missing_destructive_permissions("transport.inject_break", acknowledged_permissions or [])
@@ -2566,6 +2632,32 @@ def transport_inject_break_handler(
             message=f"break mechanism failed unexpectedly: {exc}",
             run_id=run_id,
             details={"code": "break_unconfirmed", "execution_state": ExecutionState.UNKNOWN.value},
+            suggested_next_actions=["providers.list"],
+        )
+    # Post-probe (Finding #4): re-read the kernel's execution state. A probe exception or any
+    # non-HALTED observation is fail-closed to UNKNOWN — matching the existing exception-branch
+    # posture and the §5.6 "no optimistic admit" rule.
+    try:
+        post_proof = probe_execution_state(
+            registry=session_registry,
+            admission=admission,
+            target_key=record.target_key,
+            generation=record.generation,
+        )
+        post_state = post_proof.state
+    except Exception:  # noqa: BLE001 — probe failure ⇒ unknown, fail closed
+        post_state = ExecutionState.UNKNOWN
+    if post_state is not ExecutionState.HALTED:
+        session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
+        return ToolResponse.failure(
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            message="inject_break: post-probe did not confirm HALTED",
+            run_id=run_id,
+            details={
+                "code": "break_unconfirmed",
+                "execution_state": ExecutionState.UNKNOWN.value,
+                "probe_observed": post_state.value,
+            },
             suggested_next_actions=["providers.list"],
         )
     return ToolResponse.success(
@@ -3228,11 +3320,39 @@ def _build_transport_machinery(
     transport_registry = transport_registry if transport_registry is not None else _build_transport_registry(transports)
     _validate_transport_registry(transport_registry)
 
-    if session_registry is None:
-        session_registry = SessionRegistry(directory=Path(tempfile.mkdtemp(prefix="linux-debug-mcp-registry-")))
-
     snapshot_store = SnapshotStore()
     admission = AdmissionService(snapshot_store)
+    # Bind the §4.5 lifecycle dispatcher so each opened session subscribes its
+    # _SessionSubscriber; the reap callback below routes `LifecycleEvent`s through it so the
+    # transaction's force_drop teardown (FENCED guard/lease release + backend reap + record
+    # delete + handle deregistration) is reachable from production.
+    lifecycle_dispatcher = InProcessLifecycleDispatcher()
+
+    # Production lifecycle-event source (Finding #3 / ADR 0006): `registry.reconcile()`'s
+    # orphan-backend reap is the one production point at which "the backend died" is known in
+    # #10. The closure drives `admission.invalidate_lifecycle(target_key, CRASHED)`, which runs
+    # the §4.5 chain end-to-end (close_admission → dispatcher.emit → _SessionSubscriber.force_drop
+    # → guard/lease release + record delete + handle deregister). Registry imports stay free of
+    # admission/lifecycle — the closure's body lives here, the registry just invokes it.
+    def _on_orphan_reaped(reap: OrphanReap) -> None:
+        admission.invalidate_lifecycle(
+            LifecycleEvent(target_key=reap.target_key, kind=LifecycleKind.CRASHED),
+            lifecycle_dispatcher,
+            generation=reap.record.generation,
+        )
+
+    if session_registry is None:
+        session_registry = SessionRegistry(
+            directory=Path(tempfile.mkdtemp(prefix="linux-debug-mcp-registry-")),
+            on_orphan_reaped=_on_orphan_reaped,
+        )
+    else:
+        # An injected registry (test wiring) may not have been constructed with the callback.
+        # The callback hook is a private attribute; setting it here lets test fixtures share the
+        # production behavior without forcing every test that builds a SessionRegistry by hand
+        # to know about the §4.5 reap-source contract.
+        session_registry._on_orphan_reaped = _on_orphan_reaped
+
     transaction = TransportTransaction(
         admission=admission,
         registry=session_registry,
@@ -3242,13 +3362,6 @@ def _build_transport_machinery(
         break_policy=ReferenceBreakPolicy(),
         transports=transports,
     )
-    # Bind the §4.5 lifecycle dispatcher so each opened session subscribes its
-    # _SessionSubscriber; an out-of-band event source can then drive
-    # `admission.invalidate_lifecycle(event, dispatcher, generation)` against this same instance and
-    # the transaction's force_drop teardown (FENCED guard/lease release + backend reap + record
-    # delete + handle deregistration) is reachable from production. There is no current production
-    # source of lifecycle events; binding is enough to make the path live when one arrives.
-    lifecycle_dispatcher = InProcessLifecycleDispatcher()
     transaction.bind_lifecycle(lifecycle_dispatcher)
 
     # Single-instance flock + reconcile-before-serve: acquire the host-global lock, then reap orphan

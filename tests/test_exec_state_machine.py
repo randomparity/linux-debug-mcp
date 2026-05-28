@@ -70,7 +70,7 @@ from linux_debug_mcp.seams.target import (
     TargetKey,
     TargetState,
 )
-from linux_debug_mcp.transport.base import ExecutionState, LineRole, TransportRef
+from linux_debug_mcp.transport.base import ExecutionState, LineRole, OpenRequest, TransportRef
 
 KEY = TargetKey(provisioner="local-qemu", target_id="exec-state-machine")
 PLATFORM = PlatformMetadata(
@@ -87,6 +87,13 @@ def _debugging_snapshot(generation: int) -> TargetSnapshot:
         platform=PLATFORM,
         state=TargetState.DEBUGGING,
     )
+
+
+def _active_transport_handles(machine: ExecStateMachine) -> list[AdmissionHandle]:
+    """Transport.open handles still registered in the binding table. After `close_admission`
+    these are cancelled-but-PENDING and remain registered until rolled back."""
+    bindings = list(machine.admission._bindings.get(KEY, ()))
+    return [h for h in machine.transport_handles if h in bindings]
 
 
 class _HandleRecord:
@@ -141,8 +148,26 @@ class ExecStateMachine(RuleBasedStateMachine):
         self.shadow_exec_epoch = 0  # AdmissionService starts every key at 0
         self.closed = False
         self.live_records: list[_HandleRecord] = []
+        # Parallel to live_records but for TRANSPORT_OPEN handles admitted through the
+        # recovery-gated admit_recovery edge (ADR 0006 amendment). These are always PENDING
+        # in this model — we never promote them — so rollback() is the only disposal.
+        self.transport_handles: list[AdmissionHandle] = []
+        # Mirror of the dual-write tombstone state the §4.7 helper maintains (durable tombstone
+        # generation + admission cache, always equal under the dual-write invariant). `None` =
+        # no tombstone. A tombstone at a generation OLDER than the current snapshot is
+        # **superseded** by a later reset and no longer gates admit — `reopen` advancing
+        # `shadow_generation` is exactly that path. So the effective gate is checked via
+        # `_recovery_gated()`, not by carrying a stale boolean.
+        self.tombstone_gen: int | None = None
         self.guard_token = None  # the live StopCapableGuard token, or None
         self.admission.publish_snapshot(KEY, _debugging_snapshot(self.shadow_generation))
+
+    # The §4.7 effective-gate predicate, derived from the tombstone generation + snapshot.
+    def _recovery_gated(self) -> bool:
+        """True iff a tombstone exists at the CURRENT snapshot generation — the only state in
+        which `_bind_snapshot` rejects non-recovery admit and `_require_recovery_tombstone`
+        accepts admit_recovery (the two §4.7 sides of the same gate)."""
+        return self.tombstone_gen is not None and self.tombstone_gen == self.shadow_generation
 
     # ---------------------------------------------------------------------------------
     # Rules
@@ -168,6 +193,13 @@ class ExecStateMachine(RuleBasedStateMachine):
             # Admission is closed → the gate raises admission_closed; we don't drive it through
             # the closed gate here because that path is covered by the `close_admission` /
             # `reopen` rules and the prior-gen-noop invariant.
+            return
+        if self._recovery_gated():
+            # A current tombstone gates BOTH admit_ssh_tier and non-recovery transport.open with
+            # `recovery_required` (§4.7) — the matrix the new `admit_transport_open` rule and the
+            # `tombstone_gates_ssh_and_non_recovery_admit` invariant adjudicate. Skip here so the
+            # original epoch-fence equations this rule is meant to verify remain its own concern,
+            # decoupled from the tombstone gate.
             return
 
         proof: ExecutionProof | None
@@ -392,8 +424,10 @@ class ExecStateMachine(RuleBasedStateMachine):
                 assert rec.handle.cancelled == cancelled_before[id(rec.handle)]
             return
 
-        # current generation: actually closes; cancels every still-registered binding.
+        # current generation: actually closes; cancels every still-registered binding —
+        # ssh-tier AND transport.open alike (close_admission fences every live binding).
         expected_cancelled_ids = {id(r.handle) for r in self.live_records if r.still_registered}
+        expected_cancelled_ids |= {id(h) for h in _active_transport_handles(self)}
         handles = self.admission.close_admission(KEY, self.shadow_generation)
         self.closed = True
         cancelled_ids = {id(h) for h in handles}
@@ -404,19 +438,27 @@ class ExecStateMachine(RuleBasedStateMachine):
         for rec in self.live_records:
             if id(rec.handle) in cancelled_ids:
                 assert rec.handle.cancelled is True
+        for handle in self.transport_handles:
+            if id(handle) in cancelled_ids:
+                assert handle.cancelled is True
 
     @rule()
     @precondition(lambda self: self.closed)
     def reopen(self) -> None:
         """Reopen: requires the snapshot generation to advance past the closed gen AND no
         registered bindings remain. We model that lifecycle: roll back every still-registered
-        binding (PENDING ssh-tier on a closed target rolls back freely; we never promote
-        ssh-tier handles in this machine), then bump generation, publish, and reopen."""
+        binding (PENDING ssh-tier and PENDING transport.open on a closed target both roll
+        back freely; we never promote handles in this machine), then bump generation, publish,
+        and reopen."""
         for rec in self.live_records:
             if rec.still_registered:
                 self.admission.rollback(rec.handle)
                 rec.disposition = "rolled_back"
                 rec.still_registered = False
+        for handle in list(self.transport_handles):
+            if handle in self.admission._bindings.get(KEY, ()):
+                self.admission.rollback(handle)
+        self.transport_handles = []
 
         self.shadow_generation += 1
         # The admission service does NOT explicitly zero `_exec_epoch[KEY]` on reopen; the next
@@ -469,6 +511,91 @@ class ExecStateMachine(RuleBasedStateMachine):
             return
         raise AssertionError("guard.acquire() admitted a second holder; at-most-one violated")
 
+    # --- TRANSPORT_OPEN recovery-gated admit (ADR 0006 amendment) ---------------------
+    # These rules cover the §4.7 recovery_required fence end-to-end: a current tombstone
+    # blocks ordinary admit() AND admit_ssh_tier(), and only admit_recovery() may attach
+    # meanwhile (clearing the dual-write tombstone+cache on success).
+
+    def _open_request(self) -> OpenRequest:
+        """Build an OpenRequest against the current shadow generation. The CHANNEL the snapshot
+        publishes is the one admission re-binds against, so the request mirrors it exactly."""
+        return OpenRequest(
+            target_key=KEY,
+            generation=self.shadow_generation,
+            transport_ref=CHANNEL,
+            platform=PLATFORM,
+        )
+
+    @rule(recovery=st.booleans())
+    def admit_transport_open(self, recovery: bool) -> None:
+        """Drive a transport.open admit. `recovery=False` routes through `admit` (blocked by a
+        current tombstone with `recovery_required`); `recovery=True` routes through
+        `admit_recovery` (requires a tombstone, then clears it via the dual-write helper).
+
+        The snapshot is held in DEBUGGING in this model, so the non-recovery admit also faces the
+        `target_not_ready` fence (checked AFTER recovery_required). We assert the exact failure
+        code at each matrix cell so a regression that swapped the fences would be caught.
+        """
+        request = self._open_request()
+        try:
+            handle = self.admission.admit_recovery(KEY, request) if recovery else self.admission.admit(KEY, request)
+        except AdmissionError as exc:
+            # Fence order matches `_bind_snapshot` / admit_recovery's checks:
+            #   1. closed → admission_closed (HIGHEST priority; checked first)
+            #   2. recovery-gated + not recovery → recovery_required
+            #   3. not tombstone-at-current-gen + recovery → not_recovery_required
+            #   4. otherwise + not recovery → target_not_ready (DEBUGGING snapshot)
+            gated = self._recovery_gated()
+            if self.closed:
+                assert exc.code == "admission_closed", f"expected admission_closed, got {exc.code}"
+            elif gated and not recovery:
+                assert exc.code == "recovery_required", f"expected recovery_required, got {exc.code}"
+            elif not gated and recovery:
+                assert exc.code == "not_recovery_required", f"expected not_recovery_required, got {exc.code}"
+            elif not gated and not recovery:
+                assert exc.code == "target_not_ready", f"expected target_not_ready, got {exc.code}"
+            else:
+                raise AssertionError(
+                    f"admit(gated={gated}, recovery={recovery}, closed={self.closed}) raised unexpectedly: {exc.code}"
+                ) from exc
+            # No state mutation on rejection: the cache value stays as it was.
+            assert self.tombstone_gen == self.admission._recovery_required.get(KEY)
+            return
+
+        # Admit succeeded — only legitimate for (gated, recovery=True) on a not-closed target.
+        assert self._recovery_gated() and recovery and not self.closed, (
+            f"admit succeeded in an illegitimate matrix cell: "
+            f"tombstone_gen={self.tombstone_gen}, gen={self.shadow_generation}, "
+            f"recovery={recovery}, closed={self.closed}"
+        )
+        # Dual-write clearance mirrors the transaction's `_clear_recovery`: clear the cache here
+        # (a real transaction would also `registry.clear_tombstone`; the registry is not modelled).
+        self.admission.clear_recovery_required(KEY, self.shadow_generation)
+        self.tombstone_gen = None
+        self.transport_handles.append(handle)
+
+    @rule()
+    @precondition(lambda self: bool(_active_transport_handles(self)))
+    def close_transport_open(self) -> None:
+        """Roll back a still-registered transport.open handle. These never promote in this model,
+        so PENDING rollback is always permitted (no confirm_reaped required)."""
+        active = _active_transport_handles(self)
+        handle = active[0]
+        self.admission.rollback(handle)
+        self.transport_handles.remove(handle)
+
+    @rule()
+    @precondition(lambda self: not self._recovery_gated())
+    def mark_recovery_required(self) -> None:
+        """Dual-write a tombstone at the current generation (durable + admission cache). In the
+        model we drive the cache directly; in production `_mark_recovery` writes both atomically.
+        Allowed while closed — `mark_recovery_required` only updates the cache and never touches
+        the close fence; tombstones can be parked across a close/reopen cycle (§4.7)."""
+        self.admission.mark_recovery_required(KEY, self.shadow_generation)
+        # `mark_recovery_required` only advances the cache (never regresses); reflect that.
+        if self.tombstone_gen is None or self.shadow_generation > self.tombstone_gen:
+            self.tombstone_gen = self.shadow_generation
+
     # ---------------------------------------------------------------------------------
     # Invariants
     # ---------------------------------------------------------------------------------
@@ -497,6 +624,60 @@ class ExecStateMachine(RuleBasedStateMachine):
             assert rec.admit_epoch <= max(self.shadow_exec_epoch, rec.admit_epoch), (
                 "record.admit_epoch is ahead of any epoch the machine has seen"
             )
+
+    @invariant()
+    def recovery_cache_matches_shadow(self) -> None:
+        """The dual-write tombstone+cache invariant: at every step, the admission cache's
+        `_recovery_required[KEY]` equals the shadow's `tombstone_gen` (both `None` or the same
+        integer generation). A divergence in either direction is the §4.7 fence being driven
+        out of sync — the exact bug the dual-write helper exists to prevent."""
+        cache_value = self.admission._recovery_required.get(KEY)
+        assert cache_value == self.tombstone_gen, (
+            f"recovery_required cache/shadow divergence: cache={cache_value}, shadow={self.tombstone_gen}"
+        )
+
+    @invariant()
+    def tombstone_gates_ssh_and_non_recovery_admit(self) -> None:
+        """When the effective recovery gate is active (`_recovery_gated()`), admit() (non-recovery
+        transport.open) AND admit_ssh_tier with a fresh EXECUTING proof MUST both be rejected
+        recovery_required. After admit_transport_open(recovery=True) clears the tombstone — or a
+        reopen advances the snapshot past it — the gate drops and the next admit is no longer
+        tombstone-gated (it may still fail for other reasons; we only assert the recovery_required
+        code is gone). This is the §4.7 fence proven from BOTH the transport.open and ssh-tier
+        admit edges of the same model."""
+        if not self._recovery_gated():
+            return
+        # Non-recovery transport.open is rejected by the tombstone gate before READY check.
+        request = OpenRequest(
+            target_key=KEY,
+            generation=self.shadow_generation,
+            transport_ref=CHANNEL,
+            platform=PLATFORM,
+        )
+        try:
+            self.admission.admit(KEY, request)
+        except AdmissionError as exc:
+            # When `closed` is also set, admission_closed wins (checked first); both codes are
+            # legitimate fail-closed outcomes under tombstone+closed state.
+            assert exc.code in ("recovery_required", "admission_closed"), (
+                f"non-recovery admit() under tombstone returned unexpected code {exc.code}"
+            )
+        else:
+            raise AssertionError("non-recovery admit() admitted under a current recovery_required tombstone")
+        # admit_ssh_tier with a fresh EXECUTING proof: also tombstone-gated (fail-closed).
+        proof = ExecutionProof(
+            generation=self.shadow_generation,
+            epoch=self.shadow_exec_epoch,
+            state=ExecutionState.EXECUTING,
+        )
+        try:
+            self.admission.admit_ssh_tier(KEY, self.shadow_generation, PLATFORM, execution_proof=proof)
+        except AdmissionError as exc:
+            assert exc.code in ("recovery_required", "admission_closed"), (
+                f"admit_ssh_tier under tombstone returned unexpected code {exc.code}"
+            )
+        else:
+            raise AssertionError("admit_ssh_tier admitted under a current recovery_required tombstone")
 
     @invariant()
     def no_completed_handle_spanned_a_halt(self) -> None:

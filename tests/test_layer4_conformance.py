@@ -32,13 +32,18 @@ from _layer4_fakes import (
 from conftest import (
     LEGACY_FENCE_KEY,
     LEGACY_FENCE_RUN_ID,
+    FakeBootProvider,
     FakeTestProvider,
     create_booted_run,
+    create_run,
     legacy_fence_build_transaction,
     legacy_fence_make_registry,
     legacy_fence_profiles,
+    profiles,
+    record_build,
     rootfs,
     seed_legacy_debug_session,
+    target_profile,
 )
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
@@ -77,6 +82,7 @@ from linux_debug_mcp.seams.target import (
 from linux_debug_mcp.server import (
     debug_continue_handler,
     debug_read_registers_handler,
+    target_boot_handler,
     target_run_tests_handler,
     transport_inject_break_handler,
     transport_open_handler,
@@ -84,6 +90,7 @@ from linux_debug_mcp.server import (
 from linux_debug_mcp.transport.base import (
     ExecutionState,
     LineRole,
+    OpenRequest,
     RecordState,
     TcpEndpoint,
     TransportRef,
@@ -907,3 +914,262 @@ def test_fake_ssh_runner_has_cancel_aware_shape() -> None:
     # Suppress: ensure no import-time side-effects mutated harness state we just imported.
     with contextlib.suppress(Exception):
         runner.started.clear()
+
+
+# ---------------------------------------------------------------------------
+# Post-implementation review findings
+# ---------------------------------------------------------------------------
+
+
+def _debug_target_profile():
+    """A target_profile that requests a debug-gdbstub boot, so FakeBootProvider's plan publishes
+    a gdbstub_endpoint into the boot step details (the value the short-circuit republish reads)."""
+    return target_profile().model_copy(update={"debug_gdbstub": True})
+
+
+def _boot_run(artifact_root, tmp_path, admission, *, force_reboot: bool = False):
+    return target_boot_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=FakeBootProvider(),
+        admission=admission,
+        force_reboot=force_reboot,
+        **profiles(tmp_path, target=_debug_target_profile()),
+    )
+
+
+def test_target_boot_short_circuit_republishes_snapshot(tmp_path: Path) -> None:
+    """Finding #2: an idempotent `target.boot` short-circuit MUST republish the boot READY
+    snapshot, so a post-restart re-invocation (in-memory `_store` empty, durable manifest still
+    SUCCEEDED) restores the snapshot the next ssh-tier / transport.open gate reads via
+    `_require_snapshot`. Without this, target.run_tests would fail `snapshot_missing` after a
+    server restart even though the kernel is still running."""
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    # First boot publishes the snapshot.
+    first_admission = AdmissionService(SnapshotStore())
+    first = _boot_run(artifact_root, tmp_path, first_admission)
+    assert first.ok is True
+    target_key = TargetKey(provisioner="local-qemu", target_id="run-abc123")
+    assert first_admission.current_snapshot(target_key) is not None
+
+    # Simulate a server restart: drop the admission service entirely; the durable manifest
+    # still records SUCCEEDED boot, so the second target.boot will short-circuit.
+    fresh_admission = AdmissionService(SnapshotStore())
+    assert fresh_admission.current_snapshot(target_key) is None
+
+    second = _boot_run(artifact_root, tmp_path, fresh_admission)
+    assert second.ok is True
+    # The short-circuit republished the snapshot into the fresh admission service.
+    snapshot = fresh_admission.current_snapshot(target_key)
+    assert snapshot is not None
+    assert snapshot.generation == 1  # same attempt number, same generation
+    # And the next snapshot-reading path (`_require_snapshot`) succeeds — _require_snapshot is
+    # what target.run_tests / debug.start_session / transport.open / inject_break all use.
+    request = OpenRequest(
+        target_key=target_key,
+        generation=snapshot.generation,
+        transport_ref=TransportRef(
+            provider="qemu-gdbstub",
+            channel_id="rsp0",
+            line_role=LineRole.RSP,
+            caps=("rsp",),
+            target_ref={"host": "127.0.0.1", "port": 1234},
+        ),
+        required_caps=["rsp"],
+        platform=snapshot.platform,
+    )
+    # The snapshot's READY state lets a transport.open admit succeed (not target_not_ready).
+    handle = fresh_admission.admit(target_key, request)
+    assert handle is not None
+
+
+def test_target_boot_short_circuit_republish_is_idempotent(tmp_path: Path) -> None:
+    """The republish is idempotent on `SnapshotStore`: two consecutive short-circuit calls in the
+    same process leave the published snapshot unchanged after the second (no error, no generation
+    bump, no orphaned binding) — `SnapshotStore.put` accepts an equal-generation write."""
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    admission = AdmissionService(SnapshotStore())
+    first = _boot_run(artifact_root, tmp_path, admission)
+    assert first.ok is True
+    target_key = TargetKey(provisioner="local-qemu", target_id="run-abc123")
+    snapshot_after_first = admission.current_snapshot(target_key)
+
+    # Short-circuit twice — neither call may regress the snapshot or raise.
+    second = _boot_run(artifact_root, tmp_path, admission)
+    assert second.ok is True
+    third = _boot_run(artifact_root, tmp_path, admission)
+    assert third.ok is True
+    snapshot_after_third = admission.current_snapshot(target_key)
+    assert snapshot_after_third is not None
+    assert snapshot_after_third.generation == snapshot_after_first.generation
+    # No phantom transport bindings were registered by the republish — short-circuit republishes
+    # the snapshot but does not admit anything.
+    assert admission._bindings.get(target_key, []) == []
+
+
+# ---------------------------------------------------------------------------
+# Finding #3 — reconcile() orphan reap as the production LifecycleEvent source
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_orphan_backend_emits_lifecycle_event(tmp_path: Path) -> None:
+    """Finding #3: `registry.reconcile()`'s orphan-backend reap is the production producer for
+    `LifecycleEvent` in #10. Seed a durable record with a dead backend_pid, subscribe a
+    `_SessionSubscriber` for the target via `transaction.open`, then run `reconcile()`. The
+    reaper's callback MUST drive `admission.invalidate_lifecycle(target_key, CRASHED)`, which
+    flows through the §4.5 chain: close_admission → dispatcher.emit → subscriber.force_drop →
+    handle deregister + record delete."""
+    reg = SessionRegistry(directory=tmp_path)
+    dispatcher = InProcessLifecycleDispatcher()
+    txn, admission = build_txn(FakeQemuTransport(), registry=reg)
+    txn.bind_lifecycle(dispatcher)
+    # Open a session — this registers _SessionSubscriber AND mints a live promoted admission
+    # binding the reaper's invalidate_lifecycle will deregister via force_drop.
+    session = txn.open(make_request())
+    assert reg.read_record(KEY) is not None
+    assert admission._bindings.get(KEY, []) != []
+
+    # Wire the production reap-callback the same way `_build_transport_machinery` does it.
+    from linux_debug_mcp.coordination.registry import OrphanReap
+
+    invalidated: list[OrphanReap] = []
+
+    def on_orphan_reaped(reap: OrphanReap) -> None:
+        invalidated.append(reap)
+        admission.invalidate_lifecycle(
+            LifecycleEvent(target_key=reap.target_key, kind=LifecycleKind.CRASHED),
+            dispatcher,
+            generation=session.generation,
+        )
+
+    # Force the durable record to point at a dead pid, then reconcile.
+    reg.write_record(session.model_copy(update={"backend_pid": 999999, "backend_start_time": "stale"}))
+    reaper_reg = SessionRegistry(directory=tmp_path, on_orphan_reaped=on_orphan_reaped)
+    reaper_reg.reconcile(proxy=FakeReapProxy(), admission=admission)
+
+    # The reaper saw a record with a backend_pid → invoked the callback → admission invalidated.
+    assert len(invalidated) == 1
+    assert invalidated[0].target_key == KEY
+    assert invalidated[0].session_id == session.session_id
+    assert invalidated[0].reason == "backend_died"
+    # End-to-end: durable record deleted, promoted binding deregistered.
+    assert reg.read_record(KEY) is None
+    assert admission._bindings.get(KEY, []) == []
+
+
+def test_reconcile_no_records_emits_no_lifecycle_event(tmp_path: Path) -> None:
+    """Symmetric negative case: with no durable records to reap, the reap-callback is never
+    invoked. A backend that hasn't been recorded — or a record without a `backend_pid` — does
+    not trigger the production lifecycle source path."""
+    from linux_debug_mcp.coordination.registry import OrphanReap
+
+    invocations: list[OrphanReap] = []
+
+    def on_orphan_reaped(reap: OrphanReap) -> None:
+        invocations.append(reap)
+
+    reg = SessionRegistry(directory=tmp_path, on_orphan_reaped=on_orphan_reaped)
+    admission = AdmissionService(SnapshotStore())
+    reg.reconcile(proxy=FakeReapProxy(), admission=admission)
+    assert invocations == []
+
+
+# ---------------------------------------------------------------------------
+# Finding #4 — inject_break success-path post-probe
+# ---------------------------------------------------------------------------
+
+
+def _seed_executing_session_for_break(tmp_path: Path):
+    """Open a Layer-4 session against the FakeQemuTransport so `transport_inject_break_handler`
+    has a record/admission/transaction trio to drive. Returns (reg, txn, admission, session_id)."""
+    reg = SessionRegistry(directory=tmp_path)
+    txn, admission = build_txn(FakeQemuTransport(), registry=reg)
+    open_response = transport_open_handler(run_id="run-1", transaction=txn, admission=admission, session_registry=reg)
+    assert open_response.ok is True
+    return reg, txn, admission, open_response.data["session_id"]
+
+
+def test_inject_break_silent_failure_falls_to_unknown(tmp_path: Path) -> None:
+    """Finding #4: when `break_mechanism` returns success but the post-probe reports a state
+    other than HALTED (a silent-no-op mechanism), the handler MUST dual-write UNKNOWN to the
+    durable record and return DEBUG_ATTACH_FAILURE/break_unconfirmed — never leave a falsely
+    optimistic HALTED in the record."""
+    reg, txn, admission, session_id = _seed_executing_session_for_break(tmp_path)
+
+    def _silent_break(**kwargs: Any) -> None:
+        return None  # mechanism reports success without raising
+
+    def _probe_returns_executing(*, registry, admission, target_key, generation):
+        from linux_debug_mcp.coordination.admission import ExecutionProof
+
+        return ExecutionProof(generation=generation, epoch=0, state=ExecutionState.EXECUTING)
+
+    result = transport_inject_break_handler(
+        run_id="run-1",
+        session_id=session_id,
+        acknowledged_permissions=INJECT_PERMS,
+        transaction=txn,
+        admission=admission,
+        session_registry=reg,
+        break_mechanism=_silent_break,
+        probe_execution_state=_probe_returns_executing,
+    )
+    assert result.ok is False
+    assert result.error.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert result.error.details["code"] == "break_unconfirmed"
+    assert reg.read_record(KEY).execution_state is ExecutionState.UNKNOWN
+
+
+def test_inject_break_genuine_success_keeps_halted(tmp_path: Path) -> None:
+    """The post-probe ratifies a real halt: when probe returns HALTED, the handler reports
+    success and the durable record stays HALTED (no dual-write to UNKNOWN, no failure response)."""
+    reg, txn, admission, session_id = _seed_executing_session_for_break(tmp_path)
+
+    def _ok_break(**kwargs: Any) -> None:
+        return None
+
+    def _probe_returns_halted(*, registry, admission, target_key, generation):
+        from linux_debug_mcp.coordination.admission import ExecutionProof
+
+        return ExecutionProof(generation=generation, epoch=0, state=ExecutionState.HALTED)
+
+    result = transport_inject_break_handler(
+        run_id="run-1",
+        session_id=session_id,
+        acknowledged_permissions=INJECT_PERMS,
+        transaction=txn,
+        admission=admission,
+        session_registry=reg,
+        break_mechanism=_ok_break,
+        probe_execution_state=_probe_returns_halted,
+    )
+    assert result.ok is True
+    assert reg.read_record(KEY).execution_state is ExecutionState.HALTED
+
+
+def test_inject_break_probe_timeout_falls_to_unknown(tmp_path: Path) -> None:
+    """A probe that raises (timeout / connection drop / unreachable target) MUST fail closed to
+    UNKNOWN — the success branch never tolerates an unconfirmable halt observation."""
+    reg, txn, admission, session_id = _seed_executing_session_for_break(tmp_path)
+
+    def _ok_break(**kwargs: Any) -> None:
+        return None
+
+    def _probe_raises(*, registry, admission, target_key, generation):
+        raise TimeoutError("probe timed out")
+
+    result = transport_inject_break_handler(
+        run_id="run-1",
+        session_id=session_id,
+        acknowledged_permissions=INJECT_PERMS,
+        transaction=txn,
+        admission=admission,
+        session_registry=reg,
+        break_mechanism=_ok_break,
+        probe_execution_state=_probe_raises,
+    )
+    assert result.ok is False
+    assert result.error.details["code"] == "break_unconfirmed"
+    assert reg.read_record(KEY).execution_state is ExecutionState.UNKNOWN
