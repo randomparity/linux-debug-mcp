@@ -462,7 +462,11 @@ def test_legacy_sensitive_dir_rejected(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_admission_no_snapshot_returns_target_not_ready(tmp_path: Path) -> None:
+def test_admission_no_snapshot_returns_snapshot_missing(tmp_path: Path) -> None:
+    # Iter-1 finding 7: "no snapshot exists" is a distinct precondition from
+    # "admission service unwired" — align with `_require_snapshot` and the
+    # rest of the debug.* handlers (snapshot_missing vs admission_service_
+    # unavailable).
     _, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
     response = debug_introspect_run_handler(
@@ -475,7 +479,26 @@ def test_admission_no_snapshot_returns_target_not_ready(tmp_path: Path) -> None:
         admission=FakeAdmissionService(snapshot=None),
         session_registry=FakeSessionRegistry(),
     )
-    assert response.error.details["code"] == "target_not_ready"
+    assert response.error.details["code"] == "snapshot_missing"
+
+
+def test_admission_service_unavailable_returns_distinct_code(tmp_path: Path) -> None:
+    # Iter-1 finding 7: surface "admission/session_registry not wired" as
+    # its own code so operators can distinguish a missing snapshot from a
+    # missing service.
+    _, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    response = debug_introspect_run_handler(
+        _make_request(run_id),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=FakeSshRunner(),
+        admission=None,
+        session_registry=None,
+    )
+    assert response.error.details["code"] == "admission_service_unavailable"
 
 
 def test_admit_rejects_halted(tmp_path: Path) -> None:
@@ -797,3 +820,214 @@ def test_wrapper_render_error_rolls_back_admission(tmp_path: Path, monkeypatch: 
     assert response.error.details["call_id"] == call_id_in_step_name
     # The wrapper never ran on the target — SSH must not have been called.
     assert ssh.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Iter-1 findings 1, 3: manifest-immutability invariants
+# ---------------------------------------------------------------------------
+
+
+def test_target_profile_mismatch_returns_configuration_error(tmp_path: Path) -> None:
+    _, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    response = debug_introspect_run_handler(
+        _make_request(run_id, target_profile="other"),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=FakeSshRunner(),
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert response.error.details["code"] == "manifest_profile_mismatch"
+    assert response.error.details["requested_profile"] == "other"
+
+
+def test_rootfs_profile_mismatch_returns_configuration_error(tmp_path: Path) -> None:
+    _, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    response = debug_introspect_run_handler(
+        _make_request(run_id, rootfs_profile="other"),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=FakeSshRunner(),
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert response.error.details["code"] == "manifest_profile_mismatch"
+    assert response.error.details["requested_profile"] == "other"
+
+
+def test_debug_profile_mismatch_returns_configuration_error(tmp_path: Path) -> None:
+    store = ArtifactStore(artifact_root=tmp_path)
+    manifest = store.create_run(
+        RunRequest(
+            run_id="r1",
+            source_path="/src",
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+            debug_profile="qemu-gdbstub-default",
+        )
+    )
+    store.record_step_result(
+        manifest.run_id,
+        StepResult(
+            step_name="build",
+            status=StepStatus.SUCCEEDED,
+            summary="build ok",
+            artifacts=[],
+            details={"build_id": VALID_BUILD_ID},
+        ),
+    )
+    targets, rootfs, debug = _profiles()
+    debug["other"] = DebugProfile(name="other")
+    response = debug_introspect_run_handler(
+        _make_request(manifest.run_id, debug_profile="other"),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=FakeSshRunner(),
+        admission=FakeAdmissionService(snapshot=_make_snapshot(manifest.run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert response.error.details["code"] == "manifest_profile_mismatch"
+    assert response.error.details["requested_profile"] == "other"
+
+
+def test_target_ref_mismatch_returns_configuration_error(tmp_path: Path) -> None:
+    # Iter-1 finding 3: target_ref previously was silently ignored. Per spec
+    # §3.1 it names the target profile, so a divergent value is a contract
+    # violation.
+    _, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    response = debug_introspect_run_handler(
+        _make_request(run_id, target_ref="some-other-target"),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=FakeSshRunner(),
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert response.error.details["code"] == "manifest_profile_mismatch"
+    assert response.error.details["requested_target_ref"] == "some-other-target"
+
+
+# ---------------------------------------------------------------------------
+# Iter-1 finding 2: admission.complete() failure path must roll back +
+# persist a FAILED introspect:<call_id> StepResult
+# ---------------------------------------------------------------------------
+
+
+def test_complete_raises_records_failed_step_and_rolls_back(tmp_path: Path) -> None:
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    admission = FakeAdmissionService(
+        snapshot=_make_snapshot(run_id),
+        complete_raises=AdmissionError(
+            "ssh-tier op spanned an execution-state transition (halt) since admission",
+            code="execution_state_changed",
+            category=ErrorCategory.READINESS_FAILURE,
+        ),
+    )
+    ssh = FakeSshRunner(results=[_happy_ssh_result()])
+    response = debug_introspect_run_handler(
+        _make_request(run_id),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=ssh,
+        admission=admission,
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is False
+    assert response.error.details["code"] == "execution_state_changed"
+    # Handle is rolled back so admission._bindings does not leak.
+    assert admission.rollback_calls == [admission.handle]
+    # Manifest now carries a FAILED introspect:<call_id> record matching the
+    # on-disk artifacts SSH already wrote.
+    manifest = store.load_manifest(run_id)
+    introspect_steps = {
+        name: result for name, result in manifest.step_results.items() if name.startswith("introspect:")
+    }
+    assert len(introspect_steps) == 1
+    step = next(iter(introspect_steps.values()))
+    assert step.status == StepStatus.FAILED
+    assert step.details["code"] == "execution_state_changed"
+
+
+# ---------------------------------------------------------------------------
+# Iter-1 finding 5: request.json must not embed the plaintext script
+# ---------------------------------------------------------------------------
+
+
+def test_request_json_replaces_script_with_sha256_pointer(tmp_path: Path) -> None:
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    secret_script = "MY_CRED = 'leaked-plaintext-credential'\nemit({'ok': True})"
+    ssh = FakeSshRunner(results=[_happy_ssh_result()])
+    debug_introspect_run_handler(
+        _make_request(run_id, script=secret_script),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=ssh,
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    manifest = store.load_manifest(run_id)
+    introspect_steps = [n for n in manifest.step_results if n.startswith("introspect:")]
+    call_id = introspect_steps[0].split(":", 1)[1]
+    request_json_path = store.run_dir(run_id) / "debug" / "introspect" / call_id / "request.json"
+    request_body = request_json_path.read_text(encoding="utf-8")
+    assert "leaked-plaintext-credential" not in request_body
+    assert "sha256:" in request_body
+    # Defense-in-depth — the sensitive wrapper.py still has the rendered script.
+    wrapper_path = store.run_dir(run_id) / "sensitive" / "debug" / "introspect" / call_id / "wrapper.py"
+    assert wrapper_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Iter-1 finding 6: ssh_user=root must skip sudo in the remote invocation
+# ---------------------------------------------------------------------------
+
+
+def test_root_ssh_user_omits_sudo_from_remote_argv(tmp_path: Path) -> None:
+    _, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    ssh = FakeSshRunner(results=[_happy_ssh_result()])
+    response = debug_introspect_run_handler(
+        _make_request(run_id),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=ssh,
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is True
+    # Exactly one SSH call (the wrapper invocation) — no sudo preflight.
+    assert len(ssh.calls) == 1
+    wrapper_call = ssh.calls[0]
+    # Remote command is the last element of the SSH argv (after `--` and
+    # user@host). Assert the `sudo` token does NOT appear in it.
+    remote_cmd = wrapper_call["argv"][-1]
+    assert "sudo" not in remote_cmd.split()
+    assert "python3" in remote_cmd

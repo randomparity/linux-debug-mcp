@@ -1928,6 +1928,60 @@ def debug_introspect_run_handler(
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
 
+    # Iter-1 finding 1: every later step must honour the manifest-immutability
+    # invariant for profile fields. Mirrors `target_boot_handler` (server.py
+    # ~1373) and `debug_start_session_handler` (~2572). The introspect handler
+    # previously resolved whatever the caller passed, silently substituting a
+    # different rootfs/debug profile than the run booted with.
+    if request.target_profile is not None and request.target_profile != manifest.request.target_profile:
+        return _configuration_failure(
+            run_id=run_id,
+            message="target_profile must match the immutable run manifest request",
+            details={
+                "requested_profile": request.target_profile,
+                "manifest_profile": manifest.request.target_profile,
+                "code": "manifest_profile_mismatch",
+            },
+        )
+    if request.rootfs_profile is not None and request.rootfs_profile != manifest.request.rootfs_profile:
+        return _configuration_failure(
+            run_id=run_id,
+            message="rootfs_profile must match the immutable run manifest request",
+            details={
+                "requested_profile": request.rootfs_profile,
+                "manifest_profile": manifest.request.rootfs_profile,
+                "code": "manifest_profile_mismatch",
+            },
+        )
+    if (
+        manifest.request.debug_profile is not None
+        and request.debug_profile is not None
+        and request.debug_profile != manifest.request.debug_profile
+    ):
+        return _configuration_failure(
+            run_id=run_id,
+            message="debug_profile must match the immutable run manifest request",
+            details={
+                "requested_profile": request.debug_profile,
+                "manifest_profile": manifest.request.debug_profile,
+                "code": "manifest_profile_mismatch",
+            },
+        )
+    # Iter-1 finding 3: spec §3.1 / line 84 describes `target_ref` as the
+    # "target profile name", so a divergent value names a different target
+    # than the run booted with. The handler previously read this field and
+    # discarded it, allowing agents to pass arbitrary values.
+    if request.target_ref != manifest.request.target_profile:
+        return _configuration_failure(
+            run_id=run_id,
+            message="target_ref must match the immutable run manifest target_profile",
+            details={
+                "requested_target_ref": request.target_ref,
+                "manifest_target_profile": manifest.request.target_profile,
+                "code": "manifest_profile_mismatch",
+            },
+        )
+
     rootfs_name = request.rootfs_profile or manifest.request.rootfs_profile
     try:
         resolved_rootfs = rootfs_profiles[rootfs_name]
@@ -2039,9 +2093,15 @@ def debug_introspect_run_handler(
         )
 
     runner: SshRunner = ssh_runner or SubprocessSshRunner()
+    # Iter-1 finding 6: sudo as root is documented as a no-op in spec §3.2,
+    # so for root logins the preflight has nothing to assert and the real
+    # invocation should not prepend `sudo` either. The previous code skipped
+    # the preflight but still invoked `sudo python3 -`, producing a confusing
+    # in-SSH failure when sudo was missing on a root-login target.
+    use_sudo = resolved_rootfs.ssh_user != "root"
 
-    # Spec §5.2 step 5: sudo preflight (skip when ssh_user is root).
-    if resolved_rootfs.ssh_user != "root":
+    # Spec §5.2 step 5: sudo preflight (only when sudo is needed).
+    if use_sudo:
         sudo_argv = build_ssh_argv(
             rootfs_profile=resolved_rootfs,
             known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
@@ -2081,16 +2141,19 @@ def debug_introspect_run_handler(
             category=ErrorCategory.READINESS_FAILURE,
             run_id=run_id,
             message="admission service unavailable",
-            details={"code": "target_not_ready"},
+            details={"code": "admission_service_unavailable"},
         )
     target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
     snapshot = admission.current_snapshot(target_key)
     if snapshot is None:
+        # Iter-1 finding 7: align with `_require_snapshot` and the rest of
+        # the debug.* handlers — "no snapshot exists" is `snapshot_missing`,
+        # not `target_not_ready`.
         return ToolResponse.failure(
             category=ErrorCategory.READINESS_FAILURE,
             run_id=run_id,
-            message="target not ready",
-            details={"code": "target_not_ready"},
+            message="no authoritative snapshot for target; boot must publish a READY snapshot first",
+            details={"code": "snapshot_missing"},
         )
     proof = probe_execution_state(
         registry=session_registry,
@@ -2177,22 +2240,29 @@ def debug_introspect_run_handler(
         (sensitive_call_dir / "wrapper.py").chmod(0o600)
         (agent_dir / "wrapper.skeleton.py").write_text(skeleton, encoding="utf-8")
 
-        redacted_request = redactor.redact_value(request.model_dump(mode="json"))
+        # Iter-1 finding 5: the agent-visible request.json must NOT carry the
+        # plaintext script — the wrapper.py copy in sensitive/ is the only
+        # protected source. Replace `script` with the same `sha256:` pointer
+        # used in wrapper.skeleton.py so the two agent-visible artifacts
+        # carry consistent sensitivity treatment.
+        request_dump = request.model_dump(mode="json")
+        request_dump["script"] = f"sha256:{user_script_sha256(request.script)}"
+        redacted_request = redactor.redact_value(request_dump)
         (agent_dir / "request.json").write_text(json.dumps(redacted_request), encoding="utf-8")
 
         # Spec §5.2 steps 9–10: SSH invocation + cancellation watcher.
         user_timeout = request.timeout_seconds
+        # Iter-1 finding 6: ssh_user=root means sudo is a no-op (spec §3.2);
+        # invoking it anyway risks a confusing in-SSH failure when sudo is
+        # missing on a root-login target.
+        remote_argv = ["timeout", "--kill-after=2s", f"{user_timeout}s"]
+        if use_sudo:
+            remote_argv.append("sudo")
+        remote_argv.extend(["python3", "-"])
         ssh_argv = build_ssh_argv(
             rootfs_profile=resolved_rootfs,
             known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
-            command=[
-                "timeout",
-                "--kill-after=2s",
-                f"{user_timeout}s",
-                "sudo",
-                "python3",
-                "-",
-            ],
+            command=remote_argv,
             command_timeout=user_timeout + 10,
         )
         stdout_path = agent_dir / "stdout.raw.tmp"
@@ -2223,15 +2293,40 @@ def debug_introspect_run_handler(
             stop_watcher.set()
             thread.join()
 
+        finished_at_complete = now()
         try:
             admission.complete(handle)
         except AdmissionError as exc:
-            return ToolResponse.failure(
-                category=exc.category,
-                message=str(exc),
+            # Iter-1 finding 2: previously this path returned without
+            # rolling back the handle (leaking it in admission._bindings)
+            # and without recording any StepResult — leaving SSH's on-disk
+            # artifacts orphaned with no manifest trace. Roll back the
+            # admission binding (suppressed; the disposal raises only on
+            # promoted-but-not-reaped sessions, which ssh-tier handles
+            # never become) and append a FAILED introspect:<call_id>
+            # record so the manifest reflects the on-disk state.
+            with contextlib.suppress(Exception):
+                admission.rollback(handle)
+            raw_stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
+            duration_ms = int((finished_at_complete - started_at).total_seconds() * 1000)
+            return _record_introspect_failure(
+                store=store,
                 run_id=run_id,
-                details={"code": exc.code, "call_id": call_id},
-                suggested_next_actions=["artifacts.get_manifest"],
+                call_id=call_id,
+                category=exc.category,
+                code=exc.code,
+                message=str(exc),
+                agent_dir=agent_dir,
+                sensitive_dir=sensitive_call_dir,
+                redactor=redactor,
+                raw_stderr=raw_stderr,
+                started_at=started_at,
+                finished_at=finished_at_complete,
+                ssh_exit=ssh_result.exit_status,
+                request_timeout_seconds=request.timeout_seconds,
+                duration_ms=duration_ms,
+                ssh_user=resolved_rootfs.ssh_user,
+                outcome_status_for_forensics=None,
             )
 
         # Spec §5.2 step 11: exit-code + JSON parsing.

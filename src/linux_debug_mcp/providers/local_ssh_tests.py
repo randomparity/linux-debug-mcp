@@ -124,23 +124,30 @@ class SubprocessSshRunner:
                 shell=False,
                 start_new_session=True,
             )
-            # R6-F4: write the wrapper on stdin and close so the remote can
-            # EOF and begin executing. The wrapper is bounded by
-            # SCRIPT_BYTE_CAP (~264 KiB worst case); Linux's default 64 KiB
-            # pipe buffer accommodates the typical payload non-blockingly,
-            # and the existing poll-and-cancel loop below remains the single
-            # source of truth for cancel/timeout. BrokenPipeError is
-            # suppressed so the polling loop reports the real process
-            # outcome instead of masking it with a stdin error.
+            stdin_thread: threading.Thread | None = None
             if stdin is not None:
+                # R6-F4 + iter-1 finding 4: the wrapper payload can be ~264 KiB,
+                # which exceeds Linux's default 64 KiB pipe buffer. Writing in
+                # the main thread would block until the remote drains the
+                # buffer, neutering the cancel/timeout poll below. Pushing the
+                # write into a daemon thread keeps the poll loop responsive;
+                # killing the process group closes the pipe so the writer
+                # observes BrokenPipeError and exits.
                 assert proc.stdin is not None
-                try:
-                    proc.stdin.write(stdin)
-                except BrokenPipeError:
-                    pass
-                finally:
-                    with contextlib.suppress(Exception):
-                        proc.stdin.close()
+                stdin_handle = proc.stdin
+                payload = stdin
+
+                def _write_stdin() -> None:
+                    try:
+                        stdin_handle.write(payload)
+                    except (BrokenPipeError, ValueError, OSError):
+                        pass
+                    finally:
+                        with contextlib.suppress(Exception):
+                            stdin_handle.close()
+
+                stdin_thread = threading.Thread(target=_write_stdin, daemon=True)
+                stdin_thread.start()
             ticks = 0
             while True:
                 try:
@@ -149,15 +156,19 @@ class SubprocessSshRunner:
                 except subprocess.TimeoutExpired:
                     ticks += 1
                     if cancel is not None and cancel.is_set():
-                        os.killpg(proc.pid, signal.SIGKILL)
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(proc.pid, signal.SIGKILL)
                         proc.wait()
                         cancelled_flag = True
                         break
                     if ticks * 0.1 >= timeout:
-                        os.killpg(proc.pid, signal.SIGKILL)
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(proc.pid, signal.SIGKILL)
                         proc.wait()
                         timed_out_flag = True
                         break
+            if stdin_thread is not None:
+                stdin_thread.join(timeout=2)
         # -1 sentinel: process was killed (cancel/timeout), so there is no real exit code.
         exit_status = -1 if (cancelled_flag or timed_out_flag) else proc.returncode
         return SshCommandResult(
