@@ -30,7 +30,14 @@ from pathlib import Path
 from typing import Any
 
 from _layer4_fakes import KEY, PLATFORM, FakeQemuTransport
-from conftest import CancelAwareTestProvider, FakeTestProvider, create_booted_run, rootfs
+from conftest import (
+    CancelAwareTestProvider,
+    FakeTestProvider,
+    create_booted_run,
+    kernel_provenance_details,
+    rootfs,
+    write_vmlinux_with_build_id,
+)
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import DebugProfile
@@ -334,7 +341,7 @@ def _create_debug_ready_run(tmp_path: Path) -> Path:
     )
     vmlinux = artifact_root / manifest.run_id / "build" / "vmlinux"
     kernel = artifact_root / manifest.run_id / "build" / "bzImage"
-    vmlinux.write_text("vmlinux", encoding="utf-8")
+    write_vmlinux_with_build_id(vmlinux)
     kernel.write_text("kernel", encoding="utf-8")
     store.record_step_result(
         manifest.run_id,
@@ -355,7 +362,11 @@ def _create_debug_ready_run(tmp_path: Path) -> Path:
             step_name="boot",
             status=StepStatus.SUCCEEDED,
             summary="booted",
-            details={"debug_boot": True, "gdbstub_endpoint": GDBSTUB_ENDPOINT},
+            details={
+                "debug_boot": True,
+                "gdbstub_endpoint": GDBSTUB_ENDPOINT,
+                "kernel_provenance": kernel_provenance_details(),
+            },
         ),
     )
     return artifact_root

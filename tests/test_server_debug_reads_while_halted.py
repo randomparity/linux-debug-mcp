@@ -12,6 +12,8 @@ the ssh execution gate.
 import inspect
 from pathlib import Path
 
+from conftest import kernel_provenance_details, write_vmlinux_with_build_id
+
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import DebugProfile
 from linux_debug_mcp.domain import ArtifactRef, RunRequest, StepResult, StepStatus
@@ -106,7 +108,7 @@ def _create_debug_ready_run(tmp_path: Path) -> tuple[Path, str]:
     )
     vmlinux = artifact_root / manifest.run_id / "build" / "vmlinux"
     kernel = artifact_root / manifest.run_id / "build" / "bzImage"
-    vmlinux.write_text("vmlinux", encoding="utf-8")
+    write_vmlinux_with_build_id(vmlinux)
     kernel.write_text("kernel", encoding="utf-8")
     store.record_step_result(
         manifest.run_id,
@@ -130,6 +132,7 @@ def _create_debug_ready_run(tmp_path: Path) -> tuple[Path, str]:
             details={
                 "debug_boot": True,
                 "gdbstub_endpoint": {"host": "127.0.0.1", "port": 1234},
+                "kernel_provenance": kernel_provenance_details(),
             },
         ),
     )
