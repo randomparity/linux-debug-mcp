@@ -110,6 +110,7 @@ ALLOWED_DEBUG_OPERATIONS = [
     # gate is per-DebugProfile and the existing `_ensure_debug_operation_enabled` consumes it.
     "transport.inject_break",
     "debug.introspect.run",
+    "debug.introspect.helper",
 ]
 
 # Spec §5.2 step 4a: soft cap on introspect step records per run. The handler enforces this

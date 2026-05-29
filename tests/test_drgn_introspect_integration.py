@@ -13,11 +13,20 @@ same env-gate as the boot integration test.
 
 import os
 import shutil
+from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
-from linux_debug_mcp.domain import DebugIntrospectRunRequest, ErrorCategory
-from linux_debug_mcp.server import debug_introspect_run_handler
+from linux_debug_mcp.artifacts.store import ArtifactStore
+from linux_debug_mcp.config import RootfsProfile, TargetProfile
+from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore
+from linux_debug_mcp.coordination.registry import SessionRegistry
+from linux_debug_mcp.domain import ArtifactRef, DebugIntrospectRunRequest, ErrorCategory, StepResult, StepStatus
+from linux_debug_mcp.providers.local_ssh_tests import SubprocessSshRunner, build_ssh_argv
+from linux_debug_mcp.server import create_run_handler, debug_introspect_run_handler, target_boot_handler
+
+MANAGED_DOMAIN_PREFIX = "mcp-linux-debug-"
 
 
 def _require_integration_env() -> None:
@@ -44,37 +53,192 @@ def _require_integration_env() -> None:
         )
 
 
-def _bootstrap_booted_run(tmp_path):
-    """Run the kernel.create_run → kernel.build → target.boot bootstrap and
-    return (run_id, store, admission, session_registry).
+class BootstrapResult(NamedTuple):
+    """Full context returned by _bootstrap_booted_run.
 
-    The implementation reuses the canonical sequence from
-    ``tests/test_libvirt_boot_integration.py``; consult that file for the
-    full env-variable and resource handling. This stub deliberately
-    skips before invoking expensive bootstrap to keep CI fast — the
-    integration runner is expected to inline the libvirt boot sequence
-    when running this gated test locally.
+    Fields:
+        run_id: the run identifier created by create_run_handler.
+        store: ArtifactStore bound to the run's artifact_root.
+        admission: AdmissionService populated with the boot's READY snapshot.
+        session_registry: SessionRegistry for this run.
+        target_profiles: dict passed to boot/introspect handlers.
+        rootfs_profiles: dict passed to boot/introspect handlers.
+        rootfs_profile: resolved RootfsProfile for use with _guest_ssh.
     """
-    pytest.skip(
-        "bootstrap helper for drgn introspect integration not wired up; "
-        "fill in by mirroring tests/test_libvirt_boot_integration.py."
+
+    run_id: str
+    store: ArtifactStore
+    admission: AdmissionService
+    session_registry: SessionRegistry
+    target_profiles: dict[str, TargetProfile]
+    rootfs_profiles: dict[str, RootfsProfile]
+    rootfs_profile: RootfsProfile
+
+
+def _bootstrap_booted_run(tmp_path: Path) -> BootstrapResult:
+    """Run the kernel.create_run → kernel.build → target.boot bootstrap.
+
+    Mirrors the canonical sequence from ``tests/test_libvirt_boot_integration.py``.
+    Constructs and returns an ``AdmissionService`` (seeded via the boot step) and
+    ``SessionRegistry`` for use with introspect handlers.
+
+    The ``AdmissionService`` uses an in-process ``SnapshotStore``; the boot handler
+    publishes the READY snapshot when boot succeeds, which is exactly what the
+    introspect execution path reads at the admission gate.
+
+    The ``SessionRegistry`` is created with a scratch directory under ``tmp_path``
+    (no instance lock acquired — single-process integration tests do not need it).
+
+    NOTE: this function skips if the required env vars are absent; callers that
+    invoke ``_require_integration_env()`` first will skip there, but the fallback
+    skip here is a safety net.
+    """
+    env_source = os.environ.get("LINUX_DEBUG_MCP_SOURCE")
+    env_rootfs = os.environ.get("LINUX_DEBUG_MCP_ROOTFS")
+    env_domain = os.environ.get("LINUX_DEBUG_MCP_DOMAIN")
+    env_libvirt_uri = os.environ.get("LINUX_DEBUG_MCP_LIBVIRT_URI")
+    env_readiness = os.environ.get("LINUX_DEBUG_MCP_READINESS_MARKER")
+    if not all([env_source, env_rootfs, env_domain, env_libvirt_uri, env_readiness]):
+        pytest.skip(
+            "bootstrap helper skipped: LINUX_DEBUG_MCP_SOURCE, LINUX_DEBUG_MCP_ROOTFS, "
+            "LINUX_DEBUG_MCP_DOMAIN, LINUX_DEBUG_MCP_LIBVIRT_URI, "
+            "LINUX_DEBUG_MCP_READINESS_MARKER are all required."
+        )
+
+    source = Path(env_source).expanduser()  # type: ignore[arg-type]
+    rootfs_path = Path(env_rootfs).expanduser()  # type: ignore[arg-type]
+    kernel_image = source / "arch" / "x86" / "boot" / "bzImage"
+    artifact_root = tmp_path / "runs"
+    run_id = "run-introspect-integration"
+
+    assert source.is_dir(), f"LINUX_DEBUG_MCP_SOURCE must be a Linux source directory: {source}"
+    assert rootfs_path.is_file(), f"LINUX_DEBUG_MCP_ROOTFS must be a disk image file: {rootfs_path}"
+    assert env_domain.startswith(MANAGED_DOMAIN_PREFIX), (  # type: ignore[union-attr]
+        f"LINUX_DEBUG_MCP_DOMAIN must start with {MANAGED_DOMAIN_PREFIX!r}: {env_domain}"
     )
+    assert kernel_image.is_file(), (
+        f"LINUX_DEBUG_MCP_SOURCE must contain a built x86_64 kernel image at {kernel_image}; "
+        "build bzImage before running this integration test"
+    )
+
+    create_response = create_run_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="pilot-libvirt",
+        rootfs_profile="pilot-rootfs",
+        run_id=run_id,
+    )
+    assert create_response.ok is True, create_response.model_dump(mode="json")
+
+    store = ArtifactStore(artifact_root, create_root=False)
+    store.record_step_result(
+        run_id,
+        StepResult(
+            step_name="build",
+            status=StepStatus.SUCCEEDED,
+            summary="seeded integration build result",
+            artifacts=[ArtifactRef(path=str(kernel_image), kind="kernel-image")],
+            details={"architecture": "x86_64", "output_path": str(kernel_image.parent)},
+        ),
+    )
+
+    pilot_target = TargetProfile(
+        name="pilot-libvirt",
+        architecture="x86_64",
+        target_ref=env_domain,
+        managed_domain=True,
+        managed_domain_prefix=MANAGED_DOMAIN_PREFIX,
+        libvirt_uri=env_libvirt_uri,
+        timeout_seconds=300,
+    )
+    pilot_rootfs = RootfsProfile(
+        name="pilot-rootfs",
+        source=str(rootfs_path),
+        source_type="disk_image",
+        mutability="read_only",
+        readiness_marker=env_readiness,
+    )
+    target_profiles = {"pilot-libvirt": pilot_target}
+    rootfs_profiles = {"pilot-rootfs": pilot_rootfs}
+
+    # Build the in-process admission service and session registry.  The
+    # target_boot_handler publishes the READY snapshot to ``admission`` when the
+    # boot step succeeds, which is exactly what the introspect execution path
+    # reads at the admission gate.
+    admission = AdmissionService(SnapshotStore())
+    reg_dir = tmp_path / "registry"
+    reg_dir.mkdir(parents=True, exist_ok=True)
+    session_registry = SessionRegistry(directory=reg_dir)
+
+    boot_response = target_boot_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        force_reboot=True,
+        target_profiles=target_profiles,
+        rootfs_profiles=rootfs_profiles,
+        admission=admission,
+    )
+    assert boot_response.ok is True, boot_response.model_dump(mode="json")
+
+    return BootstrapResult(
+        run_id=run_id,
+        store=store,
+        admission=admission,
+        session_registry=session_registry,
+        target_profiles=target_profiles,
+        rootfs_profiles=rootfs_profiles,
+        rootfs_profile=pilot_rootfs,
+    )
+
+
+def _guest_ssh(
+    run_id: str,
+    store: ArtifactStore,
+    rootfs_profile: RootfsProfile,
+    command: list[str],
+    timeout: int = 10,
+) -> str:
+    """Execute ``command`` on the guest via SSH and return stdout.
+
+    Uses the known_hosts file written by target.boot under
+    ``<run>/sensitive/known_hosts``.
+
+    Reads stdout from the on-disk ``stdout_path`` rather than
+    ``SshCommandResult.stdout``: the runner writes full output to the file and
+    only populates ``.stdout_snippet`` (capped at 4096 bytes), so heartbeat
+    output that exceeds the cap would be lost via the result object.  The
+    subprocess timeout is set above ``command_timeout`` so a command running
+    for ~``timeout`` seconds is not killed before returning.
+    """
+    argv = build_ssh_argv(
+        rootfs_profile=rootfs_profile,
+        known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
+        command=command,
+        command_timeout=timeout,
+    )
+    out = store.run_dir(run_id) / "logs" / "guest_ssh.stdout"
+    err = store.run_dir(run_id) / "logs" / "guest_ssh.stderr"
+    SubprocessSshRunner().run(argv, timeout=timeout + 5, stdout_path=out, stderr_path=err)
+    return out.read_text(encoding="utf-8", errors="replace") if out.exists() else ""
 
 
 def test_introspect_emit_roundtrip(tmp_path) -> None:
     _require_integration_env()
-    run_id, store, admission, session_registry = _bootstrap_booted_run(tmp_path)
+    ctx = _bootstrap_booted_run(tmp_path)
     request = DebugIntrospectRunRequest(
-        run_id=run_id,
-        target_ref="local-qemu",
+        run_id=ctx.run_id,
+        target_ref="pilot-libvirt",
         script='emit({"pid": 1})',
         timeout_seconds=30,
     )
     response = debug_introspect_run_handler(
         request,
-        artifact_root=tmp_path,
-        admission=admission,
-        session_registry=session_registry,
+        artifact_root=tmp_path / "runs",
+        target_profiles=ctx.target_profiles,
+        rootfs_profiles=ctx.rootfs_profiles,
+        admission=ctx.admission,
+        session_registry=ctx.session_registry,
     )
     assert response.ok is True, response.error
     assert response.data["status"] == "ok"
@@ -83,18 +247,20 @@ def test_introspect_emit_roundtrip(tmp_path) -> None:
 
 def test_introspect_target_side_timeout(tmp_path) -> None:
     _require_integration_env()
-    run_id, store, admission, session_registry = _bootstrap_booted_run(tmp_path)
+    ctx = _bootstrap_booted_run(tmp_path)
     request = DebugIntrospectRunRequest(
-        run_id=run_id,
-        target_ref="local-qemu",
+        run_id=ctx.run_id,
+        target_ref="pilot-libvirt",
         script="while True:\n    pass\n",
         timeout_seconds=5,
     )
     response = debug_introspect_run_handler(
         request,
-        artifact_root=tmp_path,
-        admission=admission,
-        session_registry=session_registry,
+        artifact_root=tmp_path / "runs",
+        target_profiles=ctx.target_profiles,
+        rootfs_profiles=ctx.rootfs_profiles,
+        admission=ctx.admission,
+        session_registry=ctx.session_registry,
     )
     assert response.ok is False
     assert response.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -103,20 +269,22 @@ def test_introspect_target_side_timeout(tmp_path) -> None:
 
 def test_introspect_build_id_round_trips(tmp_path) -> None:
     _require_integration_env()
-    run_id, store, admission, session_registry = _bootstrap_booted_run(tmp_path)
+    ctx = _bootstrap_booted_run(tmp_path)
     request = DebugIntrospectRunRequest(
-        run_id=run_id,
-        target_ref="local-qemu",
+        run_id=ctx.run_id,
+        target_ref="pilot-libvirt",
         script="emit({})",
         timeout_seconds=30,
     )
     response = debug_introspect_run_handler(
         request,
-        artifact_root=tmp_path,
-        admission=admission,
-        session_registry=session_registry,
+        artifact_root=tmp_path / "runs",
+        target_profiles=ctx.target_profiles,
+        rootfs_profiles=ctx.rootfs_profiles,
+        admission=ctx.admission,
+        session_registry=ctx.session_registry,
     )
     assert response.ok is True, response.error
-    manifest = store.load_manifest(run_id)
+    manifest = ctx.store.load_manifest(ctx.run_id)
     recorded = manifest.step_results["build"].details["build_id"]
     assert response.data["build_id"] == recorded

@@ -113,6 +113,7 @@ class DebugIntrospectRunRequest(Model):
     debug_profile: str | None = None
     target_profile: str | None = None
     rootfs_profile: str | None = None
+    args: dict[str, Any] = Field(default_factory=dict)
 
 
 class DebugIntrospectCheckPrerequisitesRequest(Model):
@@ -126,6 +127,25 @@ class DebugIntrospectCheckPrerequisitesRequest(Model):
     run_id: str
     target_ref: str
     timeout_seconds: int = 20
+    debug_profile: str | None = None
+    target_profile: str | None = None
+    rootfs_profile: str | None = None
+
+
+class DebugIntrospectHelperRequest(Model):
+    """Request payload for ``debug.introspect.helper``. Spec §6.1.
+
+    ``args`` is validated against the resolved helper's ``args_model`` by the
+    handler (not Pydantic) so an unknown helper / bad args surface as the
+    spec's exact failure codes. The ``[5, 300]`` timeout band and
+    manifest-immutability of profile fields are enforced by the handler.
+    """
+
+    run_id: str
+    target_ref: str
+    name: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    timeout_seconds: int = 30
     debug_profile: str | None = None
     target_profile: str | None = None
     rootfs_profile: str | None = None

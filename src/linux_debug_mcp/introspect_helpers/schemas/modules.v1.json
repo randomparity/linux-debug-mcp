@@ -1,0 +1,61 @@
+{
+  "$defs": {
+    "Module": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "refcount": {
+          "title": "Refcount",
+          "type": "integer"
+        },
+        "size": {
+          "title": "Size",
+          "type": "integer"
+        },
+        "state": {
+          "title": "State",
+          "type": "string"
+        },
+        "used_by": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Used By",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "size",
+        "refcount",
+        "used_by",
+        "state"
+      ],
+      "title": "Module",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "decode_errors": {
+      "title": "Decode Errors",
+      "type": "integer"
+    },
+    "modules": {
+      "items": {
+        "$ref": "#/$defs/Module"
+      },
+      "title": "Modules",
+      "type": "array"
+    }
+  },
+  "required": [
+    "modules",
+    "decode_errors"
+  ],
+  "title": "Output",
+  "type": "object"
+}

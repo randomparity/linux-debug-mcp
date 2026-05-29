@@ -18,7 +18,7 @@ import io
 import json
 import sys
 import types
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, suppress
 from io import StringIO
 from types import SimpleNamespace
 from typing import Any
@@ -26,7 +26,9 @@ from typing import Any
 import pytest
 
 from linux_debug_mcp.providers.local_drgn_introspect import (
+    WrapperRenderError,
     render_wrapper,
+    render_wrapper_skeleton,
     user_script_sha256,
 )
 
@@ -386,7 +388,7 @@ def test_wrapper_helper_namespace_contains_expected_subset(
     # Helpers are present.
     assert {"list_for_each_entry", "for_each_task", "dmesg"}.issubset(names)
     # User-injected symbols are present.
-    assert {"prog", "emit", "drgn"}.issubset(names)
+    assert {"prog", "emit", "drgn", "args"}.issubset(names)
     # Wrapper-private _li_* names are NOT exposed.
     li_private = {
         "_li_pre_helpers",
@@ -465,7 +467,9 @@ def test_wrapper_tail_serialization_failure_emits_minimal_json(
         ):
             return real_dumps(obj, *a, **k)
         # Primary tail dump: simulate UnicodeEncodeError / MemoryError.
-        if isinstance(obj, dict) and "emits" in obj and "user_stdout" in obj:
+        # Discriminate _li_result (has "build_id") from the caps dict (which
+        # also has "emits" and "user_stdout" but is not _li_result).
+        if isinstance(obj, dict) and "emits" in obj and "user_stdout" in obj and "build_id" in obj:
             raise RuntimeError("forced")
         return real_dumps(obj, *a, **k)
 
@@ -525,3 +529,71 @@ def test_user_script_sha256_matches_hashlib() -> None:
     script = 'emit({"hi": 1})'
     expected = hashlib.sha256(script.encode("utf-8")).hexdigest()
     assert user_script_sha256(script) == expected
+
+
+# ---------------------------------------------------------------------------
+# args injection + per-call cap slots
+# ---------------------------------------------------------------------------
+
+
+def test_render_wrapper_injects_args_into_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_stub_drgn(monkeypatch, main_module_build_id=bytes.fromhex(EXPECTED_BUILD_ID))
+    rendered = render_wrapper(
+        user_script='emit({"got": args["limit"]})',
+        expected_build_id=EXPECTED_BUILD_ID,
+        call_id=CALL_ID,
+        args_json='{"limit": 7}',
+    )
+    buf = StringIO()
+    ns: dict[str, Any] = {"__name__": "__wrapper__", "__builtins__": builtins}
+    with redirect_stdout(buf), suppress(SystemExit):
+        exec(compile(rendered, "<wrapper>", "exec"), ns)
+    assert json.loads(buf.getvalue())["emits"] == [{"got": 7}]
+
+
+def test_render_wrapper_default_caps_match_runner_defaults() -> None:
+    from linux_debug_mcp.providers.local_drgn_introspect import RUNNER_DEFAULT_CAPS
+
+    rendered = render_wrapper(user_script="pass", expected_build_id=EXPECTED_BUILD_ID, call_id=CALL_ID)
+    assert f'"per_emit_bytes": {RUNNER_DEFAULT_CAPS["per_emit_bytes"]}' in rendered
+
+
+def test_render_wrapper_caps_override_merges_onto_defaults() -> None:
+    rendered = render_wrapper(
+        user_script="pass",
+        expected_build_id=EXPECTED_BUILD_ID,
+        call_id=CALL_ID,
+        caps={"per_emit_bytes": 4 * 1024 * 1024},
+    )
+    assert '"per_emit_bytes": 4194304' in rendered
+    assert '"error_message": 4096' in rendered  # inherited
+
+
+def test_render_wrapper_rejects_non_positive_cap() -> None:
+    with pytest.raises(WrapperRenderError):
+        render_wrapper(
+            user_script="pass",
+            expected_build_id=EXPECTED_BUILD_ID,
+            call_id=CALL_ID,
+            caps={"per_emit_bytes": 0},
+        )
+
+
+def test_render_wrapper_rejects_unknown_cap_key() -> None:
+    with pytest.raises(WrapperRenderError):
+        render_wrapper(
+            user_script="pass",
+            expected_build_id=EXPECTED_BUILD_ID,
+            call_id=CALL_ID,
+            caps={"bogus": 10},
+        )
+
+
+def test_render_wrapper_skeleton_caps_override_visible() -> None:
+    rendered = render_wrapper_skeleton(
+        expected_build_id=EXPECTED_BUILD_ID,
+        call_id=CALL_ID,
+        user_script_sha256_hex="0" * 64,
+        caps={"per_emit_bytes": 4 * 1024 * 1024},
+    )
+    assert '"per_emit_bytes": 4194304' in rendered

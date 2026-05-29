@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from string import Template
@@ -26,6 +27,15 @@ _CALL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 # Spec §3.1: 256 KiB script cap (enforced by the handler, not Pydantic).
 SCRIPT_BYTE_CAP = 256 * 1024
+
+RUNNER_DEFAULT_CAPS: dict[str, int] = {
+    "emits": 100,
+    "user_stdout": 256 * 1024,
+    "traceback": 16 * 1024,
+    "total_json": 1 * 1024 * 1024,
+    "per_emit_bytes": 32 * 1024,
+    "error_message": 4096,
+}
 
 # Spec §4 (shared-interpreter invariant): the single interpreter argv consumed
 # by BOTH debug.introspect.run (server.debug_introspect_run_handler) and
@@ -47,6 +57,21 @@ class WrapperRenderError(ValueError):
     """
 
 
+def _merge_and_validate_caps(caps: dict[str, int] | None) -> dict[str, int]:
+    """Merge caller overrides onto the six-key runner defaults; reject unknown
+    keys and non-positive ints. The wrapper indexes all six keys (incl. on
+    early exception paths) so the rendered set must be complete.
+    """
+    merged = dict(RUNNER_DEFAULT_CAPS)
+    for key, value in (caps or {}).items():
+        if key not in RUNNER_DEFAULT_CAPS:
+            raise WrapperRenderError(f"unknown cap key {key!r}; allowed: {sorted(RUNNER_DEFAULT_CAPS)}")
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise WrapperRenderError(f"cap {key!r} must be a positive int; got {value!r}")
+        merged[key] = value
+    return merged
+
+
 # Spec §4.2 wrapper body — verbatim. The raw triple-quoted string preserves
 # the ``${...}`` ``string.Template`` sigils literally.
 WRAPPER_TEMPLATE = Template(r"""import sys as _li_sys
@@ -55,9 +80,7 @@ import io as _li_io
 import traceback as _li_traceback
 import contextlib as _li_contextlib
 
-_li_caps = {"emits": 100, "user_stdout": 256 * 1024, "traceback": 16 * 1024,
-            "total_json": 1 * 1024 * 1024, "per_emit_bytes": 32 * 1024,
-            "error_message": 4096}
+_li_caps = ${CAPS_JSON}
 
 def _li_truncate(s, cap):
     return (s[:cap], True) if len(s) > cap else (s, False)
@@ -158,6 +181,7 @@ for name in _li_drgn_helper_names:
     namespace[name] = globals()[name]
 
 import base64 as _li_base64
+namespace["args"] = _li_json.loads(_li_base64.b64decode("${ARGS_B64}").decode("utf-8"))
 USER_SCRIPT_B64 = "${USER_SCRIPT_B64}"
 try:
     compiled = compile(
@@ -224,7 +248,14 @@ finally:
 """)
 
 
-def render_wrapper(*, user_script: str, expected_build_id: str, call_id: str) -> str:
+def render_wrapper(
+    *,
+    user_script: str,
+    expected_build_id: str,
+    call_id: str,
+    args_json: str = "{}",
+    caps: dict[str, int] | None = None,
+) -> str:
     """Render the on-target wrapper.
 
     Spec §3.1: host validates the non-user values BEFORE substitution. A
@@ -236,18 +267,30 @@ def render_wrapper(*, user_script: str, expected_build_id: str, call_id: str) ->
     ``user_script`` is base64-encoded and substituted into a pure-ASCII
     literal, so triple quotes, NUL bytes, and ``${...}`` sigils inside the
     user script cannot escape their enclosing string.
+
+    ``args_json`` is a JSON object string injected into the user namespace as
+    ``args``. Defaults to ``"{}"`` (empty dict). ``caps`` overrides individual
+    runner caps; unknown keys or non-positive values raise ``WrapperRenderError``.
     """
     if not BUILD_ID_RE.match(expected_build_id):
         raise WrapperRenderError(f"expected_build_id must match {BUILD_ID_RE.pattern}; got {expected_build_id!r}")
     if not _CALL_ID_RE.match(call_id):
         raise WrapperRenderError(f"call_id must match {_CALL_ID_RE.pattern}; got {call_id!r}")
+    merged_caps = _merge_and_validate_caps(caps)
+    try:
+        json.loads(args_json)
+    except json.JSONDecodeError as exc:
+        raise WrapperRenderError(f"args_json must be valid JSON; got {args_json!r}: {exc}") from exc
     encoded = base64.b64encode(user_script.encode("utf-8")).decode("ascii")
+    args_b64 = base64.b64encode(args_json.encode("utf-8")).decode("ascii")
     # `substitute` (not `safe_substitute`) raises KeyError on unknown
     # placeholders — defensive against future template churn.
     return WRAPPER_TEMPLATE.substitute(
         USER_SCRIPT_B64=encoded,
         EXPECTED_BUILD_ID=expected_build_id,
         CALL_ID=call_id,
+        ARGS_B64=args_b64,
+        CAPS_JSON=json.dumps(merged_caps),
     )
 
 
@@ -259,27 +302,45 @@ def user_script_sha256(user_script: str) -> str:
     return hashlib.sha256(user_script.encode("utf-8")).hexdigest()
 
 
-def render_wrapper_skeleton(*, expected_build_id: str, call_id: str, user_script_sha256_hex: str) -> str:
+def render_wrapper_skeleton(
+    *,
+    expected_build_id: str,
+    call_id: str,
+    user_script_sha256_hex: str,
+    args_json: str = "{}",
+    caps: dict[str, int] | None = None,
+) -> str:
     """Render the agent-visible companion to wrapper.py (spec §6.1, §6.3).
 
     Same template, same regex-validated header values, but the user-script
     body is replaced by a sha256 reference. The skeleton carries no
     plaintext from the script and is safe to surface in the response's
     ``artifacts`` list.
+
+    ``args_json`` and ``caps`` mirror the same parameters on ``render_wrapper``
+    so the skeleton reflects the actual caps profile used for the call.
     """
     if not BUILD_ID_RE.match(expected_build_id):
         raise WrapperRenderError(f"expected_build_id must match {BUILD_ID_RE.pattern}; got {expected_build_id!r}")
     if not _CALL_ID_RE.match(call_id):
         raise WrapperRenderError(f"call_id must match {_CALL_ID_RE.pattern}; got {call_id!r}")
+    merged_caps = _merge_and_validate_caps(caps)
+    try:
+        json.loads(args_json)
+    except json.JSONDecodeError as exc:
+        raise WrapperRenderError(f"args_json must be valid JSON; got {args_json!r}: {exc}") from exc
     placeholder = (
         f"# <user script: sha256:{user_script_sha256_hex}; "
         f"full source under sensitive/debug/introspect/{call_id}/wrapper.py>"
     )
     encoded = base64.b64encode(placeholder.encode("utf-8")).decode("ascii")
+    args_b64 = base64.b64encode(args_json.encode("utf-8")).decode("ascii")
     return WRAPPER_TEMPLATE.substitute(
         USER_SCRIPT_B64=encoded,
         EXPECTED_BUILD_ID=expected_build_id,
         CALL_ID=call_id,
+        ARGS_B64=args_b64,
+        CAPS_JSON=json.dumps(merged_caps),
     )
 
 
@@ -308,7 +369,7 @@ def local_drgn_introspect_capability() -> ProviderCapability:
         architectures=["x86_64"],
         target_kinds=[TargetKind.VIRTUAL],
         transports=["ssh"],
-        operations=["debug.introspect.run", "debug.introspect.check_prerequisites"],
+        operations=["debug.introspect.run", "debug.introspect.check_prerequisites", "debug.introspect.helper"],
         required_host_tools=["ssh"],
         destructive_permissions=[],
         access_methods=["ssh"],

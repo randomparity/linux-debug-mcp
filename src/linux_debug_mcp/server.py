@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -54,6 +54,7 @@ from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import (
     ArtifactRef,
     DebugIntrospectCheckPrerequisitesRequest,
+    DebugIntrospectHelperRequest,
     DebugIntrospectRunRequest,
     ErrorCategory,
     PrerequisiteCheck,
@@ -63,6 +64,7 @@ from linux_debug_mcp.domain import (
     StepStatus,
     ToolResponse,
 )
+from linux_debug_mcp.introspect_helpers import HELPER_REGISTRY, HelperSpec
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
 from linux_debug_mcp.prereqs.drgn_probe import (
@@ -2389,7 +2391,33 @@ def _probe_success(
     )
 
 
-def debug_introspect_run_handler(
+IntrospectPostValidator = Callable[[dict[str, Any]], "PostValidatorVerdict | None"]
+
+
+@dataclass
+class PostValidatorVerdict:
+    """Lets a caller turn a wrapper-`ok` payload into a typed failure while
+    keeping the manifest record and the response in agreement.
+    """
+
+    ok: bool
+    failure_code: str | None = None
+    failure_message: str | None = None
+    failure_category: ErrorCategory | None = None
+    extra_step_details: dict[str, Any] = field(default_factory=dict)
+    extra_response_data: dict[str, Any] = field(default_factory=dict)
+
+
+def _introspect_args_json(request: DebugIntrospectRunRequest) -> str:
+    """JSON-encode the request's args for the wrapper.
+
+    Both DebugIntrospectRunRequest and the helper path carry an `args` field; the
+    `debug.introspect.run` MCP tool wrapper simply doesn't expose it to callers (so it stays {}).
+    """
+    return json.dumps(request.args or {})
+
+
+def _execute_introspect_call(
     request: DebugIntrospectRunRequest,
     *,
     artifact_root: Path,
@@ -2400,9 +2428,13 @@ def debug_introspect_run_handler(
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
     clock: Callable[[], datetime] | None = None,
+    operation_name: str = "debug.introspect.run",
+    caps: dict[str, int] | None = None,
+    post_validator: IntrospectPostValidator | None = None,
 ) -> ToolResponse:
-    """Spec §5.2. Execute a user-supplied drgn Python script over SSH against
-    a live target VM and return structured JSON.
+    """Shared core for `debug.introspect.run` (§5.2) and `debug.introspect.helper`
+    (§6). Execute a user-supplied drgn Python script over SSH against a live
+    target VM and return structured JSON.
     """
     run_id = request.run_id
     now = clock or _utcnow
@@ -2491,7 +2523,7 @@ def debug_introspect_run_handler(
 
     # Spec §5.2 step 2: operation gating.
     try:
-        _ensure_debug_operation_enabled(resolved_debug, "debug.introspect.run")
+        _ensure_debug_operation_enabled(resolved_debug, operation_name)
     except ProviderDebugError as exc:
         return ToolResponse.failure(
             category=exc.category,
@@ -2721,16 +2753,21 @@ def debug_introspect_run_handler(
         sensitive_call_dir.parent.chmod(0o700)
         sensitive_call_dir.parent.parent.chmod(0o700)
 
+        args_json = _introspect_args_json(request)
         try:
             wrapper = render_wrapper(
                 user_script=request.script,
                 expected_build_id=build_id,
                 call_id=call_id,
+                args_json=args_json,
+                caps=caps,
             )
             skeleton = render_wrapper_skeleton(
                 expected_build_id=build_id,
                 call_id=call_id,
                 user_script_sha256_hex=user_script_sha256(request.script),
+                args_json=args_json,
+                caps=caps,
             )
         except WrapperRenderError as exc:
             # R6-F3: render failure before SSH ran. Release the admission
@@ -3159,26 +3196,69 @@ def debug_introspect_run_handler(
                     )
                 )
 
+        verdict = post_validator(redacted_payload) if post_validator is not None else None
+        step_status = StepStatus.SUCCEEDED
+        step_failure_code = None
+        if verdict is not None and not verdict.ok:
+            step_status = StepStatus.FAILED
+            step_failure_code = verdict.failure_code
+
+        step_details: dict[str, Any] = {
+            "call_id": call_id,
+            "build_id": redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None,
+            "timeout_seconds": request.timeout_seconds,
+            "wrapper_exit_code": ssh_result.exit_status,
+            "duration_ms": duration_ms,
+            "prelude_ms": prelude_ms,
+            "truncated": truncated,
+            "ssh_user": resolved_rootfs.ssh_user,
+            "outcome_status": outcome_status,
+        }
+        if verdict is not None:
+            step_details.update(verdict.extra_step_details)
+        if step_status is StepStatus.FAILED:
+            step_details["code"] = step_failure_code
+
+        summary = (
+            f"introspect call {call_id[:8]} ok"
+            if step_status is StepStatus.SUCCEEDED
+            else f"introspect call {call_id[:8]} failed: {step_failure_code}"
+        )
         step = StepResult(
             step_name=f"introspect:{call_id}",
-            status=StepStatus.SUCCEEDED,
-            summary=f"introspect call {call_id[:8]} ok",
+            status=step_status,
+            summary=summary,
             artifacts=artifacts,
-            details={
-                "call_id": call_id,
-                "build_id": redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None,
-                "timeout_seconds": request.timeout_seconds,
-                "wrapper_exit_code": ssh_result.exit_status,
-                "duration_ms": duration_ms,
-                "prelude_ms": prelude_ms,
-                "truncated": truncated,
-                "ssh_user": resolved_rootfs.ssh_user,
-                "outcome_status": outcome_status,
-            },
+            details=step_details,
         )
         _record_terminal_introspect_result(store, run_id, step)
 
         public_artifacts = [a for a in artifacts if not a.sensitive]
+
+        if verdict is not None and not verdict.ok:
+            return ToolResponse.failure(
+                category=verdict.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
+                run_id=run_id,
+                message=verdict.failure_message or "post-validator rejected the introspect result",
+                details={"code": verdict.failure_code, "call_id": call_id},
+                suggested_next_actions=["artifacts.get_manifest"],
+            )
+        # `verdict.ok` is always True here (the not-ok case returned above); the
+        # explicit check is for self-documentation.
+        if verdict is not None and verdict.ok:
+            return ToolResponse.success(
+                summary=f"introspect call {call_id[:8]} ok",
+                run_id=run_id,
+                status=StepStatus.SUCCEEDED,
+                artifacts=public_artifacts,
+                suggested_next_actions=["artifacts.get_manifest", operation_name],
+                data={
+                    **verdict.extra_response_data,
+                    "call_id": call_id,
+                    "truncated": truncated,
+                    "prelude_ms": prelude_ms,
+                },
+            )
         return ToolResponse.success(
             summary=f"introspect call {call_id[:8]} ok",
             run_id=run_id,
@@ -3220,6 +3300,157 @@ def debug_introspect_run_handler(
                 # but the operator still needs admission-state diagnostics.
                 logger.exception("admission rollback failed while unwinding introspect handler for run_id=%s", run_id)
         raise
+
+
+def debug_introspect_run_handler(
+    request: DebugIntrospectRunRequest,
+    *,
+    artifact_root: Path,
+    target_profiles: dict[str, TargetProfile] | None = None,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    ssh_runner: SshRunner | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> ToolResponse:
+    """Thin wrapper over the shared core. `run` opts into no cap override and no post-validator."""
+    return _execute_introspect_call(
+        request,
+        artifact_root=artifact_root,
+        target_profiles=target_profiles,
+        rootfs_profiles=rootfs_profiles,
+        debug_profiles=debug_profiles,
+        ssh_runner=ssh_runner,
+        admission=admission,
+        session_registry=session_registry,
+        clock=clock,
+        operation_name="debug.introspect.run",
+        caps=None,
+        post_validator=None,
+    )
+
+
+HELPER_CAP_PROFILE: dict[str, int] = {
+    "per_emit_bytes": 4 * 1024 * 1024,
+    "emits": 4,
+    "total_json": 8 * 1024 * 1024,
+}
+
+
+def _make_helper_post_validator(spec: HelperSpec) -> IntrospectPostValidator:
+    """Spec §3.3/§6: validate the single redacted emit into the helper's
+    output_model; keep the manifest step status in agreement with the response.
+    """
+
+    def _validate(redacted_payload: dict[str, Any]) -> PostValidatorVerdict:
+        details_stub: dict[str, Any] = {"helper": spec.name, "version": spec.version}
+        # A drgn script that RAISED is a script error, NOT schema drift —
+        # surface helper_script_error with the redacted traceback so the
+        # primary diagnostic is in the response, not buried on disk.
+        outcome = redacted_payload.get("outcome") if isinstance(redacted_payload, dict) else None
+        outcome_status = outcome.get("status") if isinstance(outcome, dict) else None
+        if outcome_status == "error":
+            etype = outcome.get("error_type") if isinstance(outcome, dict) else None
+            emsg = outcome.get("error_message") if isinstance(outcome, dict) else None
+            return PostValidatorVerdict(
+                ok=False,
+                failure_code="helper_script_error",
+                failure_message=_redact_and_truncate(Redactor(), f"{etype}: {emsg}", cap=512),
+                failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                extra_step_details={**details_stub, "error_type": etype},
+            )
+        emits = redacted_payload.get("emits") if isinstance(redacted_payload, dict) else None
+        if not isinstance(emits, list) or len(emits) != 1:
+            return PostValidatorVerdict(
+                ok=False,
+                failure_code="helper_schema_drift",
+                failure_message=(f"expected exactly one emit, got {0 if not isinstance(emits, list) else len(emits)}"),
+                failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                extra_step_details={**details_stub},
+            )
+        try:
+            model = spec.output_model.model_validate(emits[0])
+        except ValidationError as exc:
+            return PostValidatorVerdict(
+                ok=False,
+                failure_code="helper_schema_drift",
+                failure_message=_redact_and_truncate(Redactor(), str(exc), cap=512),
+                failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                extra_step_details={**details_stub},
+            )
+        return PostValidatorVerdict(
+            ok=True,
+            extra_step_details={**details_stub},
+            extra_response_data={
+                "helper": spec.name,
+                "version": spec.version,
+                "result": model.model_dump(mode="json"),
+            },
+        )
+
+    return _validate
+
+
+def debug_introspect_helper_handler(
+    request: DebugIntrospectHelperRequest,
+    *,
+    artifact_root: Path,
+    target_profiles: dict[str, TargetProfile] | None = None,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    ssh_runner: SshRunner | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> ToolResponse:
+    """Spec §6. Resolve a curated helper, validate its args, and run its drgn
+    script through the shared core under the raised helper cap profile.
+    """
+    spec = HELPER_REGISTRY.get(request.name)
+    if spec is None:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=request.run_id,
+            message=f"unknown helper {request.name!r}; valid: {sorted(HELPER_REGISTRY)}",
+            details={"code": "unknown_helper", "valid": sorted(HELPER_REGISTRY)},
+            suggested_next_actions=["debug.introspect.helper"],
+        )
+    try:
+        validated_args = spec.args_model.model_validate(request.args)
+    except ValidationError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=request.run_id,
+            message=_redact_and_truncate(Redactor(), str(exc), cap=512),
+            details={"code": "helper_args_invalid"},
+            suggested_next_actions=["debug.introspect.helper"],
+        )
+    run_request = DebugIntrospectRunRequest(
+        run_id=request.run_id,
+        target_ref=request.target_ref,
+        script=spec.script,
+        timeout_seconds=request.timeout_seconds,
+        allow_write=False,
+        debug_profile=request.debug_profile,
+        target_profile=request.target_profile,
+        rootfs_profile=request.rootfs_profile,
+        args=validated_args.model_dump(mode="json"),
+    )
+    return _execute_introspect_call(
+        run_request,
+        artifact_root=artifact_root,
+        target_profiles=target_profiles,
+        rootfs_profiles=rootfs_profiles,
+        debug_profiles=debug_profiles,
+        ssh_runner=ssh_runner,
+        admission=admission,
+        session_registry=session_registry,
+        clock=clock,
+        operation_name="debug.introspect.helper",
+        caps=HELPER_CAP_PROFILE,
+        post_validator=_make_helper_post_validator(spec),
+    )
 
 
 def _require_snapshot(admission: AdmissionService, target_key: TargetKey) -> TargetSnapshot:
@@ -5582,6 +5813,35 @@ def create_app(
             rootfs_profile=rootfs_profile,
         )
         return debug_introspect_run_handler(
+            request,
+            artifact_root=Path(artifact_root),
+            admission=admission_service,
+            session_registry=durable_registry,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.introspect.helper")
+    def debug_introspect_helper(
+        run_id: str,
+        target_ref: str,
+        name: str,
+        args: dict[str, Any] | None = None,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        timeout_seconds: int = 30,
+        debug_profile: str | None = None,
+        target_profile: str | None = None,
+        rootfs_profile: str | None = None,
+    ) -> dict[str, Any]:
+        request = DebugIntrospectHelperRequest(
+            run_id=run_id,
+            target_ref=target_ref,
+            name=name,
+            args=args or {},
+            timeout_seconds=timeout_seconds,
+            debug_profile=debug_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+        )
+        return debug_introspect_helper_handler(
             request,
             artifact_root=Path(artifact_root),
             admission=admission_service,

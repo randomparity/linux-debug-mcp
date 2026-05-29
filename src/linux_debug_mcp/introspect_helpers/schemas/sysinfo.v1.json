@@ -1,0 +1,44 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "boot_cmdline": {
+      "title": "Boot Cmdline",
+      "type": "string"
+    },
+    "cpus_online": {
+      "title": "Cpus Online",
+      "type": "integer"
+    },
+    "machine": {
+      "title": "Machine",
+      "type": "string"
+    },
+    "mem_total_pages": {
+      "title": "Mem Total Pages",
+      "type": "integer"
+    },
+    "nodename": {
+      "title": "Nodename",
+      "type": "string"
+    },
+    "release": {
+      "title": "Release",
+      "type": "string"
+    },
+    "version": {
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "release",
+    "version",
+    "machine",
+    "nodename",
+    "boot_cmdline",
+    "cpus_online",
+    "mem_total_pages"
+  ],
+  "title": "Output",
+  "type": "object"
+}
