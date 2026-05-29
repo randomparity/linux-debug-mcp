@@ -275,9 +275,24 @@ failed and left a stranded `HALTED` record, so repeating `close`'s sequence
 (`transport.close` → release → `delete_record`) would just wedge the same way. So
 `transaction.force_release(session_id)` **skips the failure-prone
 `transport.close`** and does only the in-memory/durable line drop that stops the
-ssh-tier probe reading `HALTED`: a session-id-fenced `delete_record` + a
-by-`TargetKey` `guard.revoke` + console-lease release, rebuilt from the durable
-record (the way `close` resolves a session-id, `transaction.py:415`), **not** from
+ssh-tier probe reading `HALTED`:
+
+- a **session-id-fenced `delete_record`** (the same fence `close` uses,
+  `transaction.py:443`), so it can only erase the record this session wrote;
+- a **fenced by-token guard release** via the transaction's in-memory
+  `_tokens[session_id]` (a no-op if `close` already popped/released it) — **never
+  `guard.revoke(target_key)`**. This matches the discipline every other release
+  path follows (`close` `transaction.py:424-427`, `_rollback` `:396-397`,
+  `force_drop` `:113-114`) and is required by [ADR 0002](../../adr/0002-stop-controller-execution-authority-is-the-guard-token.md)
+  (Finding #4): the coarse target-wide `revoke()` is reserved for §5.4 lifecycle
+  invalidation because it is not session-fenced — a concurrent reopen that has
+  already minted a new `GuardToken` for the same `TargetKey` would be clobbered by
+  a `revoke`, yielding two stop-capable holders. The fenced by-token release
+  cannot clobber a newer holder (a stale token is a no-op, `guard.py:55-68`);
+- a by-token **console-lease release** (the lease token off the durable record).
+
+These are rebuilt from the durable record and the in-memory token map (the way
+`close` resolves a session-id, `transaction.py:415`), **not** from
 `_SessionSubscriber.force_drop`'s in-memory `_OpenState` (which `TransportTransaction`
 cannot address by `session_id`). Any still-live backend left by the skipped
 `transport.close` is reaped by `SessionRegistry.reconcile()` on the next process
@@ -427,8 +442,11 @@ Handler/seam-level (no MCP, injected fakes), following the repo convention:
   `resume_detail` set (the loud `INFRASTRUCTURE_FAILURE` signal).
 - **`force_release` skips `transport.close`**: assert `transaction.force_release`
   does **not** call the provider/transport `close` (so it cannot re-wedge the way
-  the failed `close` did) and still drops the record + revokes the guard + releases
-  the lease.
+  the failed `close` did) and still drops the record + releases the guard + lease.
+- **`force_release` does not clobber a newer holder**: acquire a fresh
+  `GuardToken` for the same `TargetKey` after the session under teardown, then call
+  `force_release(old_session_id)`; assert the **new** token still holds the guard
+  (the fenced by-token release no-ops on the stale token — it is not a `revoke`).
 - **Clean end resume**: `teardown(reason="ended")` deletes the record
   (`resume_ok=True`); a subsequent ssh-tier admit succeeds.
 - **Idempotency**: a double `teardown` (a re-attempted `debug.end_session`) is a

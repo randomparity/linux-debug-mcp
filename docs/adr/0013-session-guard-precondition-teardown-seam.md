@@ -88,9 +88,12 @@ in?**
    invokes `force_reap`** — `transaction.force_release(session_id)`, a **more
    forceful primitive than `close`, not a retry of it**: it skips the
    failure-prone `transport.close` (the likely cause of the partial close) and does
-   only the session-id-fenced `delete_record` + `guard.revoke` + lease release that
-   stops the ssh-tier probe reading `HALTED`, rebuilt from the durable record;
-   any still-live backend is reaped by `reconcile()` on next start (§5.5 backstop).
+   only the session-id-fenced `delete_record` + **fenced by-token** guard release
+   (via the in-memory `_tokens[session_id]`, **never** `revoke` — ADR 0002 reserves
+   the un-fenced `revoke` for §5.4, since a `revoke` could clobber a concurrent
+   reopen's newer guard holder) + by-token lease release that stops the ssh-tier
+   probe reading `HALTED`, rebuilt from the durable record; any still-live backend
+   is reaped by `reconcile()` on next start (§5.5 backstop).
    `resume_ok=False` therefore means even `force_reap` failed: a genuine
    `INFRASTRUCTURE_FAILURE` logged loudly, not a silently-stranded target. The
    attach-error path keeps today's `close(force=False)`/`closed_while_halted`
@@ -186,8 +189,10 @@ in?**
    delete` sequence would wedge identically and back nothing up; and `force_drop`'s
    release reads in-memory `_OpenState` the `TransportTransaction` cannot address by
    `session_id`. The accepted `force_release(session_id)` is therefore strictly more
-   forceful and record-derived: skip `transport.close`, do the fenced
-   `delete_record` + `guard.revoke` + lease release, leave any live backend to
+   forceful and record-derived: skip `transport.close`, do the session-id-fenced
+   `delete_record` + **fenced by-token** guard release (never `revoke`, per ADR
+   0002 — a `revoke` is not session-fenced and could clobber a concurrent reopen's
+   newer guard holder) + by-token lease release, leave any live backend to
    `reconcile()`.
 
 9. **Add a `halt_recorded` discriminator so a failed attach that never halted the
