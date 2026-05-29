@@ -11,14 +11,14 @@ from linux_debug_mcp.transport.base import BreakMethod, BreakPlan, TransportRef
 class SelectionError(RuntimeError):
     """No channel could be selected. `code` is `no_capable_channel` (no channel satisfies the
     required caps) or the break policy's `no_break_plan`/`break_disproved` (a capable channel
-    exists but none has an executable break plan) — spec §4.1/§4.8."""
+    exists but none has an executable break plan) — spec §4.1."""
 
     def __init__(self, message: str, *, code: str) -> None:
         super().__init__(message)
         self.code = code
 
 
-# §4.8: SYSRQ_G is issued over ssh and its preconditions (/proc/sys/kernel/sysrq,
+# §4.1: SYSRQ_G is issued over ssh and its preconditions (/proc/sys/kernel/sysrq,
 # /proc/sysrq-trigger) are a property of the running KERNEL, not of any one console/RSP line — so
 # a SYSRQ_G disproof is TARGET-WIDE and must prune the method on every channel of the target. The
 # line-bound methods (gdbstub_native/uart_break/agent_proxy_break) are disproved per channel.
@@ -27,7 +27,7 @@ _TARGET_WIDE_BREAK_METHODS = frozenset({BreakMethod.SYSRQ_G})
 
 @dataclass(frozen=True)
 class BreakDisproof:
-    """A §4.8 probe result proving a `BreakMethod` cannot execute. Its identity SCOPE is
+    """A §4.1 probe result proving a `BreakMethod` cannot execute. Its identity SCOPE is
     method-dependent: line-bound methods name a specific channel (`provider` + `channel_id`
     required); a TARGET-WIDE method (SYSRQ_G) carries no channel (both None) and applies to every
     channel of the target. Channel identity is keyed within a target (`channel_id` is unique only
@@ -72,7 +72,7 @@ def select_stop_capable_channel(
     """Pick the first `transports[]` channel for `target_key` (order is authoritative, contract
     §4.1) that satisfies `required_caps` AND has an executable break plan; a caps-sufficient but
     unbreakable channel is skipped, not selected. `disproved` is a set of `BreakDisproof` whose
-    scope is method-aware (§4.8): a line-bound disproof prunes its method only on its own channel,
+    scope is method-aware (§4.1): a line-bound disproof prunes its method only on its own channel,
     while a target-wide disproof (SYSRQ_G) prunes that method on EVERY channel of the target — so
     an ssh-issued SysRq disproof recorded while evaluating one channel is not silently ignored for
     a sibling channel. Raises SelectionError(no_capable_channel) if no channel satisfies the caps;
@@ -91,7 +91,7 @@ def select_stop_capable_channel(
         except BreakPlanError as exc:
             # Aggregate the contract's error taxonomy across ALL capable channels rather than
             # keeping only the last one: a positive disproof on any channel must not be
-            # downgraded to no_break_plan by a later topology-less channel (§4.8).
+            # downgraded to no_break_plan by a later topology-less channel (§4.1).
             if exc.code == "break_disproved":
                 saw_disproved = True
             continue

@@ -19,7 +19,7 @@ _RATIONALE = {
 class BreakPlanError(ValueError):
     """Admission-time break-plan rejection. `code` is `no_break_plan` (no topology
     predicate holds) or `break_disproved` (every topology candidate positively
-    disproved) — spec §4.8."""
+    disproved) — spec §4.1."""
 
     def __init__(self, message: str, *, code: str) -> None:
         super().__init__(message)
@@ -40,7 +40,7 @@ class BreakPolicy(Protocol):
 class ReferenceBreakPolicy:
     """Encodes the contract §4.1 reference mappings as topology predicates against the
     *selected channel's* line_role + caps plus platform facts. Admission is
-    topology-first (spec §4.8); disproof is disproof-only and injected by the caller."""
+    topology-first (spec §4.1); disproof is disproof-only and injected by the caller."""
 
     def plan(
         self,
