@@ -55,8 +55,12 @@ provider-suggested, **non-authoritative** `break_hints` list. `BreakMethod` /
    `dedicated_debug_line`.** A target may offer several break-capable serial
    channels (a shared console *and* a dedicated kgdb line); only the per-channel
    `line_role` + `caps` (§3.2, authoritative) disambiguates which line a break lands
-   on (`_candidates`, `seams/break_policy.py:68`). `dedicated_debug_line` is a
-   derived summary fact and is intentionally unused by the policy.
+   on (`_candidates`, `seams/break_policy.py:68`). The only *platform* facts the
+   policy reads are `console_kind` and `ssh_reachable`; the summary facts
+   `dedicated_debug_line` and `console_count` are intentionally unused — the
+   "single shared console" boundary case (§4.1) is captured by the per-channel
+   `line_role`/`caps` plus `ssh_reachable`, not by a count, so keying on
+   `console_count` would add nothing the channel topology does not already say.
 
 3. **Preference is candidate insertion order: line-native first, ssh `sysrq_g`
    last; `console_kind` *reorders* preference but never *excludes*
