@@ -168,6 +168,24 @@ vmcore orchestrators keep their own pre-runner setup.
    Reusing the wrapper body is what makes the offline output "equivalent to a live
    run" (AC#1).
 
+10. **Add a host-wide concurrency/memory cap to bound parallel vmcore loads.**
+    Rejected (for now): this server is local and single-agent, so the only party
+    that can OOM the host by fanning out parallel multi-GB vmcore loads is the agent
+    driving the server — there is no second tenant to protect. A cross-call
+    semaphore would add shared cross-call state, a new queueing/`readiness_failure`
+    contract, and a tuning knob for a multi-tenant deployment that does not exist
+    ("no speculative features"). The per-call memory cost and the fact that
+    `MAX_INTROSPECT_CALLS_PER_RUN` does not bound concurrency are documented in spec
+    §9 so the agent can self-limit; a bounded semaphore is the clean follow-on if a
+    shared-host deployment appears, since the path has no other gate to reconcile with.
+
+11. **Load module debuginfo by passing `modules_path` (a directory) to
+    `load_debug_info`.** Rejected: drgn's `load_debug_info` takes individual ELF
+    files, not a directory. The wrapper enumerates `*.ko[.debug]` under the resolved
+    bundle and passes the file list, surfacing three mutually-exclusive non-fatal
+    warnings (`modules_debuginfo_loaded` / `_empty` / `_load_failed`) so a green
+    result can never silently mean "no module symbols loaded."
+
 ## References
 
 spec `docs/superpowers/specs/2026-05-29-debug-introspect-from-vmcore-design.md`;

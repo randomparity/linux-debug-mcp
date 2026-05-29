@@ -99,9 +99,9 @@ Reused without change: `resolve_symbols`/`confine_run_relative`/`verify_build_id
 ```python
 class DebugIntrospectFromVmcoreRequest(Model):        # extra="forbid"
     run_id: str
-    vmcore_ref: str          # run-relative path to the captured vmcore
-    vmlinux_ref: str         # run-relative path to the matching vmlinux+DWARF
-    modules_ref: str | None = None   # optional module-debuginfo bundle
+    vmcore_ref: str          # run-relative path to the captured vmcore file
+    vmlinux_ref: str         # run-relative path to the uncompressed ELF vmlinux+DWARF
+    modules_ref: str | None = None   # optional run-relative *directory* of *.ko[.debug]
     script: str              # user drgn script source
     timeout_seconds: int = 30        # handler-bounded to [5, 300]
     allow_write: bool = False        # rejected if True (#56)
@@ -216,12 +216,33 @@ except Exception as exc:
     <emit outcome drgn_open_failure, exit 3>      # vmlinux load failure reuses the open-failure code
 
 if _li_modules:                                   # optional — best-effort, NEVER fatal
-    try:
-        prog.load_debug_info([_li_modules])
-    except Exception as exc:
+    import os as _li_os
+    # ${MODULES_PATH_B64} is a *directory* bundle (§3.1/§5). drgn's
+    # load_debug_info takes individual ELF files, not a directory, so enumerate
+    # the per-module debuginfo files and pass the file list.
+    _li_ko = []
+    for _li_root, _, _li_files in _li_os.walk(_li_modules):
+        for _li_f in _li_files:
+            if _li_f.endswith((".ko.debug", ".ko")):
+                _li_ko.append(_li_os.path.join(_li_root, _li_f))
+    if not _li_ko:
         _li_result.setdefault("warnings", []).append(
-            {"code": "modules_debuginfo_load_failed", "error_type": type(exc).__name__})
+            {"code": "modules_debuginfo_empty", "detail": "no .ko/.ko.debug under bundle"})
+    else:
+        try:
+            prog.load_debug_info(_li_ko)
+            _li_result.setdefault("warnings", []).append(
+                {"code": "modules_debuginfo_loaded", "count": len(_li_ko)})
+        except Exception as exc:
+            _li_result.setdefault("warnings", []).append(
+                {"code": "modules_debuginfo_load_failed", "error_type": type(exc).__name__})
 ```
+
+The three warning codes are mutually exclusive and let an agent distinguish
+"modules requested but the bundle was empty" (`modules_debuginfo_empty`) from
+"modules requested and N files loaded" (`modules_debuginfo_loaded`) from "modules
+requested but drgn rejected them" (`modules_debuginfo_load_failed`) — a silent
+"green result with no module symbols" is impossible.
 
 **drgn ordering assumption (must be verified by the env-gated integration test):**
 the design requires `prog.main_module().build_id` to be populated by
@@ -322,7 +343,8 @@ new shared finalizer (§7). Steps:
 5. Resolve symbols: build a `KernelProvenance(build_id="" , release="",
    vmlinux_ref=..., modules_ref=..., cmdline="", config_ref=None)` shell purely to
    reuse `resolve_symbols`, which confines the paths to `run_dir` and returns
-   `vmlinux_path`, `modules_path`, and `modules_debuginfo_missing` warnings.
+   `vmlinux_path`, `modules_path` (a directory bundle of `*.ko[.debug]`, enumerated
+   in the wrapper per §4.2), and `modules_debuginfo_missing` warnings.
    `SymbolResolutionError` → `configuration_error` (`symbol_resolution_failed`,
    carrying the resolver's `code`). Separately confine `vmcore_ref`; a missing/
    escaping vmcore is `configuration_error` (`vmcore_not_found`).
@@ -414,7 +436,7 @@ redaction/manifest/outcome logic — the same hazard ADR 0009 cited when it extr
 | user script syntax error | `CONFIGURATION_ERROR` | `script_compile_error` |
 | timeout / oversized / unparseable wrapper output | `INFRASTRUCTURE_FAILURE` | `introspect_timeout` / `oversized_output` / `wrapper_crash` |
 | user script raised | success, `status=script_error` | — |
-| present-but-corrupt modules bundle | success + `warnings[]` | `modules_debuginfo_load_failed` (non-fatal) |
+| module bundle present (loaded / empty / drgn-rejected) | success + `warnings[]` | `modules_debuginfo_loaded` / `modules_debuginfo_empty` / `modules_debuginfo_load_failed` (all non-fatal) |
 | helper schema drift / helper script raised | `INFRASTRUCTURE_FAILURE` | `helper_schema_drift` / `helper_script_error` |
 
 `provenance_unverifiable` (core has no embedded build-id) is `CONFIGURATION_ERROR`
@@ -437,6 +459,23 @@ unique `introspect:<call_id>` step). The call-budget read-then-write is not
 serialised across concurrent calls — the budget is a soft cap (a race may admit a
 couple over the limit); this matches the live path's identical non-atomic check and
 is acceptable for a soft resource ceiling.
+
+**Resource posture (intentionally unbounded, stated explicitly).** "Concurrent-safe"
+here means *free of state corruption* — it does **not** mean resource-bounded. The
+live path's admission gate incidentally serialised drgn against a target; the vmcore
+path has no such gate and adds **no** concurrency cap. Each in-flight call spawns one
+`python3`+drgn process whose resident memory is dominated by the mapped vmcore (often
+multi-GB) plus the vmlinux DWARF; K parallel calls cost ≈ K× that. `MAX_INTROSPECT_CALLS_PER_RUN`
+bounds the per-run *lifetime* total, not in-flight parallelism. This server is
+**local, single-agent**: the sole caller controls its own fan-out, so the only party
+that can exhaust host memory with parallel vmcore loads is the agent driving the
+server — there is no second tenant to protect. A cross-call host-wide concurrency
+semaphore is therefore **deliberately not added** (it would introduce shared
+cross-call state, a new `readiness_failure`/queueing contract, and a tuning knob for
+a multi-tenant scenario that does not exist today — "no speculative features"). The
+cost is documented here so the agent can self-limit; if a concrete multi-tenant or
+shared-host deployment appears, a bounded semaphore is the follow-on (it composes
+cleanly because the path already has no other gate to reconcile with).
 
 ## 10. Allowlist & capability changes
 
