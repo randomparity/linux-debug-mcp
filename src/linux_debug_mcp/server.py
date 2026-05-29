@@ -3341,29 +3341,33 @@ def _finalize_introspect_call(
                 "prelude_ms": prelude_ms,
             },
         )
+    response_data: dict[str, Any] = {
+        "call_id": call_id,
+        "status": status,
+        "outcome": outcome_for_response,
+        "emits": emits,
+        "user_stdout_snippet": user_stdout_snippet,
+        "drgn_stderr_snippet": drgn_stderr_snippet,
+        "build_id": redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None,
+        "truncated": truncated,
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "duration_ms": duration_ms,
+        "prelude_ms": prelude_ms,
+        "artifacts": [a.model_dump(mode="json") for a in public_artifacts],
+        "diagnostic": diagnostic,
+    }
+    # The live wrapper never emits warnings (vmcore-only field); include the key
+    # only when present so the live `debug.introspect.run` response is unchanged.
+    if warnings:
+        response_data["warnings"] = warnings
     return ToolResponse.success(
         summary=f"introspect call {call_id[:8]} ok",
         run_id=run_id,
         status=StepStatus.SUCCEEDED,
         artifacts=public_artifacts,
         suggested_next_actions=["artifacts.get_manifest", operation_name],
-        data={
-            "call_id": call_id,
-            "status": status,
-            "outcome": outcome_for_response,
-            "emits": emits,
-            "warnings": warnings,
-            "user_stdout_snippet": user_stdout_snippet,
-            "drgn_stderr_snippet": drgn_stderr_snippet,
-            "build_id": redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None,
-            "truncated": truncated,
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
-            "duration_ms": duration_ms,
-            "prelude_ms": prelude_ms,
-            "artifacts": [a.model_dump(mode="json") for a in public_artifacts],
-            "diagnostic": diagnostic,
-        },
+        data=response_data,
     )
 
 

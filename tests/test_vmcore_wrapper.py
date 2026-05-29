@@ -5,7 +5,7 @@ import builtins
 import json
 import sys
 import types
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, suppress
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -188,3 +188,76 @@ def test_vmcore_exec_open_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     stdout, exit_code = _exec_vmcore("emit({})", build_id=None)
     assert exit_code == 3
     assert json.loads(stdout)["outcome"]["status"] == "drgn_open_failure"
+
+
+def _install_recording_stub_drgn(monkeypatch: pytest.MonkeyPatch, *, build_id: bytes) -> list[list[str]]:
+    """Stub drgn whose load_debug_info records each call's path list."""
+    loaded: list[list[str]] = []
+    drgn_module = types.ModuleType("drgn")
+
+    class _StubProg:
+        def set_core_dump(self, path: str) -> None: ...
+
+        def load_debug_info(self, paths) -> None:
+            loaded.append(list(paths))
+
+        def main_module(self):
+            return SimpleNamespace(build_id=build_id)
+
+    drgn_module.Program = lambda *_a, **_k: _StubProg()  # type: ignore[attr-defined]
+    helpers_pkg = types.ModuleType("drgn.helpers")
+    helpers_linux = types.ModuleType("drgn.helpers.linux")
+    helpers_linux.__all__ = []  # type: ignore[attr-defined]
+    helpers_pkg.linux = helpers_linux  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "drgn", drgn_module)
+    monkeypatch.setitem(sys.modules, "drgn.helpers", helpers_pkg)
+    monkeypatch.setitem(sys.modules, "drgn.helpers.linux", helpers_linux)
+    return loaded
+
+
+def _exec_vmcore_with_modules(modules_path: str, *, build_id: bytes) -> dict:
+    rendered = render_vmcore_wrapper(
+        user_script="emit({})",
+        expected_build_id=EXPECTED_BUILD_ID,
+        call_id=CALL_ID,
+        vmcore_path="/c",
+        vmlinux_path="/v",
+        modules_path=modules_path,
+    )
+    buf = StringIO()
+    ns: dict[str, Any] = {"__name__": "__wrapper__", "__builtins__": builtins}
+    with redirect_stdout(buf), suppress(SystemExit):
+        exec(compile(rendered, "<vmcore>", "exec"), ns)
+    return json.loads(buf.getvalue())
+
+
+def test_vmcore_modules_loaded_warning(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    loaded = _install_recording_stub_drgn(monkeypatch, build_id=bytes.fromhex(EXPECTED_BUILD_ID))
+    mods = tmp_path / "mods"
+    (mods / "net").mkdir(parents=True)
+    (mods / "net" / "foo.ko.debug").write_bytes(b"x")
+    (mods / "bar.ko.debug").write_bytes(b"x")
+    payload = _exec_vmcore_with_modules(str(mods), build_id=bytes.fromhex(EXPECTED_BUILD_ID))
+    warns = {w["code"]: w for w in payload["warnings"]}
+    assert "modules_debuginfo_loaded" in warns
+    assert warns["modules_debuginfo_loaded"]["count"] == 2
+    # vmlinux + 2 module files each loaded via load_debug_info.
+    assert [p for call in loaded for p in call].count(str(mods / "bar.ko.debug")) == 1
+
+
+def test_vmcore_modules_fallback_to_plain_ko(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _install_recording_stub_drgn(monkeypatch, build_id=bytes.fromhex(EXPECTED_BUILD_ID))
+    mods = tmp_path / "mods"
+    mods.mkdir()
+    (mods / "only.ko").write_bytes(b"x")  # no .ko.debug present -> fallback
+    payload = _exec_vmcore_with_modules(str(mods), build_id=bytes.fromhex(EXPECTED_BUILD_ID))
+    warns = {w["code"]: w for w in payload["warnings"]}
+    assert warns["modules_debuginfo_loaded"]["count"] == 1
+
+
+def test_vmcore_modules_empty_warning(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _install_recording_stub_drgn(monkeypatch, build_id=bytes.fromhex(EXPECTED_BUILD_ID))
+    mods = tmp_path / "empty"
+    mods.mkdir()
+    payload = _exec_vmcore_with_modules(str(mods), build_id=bytes.fromhex(EXPECTED_BUILD_ID))
+    assert any(w["code"] == "modules_debuginfo_empty" for w in payload["warnings"])
