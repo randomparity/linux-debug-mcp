@@ -2426,8 +2426,9 @@ def _execute_introspect_call(
     caps: dict[str, int] | None = None,
     post_validator: IntrospectPostValidator | None = None,
 ) -> ToolResponse:
-    """Spec §5.2. Execute a user-supplied drgn Python script over SSH against
-    a live target VM and return structured JSON.
+    """Shared core for `debug.introspect.run` (§5.2) and `debug.introspect.helper`
+    (§6). Execute a user-supplied drgn Python script over SSH against a live
+    target VM and return structured JSON.
     """
     run_id = request.run_id
     now = clock or _utcnow
@@ -2746,19 +2747,20 @@ def _execute_introspect_call(
         sensitive_call_dir.parent.chmod(0o700)
         sensitive_call_dir.parent.parent.chmod(0o700)
 
+        args_json = _introspect_args_json(request)
         try:
             wrapper = render_wrapper(
                 user_script=request.script,
                 expected_build_id=build_id,
                 call_id=call_id,
-                args_json=_introspect_args_json(request),
+                args_json=args_json,
                 caps=caps,
             )
             skeleton = render_wrapper_skeleton(
                 expected_build_id=build_id,
                 call_id=call_id,
                 user_script_sha256_hex=user_script_sha256(request.script),
-                args_json=_introspect_args_json(request),
+                args_json=args_json,
                 caps=caps,
             )
         except WrapperRenderError as exc:
@@ -3211,10 +3213,15 @@ def _execute_introspect_call(
         if step_status is StepStatus.FAILED:
             step_details["code"] = step_failure_code
 
+        summary = (
+            f"introspect call {call_id[:8]} ok"
+            if step_status is StepStatus.SUCCEEDED
+            else f"introspect call {call_id[:8]} failed: {step_failure_code}"
+        )
         step = StepResult(
             step_name=f"introspect:{call_id}",
             status=step_status,
-            summary=f"introspect call {call_id[:8]} ok",
+            summary=summary,
             artifacts=artifacts,
             details=step_details,
         )
@@ -3230,13 +3237,15 @@ def _execute_introspect_call(
                 details={"code": verdict.failure_code, "call_id": call_id},
                 suggested_next_actions=["artifacts.get_manifest"],
             )
+        # `verdict.ok` is always True here (the not-ok case returned above); the
+        # explicit check is for self-documentation.
         if verdict is not None and verdict.ok:
             return ToolResponse.success(
                 summary=f"introspect call {call_id[:8]} ok",
                 run_id=run_id,
                 status=StepStatus.SUCCEEDED,
                 artifacts=public_artifacts,
-                suggested_next_actions=["artifacts.get_manifest", "debug.introspect.run"],
+                suggested_next_actions=["artifacts.get_manifest", operation_name],
                 data={
                     **verdict.extra_response_data,
                     "call_id": call_id,
