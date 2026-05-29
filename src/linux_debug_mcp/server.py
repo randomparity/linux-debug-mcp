@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import tempfile
 import threading
@@ -144,7 +145,14 @@ from linux_debug_mcp.seams.lifecycle import (
     LifecycleEvent,
     LifecycleKind,
 )
-from linux_debug_mcp.seams.secrets import EnvSecretsBackend, SecretsStore
+from linux_debug_mcp.seams.secrets import (
+    EnvSecretsBackend,
+    ExternalSecretsBackend,
+    KeyringSecretsBackend,
+    SecretsBackend,
+    SecretsResolutionError,
+    SecretsStore,
+)
 from linux_debug_mcp.seams.target import (
     BreakHint,
     ConsoleKind,
@@ -5818,14 +5826,20 @@ def _build_transport_machinery(
         # to know about the §4.5 reap-source contract.
         session_registry._on_orphan_reaped = _on_orphan_reaped
 
+    secrets_backends: dict[SecretReferenceKind, SecretsBackend] = {SecretReferenceKind.ENV: EnvSecretsBackend()}
+    # keyring extra not installed -> the kind stays unavailable until configured
+    with contextlib.suppress(SecretsResolutionError):
+        secrets_backends[SecretReferenceKind.KEYRING] = KeyringSecretsBackend()
+    _external_cmd = os.environ.get("LDM_SECRETS_EXTERNAL_CMD")
+    if _external_cmd:
+        secrets_backends[SecretReferenceKind.EXTERNAL] = ExternalSecretsBackend(command=shlex.split(_external_cmd))
+
     transaction = TransportTransaction(
         admission=admission,
         registry=session_registry,
         guard=InProcessStopCapableGuard(),
         leases=ConsoleLeaseManager(),
-        secrets=SecretsStore(
-            definitions=[], backends={SecretReferenceKind.ENV: EnvSecretsBackend()}, registry=SECRET_REGISTRY
-        ),
+        secrets=SecretsStore(definitions=[], backends=secrets_backends, registry=SECRET_REGISTRY),
         break_policy=ReferenceBreakPolicy(),
         transports=transports,
     )

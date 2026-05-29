@@ -1,6 +1,6 @@
 # ADR 0012: Secrets store backends and global credential redaction
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-05-29
 **Context layer:** Hardening (08) — secret resolution + redaction, consumed by transport
 (Layer 3/4)

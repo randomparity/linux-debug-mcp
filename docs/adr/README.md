@@ -15,6 +15,6 @@ Each ADR captures one non-trivial design decision — especially decisions the s
 | [0009](0009-introspect-helper-layer.md) | Introspect helper layer: shared executor, typed-result convention, and `${ARGS_B64}` seam | Accepted |
 | [0010](0010-introspect-from-vmcore-execution-model.md) | `debug.introspect.from_vmcore`: run-scoped offline execution, shared wrapper body, shared post-runner finalizer | Accepted |
 | [0011](0011-introspect-write-mode-enforcement.md) | `debug.introspect` write mode: policy-gate enforcement + cooperative wrapper write-guard | Accepted |
-| [0012](0012-secrets-store-backends-and-redaction.md) | Secrets store backends and global credential redaction | Proposed |
+| [0012](0012-secrets-store-backends-and-redaction.md) | Secrets store backends and global credential redaction | Accepted |
 
 **Layer-4 plan amendments (2026-05-27, addressing the `/challenge` review findings):** ADR 0002 amended with the in-process fenced guard token + post-restart `revoke()` soundness (Finding #4); ADR 0005 amended with the `on_partial` `backend_pid` write-through invariant (Finding #1) and the `recovery_required` single-source-of-truth / write-through-cache rule (Finding #5); ADR 0006 amended with the halt→runner cancel-bridge delivery mechanism + RUNNING-step terminalization (Finding #2).
