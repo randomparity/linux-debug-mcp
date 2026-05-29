@@ -12,6 +12,22 @@
 
 ---
 
+## Execution order (IMPORTANT — keep every commit green)
+
+The tasks below are written by topic, but **execute them in this order** so the
+test suite is green at every commit (the gate must not land before the fixtures it
+requires):
+
+**1 → 2 → 5 → 7 → 3 → 4 → 6 → 8**
+
+Rationale: Task 5 (conftest helpers) and Task 7 (seed `kernel_provenance` + real-ELF
+vmlinux into the existing fixtures, and update the `boot_metadata` asserts) are
+harmless *before* the gate exists — those tests stay green. Only once the fixtures
+already carry valid provenance do Task 3/4 wire the gate, so the existing gdb-handler
+tests never go red. Do not run Task 3/4 before Task 7.
+
+---
+
 ## File structure
 
 - `src/linux_debug_mcp/symbols/verify.py` — add `verify_vmlinux_provenance` (Task 1).
@@ -349,10 +365,15 @@ No change needed in the `@app.tool("debug.start_session")` wrapper — the new p
 Run: `uv run ruff check src/linux_debug_mcp/server.py && uv run ty check src`
 Expected: no errors.
 
-- [ ] **Step 5: Run the existing gdb-handler tests to observe the expected breakage**
+- [ ] **Step 5: Confirm the already-migrated gdb-handler tests stay green**
 
-Run: `uv run python -m pytest tests/test_debug_handlers.py -q`
-Expected: FAILures — the seeded runs have no `kernel_provenance` and a text vmlinux, so the new gate returns `provenance_missing` / `vmlinux_build_id_unreadable`. This confirms the gate is live. Task 7 fixes the fixtures.
+(Per the execution order, Task 7 has already seeded `kernel_provenance` + real-ELF
+vmlinux into these fixtures, so the gate finds matching provenance.)
+
+Run: `uv run python -m pytest tests/test_debug_handlers.py tests/test_session_guard_wiring.py \
+  tests/test_server_debug_session_migration.py tests/test_server_debug_reads_while_halted.py \
+  tests/test_phase_b_integration_gaps.py -q`
+Expected: PASS — the gate is live but every seeded run carries a matching build-id.
 
 - [ ] **Step 6: Commit**
 
