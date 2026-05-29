@@ -163,7 +163,8 @@ session unchanged (`server.py` ~4078–4088), and *before* the transport is open
 gdb attaches / the kernel is halted. Re-reading a healthy already-attached session
 therefore never re-runs the version-lock, so a pre-#70 SUCCEEDED session (recorded
 before provenance capture existed) still returns idempotently. On a fresh attach
-(or a `new_session` / replace), it:
+(or a `new_session` / replace, or a `recovery=True` reattach — all reload vmlinux
+symbols and so must re-verify), it:
 
 1. Extracts the boot-recorded §4.2 `KernelProvenance` from
    `boot_result.details["kernel_provenance"]`, reusing the live-introspect
@@ -227,8 +228,11 @@ New, in `tests/test_symbols_verify.py` and a gdb-tier test module:
   - with `symbol_identity_required=False`, an injected mismatch reader still fails
     `provenance_mismatch` (the gate is unconditional).
 
-Shared fixtures gain a helper to seed a `kernel_provenance` into a boot step so
-the existing gdb-handler tests (which now require it on the fresh-attach path)
-stay green with an injected matching reader. The existing live (#53) and vmcore
-(#14) tests are untouched (those paths are not modified). The gated gdb
-integration test is untouched (still skipped without `gdb`/`qemu`).
+A new **opt-in** helper seeds a `kernel_provenance` into a boot step. The existing
+shared booted-run fixtures (e.g. `create_booted_run`) are **not** modified — the
+boot step's `details["kernel_provenance"]` is also read by the live introspect
+handler (`server.py` ~2630), so seeding it into a shared fixture could perturb
+introspect/run_tests tests; only the gdb-handler tests and the new gdb-tier module
+call the helper. The existing live (#53) and vmcore (#14) tests are untouched
+(those paths are not modified). The gated gdb integration test is untouched (still
+skipped without `gdb`/`qemu`).
