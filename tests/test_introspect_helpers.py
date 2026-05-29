@@ -160,3 +160,17 @@ def test_irq_name_nullable() -> None:
     from linux_debug_mcp.introspect_helpers.irq import Output
 
     Output.model_validate({"irqs": [{"irq": 1, "name": None, "counts_per_cpu": [0], "affinity": [0]}]})
+
+
+def test_schema_snapshots_match_models() -> None:
+    import json
+    from pathlib import Path
+
+    from linux_debug_mcp.introspect_helpers import built_in_helper_specs
+
+    schema_dir = Path("src/linux_debug_mcp/introspect_helpers/schemas")
+    for spec in built_in_helper_specs():
+        snap = schema_dir / f"{spec.name}.v{spec.version}.json"
+        assert snap.is_file(), f"missing snapshot for {spec.name} v{spec.version}"
+        expected = json.dumps(spec.output_model.model_json_schema(), indent=2, sort_keys=True) + "\n"
+        assert snap.read_text() == expected, f"{spec.name} model changed without a snapshot/version bump (spec §3.4)"
