@@ -163,7 +163,9 @@ class WatchdogPolicy:
     def _reissue_relax(self, capture: _CapturedState) -> RelaxReport:
         # Capture-once: do NOT re-read (that would capture already-relaxed values and
         # destroy the baseline — spec §4.1). Re-issue the relax writes for knobs we
-        # captured a baseline for.
+        # captured a baseline for, but do NOT mutate the shared capture: the owner's
+        # _first_relax is the sole writer of _CapturedState, so a non-owner reissue
+        # (a concurrent same-session relax) can never race the owner's population.
         outcomes: dict[str, KnobOutcome] = {}
         for knob in self._knobs:
             if knob.out_of_band:
@@ -173,7 +175,6 @@ class WatchdogPolicy:
                 outcomes[knob.name] = KnobOutcome.ABSENT
                 continue
             ok = self._safe_write(knob.name, knob.relaxed_value)
-            capture.relaxed[knob.name] = capture.relaxed.get(knob.name, False) or ok
             outcomes[knob.name] = KnobOutcome.RELAXED if ok else KnobOutcome.WRITE_FAILED
         return RelaxReport(outcomes=outcomes)
 
