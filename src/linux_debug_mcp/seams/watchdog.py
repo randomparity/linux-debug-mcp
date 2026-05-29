@@ -1,3 +1,13 @@
+"""Watchdog relax/restore helper for interactive stops (issue #69).
+
+Relaxes kernel lockup detectors (and, on POWER, declares the out-of-band PHYP
+watchdog) before an interactive stop and restores the captured operator baseline on
+teardown. Stateful, keyed on session_id, capture-once. The restore is a SessionGuard
+TeardownStep; relax is a post-acquire call. Shipped inert (no concrete WatchdogControl
+channel) — see docs/superpowers/specs/2026-05-29-watchdog-relax-restore-design.md and
+docs/adr/0016-watchdog-relax-restore-helper.md.
+"""
+
 from __future__ import annotations
 
 import logging
