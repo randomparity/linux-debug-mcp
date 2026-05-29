@@ -291,3 +291,31 @@ def test_run_is_killed_on_cancel(tmp_path: Path) -> None:
     t.cancel()
     assert time.monotonic() - start < 5  # killed, not waited 30s
     assert result.cancelled is True
+
+
+def test_run_is_killed_when_stdout_exceeds_cap(tmp_path: Path) -> None:
+    runner = SubprocessSshRunner()
+    out, err = tmp_path / "o", tmp_path / "e"
+    cap = 4096
+    # Stream stdout in bounded chunks with a small pause so the 0.1s poll loop
+    # observes the cap breach and kills the process group before disk balloons.
+    program = (
+        "import sys, time\n"
+        "while True:\n"
+        "    sys.stdout.write('x' * 1000)\n"
+        "    sys.stdout.flush()\n"
+        "    time.sleep(0.02)\n"
+    )
+    start = time.monotonic()
+    result = runner.run(
+        ["python3", "-c", program],
+        timeout=30,
+        stdout_path=out,
+        stderr_path=err,
+        max_stdout_bytes=cap,
+    )
+    assert time.monotonic() - start < 5  # killed by the cap, not the 30s timeout
+    assert result.oversized_output is True
+    assert result.timed_out is False
+    assert result.exit_status == -1
+    assert out.stat().st_size > cap

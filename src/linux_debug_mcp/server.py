@@ -53,8 +53,11 @@ from linux_debug_mcp.coordination.registry import OrphanReap, RecoveryTombstone,
 from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import (
     ArtifactRef,
+    DebugIntrospectCheckPrerequisitesRequest,
     DebugIntrospectRunRequest,
     ErrorCategory,
+    PrerequisiteCheck,
+    PrerequisiteStatus,
     RunRequest,
     StepResult,
     StepStatus,
@@ -62,6 +65,13 @@ from linux_debug_mcp.domain import (
 )
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
+from linux_debug_mcp.prereqs.drgn_probe import (
+    PROBE_SCRIPT,
+    UNKNOWN,
+    USABLE,
+    build_probe_checks,
+    python_missing_checks,
+)
 from linux_debug_mcp.providers.contracts import (
     ConsoleReadRequest,
     ConsoleSessionRequest,
@@ -80,6 +90,7 @@ from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, Provider
 from linux_debug_mcp.providers.local_drgn_introspect import (
     _BUILD_ID_RE,
     SCRIPT_BYTE_CAP,
+    TARGET_PYTHON_ARGV,
     WrapperRenderError,
     render_wrapper,
     render_wrapper_skeleton,
@@ -92,6 +103,7 @@ from linux_debug_mcp.providers.local_kernel_build import (
 )
 from linux_debug_mcp.providers.local_ssh_tests import (
     LocalSshTestProvider,
+    SshCommandResult,
     SshRunner,
     SubprocessSshRunner,
     TestExecutionResult,
@@ -214,6 +226,34 @@ RUNNING_BUILD_MESSAGE = (
 )
 RUNNING_BOOT_MESSAGE = "previous boot is still recorded as running"
 RUNNING_TESTS_MESSAGE = "previous test run is still recorded as running"
+# Spec §6/§7: bound the probe's local footprint at three layers. The streaming
+# cap passed to the SSH runner (max_stdout_bytes) kills the probe the moment its
+# transcript on disk exceeds the cap, so a noisy/hostile target cannot fill local
+# disk within the timeout window; `_read_capped` is the post-run backstop that
+# guards json.loads memory (and covers direct-write test fakes that bypass the
+# streaming path); wall-clock is bounded by the remote `timeout` prefix.
+PROBE_STDOUT_CAP = 256 * 1024
+# debug.introspect.run stdout cap. Sized above the wrapper's 1 MiB total_json
+# payload (local_drgn_introspect.py) so a legitimate run is never killed, while
+# still bounding a hostile target that ignores the wrapper.
+RUN_STDOUT_CAP = 2 * 1024 * 1024
+
+
+def _target_python_remote_argv(*, timeout_seconds: int, use_sudo: bool) -> list[str]:
+    """Build the remote argv shared by the probe and the introspect runner.
+
+    Spec §4 shared-interpreter invariant: both ``debug.introspect.run`` and
+    ``debug.introspect.check_prerequisites`` must run the interpreter through a
+    byte-identical SSH + interpreter invocation, *including* the privilege
+    prefix. A non-root SSH login runs the interpreter under ``sudo`` in both
+    paths so the probe checks drgn/debuginfo at the same privilege level the
+    runner will use.
+    """
+    argv = ["timeout", "--kill-after=2s", f"{timeout_seconds}s"]
+    if use_sudo:
+        argv.append("sudo")
+    argv.extend(TARGET_PYTHON_ARGV)
+    return argv
 
 
 def _recorded_build_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
@@ -1898,6 +1938,344 @@ def target_run_tests_handler(
     )
 
 
+@dataclass(frozen=True)
+class _ProbeContext:
+    store: ArtifactStore
+    run_id: str
+    rootfs: RootfsProfile
+    host_build_id: str | None
+    redactor: Redactor
+
+
+def _resolve_probe_context(
+    request: DebugIntrospectCheckPrerequisitesRequest,
+    *,
+    artifact_root: Path,
+    rootfs_profiles: dict[str, RootfsProfile],
+) -> tuple[_ProbeContext | None, ToolResponse | None]:
+    """Spec §6: all pre-SSH validation. Returns (context, None) on success or
+    (None, failure-response) on any short-circuit."""
+    run_id = request.run_id
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        if not (store.run_dir(run_id) / "manifest.json").is_file():
+            return None, _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return None, ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    for field_name, requested, recorded in (
+        ("target_profile", request.target_profile, manifest.request.target_profile),
+        ("rootfs_profile", request.rootfs_profile, manifest.request.rootfs_profile),
+        ("debug_profile", request.debug_profile, manifest.request.debug_profile),
+    ):
+        if requested is not None and recorded is not None and requested != recorded:
+            return None, _configuration_failure(
+                run_id=run_id,
+                message=f"{field_name} must match the immutable run manifest request",
+                details={
+                    "requested_profile": requested,
+                    "manifest_profile": recorded,
+                    "code": "manifest_profile_mismatch",
+                },
+            )
+    if request.target_ref != manifest.request.target_profile:
+        return None, _configuration_failure(
+            run_id=run_id,
+            message="target_ref must match the immutable run manifest target_profile",
+            details={
+                "requested_target_ref": request.target_ref,
+                "manifest_target_profile": manifest.request.target_profile,
+                "code": "manifest_profile_mismatch",
+            },
+        )
+    if not (5 <= request.timeout_seconds <= 60):
+        return None, _configuration_failure(
+            run_id=run_id,
+            message=f"timeout_seconds must be in [5, 60]; got {request.timeout_seconds}",
+            details={"code": "invalid_timeout"},
+        )
+
+    boot = manifest.step_results.get("boot")
+    if boot is None or boot.status != StepStatus.SUCCEEDED:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.READINESS_FAILURE,
+            run_id=run_id,
+            message="target has not booted; boot it before probing prerequisites",
+            details={"code": "target_not_booted"},
+            suggested_next_actions=["target.boot"],
+        )
+
+    rootfs_name = request.rootfs_profile or manifest.request.rootfs_profile
+    try:
+        rootfs = rootfs_profiles[rootfs_name]
+    except KeyError:
+        return None, _configuration_failure(run_id=run_id, message=f"unknown rootfs profile: {rootfs_name}")
+    if rootfs.access_method not in {"ssh", "ssh_and_serial"}:
+        return None, _configuration_failure(
+            run_id=run_id,
+            message=f"rootfs access_method must be ssh; got {rootfs.access_method}",
+            details={"code": "unsupported_access_method"},
+        )
+    for field_name, value in (("ssh_host", rootfs.ssh_host), ("ssh_user", rootfs.ssh_user)):
+        if not value:
+            return None, _configuration_failure(
+                run_id=run_id,
+                message=f"rootfs profile is missing required SSH field: {field_name}",
+                details={"code": "missing_ssh_field", "field": field_name},
+            )
+
+    build = manifest.step_results.get("build")
+    host_build_id = build.details.get("build_id") if build is not None else None
+    redactor = Redactor(secret_values=[rootfs.ssh_key_ref] if rootfs.ssh_key_ref else [])
+    return (
+        _ProbeContext(
+            store=store,
+            run_id=run_id,
+            rootfs=rootfs,
+            host_build_id=host_build_id,
+            redactor=redactor,
+        ),
+        None,
+    )
+
+
+def debug_introspect_check_prerequisites_handler(
+    request: DebugIntrospectCheckPrerequisitesRequest,
+    *,
+    artifact_root: Path,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    ssh_runner: SshRunner | None = None,
+) -> ToolResponse:
+    """Spec §3-§7: target-side drgn prerequisite probe."""
+    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    _ctx, failure = _resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
+    if failure is not None:
+        return failure
+    assert _ctx is not None
+    ctx = _ctx
+    run_id = ctx.run_id
+
+    runner: SshRunner = ssh_runner or SubprocessSshRunner()
+    probe_id = uuid.uuid4().hex
+    agent_dir, sensitive_dir = _prepare_probe_dirs(ctx.store, run_id, probe_id)
+
+    use_sudo = ctx.rootfs.ssh_user != "root"
+    remote_argv = _target_python_remote_argv(timeout_seconds=request.timeout_seconds, use_sudo=use_sudo)
+    try:
+        ssh_argv = build_ssh_argv(
+            rootfs_profile=ctx.rootfs,
+            known_hosts_path=ctx.store.run_dir(run_id) / "sensitive" / "known_hosts",
+            command=remote_argv,
+            command_timeout=request.timeout_seconds + 10,
+        )
+    except ValueError as exc:
+        return _configuration_failure(
+            run_id=run_id,
+            message=_redact_and_truncate(ctx.redactor, str(exc), cap=256),
+            details={"code": "invalid_ssh_options"},
+        )
+
+    stdout_path = sensitive_dir / "stdout.raw"
+    stderr_path = sensitive_dir / "stderr.raw"
+    try:
+        ssh_result = runner.run(
+            ssh_argv,
+            timeout=request.timeout_seconds + 10,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            stdin=PROBE_SCRIPT,
+            max_stdout_bytes=PROBE_STDOUT_CAP,
+        )
+    except Exception as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=_redact_and_truncate(ctx.redactor, f"ssh probe raised: {exc}", cap=256),
+            details={"code": "ssh_failure"},
+        )
+    for _path in (stdout_path, stderr_path):
+        with contextlib.suppress(FileNotFoundError):
+            _path.chmod(0o600)
+
+    return _assemble_probe_response(
+        ctx,
+        ssh_result=ssh_result,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        agent_dir=agent_dir,
+        probe_id=probe_id,
+    )
+
+
+def _read_capped(path: Path, cap: int) -> str | None:
+    """Read the file iff its byte size is within *cap*; None if oversized."""
+    if not path.exists():
+        return ""
+    if path.stat().st_size > cap:
+        return None
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _prepare_probe_dirs(store: ArtifactStore, run_id: str, probe_id: str) -> tuple[Path, Path]:
+    """Create the agent-visible and sensitive probe directories with 0o700.
+
+    Returns ``(agent_dir, sensitive_dir)``.
+    """
+    agent_dir = store.run_dir(run_id) / "debug" / "checkprereq" / probe_id
+    sensitive_dir = store.run_dir(run_id) / "sensitive" / "debug" / "checkprereq" / probe_id
+    agent_dir.mkdir(parents=True, mode=0o700)
+    sensitive_dir.mkdir(parents=True, mode=0o700)
+    for _dir in (sensitive_dir, sensitive_dir.parent, sensitive_dir.parent.parent):
+        with contextlib.suppress(FileNotFoundError):
+            _dir.chmod(0o700)
+    return agent_dir, sensitive_dir
+
+
+def _no_json_response(
+    ctx: _ProbeContext,
+    *,
+    ssh_result: SshCommandResult,
+    agent_dir: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    probe_id: str,
+    parsed: Any,
+) -> ToolResponse | None:
+    """Handle the cases where the probe returned no parseable JSON dict.
+
+    Returns the 127-success / 255-failure / non-dict-failure response, or
+    ``None`` to fall through to the normal ``build_probe_checks`` path.
+    """
+    if isinstance(parsed, dict):
+        return None
+    run_id = ctx.run_id
+    if ssh_result.exit_status == 127:
+        checks, verdict = python_missing_checks()
+        return _probe_success(
+            ctx,
+            agent_dir=agent_dir,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            probe_id=probe_id,
+            checks=checks,
+            verdict=verdict,
+            parsed=None,
+        )
+    if ssh_result.exit_status == 255:
+        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="probe ssh transport failed before the target ran",
+            details={"code": "ssh_connect_failure", "stderr": snippet},
+        )
+    snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        run_id=run_id,
+        message=f"probe did not return parseable JSON (exit {ssh_result.exit_status})",
+        details={"code": "probe_unparseable", "stderr": snippet},
+    )
+
+
+def _assemble_probe_response(
+    ctx: _ProbeContext,
+    *,
+    ssh_result: SshCommandResult,
+    stdout_path: Path,
+    stderr_path: Path,
+    agent_dir: Path,
+    probe_id: str,
+) -> ToolResponse:
+    run_id = ctx.run_id
+    if ssh_result.oversized_output:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"probe stdout exceeded {PROBE_STDOUT_CAP} bytes",
+            details={"code": "oversized_output"},
+        )
+    raw_stdout = _read_capped(stdout_path, PROBE_STDOUT_CAP)
+    if raw_stdout is None:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"probe stdout exceeded {PROBE_STDOUT_CAP} bytes",
+            details={"code": "oversized_output"},
+        )
+    if ssh_result.cancelled or ssh_result.timed_out or ssh_result.stdin_failed:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="probe ssh round trip failed",
+            details={"code": "ssh_failure"},
+        )
+    try:
+        parsed = json.loads(raw_stdout) if raw_stdout else None
+    except json.JSONDecodeError:
+        parsed = None
+
+    no_json = _no_json_response(
+        ctx,
+        ssh_result=ssh_result,
+        agent_dir=agent_dir,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        probe_id=probe_id,
+        parsed=parsed,
+    )
+    if no_json is not None:
+        return no_json
+
+    assert isinstance(parsed, dict)
+    checks, verdict = build_probe_checks(parsed, host_build_id=ctx.host_build_id)
+    return _probe_success(
+        ctx,
+        agent_dir=agent_dir,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        probe_id=probe_id,
+        checks=checks,
+        verdict=verdict,
+        parsed=parsed,
+    )
+
+
+def _probe_success(
+    ctx: _ProbeContext,
+    *,
+    agent_dir: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    probe_id: str,
+    checks: list[PrerequisiteCheck],
+    verdict: str,
+    parsed: dict[str, Any] | None,
+) -> ToolResponse:
+    artifacts = [
+        ArtifactRef(path=str(stdout_path), kind="probe-stdout", sensitive=True),
+        ArtifactRef(path=str(stderr_path), kind="probe-stderr", sensitive=True),
+    ]
+    if parsed is not None:
+        report_path = agent_dir / "probe.json"
+        report_path.write_text(json.dumps(ctx.redactor.redact_value(parsed)), encoding="utf-8")
+        artifacts.append(ArtifactRef(path=str(report_path), kind="probe-report", sensitive=False))
+    failed = sum(1 for c in checks if c.status == PrerequisiteStatus.FAILED)
+    next_actions = ["debug.introspect.run"] if verdict in {USABLE, UNKNOWN} else ["host.check_prerequisites"]
+    return ToolResponse.success(
+        summary=f"introspect prerequisites: {verdict} ({failed} failed checks)",
+        run_id=ctx.run_id,
+        data={
+            "introspect_usable": verdict,
+            "probe_id": probe_id,
+            "checks": ctx.redactor.redact_value([c.model_dump(mode="json") for c in checks]),
+        },
+        artifacts=artifacts,
+        suggested_next_actions=next_actions,
+    )
+
+
 def debug_introspect_run_handler(
     request: DebugIntrospectRunRequest,
     *,
@@ -2299,10 +2677,7 @@ def debug_introspect_run_handler(
         # Iter-1 finding 6: ssh_user=root means sudo is a no-op (spec §3.2);
         # invoking it anyway risks a confusing in-SSH failure when sudo is
         # missing on a root-login target.
-        remote_argv = ["timeout", "--kill-after=2s", f"{user_timeout}s"]
-        if use_sudo:
-            remote_argv.append("sudo")
-        remote_argv.extend(["python3", "-"])
+        remote_argv = _target_python_remote_argv(timeout_seconds=user_timeout, use_sudo=use_sudo)
         try:
             ssh_argv = build_ssh_argv(
                 rootfs_profile=resolved_rootfs,
@@ -2359,6 +2734,7 @@ def debug_introspect_run_handler(
                 stderr_path=stderr_path,
                 cancel=cancel_event,
                 stdin=wrapper,
+                max_stdout_bytes=RUN_STDOUT_CAP,
             )
         finally:
             stop_watcher.set()
@@ -2419,7 +2795,7 @@ def debug_introspect_run_handler(
             )
 
         # Spec §5.2 step 11: exit-code + JSON parsing.
-        raw_stdout = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
+        raw_stdout = _read_capped(stdout_path, RUN_STDOUT_CAP)
         raw_stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
         finished_at = now()
         duration_ms = int((time.monotonic() - started_monotonic) * 1000)
@@ -2462,6 +2838,14 @@ def debug_introspect_run_handler(
                 outcome_status_for_forensics=outcome_status_for_forensics,
                 include_stdout_json=include_stdout_json,
                 redacted_payload=redacted_payload,
+            )
+
+        if ssh_result.oversized_output or raw_stdout is None:
+            return _fail(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                code="oversized_output",
+                message=f"introspect stdout exceeded {RUN_STDOUT_CAP} bytes",
+                outcome_status_for_forensics=None,
             )
 
         if ssh_result.cancelled:
@@ -5051,6 +5435,29 @@ def create_app(
             artifact_root=Path(artifact_root),
             admission=admission_service,
             session_registry=durable_registry,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.introspect.check_prerequisites")
+    def debug_introspect_check_prerequisites(
+        run_id: str,
+        target_ref: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        timeout_seconds: int = 20,
+        debug_profile: str | None = None,
+        target_profile: str | None = None,
+        rootfs_profile: str | None = None,
+    ) -> dict[str, Any]:
+        request = DebugIntrospectCheckPrerequisitesRequest(
+            run_id=run_id,
+            target_ref=target_ref,
+            timeout_seconds=timeout_seconds,
+            debug_profile=debug_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+        )
+        return debug_introspect_check_prerequisites_handler(
+            request,
+            artifact_root=Path(artifact_root),
         ).model_dump(mode="json")
 
     @app.tool(name="artifacts.collect")

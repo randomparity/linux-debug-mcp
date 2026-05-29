@@ -115,6 +115,22 @@ class DebugIntrospectRunRequest(Model):
     rootfs_profile: str | None = None
 
 
+class DebugIntrospectCheckPrerequisitesRequest(Model):
+    """Request payload for ``debug.introspect.check_prerequisites``. Spec §3.
+
+    Run-scoped, read-only target probe. ``timeout_seconds`` defaults to 20 and
+    is bounded to [5, 60] by the handler (not Pydantic) so an out-of-range
+    value surfaces as ``ToolResponse.failure(CONFIGURATION_ERROR)`` per §6.
+    """
+
+    run_id: str
+    target_ref: str
+    timeout_seconds: int = 20
+    debug_profile: str | None = None
+    target_profile: str | None = None
+    rootfs_profile: str | None = None
+
+
 class RunStep(Model):
     name: str
     status: StepStatus = StepStatus.PENDING

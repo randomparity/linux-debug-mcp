@@ -154,7 +154,7 @@ class FakeSshRunner:
         self.cancel_observed = threading.Event()
         self.started = threading.Event()
 
-    def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None):
+    def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None, max_stdout_bytes=None):
         from linux_debug_mcp.providers.local_ssh_tests import SshCommandResult
 
         self.started.set()

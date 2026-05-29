@@ -29,7 +29,7 @@ from linux_debug_mcp.domain import (
 )
 from linux_debug_mcp.providers.local_ssh_tests import SshCommandResult
 from linux_debug_mcp.seams.target import ConsoleKind, PlatformMetadata, TargetState
-from linux_debug_mcp.server import debug_introspect_run_handler
+from linux_debug_mcp.server import RUN_STDOUT_CAP, debug_introspect_run_handler
 
 VALID_BUILD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
@@ -87,6 +87,7 @@ class FakeSshRunner:
         stderr_path,
         cancel=None,
         stdin=None,
+        max_stdout_bytes=None,
     ) -> SshCommandResult:
         self.calls.append(
             {
@@ -650,6 +651,52 @@ def test_ssh_timeout_propagates(tmp_path: Path) -> None:
     assert response.error.details["code"] == "ssh_timeout"
 
 
+def test_run_oversized_stdout_streaming_cap_is_infrastructure_failure(tmp_path: Path) -> None:
+    # Iter-2 finding (run-path Finding 2): the SSH runner's streaming cap kills
+    # a hostile target that floods stdout. The runner signals this with
+    # oversized_output=True; the handler must surface it as a distinct
+    # INFRASTRUCTURE_FAILURE / oversized_output, not fall through to wrapper_crash.
+    _, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    ssh = FakeSshRunner(results=[SshCommandResult(exit_status=-1, stdout="", stderr="", oversized_output=True)])
+    response = debug_introspect_run_handler(
+        _make_request(run_id),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=ssh,
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert response.error.details["code"] == "oversized_output"
+
+
+def test_run_oversized_stdout_backstop_is_infrastructure_failure(tmp_path: Path) -> None:
+    # Post-hoc backstop: a direct-write path (test fake / future runner without
+    # the streaming kill) leaves an oversized stdout.raw on disk with
+    # oversized_output=False. `_read_capped` returns None for the oversized read
+    # and the handler still classifies it as INFRASTRUCTURE_FAILURE / oversized_output.
+    _, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    ssh = FakeSshRunner(
+        results=[SshCommandResult(exit_status=0, stdout="x" * (RUN_STDOUT_CAP + 10), stderr="", oversized_output=False)]
+    )
+    response = debug_introspect_run_handler(
+        _make_request(run_id),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=ssh,
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert response.error.details["code"] == "oversized_output"
+
+
 def test_wrapper_py_written_under_sensitive_with_0600(tmp_path: Path) -> None:
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1019,7 +1066,7 @@ def test_chmod_survives_missing_raw_file_race(tmp_path: Path) -> None:
     targets, rootfs, debug = _profiles()
 
     class _DeletingFakeSsh(FakeSshRunner):
-        def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None):
+        def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None, max_stdout_bytes=None):
             result = super().run(
                 argv,
                 timeout=timeout,
