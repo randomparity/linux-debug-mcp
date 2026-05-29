@@ -337,3 +337,27 @@ def test_helper_happy_path(tmp_path: Path) -> None:
     assert resp.data["helper"] == "sysinfo"
     assert resp.data["result"]["cpus_online"] == 4
     assert resp.suggested_next_actions == ["artifacts.get_manifest", "debug.introspect.from_vmcore_helper"]
+
+
+# ---------------------------------------------------------------------------
+# Task 8: allowlist + capability advertising
+# ---------------------------------------------------------------------------
+
+
+def test_operations_in_allowlist() -> None:
+    from linux_debug_mcp.config import ALLOWED_DEBUG_OPERATIONS
+
+    assert "debug.introspect.from_vmcore" in ALLOWED_DEBUG_OPERATIONS
+    assert "debug.introspect.from_vmcore_helper" in ALLOWED_DEBUG_OPERATIONS
+
+
+def test_capability_advertises_vmcore_ops_concurrent_safe() -> None:
+    from linux_debug_mcp.providers.local_drgn_introspect import local_drgn_introspect_capability
+
+    cap = local_drgn_introspect_capability()
+    assert "debug.introspect.from_vmcore" in cap.operations
+    assert "debug.introspect.from_vmcore_helper" in cap.operations
+    by_op = {c.operation: c for c in cap.operation_capabilities}
+    assert by_op["debug.introspect.from_vmcore"].semantics.concurrent_safe is True
+    assert by_op["debug.introspect.from_vmcore_helper"].semantics.concurrent_safe is True
+    assert by_op["debug.introspect.run"].semantics.concurrent_safe is False

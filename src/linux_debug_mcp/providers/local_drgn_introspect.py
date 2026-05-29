@@ -16,6 +16,7 @@ from linux_debug_mcp.domain import (
     ImplementationState,
     OperationSemantics,
     ProviderCapability,
+    ProviderOperationCapability,
     TargetKind,
 )
 from linux_debug_mcp.symbols.verify import BUILD_ID_RE
@@ -588,24 +589,52 @@ class LocalDrgnIntrospectProvider:
 
 
 def local_drgn_introspect_capability() -> ProviderCapability:
-    """Factory used by ``providers/plugins.py``. Spec §3.4 / §2."""
+    """Factory used by ``providers/plugins.py``. Spec §3.4 / §2 / ADR 0010.
+
+    The live ssh-tier ops are ``concurrent_safe=False`` (admission-gated); the
+    offline vmcore ops are ``concurrent_safe=True`` (interface-contracts §5.6
+    rule 3 — never gated), advertised via per-operation overrides.
+    """
+    live_semantics = OperationSemantics(
+        idempotent=False,
+        retryable=True,
+        destructive=False,
+        cancelable=True,
+        concurrent_safe=False,
+    )
+    vmcore_semantics = OperationSemantics(
+        idempotent=False,
+        retryable=True,
+        destructive=False,
+        cancelable=True,
+        concurrent_safe=True,
+    )
+    vmcore_ops = {"debug.introspect.from_vmcore", "debug.introspect.from_vmcore_helper"}
+    operations = [
+        "debug.introspect.run",
+        "debug.introspect.check_prerequisites",
+        "debug.introspect.helper",
+        "debug.introspect.from_vmcore",
+        "debug.introspect.from_vmcore_helper",
+    ]
     return ProviderCapability(
         provider_name="local-drgn-introspect",
-        provider_version="0.1.0",
+        provider_version="0.2.0",
         provider_family="debug",
         implementation_state=ImplementationState.IMPLEMENTED,
         architectures=["x86_64"],
         target_kinds=[TargetKind.VIRTUAL],
         transports=["ssh"],
-        operations=["debug.introspect.run", "debug.introspect.check_prerequisites", "debug.introspect.helper"],
+        operations=operations,
         required_host_tools=["ssh"],
         destructive_permissions=[],
         access_methods=["ssh"],
-        semantics=OperationSemantics(
-            idempotent=False,
-            retryable=True,
-            destructive=False,
-            cancelable=True,
-            concurrent_safe=False,
-        ),
+        semantics=live_semantics,
+        operation_capabilities=[
+            ProviderOperationCapability(
+                operation=op,
+                semantics=(vmcore_semantics if op in vmcore_ops else live_semantics),
+            )
+            for op in operations
+        ],
     )
