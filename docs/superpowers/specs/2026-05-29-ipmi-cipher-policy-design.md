@@ -1,6 +1,6 @@
 # IPMI cipher-suite policy: enforce lanplus/cipher-3, reject cipher 0
 
-**Status:** Accepted (implemented) · **Issue:** #67 (epic #9, split from #17, depends on #15) ·
+**Status:** Accepted · **Issue:** #67 (epic #9, split from #17, depends on #15) ·
 **Labels:** `security`, `bmc`, `x86_64`, `hardening` ·
 **ADR:** [0014](../../adr/0014-ipmi-cipher-suite-policy.md)
 
@@ -30,9 +30,10 @@ the real provider exists and a regression that reintroduces cipher 0 is caught i
 2. A single in-code chokepoint (`safety/ipmi.py`) owns the cipher allowlist and the
    `lanplus` interface constant, so the future `ipmi-sol` provider (#15) validates
    through the same policy rather than re-deriving it.
-3. A CI guard fails the build if a cipher-0 / non-`lanplus` `ipmitool` invocation can
-   appear anywhere in `src/`, independent of whether the contract is exercised at
-   runtime. This is the regression tripwire for when #15 lands.
+3. A CI guard fails the build if a **hardcoded** cipher-0 / non-`lanplus` `ipmitool`
+   invocation literal appears in `src/`, independent of whether the contract is
+   exercised at runtime. This is a coarse tripwire (see the limitation below), not a
+   proof that #15's eventual runtime construction is safe.
 
 **Non-goals**
 
@@ -75,9 +76,10 @@ validator it is collected as a normal validation error and mapped to
 cipher 0 and the allowed set so the failure is actionable; it carries no
 credential-bearing input.
 
-The `0` and `3` constants live **only** in this module. The CI guard (below) treats the
-literal cipher-0 / non-`lanplus` patterns as forbidden everywhere except this module
-(which defines the forbidden constant) and the tests that assert the policy.
+The `0` and `3` constants live **only** in this module. The CI guard (below) scans
+`src/` only and treats the literal cipher-0 / non-`lanplus` `ipmitool` patterns as
+forbidden everywhere except this module (which defines the forbidden constant). Tests
+live under `tests/`, outside the guard's scan scope, so they may freely name cipher 0.
 
 ### Contract enforcement — `ConsoleSessionRequest`
 
@@ -108,20 +110,34 @@ the raw-secret-field guard or `_safe_label_fields`.
 ### CI guard — `just check-ipmi`
 
 A `justfile` target mirroring `check-docs`, plus a CI job step that runs it. The guard
-greps `src/` for forbidden IPMI invocation patterns and fails if any are present
-outside `safety/ipmi.py`:
+greps `src/` for forbidden IPMI invocation literals and fails if any are present outside
+`safety/ipmi.py`. The patterns are boundary-anchored so the compliant invocation is not
+flagged:
 
-- `ipmitool` invocations selecting the bare-`lan` interface (`-I lan` not followed by
-  `plus`).
-- cipher-suite-0 selection on an `ipmitool` command line (`-C 0`, `-C0`,
-  `-C  0`).
+- bare-`lan` interface selection: `-I lan` **not** immediately followed by `plus`
+  (regex `-I lan(?!plus)`). `-I lanplus` must pass.
+- cipher-suite-0 selection: `-C` then optional spaces then `0` **not** followed by
+  another digit (regex `-C\s*0(?![0-9])`). `-C 3` and `-C 30` must pass.
 
-The guard is a textual tripwire, not a proof of runtime behavior; the contract test is
-the runtime proof. Together they cover both layers issue #67 names ("enforce in the
-IPMI transport path (code)" and "CI guard that fails if a cipher-0 / non-`lanplus` code
-path can be reached"). The guard's exclusion of `safety/ipmi.py` is necessary because
-that module legitimately names the forbidden constant; the exclusion is scoped to that
-one file so a forbidden pattern anywhere else still fails.
+**Limitation (deliberate).** This guard catches only *hardcoded* offending literals. It
+cannot see a cipher suite assembled at runtime from a variable
+(`["-C", str(suite)]` where `suite == 0`), because the literal `-C 0` never appears in
+source. The guard is therefore a coarse tripwire and an intent marker, **not** a proof
+that #15's runtime command construction is safe. The runtime guarantee for #15 is
+deferred to that issue's acceptance: the `ipmi-sol` provider MUST obtain its cipher
+suite from the already-validated `ConsoleSessionRequest.ipmi_cipher_suite` (or call
+`validate_ipmi_cipher_suite` directly) and MUST build the interface flag from
+`IPMI_INTERFACE`, never from caller-supplied free text. #67 does not — and cannot —
+mechanically enforce that against code that does not yet exist; building an
+`ipmitool` argv constructor now would be a phantom feature (ADR 0014, rejected-alt 4).
+
+The contract test is the live runtime proof for today's only IPMI configuration
+surface. Together the contract enforcement and the guard cover both layers issue #67
+names ("enforce in the IPMI transport path (code)" and "CI guard that fails if a
+cipher-0 / non-`lanplus` code path can be reached"), within the stated limitation. The
+guard's exclusion of `safety/ipmi.py` is scoped to that one file — which legitimately
+names the forbidden constant — so a forbidden literal anywhere else under `src/` still
+fails.
 
 ## Failure contract
 
@@ -156,6 +172,9 @@ The stub still opens no resources.
 - AC7: `just check-ipmi` passes on the current tree and fails when a `-C 0` or `-I lan`
   (non-lanplus) `ipmitool` literal is introduced under `src/` outside
   `safety/ipmi.py`.
+- AC8 (false-positive guard): `just check-ipmi` passes a `src/` file containing the
+  compliant literal `ipmitool -I lanplus -C 3` and a `-C 30` literal — the
+  boundary-anchored patterns must not flag `lanplus` or multi-digit suites.
 
 ## References
 
