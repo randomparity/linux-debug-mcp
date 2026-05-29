@@ -47,6 +47,7 @@ from linux_debug_mcp.safety.ipmi import (
     IPMI_FORBIDDEN_CIPHER_SUITE,
     IPMI_INTERFACE,
     IpmiPolicyError,
+    check_ipmi_cipher_value,
     validate_ipmi_cipher_suite,
 )
 
@@ -65,18 +66,23 @@ def test_none_normalizes_to_default() -> None:
 
 def test_allowed_suite_passes() -> None:
     assert validate_ipmi_cipher_suite(3) == 3
+    assert check_ipmi_cipher_value(3) == 3
 
 
 def test_cipher_zero_rejected() -> None:
     with pytest.raises(IpmiPolicyError) as exc:
         validate_ipmi_cipher_suite(0)
     assert "0" in str(exc.value)
+    with pytest.raises(IpmiPolicyError):
+        check_ipmi_cipher_value(0)
 
 
 @pytest.mark.parametrize("suite", [1, 2, 17, -1, 999])
 def test_non_allowlisted_suites_rejected(suite: int) -> None:
     with pytest.raises(IpmiPolicyError):
         validate_ipmi_cipher_suite(suite)
+    with pytest.raises(IpmiPolicyError):
+        check_ipmi_cipher_value(suite)
 
 
 def test_ipmi_policy_error_is_value_error() -> None:
@@ -114,11 +120,39 @@ class IpmiPolicyError(ValueError):
     """Raised when an IPMI configuration violates the cipher-suite policy."""
 
 
-def validate_ipmi_cipher_suite(value: int | None) -> int:
-    """Return a policy-approved IPMI cipher suite.
+def check_ipmi_cipher_value(value: int) -> int:
+    """Validate a concrete (non-``None``) IPMI cipher suite against the policy.
 
-    ``None`` normalizes to ``IPMI_DEFAULT_CIPHER_SUITE``. Cipher suite 0 and any
-    suite outside ``IPMI_ALLOWED_CIPHER_SUITES`` raise ``IpmiPolicyError``.
+    Used by field-level validators so the rejection is attributed to the
+    offending field. Cipher suite 0 and any suite outside
+    ``IPMI_ALLOWED_CIPHER_SUITES`` raise ``IpmiPolicyError``.
+
+    Args:
+        value: The requested cipher suite.
+
+    Returns:
+        The approved cipher suite integer (unchanged).
+
+    Raises:
+        IpmiPolicyError: If the suite is 0 or not in the allowlist.
+    """
+    if value == IPMI_FORBIDDEN_CIPHER_SUITE:
+        raise IpmiPolicyError(
+            "IPMI cipher suite 0 disables authentication and is refused; "
+            f"use cipher suite {IPMI_DEFAULT_CIPHER_SUITE} (lanplus)"
+        )
+    if value not in IPMI_ALLOWED_CIPHER_SUITES:
+        allowed = ", ".join(str(suite) for suite in sorted(IPMI_ALLOWED_CIPHER_SUITES))
+        raise IpmiPolicyError(f"IPMI cipher suite must be one of {{{allowed}}}; got {value}")
+    return value
+
+
+def validate_ipmi_cipher_suite(value: int | None) -> int:
+    """Return a policy-approved IPMI cipher suite, taking the default for ``None``.
+
+    The chokepoint the ``ipmi-sol`` provider (#15) calls to resolve an effective
+    suite. ``None`` normalizes to ``IPMI_DEFAULT_CIPHER_SUITE``; otherwise the
+    value is checked via :func:`check_ipmi_cipher_value`.
 
     Args:
         value: Requested cipher suite, or ``None`` to take the mandated default.
@@ -131,15 +165,7 @@ def validate_ipmi_cipher_suite(value: int | None) -> int:
     """
     if value is None:
         return IPMI_DEFAULT_CIPHER_SUITE
-    if value == IPMI_FORBIDDEN_CIPHER_SUITE:
-        raise IpmiPolicyError(
-            "IPMI cipher suite 0 disables authentication and is refused; "
-            f"use cipher suite {IPMI_DEFAULT_CIPHER_SUITE} (lanplus)"
-        )
-    if value not in IPMI_ALLOWED_CIPHER_SUITES:
-        allowed = ", ".join(str(suite) for suite in sorted(IPMI_ALLOWED_CIPHER_SUITES))
-        raise IpmiPolicyError(f"IPMI cipher suite must be one of {{{allowed}}}; got {value}")
-    return value
+    return check_ipmi_cipher_value(value)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -231,10 +257,10 @@ Expected: FAIL — `test_ipmi_sol_defaults_cipher_to_three` errors with `Attribu
 In `src/linux_debug_mcp/providers/contracts.py`, add after the existing `from linux_debug_mcp.domain import Model` line (line 9):
 
 ```python
-from linux_debug_mcp.safety.ipmi import validate_ipmi_cipher_suite
+from linux_debug_mcp.safety.ipmi import IPMI_DEFAULT_CIPHER_SUITE, check_ipmi_cipher_value
 ```
 
-- [ ] **Step 4: Add the field and validator**
+- [ ] **Step 4: Add the field and validators**
 
 Replace `ConsoleSessionRequest` (currently lines 253-270) with:
 
@@ -259,26 +285,45 @@ class ConsoleSessionRequest(ProviderRequest):
             raise ValueError("console access method is not supported")
         return value
 
+    @field_validator("ipmi_cipher_suite")
+    @classmethod
+    def validate_cipher_value(cls, value: int | None) -> int | None:
+        if value is None:
+            return value
+        return check_ipmi_cipher_value(value)
+
     @model_validator(mode="after")
     def enforce_ipmi_cipher_policy(self) -> ConsoleSessionRequest:
         if self.access_method == "ipmi-sol":
-            normalized = validate_ipmi_cipher_suite(self.ipmi_cipher_suite)
-            if normalized != self.ipmi_cipher_suite:
-                object.__setattr__(self, "ipmi_cipher_suite", normalized)
+            if self.ipmi_cipher_suite is None:
+                object.__setattr__(self, "ipmi_cipher_suite", IPMI_DEFAULT_CIPHER_SUITE)
         elif self.ipmi_cipher_suite is not None:
             raise ValueError("ipmi_cipher_suite is only valid for access_method 'ipmi-sol'")
         return self
 ```
 
 Notes for the engineer:
-- `object.__setattr__` is required for the `None -> 3` normalization: a plain
-  `self.ipmi_cipher_suite = normalized` re-triggers validation under the model's
+- **Why two validators.** The value-domain rejection (cipher 0 / non-allowlisted) lives
+  in `validate_cipher_value`, a `field_validator`, so Pydantic attributes the error to
+  `loc=("ipmi_cipher_suite",)`. A `model_validator(mode="after")` raise has `loc=()`
+  (model-level), so the field name would be absent from `validation_errors` and AC1
+  would be unmeetable. Verified empirically: field-validator error → `loc=('ipmi_cipher_suite',)`;
+  after-model-validator error → `loc=()`. The cross-field rules (default `None→3` for
+  `ipmi-sol`; require `None` for non-IPMI methods) genuinely need `access_method`, so
+  they stay in the model validator.
+- `object.__setattr__` is required for the `None → 3` normalization: a plain
+  `self.ipmi_cipher_suite = ...` re-triggers validation under the model's
   `validate_assignment=True`, which re-runs this `mode="after"` validator and recurses.
-  Bypassing assignment validation is safe here because `normalized` is already approved.
-- `validate_ipmi_cipher_suite` raises `IpmiPolicyError(ValueError)`, which Pydantic
-  collects as a normal validation error — `_future_stub_handler` maps it to
-  `CONFIGURATION_ERROR`.
+  Bypassing assignment validation is safe here because the value is the approved default.
+  Verified: `object.__setattr__` normalization yields `.ipmi_cipher_suite == 3` with no
+  recursion.
+- `check_ipmi_cipher_value` raises `IpmiPolicyError(ValueError)`, which Pydantic collects
+  as a normal validation error — `_future_stub_handler` maps it to `CONFIGURATION_ERROR`.
 - `model_validator` and `field_validator` are already imported in this file (line 7).
+- A non-IPMI method with `ipmi_cipher_suite=0` is rejected by the field validator (loc =
+  the field); a non-IPMI method with an allowlisted suite (e.g. `3`) passes the field
+  validator and is then rejected by the model validator ("only valid for ipmi-sol").
+  Both are `CONFIGURATION_ERROR`, satisfying AC4.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -362,7 +407,7 @@ def test_console_open_cipher_on_ssh_is_configuration_error() -> None:
 - [ ] **Step 2: Run tests**
 
 Run: `uv run python -m pytest tests/test_future_stub_handlers.py -k "ipmi or cipher" -q`
-Expected: PASS — Task 2 already implemented the enforcement, so these should pass immediately. If `test_console_open_ipmi_default_cipher_reaches_not_implemented` fails because no provider advertises `console.open_session` for `x86_64`, confirm via `uv run python -m pytest tests/test_future_stub_handlers.py -q` that the existing `serial`+`ppc64le` valid call still returns `not_implemented`; the stub advertises both architectures (`STUB_ARCHITECTURES = ["x86_64", "ppc64le"]`), so `x86_64` is valid.
+Expected: PASS — Task 2 already implemented the enforcement, so these should pass immediately. `test_console_open_ipmi_default_cipher_reaches_not_implemented` reaches provider selection; `console.open_session` + `x86_64` resolves to exactly one candidate (`console-access-stub`) — verified against `ProviderRegistry.with_defaults().find_by_operation_and_architecture(...)`, which returns `['console-access-stub']` for both `x86_64` and `ppc64le` — so `select_future_provider` returns the stub (`not_implemented`), never the multi-candidate `configuration_error`.
 
 - [ ] **Step 3: Run the full module for regressions**
 
@@ -461,14 +506,21 @@ check-ipmi:
 Run: `uv run python -m pytest tests/test_ipmi_policy.py -k "check_ipmi or guard_pattern" -q`
 Expected: PASS — clean tree returns 0; the pattern flags exactly lines 3,4,5.
 
-- [ ] **Step 5: Manually verify the tripwire bites**
+- [ ] **Step 5: Manually verify the tripwire bites (end-to-end against real `src/`)**
 
-Run:
+The Step-1 `guard_pattern` unit test covers the regex in isolation; this step proves the
+real `just check-ipmi` invocation fails on a planted `src/` literal. The `trap` guarantees
+the probe is removed even if the step is interrupted, so it cannot pollute the tree or the
+guard's own scan.
+
 ```bash
-printf 'X = "ipmitool -C 0 -I lanplus"\n' > src/linux_debug_mcp/_ipmi_guard_probe.py
-just check-ipmi; echo "exit=$?"
-rm src/linux_debug_mcp/_ipmi_guard_probe.py
-just check-ipmi; echo "exit=$?"
+PROBE=src/linux_debug_mcp/_ipmi_guard_probe.py
+trap 'trash "$PROBE" 2>/dev/null || rm -f "$PROBE"' EXIT
+printf 'X = "ipmitool -C 0 -I lanplus"\n' > "$PROBE"
+just check-ipmi; echo "exit=$?"   # expect exit=1 (guard bites)
+trash "$PROBE" 2>/dev/null || rm -f "$PROBE"
+trap - EXIT
+just check-ipmi; echo "exit=$?"   # expect exit=0 (clean tree)
 ```
 Expected: first `exit=1` (guard fails on the planted literal), second `exit=0` (clean).
 
@@ -531,10 +583,13 @@ uv run ruff check
 uv run ruff format --check .
 uv run ty check src
 uv run python -m pytest -q
+uv run pre-commit run --all-files
 just check-docs
 just check-ipmi
 ```
-Expected: all green, zero warnings. The env-gated libvirt/gdb/drgn integration tests skip as usual.
+Expected: all green, zero warnings. `pre-commit run --all-files` mirrors CI's hard-gating
+`pre-commit` job (including `detect-secrets`); run it locally so a hook failure surfaces
+before CI. The env-gated libvirt/gdb/drgn integration tests skip as usual.
 
 - [ ] **Step 2: Confirm no unintended diffs**
 
