@@ -276,6 +276,17 @@ def _happy_ssh_result() -> SshCommandResult:
 _WRITE_PERMS = ["mutate live kernel state via drgn write APIs"]
 
 
+def test_run_tool_exposes_acknowledged_permissions() -> None:
+    import inspect
+
+    from linux_debug_mcp.server import create_app
+
+    app = create_app()
+    tool = app._tool_manager._tools["debug.introspect.run"]
+    params = inspect.signature(tool.fn).parameters
+    assert "acknowledged_permissions" in params
+
+
 def test_allow_write_requires_profile_op(tmp_path: Path) -> None:
     _, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, _ = _profiles()
