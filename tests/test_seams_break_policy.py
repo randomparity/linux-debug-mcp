@@ -47,6 +47,33 @@ def test_shared_console_with_uart_break_and_no_ssh_admits_agent_proxy_break():
     assert plan.method is BreakMethod.AGENT_PROXY_BREAK
 
 
+def test_uart_shared_console_with_uart_break_and_ssh_prefers_agent_proxy_break():
+    # ADR 0018 Decision 3: on a UART shared console that supports_uart_break, the
+    # line-native agent_proxy_break is preferred over the ssh sysrq_g fallback even
+    # when ssh IS reachable (candidate order [agent_proxy_break, sysrq_g]). The
+    # existing shared-console agent_proxy_break test uses ssh=False, so the
+    # line-native-beats-ssh ordering branch was previously uncovered.
+    policy = ReferenceBreakPolicy()
+    plan = policy.plan(
+        channel=_channel(LineRole.SHARED_CONSOLE, ["provides_console", "supports_uart_break"]),
+        platform=_platform(ssh=True),
+    )
+    assert plan.method is BreakMethod.AGENT_PROXY_BREAK
+
+
+def test_uart_shared_console_agent_proxy_disproved_falls_back_to_sysrq_g():
+    # Same UART shared console + ssh, but the preferred agent_proxy_break is
+    # positively disproved: selection must fall back to the next candidate, sysrq_g,
+    # rather than rejecting the channel.
+    policy = ReferenceBreakPolicy()
+    plan = policy.plan(
+        channel=_channel(LineRole.SHARED_CONSOLE, ["provides_console", "supports_uart_break"]),
+        platform=_platform(ssh=True),
+        disproved={BreakMethod.AGENT_PROXY_BREAK},
+    )
+    assert plan.method is BreakMethod.SYSRQ_G
+
+
 def test_shared_console_without_uart_break_and_no_ssh_has_no_plan():
     # Contract §4.1: no predicate holds -> no_break_plan (NOT break_disproved).
     policy = ReferenceBreakPolicy()

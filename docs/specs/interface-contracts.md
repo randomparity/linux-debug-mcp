@@ -272,6 +272,10 @@ scheduling concern, not here.
 
 Provisioning supplies **facts**; issue 08 owns the **policy** that maps facts →
 break method; issue 01 **executes** it. Provisioning MUST NOT hardcode a method.
+The policy's mapping design — topology-first predicates, preference ordering, the
+`no_break_plan`/`break_disproved` taxonomy and disproof scope, and why `break_hints`
+is non-authoritative — is recorded in
+[ADR 0018](../adr/0018-break-injection-policy-mapping.md).
 
 ```yaml
 PlatformMetadata:
