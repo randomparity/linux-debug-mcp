@@ -256,6 +256,30 @@ def test_post_validator_redacted_emit_still_validates() -> None:
     assert v(payload).ok is True
 
 
+def test_default_list_helpers_fit_helper_cap_profile() -> None:
+    import json
+
+    from linux_debug_mcp.server import HELPER_CAP_PROFILE
+
+    deep_stack = [f"func_{i}+0x{i:x}/0x100" for i in range(64)]
+    tasks_payload = {
+        "tasks": [
+            {"pid": i, "tgid": i, "comm": "kworker/u8:0", "state": "D", "kernel_stack": deep_stack} for i in range(200)
+        ],
+        "truncated": True,
+    }
+    encoded = json.dumps(tasks_payload)
+    assert len(encoded) <= HELPER_CAP_PROFILE["per_emit_bytes"]
+    assert len(encoded) <= HELPER_CAP_PROFILE["total_json"]
+
+    dmesg_payload = {
+        "entries": [{"ts_usec": i, "level": 6, "text": "x" * 80} for i in range(1000)],
+        "truncated": True,
+    }
+    encoded = json.dumps(dmesg_payload)
+    assert len(encoded) <= HELPER_CAP_PROFILE["per_emit_bytes"]
+
+
 def test_post_validator_script_error_is_not_drift() -> None:
     from linux_debug_mcp.server import _make_helper_post_validator
 
