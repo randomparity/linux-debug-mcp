@@ -110,6 +110,7 @@ class DebugIntrospectRunRequest(Model):
     script: str
     timeout_seconds: int = 30
     allow_write: bool = False
+    acknowledged_permissions: list[str] = Field(default_factory=list)
     debug_profile: str | None = None
     target_profile: str | None = None
     rootfs_profile: str | None = None

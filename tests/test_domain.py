@@ -138,9 +138,15 @@ def test_debug_introspect_run_request_minimal() -> None:
     req = DebugIntrospectRunRequest(run_id="r1", target_ref="local-qemu", script="print(1)")
     assert req.timeout_seconds == 30
     assert req.allow_write is False
+    assert req.acknowledged_permissions == []
     assert req.debug_profile is None
     assert req.target_profile is None
     assert req.rootfs_profile is None
+
+
+def test_debug_introspect_run_request_acknowledged_permissions() -> None:
+    req = DebugIntrospectRunRequest(run_id="r1", target_ref="local-qemu", script="pass", acknowledged_permissions=["x"])
+    assert req.acknowledged_permissions == ["x"]
 
 
 def test_debug_introspect_run_request_rejects_extra_fields() -> None:
