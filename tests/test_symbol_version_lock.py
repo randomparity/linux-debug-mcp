@@ -135,6 +135,35 @@ def test_missing_provenance_fails(tmp_path):
     assert provider.calls == 0
 
 
+def test_capture_error_surfaces_as_provenance_missing(tmp_path):
+    # Boot recorded a typed capture error instead of provenance.
+    artifact_root, run_id = _seed(tmp_path, provenance=None)
+    store = ArtifactStore(artifact_root, create_root=False)
+    boot = store.load_manifest(run_id).step_results["boot"]
+    store.record_step_result(
+        run_id,
+        StepResult(
+            step_name="boot",
+            status=StepStatus.SUCCEEDED,
+            summary=boot.summary,
+            details={
+                **boot.details,
+                "kernel_provenance_capture_error": {"code": "build_id_unavailable", "message": "no build_id"},
+            },
+        ),
+        replace_succeeded=True,
+    )
+    provider = FakeDebugProvider()
+    resp = debug_start_session_handler(
+        artifact_root=artifact_root, run_id=run_id, provider=provider, debug_profiles=_profiles()
+    )
+    assert resp.ok is False
+    assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert resp.error.details["code"] == "provenance_missing"
+    assert resp.error.details["capture_error"] == "build_id_unavailable"
+    assert provider.calls == 0
+
+
 def test_corrupt_recorded_build_id_fails(tmp_path):
     artifact_root, run_id = _seed(tmp_path, provenance=kernel_provenance_details("NOT-HEX"))
     provider = FakeDebugProvider()
