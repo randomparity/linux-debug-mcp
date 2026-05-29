@@ -192,8 +192,10 @@ declared order:
 `ValueError` rather than silently keying under a placeholder.
 
 Returns a `RelaxReport` (knob → outcome: `relaxed` / `absent` / `skipped` /
-`write_failed`). `relax` never raises; a channel that itself raises is caught and
-recorded as `write_failed` for that knob.
+`write_failed`). `relax` never raises **for channel/knob errors** — a channel that
+itself raises is caught and recorded as `write_failed` for that knob; the **only**
+exception it raises is the `ValueError` precondition above for a `None`
+`session_id` (a programming error, not an operational failure).
 
 **`restore(ctx)`** — look up the captured map for `ctx.session_id`:
 - no entry (relax never ran for this session, or restore already ran and cleared
@@ -337,6 +339,25 @@ restore step is correctly absent there — so reopening ADR 0013 is unnecessary.
 "times out" clause of AC1 for the *target* (no orphan, no live `HALTED`) is already
 covered by #66's dispatcher conformance test; #69's timeout concern is the
 *operation* timeout that lands on the synchronous teardown.
+
+### 5.1 Limitation: the captured baseline is in-process, not crash-durable
+
+The captured baseline (§3.3) lives only in the `WatchdogPolicy`'s in-memory dict.
+So the restore guarantee covers only paths where the **same process** reaches a
+`SessionGuard.teardown` (clean end, attach error, operation timeout). It does **not**
+cover an **abandoned session** where the MCP server itself dies after `relax` but
+before teardown: no teardown runs, the in-memory capture is gone, and the target
+keeps running with the watchdogs relaxed and the baseline **unrecoverable** (there is
+no durable record to restore from). `SessionRegistry.reconcile()` on restart reaps
+backends but knows nothing about watchdogs, so it is not a backstop here.
+
+For #69 the blast radius is nil because the helper ships **inert** (§1.2) — no live
+`relax` ever runs — so this is a forward-looking limitation, not a live gap. A live
+tier that needs crash-durable restore must persist the captured baseline (e.g.
+alongside the durable `TransportSession` record) and restore from it during
+`reconcile`; that durable-capture design is **out of scope for #69** and is called
+out here so the live tier does not read "restored … on error/timeout" as also
+covering a server crash.
 
 ## 6. Error handling & failure contract
 
