@@ -5,14 +5,32 @@ preservation, session_id keying, and restore-on-error/timeout via SessionGuard.t
 See docs/superpowers/specs/2026-05-29-watchdog-relax-restore-design.md / docs/adr/0016-*.
 """
 
+import pytest
+
+from linux_debug_mcp.seams.guard import SessionGuardContext
+from linux_debug_mcp.seams.target import TargetKey
 from linux_debug_mcp.seams.watchdog import (
     KnobOutcome,
     RelaxReport,
     RestoreReport,
     WatchdogArch,
+    WatchdogPolicy,
     WriteOutcome,
     knobs_for_arch,
 )
+
+
+def _ctx(*, session_id: str | None = "sess-1", generation: int = 7) -> SessionGuardContext:
+    return SessionGuardContext(
+        target_key=TargetKey(provisioner="local-qemu", target_id="run-1"),
+        generation=generation,
+        session_id=session_id,
+        reason="ended",
+    )
+
+
+def _x86_policy(channel: object) -> WatchdogPolicy:
+    return WatchdogPolicy(arch=WatchdogArch.X86_64, channel=channel)  # type: ignore[arg-type]
 
 
 def test_x86_knob_list_is_the_five_generic_detectors():
@@ -71,3 +89,62 @@ def test_reports_are_constructible():
     restore = RestoreReport(restored={}, noop=True)
     assert relax.outcomes["kernel.watchdog"] is KnobOutcome.RELAXED
     assert restore.noop is True
+
+
+def test_relax_reads_then_writes_each_knob_in_declared_order():
+    channel = FakeWatchdogControl(values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)})
+    report = _x86_policy(channel).relax(_ctx())
+    assert channel.calls == [
+        ("read", "kernel.nmi_watchdog", None),
+        ("write", "kernel.nmi_watchdog", "0"),
+        ("read", "kernel.watchdog", None),
+        ("write", "kernel.watchdog", "0"),
+        ("read", "kernel.watchdog_thresh", None),
+        ("write", "kernel.watchdog_thresh", "0"),
+        ("read", "kernel.softlockup_panic", None),
+        ("write", "kernel.softlockup_panic", "0"),
+        ("read", "kernel.hardlockup_panic", None),
+        ("write", "kernel.hardlockup_panic", "0"),
+    ]
+    assert all(o is KnobOutcome.RELAXED for o in report.outcomes.values())
+
+
+def test_relax_requires_session_id():
+    with pytest.raises(ValueError, match="session_id"):
+        _x86_policy(FakeWatchdogControl()).relax(_ctx(session_id=None))
+
+
+def test_relax_records_absent_knob_and_skips_its_write():
+    channel = FakeWatchdogControl(values={"kernel.watchdog": "1"})
+    report = _x86_policy(channel).relax(_ctx())
+    assert report.outcomes["kernel.nmi_watchdog"] is KnobOutcome.ABSENT
+    assert ("write", "kernel.nmi_watchdog", "0") not in channel.calls
+    assert report.outcomes["kernel.watchdog"] is KnobOutcome.RELAXED
+
+
+def test_relax_records_write_failed_when_write_fails():
+    channel = FakeWatchdogControl(
+        values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)},
+        fail_writes={"kernel.nmi_watchdog"},
+    )
+    report = _x86_policy(channel).relax(_ctx())
+    assert report.outcomes["kernel.nmi_watchdog"] is KnobOutcome.WRITE_FAILED
+
+
+def test_relax_records_out_of_band_knob_skipped_without_touching_channel():
+    in_band = {k.name: "1" for k in knobs_for_arch(WatchdogArch.PPC64LE) if not k.out_of_band}
+    channel = FakeWatchdogControl(values=in_band)
+    report = WatchdogPolicy(arch=WatchdogArch.PPC64LE, channel=channel).relax(_ctx())
+    assert report.outcomes["phyp_partition_watchdog"] is KnobOutcome.SKIPPED
+    assert all(name != "phyp_partition_watchdog" for _op, name, _v in channel.calls)
+
+
+def test_relax_is_capture_once_second_relax_does_not_reread():
+    channel = FakeWatchdogControl(values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)})
+    policy = _x86_policy(channel)
+    policy.relax(_ctx())
+    reads_after_first = [c for c in channel.calls if c[0] == "read"]
+    channel.calls.clear()
+    policy.relax(_ctx())
+    assert [c for c in channel.calls if c[0] == "read"] == []
+    assert len(reads_after_first) == 5
