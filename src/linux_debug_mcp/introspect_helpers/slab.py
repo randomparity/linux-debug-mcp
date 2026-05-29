@@ -28,6 +28,8 @@ for cache in for_each_slab_cache(prog):
         objsize = int(cache.object_size.value_())
         oo = int(cache.oo.x.value_())
         objs_per_slab = oo & ((1 << 16) - 1)
+        # SLUB does not expose per-cache active/num object counts via the same drgn path
+        # as SLAB; -1 signals unavailable.
         rows.append({
             "name": name,
             "active_objs": -1,

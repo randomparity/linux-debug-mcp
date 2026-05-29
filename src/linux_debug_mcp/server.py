@@ -2409,7 +2409,11 @@ class PostValidatorVerdict:
 
 
 def _introspect_args_json(request: DebugIntrospectRunRequest) -> str:
-    """Both request types carry `args`; `run`'s tool signature leaves it unexposed."""
+    """JSON-encode the request's args for the wrapper.
+
+    Both DebugIntrospectRunRequest and the helper path carry an `args` field; the
+    `debug.introspect.run` MCP tool wrapper simply doesn't expose it to callers (so it stays {}).
+    """
     return json.dumps(request.args or {})
 
 
@@ -3410,6 +3414,7 @@ def debug_introspect_helper_handler(
             run_id=request.run_id,
             message=f"unknown helper {request.name!r}; valid: {sorted(HELPER_REGISTRY)}",
             details={"code": "unknown_helper", "valid": sorted(HELPER_REGISTRY)},
+            suggested_next_actions=["debug.introspect.helper"],
         )
     try:
         validated_args = spec.args_model.model_validate(request.args)
@@ -3419,6 +3424,7 @@ def debug_introspect_helper_handler(
             run_id=request.run_id,
             message=_redact_and_truncate(Redactor(), str(exc), cap=512),
             details={"code": "helper_args_invalid"},
+            suggested_next_actions=["debug.introspect.helper"],
         )
     run_request = DebugIntrospectRunRequest(
         run_id=request.run_id,

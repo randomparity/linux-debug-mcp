@@ -1520,3 +1520,86 @@ def test_helper_args_invalid(tmp_path: Path) -> None:
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "helper_args_invalid"
+
+
+def test_helper_passes_cap_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import linux_debug_mcp.server as server
+    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
+    from linux_debug_mcp.server import debug_introspect_helper_handler
+
+    captured: dict = {}
+    orig = server.render_wrapper
+
+    def spy(**kwargs):
+        captured.update(kwargs)
+        return orig(**kwargs)
+
+    monkeypatch.setattr(server, "render_wrapper", spy)
+
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    emit = {
+        "release": "6.8",
+        "version": "#1",
+        "machine": "x86_64",
+        "nodename": "vm",
+        "boot_cmdline": "ro",
+        "cpus_online": 2,
+        "mem_total_pages": 100,
+    }
+    resp = debug_introspect_helper_handler(
+        DebugIntrospectHelperRequest(run_id=run_id, target_ref="local-qemu", name="sysinfo"),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=FakeSshRunner(results=[_helper_ssh_result(emit)]),
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert resp.ok is True, resp.error
+    assert captured["caps"] == server.HELPER_CAP_PROFILE
+
+
+def test_helper_redacts_secret_in_emit(tmp_path: Path) -> None:
+    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
+    from linux_debug_mcp.safety.redaction import REDACTION
+    from linux_debug_mcp.server import debug_introspect_helper_handler
+
+    _, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, _rootfs, debug = _profiles()
+    rootfs_with_secret = {
+        "minimal": RootfsProfile(
+            name="minimal",
+            source="/var/lib/linux-debug-mcp/rootfs/minimal.qcow2",
+            access_method="ssh_and_serial",
+            ssh_host="127.0.0.1",
+            ssh_port=22,
+            ssh_user="root",
+            ssh_key_ref="supersecret",
+            readiness_marker="ready",
+        )
+    }
+    emit = {
+        "release": "6.8",
+        "version": "#1",
+        "machine": "x86_64",
+        "nodename": "vm",
+        "boot_cmdline": "ro quiet supersecret extra",
+        "cpus_online": 2,
+        "mem_total_pages": 100,
+    }
+    ssh = FakeSshRunner(results=[_helper_ssh_result(emit)])
+    resp = debug_introspect_helper_handler(
+        DebugIntrospectHelperRequest(run_id=run_id, target_ref="local-qemu", name="sysinfo"),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs_with_secret,
+        debug_profiles=debug,
+        ssh_runner=ssh,
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert resp.ok is True, resp.error
+    assert "supersecret" not in resp.data["result"]["boot_cmdline"]
+    assert REDACTION in resp.data["result"]["boot_cmdline"]

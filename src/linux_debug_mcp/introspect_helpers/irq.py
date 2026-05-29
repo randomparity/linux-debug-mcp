@@ -46,6 +46,8 @@ for irq_no, desc in iter_descs():
                 name = action.name.string_().decode("utf-8", "replace")
         except Exception:
             name = None
+        # affinity mask decode is kernel-version-specific; v1 reports the online CPU set
+        # as a conservative approximation.
         affinity = list(online)
         rows.append({"irq": irq_no, "name": name, "counts_per_cpu": counts, "affinity": affinity})
     except Exception:

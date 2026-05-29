@@ -74,7 +74,7 @@ Anything that may surface guest output, gdb transcripts, or secret-bearing detai
 
 ### Constrained debug surface
 
-The set of allowed debug operations is the hard-coded `SPRINT_4_DEBUG_OPERATIONS` list in `config.py`. `DebugProfile.enabled_operations` may further narrow it. `_ensure_debug_operation_enabled` enforces both layers — call it from any new `debug.*` handler before invoking the provider.
+The set of allowed debug operations is the hard-coded `ALLOWED_DEBUG_OPERATIONS` list in `config.py`. `DebugProfile.enabled_operations` may further narrow it. `_ensure_debug_operation_enabled` enforces both layers — call it from any new `debug.*` handler before invoking the provider.
 
 ### Path safety
 
