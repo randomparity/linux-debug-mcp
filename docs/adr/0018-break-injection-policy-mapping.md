@@ -44,7 +44,11 @@ provider-suggested, **non-authoritative** `break_hints` list. `BreakMethod` /
    `coordination/transaction.py:160,245` holds and calls it). Provisioning supplies
    only facts; the executing mechanisms consume the recorded `BreakPlan`. This is
    the §4.1 facts → policy → execute split made concrete, with the policy as the
-   single seam every stop-capable tier shares rather than per-tier logic.
+   single seam every stop-capable tier that *needs* a break shares, rather than
+   per-tier logic. (A tier whose selected channel is `rsp`/`gdbstub_native` needs no
+   injection — see Decision 7 — and the legacy non-transport gdb attach,
+   `transport_enabled=false` at `server.py:4180`, is exactly that break-free case;
+   it consults no policy by construction.)
 
 2. **Topology-first: predicates key on the *selected channel's* `line_role` +
    `caps`, plus platform facts — never on the platform summary
@@ -89,10 +93,11 @@ provider-suggested, **non-authoritative** `break_hints` list. `BreakMethod` /
 
 6. **`break_hints` is deliberately not consumed by the policy.** §4.1 marks it
    provider-suggested and **non-authoritative**; the topology predicates are the
-   sole authority. The field is plumbed through `PlatformMetadata` for diagnostics
-   and possible future use (`coordination/admission.py:173` carries it immutably
-   across admission), but feeding it into the decision would let a provider's guess
-   override the authoritative predicates.
+   sole authority. The field is carried on `PlatformMetadata` for forward-compatibility
+   with the §4.1 contract and is currently unread by any code path
+   (`coordination/admission.py:173` carries it immutably across admission but never
+   inspects it); feeding it into the decision would let a provider's guess override
+   the authoritative predicates.
 
 7. **Execution rejects a requested method that is not the admitted plan, and
    `gdbstub_native` is not injectable.** `inject_break`
@@ -104,10 +109,13 @@ provider-suggested, **non-authoritative** `break_hints` list. `BreakMethod` /
 
 ## Consequences
 
-- Every stop-capable tier (#12 `debug.kdb`, #13 `debug.gdb` — the latter already
-  routes through `transaction.open` at `server.py:4205`) obtains its break method
-  from the one `BreakPolicy` seam; no tier embeds per-platform selection logic, so
-  the §4.1 mappings change in exactly one place.
+- On the Layer-4 transport path (`transport_enabled`, `server.py:4180`), every
+  stop-capable tier obtains its break method from the one `BreakPolicy` seam: #13
+  `debug.gdb` already routes through `transaction.open` at `server.py:4205`, and #12
+  `debug.kdb` will inherit the same path. No tier embeds per-platform selection
+  logic, so the §4.1 mappings change in exactly one place. The legacy non-transport
+  gdb attach consults no policy because it needs no break (RSP/`gdbstub_native`),
+  not because it has its own mapping.
 - A capable-but-unbreakable channel is skipped, and an attach with no executable
   break plan fails loud before any acquisition (no guard, lease, session, or halt to
   unwind), surfacing `no_break_plan` / `break_disproved` so an operator can tell a
