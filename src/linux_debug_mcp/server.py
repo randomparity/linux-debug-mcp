@@ -169,7 +169,12 @@ from linux_debug_mcp.seams.target import (
 )
 from linux_debug_mcp.symbols.build_id import BuildIdReadError, read_elf_build_id
 from linux_debug_mcp.symbols.resolve import SymbolResolutionError, resolve_symbols
-from linux_debug_mcp.symbols.verify import BUILD_ID_RE, ProvenanceMismatch, verify_build_id
+from linux_debug_mcp.symbols.verify import (
+    BUILD_ID_RE,
+    ProvenanceMismatch,
+    verify_build_id,
+    verify_vmlinux_provenance,
+)
 from linux_debug_mcp.transport.base import (
     EndpointExposure,
     ExecutionState,
@@ -4005,6 +4010,75 @@ def _halt_debug_transport(
     admission.cancel_ssh_tier(session.target_key, session.generation, halt_epoch=halt_epoch)
 
 
+def _verify_gdb_symbol_version_lock(
+    *,
+    boot_result: StepResult,
+    vmlinux_path: Path,
+    run_id: str,
+    build_id_reader: Callable[[Path], str],
+) -> ToolResponse | None:
+    """#70 / ADR 0017: verify the on-disk vmlinux ELF build-id equals the
+    boot-recorded §4.2 KernelProvenance.build_id. Returns a failure ToolResponse to
+    abort the attach, or None to proceed. Unconditional (independent of
+    symbol_identity_required) -- a detected mismatch is bogus symbols.
+    """
+    provenance = boot_result.details.get("kernel_provenance")
+    if not isinstance(provenance, dict):
+        capture_error = boot_result.details.get("kernel_provenance_capture_error")
+        details: dict[str, Any] = {"code": "provenance_missing"}
+        if isinstance(capture_error, dict):
+            message = f"boot did not record a KernelProvenance: {capture_error.get('message', 'capture failed')}"
+            details["capture_error"] = capture_error.get("code")
+        else:
+            message = (
+                "boot for this run did not record a KernelProvenance (it predates "
+                "provenance capture). Re-run target.boot with force_reboot=true to capture it."
+            )
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=message,
+            details=details,
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+    expected_build_id = provenance.get("build_id")
+    if not isinstance(expected_build_id, str) or not BUILD_ID_RE.match(expected_build_id):
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="recorded build_id is malformed",
+            details={"code": "provenance_corrupt", "recorded": str(expected_build_id)},
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+    try:
+        verify_vmlinux_provenance(
+            expected_build_id=expected_build_id,
+            vmlinux_path=vmlinux_path,
+            build_id_reader=build_id_reader,
+        )
+    except BuildIdReadError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=f"could not read a GNU build-id from the vmlinux to verify symbols: {exc}",
+            details={"code": "vmlinux_build_id_unreadable"},
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+    except ProvenanceMismatch as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=(
+                f"vmlinux build-id {exc.observed!r} does not match the booted kernel's recorded "
+                f"build-id {exc.expected!r}; rebuild or re-boot so the booted kernel and the "
+                "vmlinux on disk share a build-id"
+            ),
+            details={"code": "provenance_mismatch", "expected": exc.expected, "observed": exc.observed},
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+    return None
+
+
 def debug_start_session_handler(
     *,
     artifact_root: Path,
@@ -4018,6 +4092,7 @@ def debug_start_session_handler(
     session_registry: SessionRegistry | None = None,
     session_guard: SessionGuard | None = None,
     recovery: bool = False,
+    build_id_reader: Callable[[Path], str] = read_elf_build_id,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -4086,6 +4161,18 @@ def debug_start_session_handler(
                         suggested_next_actions=["debug.interrupt", "debug.read_registers", "artifacts.get_manifest"],
                     )
                 replace_existing_debug = existing.status == StepStatus.SUCCEEDED
+            # #70 / ADR 0017: symbol version-lock BEFORE any acquisition or attach.
+            # Runs on every fresh attach (incl. new_session / replace / recovery), after the
+            # idempotent SUCCEEDED short-circuit above so re-reading a healthy session never
+            # re-gates. A failure returns with nothing acquired and no debug step recorded.
+            version_lock_failure = _verify_gdb_symbol_version_lock(
+                boot_result=boot_result,
+                vmlinux_path=Path(vmlinux.path),
+                run_id=run_id,
+                build_id_reader=build_id_reader,
+            )
+            if version_lock_failure is not None:
+                return version_lock_failure
             transport_enabled = transaction is not None and admission is not None and session_registry is not None
             transport_session: TransportSession | None = None
             if transport_enabled:
