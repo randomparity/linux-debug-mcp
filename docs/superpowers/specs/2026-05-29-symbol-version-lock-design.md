@@ -29,24 +29,48 @@ The **third tier, #13 `debug.gdb` (QEMU gdbstub), is the gap.** Its
 same *path* the build recorded) and `live_banner_match` (the running kernel's
 `linux_banner` **release string** equals the build's `kernel_release`), both gated
 by `DebugProfile.symbol_identity_required` (default `True`). It **never compares
-the build-id.** Two builds that share a release string (e.g. `6.9.0-test`) but
-differ in content have different build-ids yet identical banners — they pass
-today's checks and gdb loads mismatched symbols. This issue closes that hole and
-makes the §4.2 build-id version-lock uniform across all three tiers.
+the build-id.**
+
+The concrete, grounded hole: when an operator sets
+`symbol_identity_required=False`, the provider does **not** enforce
+`same_run_artifact_linkage` and does **not** fail on a `live_banner_match` miss
+(`qemu_gdbstub.py:281`, `343`) — so gdb attaches against whatever vmlinux is
+recorded and loads its symbols with no fail-loud, even if that vmlinux does not
+match the booted build. Today there is *no* build-id check on any gdb path. This
+issue adds an **unconditional** build-id version-lock (independent of
+`symbol_identity_required`) so a build-id mismatch always fails loud, and gives the
+gdb tier the same explicit build-id integrity gate the other two tiers already
+have.
+
+What this check is and is not (see §1.2 and ADR 0017 rejected A): it compares the
+on-disk vmlinux's ELF build-id against the **boot-recorded** §4.2
+`KernelProvenance.build_id`. That is a *symbol-source integrity / version-lock*
+check (the vmlinux gdb will load is the one the booted build produced and has not
+been swapped, truncated, or replaced), enforced even when the operator relaxed the
+banner/linkage signals. It is **not** a read of the *running* kernel's build-id
+over RSP — that live read is deferred (§1.2); `live_banner_match` remains the
+interim live cross-check, which the architecture design explicitly sanctions
+("the `vmlinux` build ID **or other available identity**", design §QemuGdbstubProvider).
 
 ### 1.1 In scope
 
 - A shared verification primitive in `symbols/verify.py` that ties together
-  "read the vmlinux ELF build-id, validate its shape, and compare it to an
-  expected build-id", raising typed errors that map to the existing
-  `CONFIGURATION_ERROR` codes (`vmlinux_build_id_unreadable`,
-  `provenance_mismatch`). This is the single seam the tiers consume (§4.2 "expose
-  verification for the symbol-using tiers").
+  "read the vmlinux ELF build-id and compare it to an expected build-id", raising
+  the existing typed errors (`BuildIdReadError`, `ProvenanceMismatch`) that the
+  handler maps to `CONFIGURATION_ERROR` codes (`vmlinux_build_id_unreadable`,
+  `provenance_mismatch`). It composes the existing `read_elf_build_id` +
+  `verify_build_id` (ADR 0008) into the one read+compare both offline callers need.
 - `debug.start_session` (#13) extracting the boot-recorded §4.2
   `KernelProvenance.build_id` and running the primitive against the on-disk
-  vmlinux **before attaching gdb** — so a mismatch fails before the kernel is
+  vmlinux **before attaching gdb** (and after the idempotent return of an
+  already-attached session — §3.2) — so a mismatch fails before the kernel is
   halted, with nothing acquired to tear down.
 - Reusing the existing cross-tier error taxonomy and codes verbatim.
+
+The "owns the §4.2 contract" framing is satisfied by the gdb tier now consuming
+build-id verification (the live #53 and vmcore #14 tiers already verify build-id
+via `verify_build_id` in the shared introspect finalizer) — **not** by refactoring
+those tiers (§1.2).
 
 ### 1.2 Out of scope
 
@@ -57,10 +81,15 @@ makes the §4.2 build-id version-lock uniform across all three tiers.
   "the `vmlinux` build ID **or other available identity**" for the gdb tier
   (design §"QemuGdbstubProvider", line ~172). Banner-match stays as the live
   identity check; build-id covers symbol-source integrity. (ADR 0017, rejected A.)
-- Refactoring the #53 live-wrapper verification path (its host check already calls
-  `verify_build_id`; rewriting it earns no behavior and risks regression). The
-  #14 vmcore path's inline read+verify is replaced by the new shared primitive
-  because it is literally the same three lines (§3.3).
+- Refactoring the #53 live and #14 vmcore verification paths. Both already verify
+  build-id host-authoritatively in the shared introspect finalizer
+  (`_finalize_introspect_call` → `verify_build_id`, `server.py` ~3295), with the
+  wrapper self-aborting on mismatch (`server.py` ~3239). In the vmcore flow the
+  vmlinux ELF id is the *expected* and the vmcore-embedded id is the *observed*,
+  and the compare happens in the finalizer — not at the inline vmlinux read
+  (`server.py` ~3738, which only reads + shape-checks the vmlinux id). The new
+  primitive does not drop into that flow without inverting operand roles, so these
+  tiers are left untouched (rewriting earns no behavior and risks regression).
 - Changing `DebugProfile.symbol_identity_required` semantics for banner/linkage.
 
 ## 2. Failure contract
@@ -73,16 +102,17 @@ gdb halt; nothing is acquired and no `debug` step is recorded SUCCEEDED.
 | Condition (gdb tier) | `code` | category |
 |---|---|---|
 | boot recorded no `KernelProvenance` (or a capture error) | `provenance_missing` | `CONFIGURATION_ERROR` |
-| recorded `build_id` is absent/malformed (fails `BUILD_ID_RE`) | `provenance_corrupt` | `CONFIGURATION_ERROR` (`INFRASTRUCTURE_FAILURE` if a previously-validated record is corrupt — see note) |
+| recorded `build_id` is absent/malformed (fails `BUILD_ID_RE`) | `provenance_corrupt` | `INFRASTRUCTURE_FAILURE` |
 | vmlinux ELF carries no readable GNU build-id | `vmlinux_build_id_unreadable` | `CONFIGURATION_ERROR` |
 | vmlinux build-id ≠ recorded build_id | `provenance_mismatch` | `CONFIGURATION_ERROR` |
 
 Note: these are exactly the codes/categories the live (#53) and vmcore (#14)
 tiers already emit, so an agent sees one version-lock vocabulary across tiers.
 `provenance_missing`/`provenance_corrupt` mirror the live introspect handler
-(`server.py` ~2632–2662): a missing record is `CONFIGURATION_ERROR`, a recorded
-build_id that fails `BUILD_ID_RE` is `INFRASTRUCTURE_FAILURE` (`provenance_corrupt`)
-because boot validated it on the way in.
+(`server.py` ~2632–2662): a missing record is `CONFIGURATION_ERROR`; a recorded
+build_id that fails `BUILD_ID_RE` is `INFRASTRUCTURE_FAILURE` (`provenance_corrupt`),
+because boot validated it on the way in, so a corrupt record is an internal fault,
+not caller misconfiguration.
 
 The message on `provenance_mismatch` names both ids (opaque lower-case hex, safe
 to surface — `ProvenanceMismatch` docstring) and the actionable fix ("rebuild or
@@ -97,13 +127,15 @@ def verify_vmlinux_provenance(
     *, expected_build_id: str, vmlinux_path: Path,
     build_id_reader: Callable[[Path], str] = read_elf_build_id,
 ) -> str:
-    """Read the vmlinux ELF build-id, validate its shape, and verify it equals
-    expected_build_id. Returns the observed build-id on success.
+    """Read the vmlinux ELF build-id and verify it equals expected_build_id.
+    Returns the observed build-id on success.
 
-    Raises BuildIdReadError (unreadable/non-ELF/no note → vmlinux_build_id_unreadable),
-    ProvenanceMismatch (observed != expected → provenance_mismatch). The caller
+    Raises BuildIdReadError (unreadable/non-ELF/no note → vmlinux_build_id_unreadable)
+    and ProvenanceMismatch (observed != expected → provenance_mismatch). The caller
     is responsible for having validated expected_build_id's shape (the recorded
-    §4.2 value), exactly as the wrapper/vmcore callers do today.
+    §4.2 value) before calling — the gdb handler does so via BUILD_ID_RE
+    (provenance_corrupt). read_elf_build_id already returns a canonical lower-case
+    hex id, so the observed side needs no separate shape check.
     """
 ```
 
@@ -115,14 +147,19 @@ ELF — the same injection pattern the vmcore handler already exposes
 ### 3.2 gdb tier consumption (`debug_start_session_handler`)
 
 `debug_start_session_handler` gains a `build_id_reader` parameter (default
-`read_elf_build_id`). After it has resolved the SUCCEEDED build's `vmlinux`
-artifact and the SUCCEEDED debug boot, and before it acquires the debug lock /
-opens the transport / attaches gdb, it:
+`read_elf_build_id`). The check runs on the **attach path only**: it sits *after*
+the idempotent short-circuit that returns an already-recorded SUCCEEDED `debug`
+session unchanged (`server.py` ~4078–4088), and *before* the transport is opened /
+gdb attaches / the kernel is halted. Re-reading a healthy already-attached session
+therefore never re-runs the version-lock, so a pre-#70 SUCCEEDED session (recorded
+before provenance capture existed) still returns idempotently. On a fresh attach
+(or a `new_session` / replace), it:
 
 1. Extracts the boot-recorded §4.2 `KernelProvenance` from
    `boot_result.details["kernel_provenance"]`, reusing the live-introspect
-   extraction shape (`provenance_missing` on absent/capture-error,
-   `provenance_corrupt` on a build_id failing `BUILD_ID_RE`).
+   extraction shape (`provenance_missing` → `CONFIGURATION_ERROR` on
+   absent/capture-error, `provenance_corrupt` → `INFRASTRUCTURE_FAILURE` on a
+   build_id failing `BUILD_ID_RE`).
 2. Calls `verify_vmlinux_provenance(expected_build_id=…, vmlinux_path=vmlinux.path,
    build_id_reader=build_id_reader)`.
 3. On `BuildIdReadError` → `CONFIGURATION_ERROR` / `vmlinux_build_id_unreadable`;
@@ -146,18 +183,11 @@ placement requires it. The reserved pre/post-attach slots remain available for
 future preconditions that key only on `SessionGuardContext`. (ADR 0017, rejected B/C.)
 
 Covering both the transport-wired and the non-transport (legacy) handler paths:
-the call sits before the `transport_enabled` branch, so a build-id mismatch is
-rejected regardless of whether the transport machinery is wired.
+the call sits inside the `debug_lock`, after the idempotent short-circuit and
+before the `transport_enabled` branch, so a build-id mismatch is rejected
+regardless of whether the transport machinery is wired.
 
-### 3.3 vmcore tier (#14) re-point
-
-The vmcore handler's inline "read vmlinux build-id, shape-check, then compare to
-the vmcore-embedded id" becomes a call to `verify_vmlinux_provenance` with
-`expected_build_id` = the vmcore-embedded id. Behavior and emitted codes are
-unchanged; this is the "owns the contract / consume from the tiers" deliverable,
-proven green by the existing vmcore tests.
-
-### 3.4 What stays the same
+### 3.3 What stays the same
 
 - The #53 live wrapper path (self-abort + host `verify_build_id`) is untouched.
 - The gdb provider's `same_run_artifact_linkage` / `live_banner_match` checks and
@@ -177,12 +207,18 @@ New, in `tests/test_symbols_verify.py` and a gdb-tier test module:
   - injected reader returns `B' ≠ B` → `CONFIGURATION_ERROR` /
     `provenance_mismatch`, no `debug` step recorded, provider never attached.
   - injected reader raises `BuildIdReadError` → `vmlinux_build_id_unreadable`.
-  - boot step with no `kernel_provenance` → `provenance_missing`.
-  - boot step with a malformed recorded build_id → `provenance_corrupt`.
-- vmcore tier: existing mismatch/unverifiable tests stay green after the
-  re-point (no new behavior).
+  - boot step with no `kernel_provenance` → `CONFIGURATION_ERROR` /
+    `provenance_missing`.
+  - boot step with a malformed recorded build_id → `INFRASTRUCTURE_FAILURE` /
+    `provenance_corrupt`.
+  - re-invoking a recorded SUCCEEDED session returns it idempotently **without**
+    running the version-lock (a boot step with no `kernel_provenance` still
+    returns the existing session, not `provenance_missing`).
+  - with `symbol_identity_required=False`, an injected mismatch reader still fails
+    `provenance_mismatch` (the gate is unconditional).
 
 Shared fixtures gain a helper to seed a `kernel_provenance` into a boot step so
-the existing gdb-handler tests (which now require it) stay green with an injected
-matching reader. The gated gdb integration test is untouched (still skipped
-without `gdb`/`qemu`).
+the existing gdb-handler tests (which now require it on the fresh-attach path)
+stay green with an injected matching reader. The existing live (#53) and vmcore
+(#14) tests are untouched (those paths are not modified). The gated gdb
+integration test is untouched (still skipped without `gdb`/`qemu`).
