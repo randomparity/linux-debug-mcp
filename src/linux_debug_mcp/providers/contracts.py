@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from linux_debug_mcp.domain import Model
+from linux_debug_mcp.safety.ipmi import IPMI_DEFAULT_CIPHER_SUITE, check_ipmi_cipher_value
 
 KNOWN_ARCHITECTURES = {"x86_64", "ppc64le"}
 MAX_TIMEOUT_SECONDS = 24 * 60 * 60
@@ -254,6 +255,7 @@ class ConsoleSessionRequest(ProviderRequest):
     target_name: str
     access_method: str
     credential_ref: str | None = None
+    ipmi_cipher_suite: int | None = None
 
     _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
         ProviderRequest._safe_label_fields,
@@ -268,6 +270,22 @@ class ConsoleSessionRequest(ProviderRequest):
         if value not in _CONSOLE_ACCESS_METHODS:
             raise ValueError("console access method is not supported")
         return value
+
+    @field_validator("ipmi_cipher_suite")
+    @classmethod
+    def validate_cipher_value(cls, value: int | None) -> int | None:
+        if value is None:
+            return value
+        return check_ipmi_cipher_value(value)
+
+    @model_validator(mode="after")
+    def enforce_ipmi_cipher_policy(self) -> ConsoleSessionRequest:
+        if self.access_method == "ipmi-sol":
+            if self.ipmi_cipher_suite is None:
+                object.__setattr__(self, "ipmi_cipher_suite", IPMI_DEFAULT_CIPHER_SUITE)
+        elif self.ipmi_cipher_suite is not None:
+            raise ValueError("ipmi_cipher_suite is only valid for access_method 'ipmi-sol'")
+        return self
 
 
 class ConsoleReadRequest(ProviderRequest):
