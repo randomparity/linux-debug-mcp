@@ -5,6 +5,7 @@ open()/close()/gating/recovery test, so a contract change touches one file, not 
 from __future__ import annotations
 
 import threading
+from types import MappingProxyType
 
 from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore, TargetSnapshot
 from linux_debug_mcp.coordination.lease import ConsoleLeaseManager
@@ -64,7 +65,7 @@ class FakeQemuTransport(Transport):
             endpoint_exposure=EndpointExposure.LOOPBACK_LOCAL,
         )
 
-    def attach(self, request, *, cancel, deadline, on_partial) -> BackendAttachment:
+    def attach(self, request, *, cancel, deadline, on_partial, secrets=MappingProxyType({})) -> BackendAttachment:
         if self._backend_pid is not None:
             # emit pid+start_time as one partial (mirrors transport/proxy.py:184) so the
             # transaction can write it through into the OPENING record before we return.

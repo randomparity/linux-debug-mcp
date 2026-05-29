@@ -1,6 +1,7 @@
 import dataclasses
 import threading
 from datetime import UTC, datetime
+from types import MappingProxyType
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -613,7 +614,7 @@ def test_concrete_transport_attach_returns_backend_attachment():
                 endpoint_exposure=EndpointExposure.LOOPBACK_LOCAL,
             )
 
-        def attach(self, request, *, cancel, deadline, on_partial) -> BackendAttachment:
+        def attach(self, request, *, cancel, deadline, on_partial, secrets=MappingProxyType({})) -> BackendAttachment:
             return BackendAttachment(
                 console_endpoint=None,
                 rsp_endpoint=TcpEndpoint(host="127.0.0.1", port=request.transport_ref.opts["port"]),

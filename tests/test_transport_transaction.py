@@ -1,4 +1,5 @@
 import time
+from types import MappingProxyType
 
 import pytest
 from _layer4_fakes import (
@@ -63,8 +64,10 @@ def test_on_partial_writes_backend_pid_through_before_ready(tmp_path):
     reg = SessionRegistry(directory=tmp_path)
 
     class ReadsOwnRecordAtAttach(FakeQemuTransport):
-        def attach(self, request, *, cancel, deadline, on_partial):
-            attachment = super().attach(request, cancel=cancel, deadline=deadline, on_partial=on_partial)
+        def attach(self, request, *, cancel, deadline, on_partial, secrets=MappingProxyType({})):
+            attachment = super().attach(
+                request, cancel=cancel, deadline=deadline, on_partial=on_partial, secrets=secrets
+            )
             self.seen = reg.read_record(KEY)  # after the backend_process partial wrote through
             return attachment
 

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import ipaddress
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from types import MappingProxyType
 
 from linux_debug_mcp.domain import ErrorCategory
 from linux_debug_mcp.transport.base import (
@@ -48,6 +49,7 @@ class QemuGdbstubTransport(Transport):
         cancel: threading.Event,
         deadline: float,
         on_partial: Callable[[str, object], None],
+        secrets: Mapping[str, str] = MappingProxyType({}),
     ) -> BackendAttachment:
         opts = request.transport_ref.opts
         host = str(opts.get("host", "127.0.0.1"))

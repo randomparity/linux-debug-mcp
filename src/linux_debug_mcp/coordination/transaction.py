@@ -254,7 +254,7 @@ class TransportTransaction:
                 state = replace(state, lease_token=self._leases.acquire(request.target_key, LeaseOwner.TRANSPORT))
             _crash(crash_after, "lease")
             # (6) secrets (never persisted/logged).
-            self._secrets.resolve(list(channel.secret_refs))
+            resolved_secrets = self._secrets.resolve(list(channel.secret_refs))
             # (7) write-ahead OPENING record. The fenced token is held in-process keyed by
             # session_id (stop_guard_token persists only its secret as an audit marker — ADR 0003).
             session_id = new_session_id()
@@ -304,6 +304,7 @@ class TransportTransaction:
                 cancel=threading.Event(),
                 deadline=time.monotonic() + _ATTACH_DEADLINE_SECONDS,
                 on_partial=on_partial,
+                secrets=resolved_secrets,
             )
             if attachment.backend_pid is not None:
                 # transports that report the pid on the returned attachment rather than via the
