@@ -53,6 +53,7 @@ from linux_debug_mcp.coordination.registry import OrphanReap, RecoveryTombstone,
 from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import (
     ArtifactRef,
+    DebugIntrospectCheckPrerequisitesRequest,
     DebugIntrospectRunRequest,
     ErrorCategory,
     RunRequest,
@@ -1897,6 +1898,123 @@ def target_run_tests_handler(
         artifacts=safe_artifacts,
         suggested_next_actions=["artifacts.collect"],
     )
+
+
+@dataclass(frozen=True)
+class _ProbeContext:
+    store: ArtifactStore
+    run_id: str
+    rootfs: RootfsProfile
+    host_build_id: str | None
+    redactor: Redactor
+
+
+def _resolve_probe_context(
+    request: DebugIntrospectCheckPrerequisitesRequest,
+    *,
+    artifact_root: Path,
+    rootfs_profiles: dict[str, RootfsProfile],
+) -> tuple[_ProbeContext | None, ToolResponse | None]:
+    """Spec §6: all pre-SSH validation. Returns (context, None) on success or
+    (None, failure-response) on any short-circuit."""
+    run_id = request.run_id
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        if not (store.run_dir(run_id) / "manifest.json").is_file():
+            return None, _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return None, ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    for field_name, requested, recorded in (
+        ("target_profile", request.target_profile, manifest.request.target_profile),
+        ("rootfs_profile", request.rootfs_profile, manifest.request.rootfs_profile),
+        ("debug_profile", request.debug_profile, manifest.request.debug_profile),
+    ):
+        if requested is not None and recorded is not None and requested != recorded:
+            return None, _configuration_failure(
+                run_id=run_id,
+                message=f"{field_name} must match the immutable run manifest request",
+                details={
+                    "requested_profile": requested,
+                    "manifest_profile": recorded,
+                    "code": "manifest_profile_mismatch",
+                },
+            )
+    if request.target_ref != manifest.request.target_profile:
+        return None, _configuration_failure(
+            run_id=run_id,
+            message="target_ref must match the immutable run manifest target_profile",
+            details={
+                "requested_target_ref": request.target_ref,
+                "manifest_target_profile": manifest.request.target_profile,
+                "code": "manifest_profile_mismatch",
+            },
+        )
+    if not (5 <= request.timeout_seconds <= 60):
+        return None, _configuration_failure(
+            run_id=run_id,
+            message=f"timeout_seconds must be in [5, 60]; got {request.timeout_seconds}",
+            details={"code": "invalid_timeout"},
+        )
+
+    boot = manifest.step_results.get("boot")
+    if boot is None or boot.status != StepStatus.SUCCEEDED:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.READINESS_FAILURE,
+            run_id=run_id,
+            message="target has not booted; boot it before probing prerequisites",
+            details={"code": "target_not_booted"},
+            suggested_next_actions=["target.boot"],
+        )
+
+    rootfs_name = request.rootfs_profile or manifest.request.rootfs_profile
+    try:
+        rootfs = rootfs_profiles[rootfs_name]
+    except KeyError:
+        return None, _configuration_failure(run_id=run_id, message=f"unknown rootfs profile: {rootfs_name}")
+    if rootfs.access_method not in {"ssh", "ssh_and_serial"}:
+        return None, _configuration_failure(
+            run_id=run_id,
+            message=f"rootfs access_method must be ssh; got {rootfs.access_method}",
+            details={"code": "unsupported_access_method"},
+        )
+    for field_name, value in (("ssh_host", rootfs.ssh_host), ("ssh_user", rootfs.ssh_user)):
+        if not value:
+            return None, _configuration_failure(
+                run_id=run_id,
+                message=f"rootfs profile is missing required SSH field: {field_name}",
+                details={"code": "missing_ssh_field", "field": field_name},
+            )
+
+    build = manifest.step_results.get("build")
+    host_build_id = build.details.get("build_id") if build is not None else None
+    redactor = Redactor(secret_values=[rootfs.ssh_key_ref] if rootfs.ssh_key_ref else [])
+    return (
+        _ProbeContext(
+            store=store,
+            run_id=run_id,
+            rootfs=rootfs,
+            host_build_id=host_build_id,
+            redactor=redactor,
+        ),
+        None,
+    )
+
+
+def debug_introspect_check_prerequisites_handler(
+    request: DebugIntrospectCheckPrerequisitesRequest,
+    *,
+    artifact_root: Path,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    ssh_runner: SshRunner | None = None,
+) -> ToolResponse:
+    """Spec §3-§7: target-side drgn prerequisite probe."""
+    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    _ctx, failure = _resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
+    if failure is not None:
+        return failure
+    raise NotImplementedError("SSH body added in Task 8")
 
 
 def debug_introspect_run_handler(
