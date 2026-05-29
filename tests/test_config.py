@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from linux_debug_mcp.config import (
     ALLOWED_DEBUG_OPERATIONS,
+    INTROSPECT_DESTRUCTIVE_PERMISSIONS,
     MAX_INTROSPECT_CALLS_PER_RUN,
     PRELUDE_WARNING_FRACTION_PCT,
     ArtifactPolicy,
@@ -15,6 +16,7 @@ from linux_debug_mcp.config import (
     TargetProfile,
     TestCommand,
     TestSuiteProfile,
+    missing_destructive_permissions,
 )
 from linux_debug_mcp.safety.secrets import SecretReference, SecretReferenceKind
 
@@ -144,6 +146,7 @@ def test_default_debug_profile_matches_sprint_4_policy() -> None:
         "debug.introspect.helper",
         "debug.introspect.from_vmcore",
         "debug.introspect.from_vmcore_helper",
+        "debug.introspect.write",
     ]
 
 
@@ -315,6 +318,38 @@ def test_build_profile_rejects_targets_that_can_change_make_policy(target: str) 
 
 def test_allowed_debug_operations_includes_introspect_run() -> None:
     assert "debug.introspect.run" in ALLOWED_DEBUG_OPERATIONS
+
+
+def test_allowed_debug_operations_includes_introspect_write() -> None:
+    assert "debug.introspect.write" in ALLOWED_DEBUG_OPERATIONS
+
+
+def test_introspect_destructive_permissions_has_run_entry() -> None:
+    assert INTROSPECT_DESTRUCTIVE_PERMISSIONS["debug.introspect.run"] == [
+        "mutate live kernel state via drgn write APIs"
+    ]
+
+
+def test_missing_destructive_permissions_introspect_registry() -> None:
+    required = INTROSPECT_DESTRUCTIVE_PERMISSIONS["debug.introspect.run"]
+    assert (
+        missing_destructive_permissions("debug.introspect.run", [], registry=INTROSPECT_DESTRUCTIVE_PERMISSIONS)
+        == required
+    )
+    assert (
+        missing_destructive_permissions("debug.introspect.run", required, registry=INTROSPECT_DESTRUCTIVE_PERMISSIONS)
+        == []
+    )
+    assert (
+        missing_destructive_permissions(
+            "debug.introspect.run", [*required, "extra"], registry=INTROSPECT_DESTRUCTIVE_PERMISSIONS
+        )
+        == []
+    )
+
+
+def test_missing_destructive_permissions_defaults_to_transport_registry() -> None:
+    assert missing_destructive_permissions("transport.inject_break", []) == ["drop target kernel into the debugger"]
 
 
 def test_max_introspect_calls_per_run_default() -> None:

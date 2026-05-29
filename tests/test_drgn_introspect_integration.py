@@ -288,3 +288,63 @@ def test_introspect_build_id_round_trips(tmp_path) -> None:
     manifest = ctx.store.load_manifest(ctx.run_id)
     recorded = manifest.step_results["build"].details["build_id"]
     assert response.data["build_id"] == recorded
+
+
+# ---------------------------------------------------------------------------
+# #56 write-mode round trips (env-gated)
+# ---------------------------------------------------------------------------
+
+_WRITE_PERM = "mutate live kernel state via drgn write APIs"
+
+
+def test_introspect_allow_write_false_blocks_prog_write(tmp_path) -> None:
+    _require_integration_env()
+    ctx = _bootstrap_booted_run(tmp_path)
+    request = DebugIntrospectRunRequest(
+        run_id=ctx.run_id,
+        target_ref="pilot-libvirt",
+        script='prog.write(0, b"\\x00")',
+        timeout_seconds=30,
+        allow_write=False,
+    )
+    response = debug_introspect_run_handler(
+        request,
+        artifact_root=tmp_path / "runs",
+        target_profiles=ctx.target_profiles,
+        rootfs_profiles=ctx.rootfs_profiles,
+        admission=ctx.admission,
+        session_registry=ctx.session_registry,
+    )
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert response.error.details["code"] == "write_mode_disabled"
+
+
+def test_introspect_allow_write_true_reaches_drgn(tmp_path) -> None:
+    _require_integration_env()
+    ctx = _bootstrap_booted_run(tmp_path)
+    request = DebugIntrospectRunRequest(
+        run_id=ctx.run_id,
+        target_ref="pilot-libvirt",
+        script='prog.write(0, b"\\x00"); emit({"reached": True})',
+        timeout_seconds=30,
+        allow_write=True,
+        acknowledged_permissions=[_WRITE_PERM],
+    )
+    response = debug_introspect_run_handler(
+        request,
+        artifact_root=tmp_path / "runs",
+        target_profiles=ctx.target_profiles,
+        rootfs_profiles=ctx.rootfs_profiles,
+        admission=ctx.admission,
+        session_registry=ctx.session_registry,
+    )
+    # Under write mode the guard is absent, so prog.write reaches drgn, which
+    # fails on today's read-only live target (no writable target exists yet).
+    # The contract asserted here: the call is NOT rejected as write_mode_disabled,
+    # proving the guard is not installed under write mode. A drgn-level write
+    # failure surfaces as a script error outcome (ok=True, status="script_error").
+    if response.ok:
+        assert response.data["status"] in {"ok", "script_error"}
+    else:
+        assert response.error.details.get("code") != "write_mode_disabled"

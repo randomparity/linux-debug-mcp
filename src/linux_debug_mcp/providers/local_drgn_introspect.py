@@ -104,7 +104,8 @@ try:
     from drgn.helpers.linux import *  # noqa: F401,F403,E402
     _li_drgn_helper_names = set(globals().keys()) - _li_pre_helpers
 
-    prog = drgn.Program()
+${ALLOW_WRITE_SETUP}
+    prog = _li_program_class()
     prog.set_kernel()
     prog.load_default_debug_info()
 except Exception as exc:
@@ -146,7 +147,10 @@ if _li_result["build_id"] != "${EXPECTED_BUILD_ID}":
 
 """
 
-_WRAPPER_BODY = r"""_li_emit_buffer = []
+_WRAPPER_BODY = r"""class _li_WriteModeDisabled(Exception):
+    pass
+
+_li_emit_buffer = []
 _li_emit_overflow = False
 
 def emit(obj):
@@ -206,6 +210,11 @@ with _li_contextlib.redirect_stdout(user_stdout):
     try:
         exec(compiled, namespace)
         _li_result["outcome"] = {"status": "ok"}
+    except _li_WriteModeDisabled as exc:
+        msg, msg_trunc = _li_truncate(str(exc), _li_caps["error_message"])
+        _li_result["outcome"] = {"status": "write_mode_disabled",
+                                 "error_message": msg}
+        _li_result["truncated"]["error_message"] = msg_trunc
     except BaseException as exc:
         tb, tb_trunc = _li_truncate(_li_traceback.format_exc(), _li_caps["traceback"])
         msg, msg_trunc = _li_truncate(str(exc), _li_caps["error_message"])
@@ -251,6 +260,24 @@ finally:
 """
 
 WRAPPER_TEMPLATE = Template(_WRAPPER_PROLOGUE_LIVE + _WRAPPER_BODY)
+
+
+# ADR 0011 / #56: the live prologue's ${ALLOW_WRITE_SETUP} block. When write mode is off the
+# program is a drgn.Program subclass whose write() raises the body's _li_WriteModeDisabled
+# sentinel (caught -> write_mode_disabled outcome). A subclass — not a proxy — keeps the program
+# a real Program (isinstance true, native reads, drgn C constructors accept it), so AC#1 holds.
+# Both blocks are indented 4 spaces to sit inside the prologue's drgn-open `try:`.
+_ALLOW_WRITE_SETUP_GUARDED = (
+    "    class _li_GuardedProgram(drgn.Program):\n"
+    "        def write(self, *_li_a, **_li_k):\n"
+    "            raise _li_WriteModeDisabled('allow_write is false; drgn write APIs are disabled')\n"
+    "    _li_program_class = _li_GuardedProgram"
+)
+_ALLOW_WRITE_SETUP_PLAIN = "    _li_program_class = drgn.Program"
+
+
+def _allow_write_setup(allow_write: bool) -> str:
+    return _ALLOW_WRITE_SETUP_PLAIN if allow_write else _ALLOW_WRITE_SETUP_GUARDED
 
 
 # Spec §4.2 / ADR 0010: the offline prologue. Same _li_result shape and the same
@@ -484,6 +511,7 @@ def render_wrapper(
     call_id: str,
     args_json: str = "{}",
     caps: dict[str, int] | None = None,
+    allow_write: bool = False,
 ) -> str:
     """Render the on-target wrapper.
 
@@ -500,6 +528,11 @@ def render_wrapper(
     ``args_json`` is a JSON object string injected into the user namespace as
     ``args``. Defaults to ``"{}"`` (empty dict). ``caps`` overrides individual
     runner caps; unknown keys or non-positive values raise ``WrapperRenderError``.
+
+    ``allow_write`` (ADR 0011 / #56): when False (default) the program is a
+    ``drgn.Program`` subclass whose ``write()`` raises ``_li_WriteModeDisabled``
+    (surfaced as a ``write_mode_disabled`` outcome); when True the plain
+    ``drgn.Program`` is used and writes flow to drgn.
     """
     if not BUILD_ID_RE.match(expected_build_id):
         raise WrapperRenderError(f"expected_build_id must match {BUILD_ID_RE.pattern}; got {expected_build_id!r}")
@@ -520,6 +553,7 @@ def render_wrapper(
         CALL_ID=call_id,
         ARGS_B64=args_b64,
         CAPS_JSON=json.dumps(merged_caps),
+        ALLOW_WRITE_SETUP=_allow_write_setup(allow_write),
     )
 
 
@@ -564,12 +598,15 @@ def render_wrapper_skeleton(
     )
     encoded = base64.b64encode(placeholder.encode("utf-8")).decode("ascii")
     args_b64 = base64.b64encode(args_json.encode("utf-8")).decode("ascii")
+    # Skeleton mirrors the default read-only render (ADR 0011 §6): the guarded
+    # setup keeps the agent-visible skeleton faithful to a default call.
     return WRAPPER_TEMPLATE.substitute(
         USER_SCRIPT_B64=encoded,
         EXPECTED_BUILD_ID=expected_build_id,
         CALL_ID=call_id,
         ARGS_B64=args_b64,
         CAPS_JSON=json.dumps(merged_caps),
+        ALLOW_WRITE_SETUP=_allow_write_setup(False),
     )
 
 

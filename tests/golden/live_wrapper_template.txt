@@ -27,7 +27,8 @@ try:
     from drgn.helpers.linux import *  # noqa: F401,F403,E402
     _li_drgn_helper_names = set(globals().keys()) - _li_pre_helpers
 
-    prog = drgn.Program()
+${ALLOW_WRITE_SETUP}
+    prog = _li_program_class()
     prog.set_kernel()
     prog.load_default_debug_info()
 except Exception as exc:
@@ -66,6 +67,9 @@ if _li_result["build_id"] != "${EXPECTED_BUILD_ID}":
         _li_json.dump(_li_result, _li_sys.stdout)
     finally:
         _li_sys.exit(4)
+
+class _li_WriteModeDisabled(Exception):
+    pass
 
 _li_emit_buffer = []
 _li_emit_overflow = False
@@ -127,6 +131,11 @@ with _li_contextlib.redirect_stdout(user_stdout):
     try:
         exec(compiled, namespace)
         _li_result["outcome"] = {"status": "ok"}
+    except _li_WriteModeDisabled as exc:
+        msg, msg_trunc = _li_truncate(str(exc), _li_caps["error_message"])
+        _li_result["outcome"] = {"status": "write_mode_disabled",
+                                 "error_message": msg}
+        _li_result["truncated"]["error_message"] = msg_trunc
     except BaseException as exc:
         tb, tb_trunc = _li_truncate(_li_traceback.format_exc(), _li_caps["traceback"])
         msg, msg_trunc = _li_truncate(str(exc), _li_caps["error_message"])

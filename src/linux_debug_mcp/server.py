@@ -23,6 +23,7 @@ from linux_debug_mcp.artifacts.manifest import BootAttempt, RunManifest
 from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
 from linux_debug_mcp.config import (
     ALLOWED_DEBUG_OPERATIONS,
+    INTROSPECT_DESTRUCTIVE_PERMISSIONS,
     MAX_INTROSPECT_CALLS_PER_RUN,
     PRELUDE_WARNING_FRACTION_PCT,
     BootOverrides,
@@ -394,6 +395,8 @@ def _record_introspect_failure(
     outcome_status_for_forensics: str | None,
     include_stdout_json: bool = False,
     redacted_payload: dict[str, Any] | None = None,
+    allow_write: bool = False,
+    acknowledged_permissions: list[str] | None = None,
 ) -> ToolResponse:
     """Persist artifacts, record the FAILED step, return ``ToolResponse.failure``.
 
@@ -443,6 +446,12 @@ def _record_introspect_failure(
     # than recording a misleading `ssh_user: null` on a non-SSH step.
     if ssh_user is not None:
         details["ssh_user"] = ssh_user
+    # ADR 0011 / #56 audit: record allow_write on every live call so failed/blocked
+    # write-mode calls remain visible in the manifest; record the satisfied required
+    # permissions only when write mode was used.
+    details["allow_write"] = allow_write
+    if allow_write:
+        details["acknowledged_permissions"] = list(acknowledged_permissions or [])
     step = StepResult(
         step_name=f"introspect:{call_id}",
         status=StepStatus.FAILED,
@@ -2546,14 +2555,38 @@ def _execute_introspect_call(
             details={**exc.details, "code": "operation_disabled"},
         )
 
-    # Spec §5.2 step 3: request invariants.
+    # Spec §5.2 step 3 / ADR 0011: write-mode policy gate (live path only). The
+    # security boundary is host-side and runs before any SSH/admission work: a
+    # write requires BOTH the DebugProfile write capability AND a per-call ack.
     if request.allow_write:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message="allow_write=true is not yet supported (#56 — write-mode opt-in)",
-            details={"code": "allow_write_not_supported"},
+        try:
+            _ensure_debug_operation_enabled(resolved_debug, "debug.introspect.write")
+        except ProviderDebugError as exc:
+            return ToolResponse.failure(
+                category=exc.category,
+                message=str(exc),
+                run_id=run_id,
+                details={**exc.details, "code": "operation_disabled"},
+            )
+        missing = missing_destructive_permissions(
+            operation_name,
+            request.acknowledged_permissions,
+            registry=INTROSPECT_DESTRUCTIVE_PERMISSIONS,
         )
+        if missing:
+            return ToolResponse.failure(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                run_id=run_id,
+                message=(
+                    "debug.introspect.run write mode is destructive; acknowledge its required permissions to proceed"
+                ),
+                details={"code": "permission_required", "required_permissions": missing},
+            )
+    # The satisfied required permissions for audit/recording (the gate guarantees all
+    # required perms are acknowledged when allow_write is set; empty otherwise).
+    write_mode_permissions = (
+        list(INTROSPECT_DESTRUCTIVE_PERMISSIONS.get(operation_name, [])) if request.allow_write else []
+    )
     if not (5 <= request.timeout_seconds <= 300):
         return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
@@ -2767,6 +2800,18 @@ def _execute_introspect_call(
         sensitive_call_dir.parent.chmod(0o700)
         sensitive_call_dir.parent.parent.chmod(0o700)
 
+        # ADR 0011 / #56: one audit line per executed write-mode call, emitted as
+        # soon as the call_id is minted so it fires exactly once for every call
+        # that also gets a manifest step (independent of the later runner outcome).
+        if request.allow_write:
+            logger.warning(
+                "audit: %s write-mode invocation run_id=%s call_id=%s permissions=%s",
+                operation_name,
+                run_id,
+                call_id,
+                write_mode_permissions,
+            )
+
         args_json = _introspect_args_json(request)
         try:
             wrapper = render_wrapper(
@@ -2775,6 +2820,7 @@ def _execute_introspect_call(
                 call_id=call_id,
                 args_json=args_json,
                 caps=caps,
+                allow_write=request.allow_write,
             )
             skeleton = render_wrapper_skeleton(
                 expected_build_id=build_id,
@@ -2810,6 +2856,7 @@ def _execute_introspect_call(
                     "timeout_seconds": request.timeout_seconds,
                     "duration_ms": 0,
                     "wrapper_exit_code": None,
+                    "allow_write": request.allow_write,
                 },
             )
             _record_terminal_introspect_result(store, run_id, failed)
@@ -2964,6 +3011,8 @@ def _execute_introspect_call(
                 duration_ms=duration_ms,
                 ssh_user=resolved_rootfs.ssh_user,
                 outcome_status_for_forensics=None,
+                allow_write=request.allow_write,
+                acknowledged_permissions=write_mode_permissions,
             )
 
         # Spec §5.2 step 11+: shared post-runner finalization (live + vmcore).
@@ -2988,6 +3037,8 @@ def _execute_introspect_call(
             drgn_open_message="drgn could not attach to the live target",
             exec_principal=resolved_rootfs.ssh_user,
             post_validator=post_validator,
+            allow_write=request.allow_write,
+            acknowledged_permissions=write_mode_permissions,
         )
 
     except Exception:
@@ -3029,6 +3080,8 @@ def _finalize_introspect_call(
     drgn_open_message: str,
     exec_principal: str | None,
     post_validator: IntrospectPostValidator | None,
+    allow_write: bool = False,
+    acknowledged_permissions: list[str] | None = None,
 ) -> ToolResponse:
     """Shared post-runner stage for both the live (`_execute_introspect_call`)
     and offline (`_execute_vmcore_introspect_call`) paths (spec §7 / ADR 0010).
@@ -3078,6 +3131,8 @@ def _finalize_introspect_call(
             outcome_status_for_forensics=outcome_status_for_forensics,
             include_stdout_json=include_stdout_json,
             redacted_payload=redacted_payload,
+            allow_write=allow_write,
+            acknowledged_permissions=acknowledged_permissions,
         )
 
     if ssh_result.oversized_output or raw_stdout is None:
@@ -3180,6 +3235,18 @@ def _finalize_introspect_call(
             category=ErrorCategory.CONFIGURATION_ERROR,
             code="script_compile_error",
             message="user script failed to compile",
+            outcome_status_for_forensics=outcome_status,
+            include_stdout_json=True,
+            redacted_payload=rp,
+        )
+    if outcome_status == "write_mode_disabled":
+        # ADR 0011 / #56: the wrapper guard refused a drgn write under allow_write=false.
+        # Must be an explicit branch — an unmatched outcome status falls through to the
+        # success path below (`status="ok"`), which would report a blocked write as success.
+        return _fail(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            code="write_mode_disabled",
+            message="script attempted a drgn write API but allow_write is false",
             outcome_status_for_forensics=outcome_status,
             include_stdout_json=True,
             redacted_payload=rp,
@@ -3298,6 +3365,11 @@ def _finalize_introspect_call(
     # rather than recording a misleading `ssh_user: null` on a non-SSH step.
     if exec_principal is not None:
         step_details["ssh_user"] = exec_principal
+    # ADR 0011 / #56 audit: allow_write on every live call; satisfied required
+    # permissions only when write mode was used.
+    step_details["allow_write"] = allow_write
+    if allow_write:
+        step_details["acknowledged_permissions"] = list(acknowledged_permissions or [])
     if verdict is not None:
         step_details.update(verdict.extra_step_details)
     if step_status is StepStatus.FAILED:
@@ -3552,13 +3624,15 @@ def _execute_vmcore_introspect_call(
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
 
-    # Spec §6 step 2: request invariants (no profile fields to reconcile).
+    # Spec §6 step 2 / ADR 0011: a vmcore is an immutable core-dump file and the
+    # offline path carries no DebugProfile to gate against, so write mode does not
+    # apply here (it would be a phantom feature) — reject it with an accurate reason.
     if request.allow_write:
         return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
             run_id=run_id,
-            message="allow_write=true is not yet supported (#56 — write-mode opt-in)",
-            details={"code": "allow_write_not_supported"},
+            message="write mode is not applicable to offline vmcore analysis; the core file is immutable",
+            details={"code": "write_mode_not_applicable"},
         )
     if not (5 <= request.timeout_seconds <= 300):
         return ToolResponse.failure(
@@ -6200,6 +6274,7 @@ def create_app(
         artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
         timeout_seconds: int = 30,
         allow_write: bool = False,
+        acknowledged_permissions: list[str] | None = None,
         debug_profile: str | None = None,
         target_profile: str | None = None,
         rootfs_profile: str | None = None,
@@ -6210,6 +6285,7 @@ def create_app(
             script=script,
             timeout_seconds=timeout_seconds,
             allow_write=allow_write,
+            acknowledged_permissions=acknowledged_permissions or [],
             debug_profile=debug_profile,
             target_profile=target_profile,
             rootfs_profile=rootfs_profile,
