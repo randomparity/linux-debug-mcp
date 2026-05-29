@@ -12,13 +12,14 @@ the kernel's lockup detectors (and, on POWER, the platform/PHYP watchdog) keep
 counting, so on resume — or on the other still-running CPUs — a softlockup/
 hardlockup fires and the target panics or resets. This issue adds a **watchdog
 relax/restore helper**: it relaxes the relevant watchdogs **before** an interactive
-stop and restores their prior values **afterward**, including on error and timeout.
+stop and restores their prior values **afterward** — attempted (and the outcome
+recorded) on success, error, and timeout, bounded by the session window (§5).
 
-The helper is the first concrete `TeardownStep` (and paired enter-phase step) that
-hangs off the `SessionGuard` seam #66 shipped with empty slots. #66 defined
-**where** watchdog relax/restore hooks in; #69 defines **what it does** and proves
-the relax→restore round-trip and the restore-on-error / restore-on-timeout
-invariants by seam-level test.
+The helper is the first concrete `TeardownStep` (the restore) that hangs off the
+`SessionGuard` seam #66 shipped with empty slots, paired with a post-acquire
+`relax` call (§3.4). #66 defined **where** watchdog restore hooks in; #69 defines
+**what it does** and proves the relax→restore round-trip and the
+restore-on-error / restore-on-timeout behavior by seam-level test.
 
 ### 1.1 In scope
 
@@ -73,7 +74,7 @@ invariants by seam-level test.
 
 | Concern | Where | Status for #69 |
 |---|---|---|
-| Enter (`PreAttachPrecondition`) + exit (`TeardownStep`) slots | `seams/guard.py` `SessionGuard` | reused; #69 supplies one of each |
+| Exit (`TeardownStep`) slot | `seams/guard.py` `SessionGuard` | reused; #69 supplies the restore step (the relax is a post-acquire call, not a slot — §3.4) |
 | Reverse-order, suppress+aggregate teardown-step execution | `SessionGuard.teardown` | reused unchanged; the restore step relies on its non-fatal contract |
 | `SessionGuardContext` (`target_key`, `generation`, `session_id`, `reason`) | `seams/guard.py` | reused as the `relax`/`restore` key source |
 | Bounded, cancelable command execution over ssh | `providers/local_ssh_tests.py` `SshRunner` | the live `WatchdogControl` backing (future tier); #69 depends only on the abstraction |
@@ -303,16 +304,28 @@ same posture `SessionGuard.teardown` already takes for `close`.
 
 ## 5. restore-on-error and restore-on-timeout
 
-AC: watchdogs are restored "including on error/timeout." The two cases:
+AC: watchdogs are restored "including on error/timeout." The guarantee #69 makes is
+precise and **best-effort, not unconditional**: on every error/timeout exit the
+restore is **attempted** and any per-knob failure is **recorded** (into
+`TeardownReport.step_errors`), never silently dropped. Actual restoration is
+contingent on target reachability — on an error/timeout path the kernel may be
+parked/wedged and the in-band channel unreachable (§4.3), in which case the restore
+writes fail-fast and are recorded `write_failed`. The real safety property is the
+pairing: **relax happens only in the pre-halt window (so the relaxed window is
+bounded by the session), and restore is attempted-and-recorded on every synchronous
+exit.** The two cases:
 
 - **Error** — a post-`open()` failure (`provider.start_session` raises, or a
   post-attach precondition rejects) drives `teardown(reason="attach_error")`, which
-  runs the `WatchdogRestoreStep`. Captured values are restored. Tested directly at
-  the seam by driving `teardown` with a provider/step that raises.
+  runs the `WatchdogRestoreStep`: restore is attempted against the (possibly
+  unreachable) target and its outcome recorded. Tested both ways at the seam —
+  a reachable channel (captured values written back) **and** an unreachable channel
+  (writes fail, recorded in `step_errors`, capture still cleared).
 - **Timeout** — an interactive-stop / attach **operation** timeout surfaces as a
   `ProviderDebugError` (a timeout `ErrorCategory`) from `provider.start_session`,
-  taking the **same** `attach_error` teardown path → restore runs. Tested by a
-  provider whose `start_session` raises a timeout-category error.
+  taking the **same** `attach_error` teardown path → restore is attempted. A timeout
+  is itself evidence the target may be unreachable, so this is the case most likely
+  to record `write_failed`; the contract is attempt-and-record, not guaranteed write.
 
 The **lifecycle-dispatcher invalidation path** (`resetting` / `crashed` /
 `releasing` / `lease_expired`) is deliberately **not** a restore path, exactly as
@@ -329,11 +342,11 @@ covered by #66's dispatcher conformance test; #69's timeout concern is the
 
 - `relax` and `restore` **never raise** — they return reports. A channel that
   raises is caught and recorded per-knob.
-- `WatchdogRelaxStep.check` is side-effecting and must not abort the enter on a
-  relax failure: a watchdog that could not be relaxed is a logged degradation, not a
-  reason to refuse the session (refusing would strand the agent with no debug path
-  for a non-safety-critical knob). It records the `RelaxReport` and returns. (A live
-  tier that wants a hard refusal on a *specific* critical knob can add its own
+- The post-acquire `relax(ctx)` call records its `RelaxReport`; the live integrator
+  must **not** abort the session on a relax failure — a watchdog that could not be
+  relaxed is a logged degradation, not a reason to refuse the session (refusing would
+  strand the agent with no debug path for a non-safety-critical knob). (A live tier
+  that wants a hard refusal on a *specific* critical knob can add its own
   `PreAttachPrecondition`; that policy is out of scope for #69.)
 - `WatchdogRestoreStep.teardown` raises `WatchdogRestoreError` only on a restore
   **write** failure, so the failure is captured into `TeardownReport.step_errors`
@@ -369,12 +382,18 @@ Seam-level, injected `FakeWatchdogControl`, following the repo convention (no MC
   the same real `session_id` round-trip even though the relax ctx and teardown ctx
   carry different `generation` values (proving the helper does not key on the
   non-authoritative `generation`).
-- **restore-on-error**: a `SessionGuard` with the restore step + a `provider`/step
-  that raises drives `teardown(reason="attach_error")`; assert each captured knob
-  restored and `resume_ok` still holds (close still ran).
+- **restore-on-error (reachable)**: a `SessionGuard` with the restore step + a
+  `provider`/step that raises drives `teardown(reason="attach_error")`; with a
+  reachable channel assert each captured knob restored and `resume_ok` still holds
+  (close still ran).
+- **restore-on-error (unreachable channel)**: the same `attach_error` teardown but
+  the channel's `write_knob` fails (target wedged/unreachable); assert the failure is
+  recorded in `TeardownReport.step_errors`, the capture is still cleared (a retry is
+  a clean `noop`), and `resume_ok` still holds — proving the degraded path is handled,
+  not that restore magically succeeds.
 - **restore-on-timeout**: a `provider.start_session` raising a timeout-category
-  `ProviderDebugError` drives the `attach_error` teardown → restore runs; assert
-  restore happened.
+  `ProviderDebugError` drives the `attach_error` teardown → restore is attempted;
+  assert it runs (outcome recorded) on the same path as restore-on-error.
 - **restore-write failure is non-fatal**: a `FakeWatchdogControl` whose `write_knob`
   fails on restore for one knob → `WatchdogRestoreStep.teardown` raises, the error is
   aggregated into `TeardownReport.step_errors`, the **other** knobs are still

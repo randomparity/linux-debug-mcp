@@ -74,7 +74,10 @@ is not a `SessionGuard` exit and a reboot restores watchdog defaults anyway.
    the dispatcher reboot path is a deliberate no-op.** An attach/interactive-stop
    timeout surfaces as a timeout-category `ProviderDebugError` from
    `provider.start_session`, which drives the same `teardown(reason="attach_error")`
-   the error path takes — so restore runs. The lifecycle-dispatcher invalidation
+   the error path takes — so restore is **attempted and its outcome recorded**
+   (restoration is best-effort: an unreachable/wedged target makes the writes fail
+   fast and record `write_failed`, never silently dropped — spec §5). The
+   lifecycle-dispatcher invalidation
    path (`resetting`/`crashed`/`releasing`/`lease_expired`) is **not** a restore
    path: ADR 0013 already established it is not a `SessionGuard` exit and the target
    reboots with default watchdog settings. #69 adds a conformance assertion that the
