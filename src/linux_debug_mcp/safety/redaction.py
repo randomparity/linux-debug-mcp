@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import logging
 import re
+import traceback
 from collections.abc import Mapping
 from typing import Any
+
+from linux_debug_mcp.safety.secret_registry import SecretRegistry
 
 REDACTION = "[REDACTED]"
 
@@ -40,3 +44,43 @@ class Redactor:
         if isinstance(value, tuple):
             return tuple(self.redact_value(item) for item in value)
         return value
+
+
+class SecretRedactionFilter(logging.Filter):
+    """Handler-boundary redaction. Attach to every handler (not only the root logger) so a
+    module that sets ``propagate=False`` or owns its handler cannot bypass redaction. Masks
+    the fully rendered message AND any exception/stack text against the registry snapshot
+    plus the ``Redactor`` key/value patterns. Caches a ``Redactor``, rebuilding only when the
+    registry version changes."""
+
+    def __init__(self, registry: SecretRegistry) -> None:
+        super().__init__()
+        self._registry = registry
+        self._cached_version = -1
+        self._redactor = Redactor()
+
+    def _current(self) -> Redactor:
+        version = self._registry.version()
+        if version != self._cached_version:
+            self._redactor = Redactor(list(self._registry.snapshot()))
+            self._cached_version = version
+        return self._redactor
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        redactor = self._current()
+        try:
+            message = record.getMessage()
+        except Exception:  # bad %-formatting must never break logging
+            message = f"{record.msg!r} args={record.args!r}"
+        if not isinstance(message, str):
+            message = str(message)
+        record.msg = redactor.redact_text(message)
+        record.args = ()
+        if record.exc_info:
+            record.exc_text = "".join(traceback.format_exception(*record.exc_info))
+            record.exc_info = None
+        if record.exc_text:
+            record.exc_text = redactor.redact_text(record.exc_text)
+        if record.stack_info:
+            record.stack_info = redactor.redact_text(record.stack_info)
+        return True
