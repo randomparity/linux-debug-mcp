@@ -7,7 +7,9 @@ from _layer4_fakes import (
     FakeBlockingReapProxy,
     FakeBrokeredTransport,
     FakeQemuTransport,
+    build_dual_channel_txn,
     build_txn,
+    make_console_request,
     make_request,
 )
 
@@ -29,6 +31,33 @@ def test_open_happy_path_returns_loopback_session(tmp_path):
     # promoted: a second open on the same target is refused by the guard
     with pytest.raises(GuardConflict):
         txn.open(make_request())
+
+
+def test_stop_capable_guard_is_target_wide_across_rsp_and_console(tmp_path):
+    """§5.6 rule 1 / issue #68 headline AC: a target exposing BOTH a separate RSP path AND a console
+    refuses a second stop-capable session target-wide (gdb-on-RSP holds the guard, a kdb-style open
+    on the console is refused), and the refusal is the StopCapableGuard — NOT the console lease. The
+    console lease is still FREE when the second open is rejected, because the guard (open() step 4)
+    is checked before and independently of the console lease (step 5): the console lease is
+    necessary for a console stop session but not sufficient for the single-holder invariant."""
+    guard, leases = InProcessStopCapableGuard(), ConsoleLeaseManager()
+    txn, _ = build_dual_channel_txn(registry=SessionRegistry(directory=tmp_path), guard=guard, leases=leases)
+
+    # gdb attaches over the RSP path and holds the target-wide guard. The RSP path owns no console,
+    # so it takes no console lease — the lease stays FREE throughout.
+    rsp_session = txn.open(make_request())
+    assert rsp_session.record_state is RecordState.READY
+    assert rsp_session.console_lease_token is None
+    assert leases.snapshot(KEY)[0] is LeaseOwner.FREE
+
+    # a SECOND stop session on the CONSOLE channel of the SAME target is refused target-wide...
+    with pytest.raises(GuardConflict):
+        txn.open(make_console_request())
+
+    # ...by the guard, not the lease: the console lease is STILL free, proving the console open was
+    # rejected at the guard step (4) before it ever reached lease acquisition (5). A guard keyed on
+    # the console lease would have let this second stop session through (the lease was free).
+    assert leases.snapshot(KEY)[0] is LeaseOwner.FREE
 
 
 def test_brokered_required_refused_before_any_acquisition(tmp_path):

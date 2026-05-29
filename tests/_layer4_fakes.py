@@ -39,6 +39,12 @@ PLATFORM = PlatformMetadata(
     break_hints=[BreakHint.GDBSTUB_NATIVE],
 )
 CHANNEL = TransportRef(provider="qemu-gdbstub", channel_id="rsp0", line_role=LineRole.RSP, caps=("rsp",))
+# A loopback-local console channel on the SAME target as CHANNEL — the §5.6 "target exposing both a
+# separate RSP path AND a console" topology. Distinct from FakeBrokeredTransport (BROKERED_REQUIRED,
+# refused pre-attach): this one is LOOPBACK_LOCAL so an open via it reaches the guard step.
+CONSOLE_CHANNEL = TransportRef(
+    provider="qemu-virtio-serial", channel_id="con0", line_role=LineRole.SHARED_CONSOLE, caps=("console",)
+)
 
 
 class FakeQemuTransport(Transport):
@@ -98,6 +104,32 @@ class FakeBrokeredTransport(FakeQemuTransport):
             provides_rsp=True,
             supports_uart_break=False,
             endpoint_exposure=EndpointExposure.BROKERED_REQUIRED,
+        )
+
+
+class FakeConsoleTransport(FakeQemuTransport):
+    """Loopback-local console stand-in (`provides_console=True`) for the §5.6 mixed-path case: a
+    target exposing a console alongside a separate RSP path. Acquires the console lease at open()
+    step 5 — so a test can prove the StopCapableGuard (step 4) refuses a second stop session BEFORE
+    the lease is ever touched, i.e. independently of the console lease."""
+
+    @property
+    def capability(self) -> TransportCapability:
+        return TransportCapability(
+            provider_name="qemu-virtio-serial",
+            locality=TransportLocality.LOCAL,
+            provides_console=True,
+            provides_rsp=False,
+            supports_uart_break=True,
+            endpoint_exposure=EndpointExposure.LOOPBACK_LOCAL,
+        )
+
+    def attach(self, request, *, cancel, deadline, on_partial, secrets=MappingProxyType({})) -> BackendAttachment:
+        return BackendAttachment(
+            console_endpoint=TcpEndpoint(host="127.0.0.1", port=5552),
+            rsp_endpoint=None,
+            backend_pid=None,
+            backend_start_time=None,
         )
 
 
@@ -209,6 +241,38 @@ def build_txn(
     return txn, admission
 
 
+def build_dual_channel_txn(
+    *,
+    registry: SessionRegistry,
+    guard=None,
+    leases=None,
+    generation: int = 1,
+):
+    """A transaction over a target exposing BOTH `CHANNEL` (RSP) and `CONSOLE_CHANNEL` (console) —
+    the §5.6 "separate RSP path alongside a console" topology — with both transports registered.
+    Returns (txn, admission). Used to prove the StopCapableGuard is target-wide across distinct
+    physical paths, independent of the console lease."""
+    store = SnapshotStore()
+    seed_snapshot(store, generation=generation, transports=(CHANNEL, CONSOLE_CHANNEL))
+    admission = AdmissionService(store)
+    rsp, console = FakeQemuTransport(), FakeConsoleTransport()
+    txn = TransportTransaction(
+        admission=admission,
+        registry=registry,
+        guard=guard or InProcessStopCapableGuard(),
+        leases=leases or ConsoleLeaseManager(),
+        secrets=SecretsStore(
+            definitions=[], backends={SecretReferenceKind.ENV: EnvSecretsBackend()}, registry=SecretRegistry()
+        ),
+        break_policy=FakeBreakPolicy(),
+        transports={
+            rsp.capability.provider_name: rsp,
+            console.capability.provider_name: console,
+        },
+    )
+    return txn, admission
+
+
 def make_request(provider: str = "qemu-gdbstub", *, generation: int = 1) -> OpenRequest:
     ref = (
         CHANNEL
@@ -216,3 +280,8 @@ def make_request(provider: str = "qemu-gdbstub", *, generation: int = 1) -> Open
         else TransportRef(provider=provider, channel_id="rsp0", line_role=LineRole.RSP, caps=("rsp",))
     )
     return OpenRequest(target_key=KEY, generation=generation, transport_ref=ref, platform=PLATFORM)
+
+
+def make_console_request(*, generation: int = 1) -> OpenRequest:
+    """An open() request bound to `CONSOLE_CHANNEL` — the console path of a dual-channel target."""
+    return OpenRequest(target_key=KEY, generation=generation, transport_ref=CONSOLE_CHANNEL, platform=PLATFORM)
