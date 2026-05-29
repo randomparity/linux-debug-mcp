@@ -43,6 +43,13 @@ check-docs:
     # (e.g. SPRINT_4_DEBUG_OPERATIONS), so they are excluded.
     ! rg -n "sprin[t]|Sprin[t]|SPRIN[T]" README.md docs -g '!docs/superpowers/**'
 
+check-ipmi:
+    # IPMI hardening guard (issue #67): no hardcoded cipher-0 / non-lanplus
+    # ipmitool invocations under src/. safety/ipmi.py is the one file allowed to
+    # name the forbidden constant. Patterns are \b-anchored so -I lanplus and
+    # -C 3 / -C 30 are not flagged. Default ripgrep engine (no PCRE2).
+    ! rg -n -e '-I lan\b|-C *0\b' src -g '!src/linux_debug_mcp/safety/ipmi.py'
+
 audit:
     uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > /tmp/runtime-reqs.txt
     uv run --with 'pip-audit==2.10.0' pip-audit --strict -r /tmp/runtime-reqs.txt

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from linux_debug_mcp.safety.ipmi import (
@@ -49,3 +53,47 @@ def test_non_allowlisted_suites_rejected(suite: int) -> None:
 
 def test_ipmi_policy_error_is_value_error() -> None:
     assert issubclass(IpmiPolicyError, ValueError)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _run_check_ipmi() -> subprocess.CompletedProcess[str]:
+    just = shutil.which("just")
+    if just is None:
+        pytest.skip("just is not installed")
+    return subprocess.run(
+        [just, "check-ipmi"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_check_ipmi_passes_on_clean_tree() -> None:
+    result = _run_check_ipmi()
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_guard_pattern_flags_forbidden_and_passes_compliant(tmp_path: Path) -> None:
+    pattern = r"-I lan\b|-C *0\b"
+    sample = tmp_path / "sample.txt"
+    sample.write_text(
+        "ipmitool -I lanplus -C 3 sol activate\n"
+        "ipmitool -I lanplus -C 30 raw\n"
+        "ipmitool -I lan -U admin\n"
+        "ipmitool -C 0 chassis\n"
+        "ipmitool -C0 power\n"
+    )
+    rg = shutil.which("rg")
+    if rg is None:
+        pytest.skip("ripgrep is not installed")
+    proc = subprocess.run(
+        [rg, "-n", "-e", pattern, str(sample)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    matched_lines = {line.split(":", 1)[0] for line in proc.stdout.splitlines()}
+    assert matched_lines == {"3", "4", "5"}
