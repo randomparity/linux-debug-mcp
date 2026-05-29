@@ -79,7 +79,14 @@ class InProcessStopCapableGuard:
         codebase does NOT use it: `TransportTransaction` holds the `GuardToken` in-process and frees
         the guard by the fenced `release(target_key, token)` instead (ADR 0002 Finding #4, ADR 0015),
         so `revoke` has no in-process caller today. It is retained as a Protocol primitive a swapped
-        #08 impl (or a tokenless force-reap path) can use. The outstanding token is fenced: a
+        #08 impl (or a tokenless force-reap path) can use.
+
+        Safe-use precondition: revoke clears the CURRENT holder unconditionally, so it can wrongly
+        clear a NEWER holder that acquired after a §5.4 revoke -> re-acquire — the "stale clears
+        newer" violation fenced release prevents. Call it ONLY when no live holder it would wrongly
+        clear can exist: the post-restart reconcile path, where the instance.lock flock + reconcile-
+        before-admit prove the prior holder dead (ADR 0002). Within one server lifetime, token-
+        holding paths MUST use `release(target_key, token)`. The outstanding token is still fenced: a
         subsequent `release(old_token)` is a no-op, so a revoke can never be undone by a stale token."""
         with self._lock:
             self._holders.pop(target_key, None)
