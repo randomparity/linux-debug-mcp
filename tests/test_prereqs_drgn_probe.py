@@ -16,7 +16,7 @@ from linux_debug_mcp.prereqs.drgn_probe import (
     normalize_build_id,
     python_missing_checks,
 )
-from linux_debug_mcp.providers.local_drgn_introspect import TARGET_PYTHON_ARGV
+from linux_debug_mcp.providers.local_drgn_introspect import TARGET_PYTHON_ARGV, local_drgn_introspect_capability
 
 
 def test_target_python_argv_is_shared_constant() -> None:
@@ -189,3 +189,9 @@ def test_probe_script_runs_and_emits_valid_json() -> None:
     ):
         assert key in doc
     assert isinstance(doc["vmlinux_debuginfo"]["candidates"], list)
+
+
+def test_capability_advertises_check_prerequisites() -> None:
+    cap = local_drgn_introspect_capability()
+    assert "debug.introspect.check_prerequisites" in cap.operations
+    assert "debug.introspect.run" in cap.operations
