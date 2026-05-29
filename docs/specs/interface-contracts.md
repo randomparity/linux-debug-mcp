@@ -544,10 +544,12 @@ rather than racing teardown. Having closed admission, it then:
    re-`acquire`-ing it for `provisioner` if a re-boot needs it — so provisioning
    can drive boot selection again. `revoke()` bumps the **lease** generation,
    fencing out any console write from a not-yet-torn-down helper.
-4. `revoke()` the `StopCapableGuard` for the `TargetKey` (§5.6) under the same
-   ordering as session teardown, releasing the stop-capable slot so a fresh
-   session can attach after recovery — otherwise an invalidated target would be
-   stranded permanently stop-session-busy.
+4. **Free the `StopCapableGuard`** for the `TargetKey` (§5.6) under the same
+   ordering as session teardown — by the fenced `release(target_key, token)` where
+   the invalidator holds the session's token (the in-process Layer-4 path), else
+   `revoke(target_key)` — releasing the stop-capable slot so a fresh session can
+   attach after recovery; otherwise an invalidated target would be stranded
+   permanently stop-session-busy.
 5. **Bump the `TargetKey`'s handle `generation`** (§3.1). Every `TargetHandle` and
    `OpenRequest` minted in the incarnation just torn down is now `stale_handle`;
    when the target next reaches `READY`, `wait_ready()` stamps the new generation
@@ -630,10 +632,13 @@ rather than fail. Three rules (resolved, §9.4):
    `acquire(target_key) -> token` (CAS on the empty slot; a second attach gets
    `stop_session_conflict`), the token is stored in the session binding,
    detach/close `release(target_key, token)`s it idempotently (a stale token is a
-   no-op), and §5.4 invalidation/force-reap `revoke(target_key)`s it. The guard
-   never outlives the session that holds it, so an invalidation can never strand a
-   target permanently stop-session-busy and a stale release can never clear a
-   newer holder.
+   no-op), and §5.4 invalidation/force-reap frees the slot — by the same fenced
+   `release(target_key, token)` where the invalidator holds the session's token
+   (the in-process Layer-4 path; every in-process holder does), with
+   `revoke(target_key)` the coarse tokenless force-free retained for a holder that
+   does not. The guard never outlives the session that holds it, so an invalidation
+   can never strand a target permanently stop-session-busy and a stale release can
+   never clear a newer holder.
 2. **ssh-tier ops are gated on `EXECUTING`.** While `HALTED`, `debug.introspect`
    (live) and smoke tests are **rejected immediately** with a clear error
    ("target halted in debugger; resume or detach first") — never left to hang.
@@ -741,7 +746,7 @@ so the contract is enforced, not just described:
 - [ ] A live `debug.introspect` op goes through the same admission service: it is
       rejected against a `RESETTING`/`RELEASING` target and against a `HALTED`
       kernel, while offline vmcore `debug.postmortem` bypasses admission (§5.3).
-- [ ] `StopCapableGuard` is released on detach and revoked on §5.4 invalidation: a
+- [ ] `StopCapableGuard` is released on detach and freed on §5.4 invalidation: a
       reset/crash/lease-expiry frees the stop-capable slot so a fresh session can
       attach, and a stale token cannot clear a newer holder (§5.4, §5.6).
 - [ ] A `reset()`/`release()` racing an **admitted ssh-tier op** cancels that op
