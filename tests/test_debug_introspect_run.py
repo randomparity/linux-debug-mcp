@@ -273,22 +273,195 @@ def _happy_ssh_result() -> SshCommandResult:
 # ---------------------------------------------------------------------------
 
 
-def test_allow_write_rejected(tmp_path: Path) -> None:
+_WRITE_PERMS = ["mutate live kernel state via drgn write APIs"]
+
+
+def test_allow_write_requires_profile_op(tmp_path: Path) -> None:
+    _, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, _ = _profiles()
+    profile = DebugProfile(name="qemu-gdbstub-default", enabled_operations=["debug.introspect.run"])
+    response = debug_introspect_run_handler(
+        _make_request(run_id, allow_write=True, acknowledged_permissions=_WRITE_PERMS),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles={"qemu-gdbstub-default": profile},
+        ssh_runner=FakeSshRunner(),
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert response.error.details["code"] == "operation_disabled"
+
+
+def test_allow_write_requires_ack(tmp_path: Path) -> None:
     _, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
     response = debug_introspect_run_handler(
-        _make_request(run_id, allow_write=True),
+        _make_request(run_id, allow_write=True, acknowledged_permissions=[]),
         artifact_root=tmp_path,
         target_profiles=targets,
         rootfs_profiles=rootfs,
         debug_profiles=debug,
         ssh_runner=FakeSshRunner(),
-        admission=FakeAdmissionService(),
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
         session_registry=FakeSessionRegistry(),
     )
     assert response.ok is False
     assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
-    assert response.error.details["code"] == "allow_write_not_supported"
+    assert response.error.details["code"] == "permission_required"
+    assert response.error.details["required_permissions"] == _WRITE_PERMS
+
+
+def test_allow_write_admitted_records_flag_and_perms(tmp_path: Path) -> None:
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    ssh = FakeSshRunner(results=[_happy_ssh_result()])
+    response = debug_introspect_run_handler(
+        _make_request(run_id, allow_write=True, acknowledged_permissions=[*_WRITE_PERMS, "extra"]),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=ssh,
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is True
+    manifest = store.load_manifest(run_id)
+    step = next(v for k, v in manifest.step_results.items() if k.startswith("introspect:"))
+    assert step.details["allow_write"] is True
+    # Only the satisfied required perms are recorded, not the caller's "extra".
+    assert step.details["acknowledged_permissions"] == _WRITE_PERMS
+
+
+def test_read_only_call_skips_gates_and_ignores_ack(tmp_path: Path) -> None:
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, _ = _profiles()
+    profile = DebugProfile(name="qemu-gdbstub-default", enabled_operations=["debug.introspect.run"])
+    ssh = FakeSshRunner(results=[_happy_ssh_result()])
+    response = debug_introspect_run_handler(
+        _make_request(run_id, allow_write=False, acknowledged_permissions=["ignored"]),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles={"qemu-gdbstub-default": profile},
+        ssh_runner=ssh,
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is True
+    manifest = store.load_manifest(run_id)
+    step = next(v for k, v in manifest.step_results.items() if k.startswith("introspect:"))
+    assert step.details["allow_write"] is False
+    assert "acknowledged_permissions" not in step.details
+
+
+def test_write_mode_audit_log_line(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    _, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    ssh = FakeSshRunner(results=[_happy_ssh_result()])
+    with caplog.at_level("WARNING"):
+        debug_introspect_run_handler(
+            _make_request(run_id, allow_write=True, acknowledged_permissions=_WRITE_PERMS),
+            artifact_root=tmp_path,
+            target_profiles=targets,
+            rootfs_profiles=rootfs,
+            debug_profiles=debug,
+            ssh_runner=ssh,
+            admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+            session_registry=FakeSessionRegistry(),
+        )
+    audit_lines = [r for r in caplog.records if "write-mode invocation" in r.getMessage()]
+    assert len(audit_lines) == 1
+
+
+def test_read_only_call_emits_no_audit_line(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    _, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    ssh = FakeSshRunner(results=[_happy_ssh_result()])
+    with caplog.at_level("WARNING"):
+        debug_introspect_run_handler(
+            _make_request(run_id),
+            artifact_root=tmp_path,
+            target_profiles=targets,
+            rootfs_profiles=rootfs,
+            debug_profiles=debug,
+            ssh_runner=ssh,
+            admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+            session_registry=FakeSessionRegistry(),
+        )
+    assert not [r for r in caplog.records if "write-mode invocation" in r.getMessage()]
+
+
+def test_allow_write_failed_call_records_flag_via_failure_recorder(tmp_path: Path) -> None:
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    # A drgn_open_failure outcome routes through _fail -> _record_introspect_failure
+    # (a genuinely FAILED step), exercising the failure recorder's allow_write path.
+    # NB: outcome.status="error" would NOT work here — it is the SUCCESS path
+    # (status="script_error", SUCCEEDED step) and never reaches _record_introspect_failure.
+    body = {
+        "call_id": "0" * 32,
+        "build_id": None,
+        "outcome": {"status": "drgn_open_failure", "error_type": "OSError", "error_message": "x"},
+        "emits": [],
+        "user_stdout": "",
+        "prelude_ms": 1,
+        "truncated": {
+            k: False for k in ("emits", "user_stdout", "traceback", "total_json", "per_emit_size", "error_message")
+        },
+    }
+    ssh = FakeSshRunner(results=[SshCommandResult(exit_status=3, stdout=json.dumps(body), stderr="")])
+    debug_introspect_run_handler(
+        _make_request(run_id, allow_write=True, acknowledged_permissions=_WRITE_PERMS),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=ssh,
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    manifest = store.load_manifest(run_id)
+    step = next(v for k, v in manifest.step_results.items() if k.startswith("introspect:"))
+    assert step.status == StepStatus.FAILED
+    assert step.details["allow_write"] is True
+    assert step.details["acknowledged_permissions"] == _WRITE_PERMS
+
+
+def test_write_mode_disabled_outcome_rejected(tmp_path: Path) -> None:
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    body = {
+        "call_id": "0" * 32,
+        "build_id": VALID_BUILD_ID,
+        "outcome": {"status": "write_mode_disabled", "error_message": "blocked"},
+        "emits": [],
+        "user_stdout": "",
+        "prelude_ms": 1,
+        "truncated": {
+            k: False for k in ("emits", "user_stdout", "traceback", "total_json", "per_emit_size", "error_message")
+        },
+    }
+    ssh = FakeSshRunner(results=[SshCommandResult(exit_status=6, stdout=json.dumps(body), stderr="")])
+    response = debug_introspect_run_handler(
+        _make_request(run_id),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=ssh,
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert response.error.details["code"] == "write_mode_disabled"
+    manifest = store.load_manifest(run_id)
+    step = next(v for k, v in manifest.step_results.items() if k.startswith("introspect:"))
+    assert step.status == StepStatus.FAILED
 
 
 def test_invalid_timeout_rejected(tmp_path: Path) -> None:
