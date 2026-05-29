@@ -364,3 +364,44 @@ def test_delete_record_session_id_fence_skips_on_mismatch(tmp_path):
     # The current owner can still delete it cleanly.
     reg.delete_record(KEY, expected_session_id=fresh_id)
     assert reg.read_record(KEY) is None
+
+
+def test_force_release_skips_transport_close(tmp_path):
+    # force_release is the SessionGuard remediation backstop (issue #66): it MUST NOT call
+    # transport.close (which is the failure-prone op that wedged), only drop the in-memory/durable
+    # line. So the transport's close() must not be invoked.
+    transport = FakeQemuTransport()
+    txn, _ = build_txn(transport, registry=SessionRegistry(directory=tmp_path))
+    session = txn.open(make_request())
+    transport.closed.clear()
+    txn.force_release(session.session_id)
+    assert transport.closed == []
+
+
+def test_force_release_deletes_record_and_releases_guard(tmp_path):
+    reg = SessionRegistry(directory=tmp_path)
+    txn, _ = build_txn(FakeQemuTransport(), registry=reg)
+    session = txn.open(make_request())
+    assert reg.read_record(KEY) is not None
+    txn.force_release(session.session_id)
+    assert reg.read_record(KEY) is None
+    # guard is free again: a fresh acquire succeeds (no GuardConflict)
+    txn._guard.acquire(KEY)
+
+
+def test_force_release_unknown_session_is_noop(tmp_path):
+    txn, _ = build_txn(FakeQemuTransport(), registry=SessionRegistry(directory=tmp_path))
+    txn.force_release("no-such-session")  # must not raise
+
+
+def test_force_release_does_not_clobber_newer_holder(tmp_path):
+    reg = SessionRegistry(directory=tmp_path)
+    txn, _ = build_txn(FakeQemuTransport(), registry=reg)
+    session = txn.open(make_request())
+    # release the first session's guard cleanly (mirrors close()), then a NEW holder acquires the
+    # SAME target_key, then force_release the stale session id.
+    txn._guard.release(session.target_key, txn._tokens[session.session_id])
+    new_token = txn._guard.acquire(session.target_key)
+    txn.force_release(session.session_id)  # stale session id -> must NOT revoke the new holder
+    # the NEW holder still owns the guard: releasing new_token succeeds (it was never revoked)
+    assert txn._guard.release(session.target_key, new_token) is True
