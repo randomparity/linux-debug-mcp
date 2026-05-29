@@ -288,3 +288,46 @@ def test_future_stub_handlers_do_not_create_run_workspace_or_touch_forbidden_dep
     assert response.error.details["provider_name"] == provider_name
     assert response.error.details["operation"] == operation
     assert not (tmp_path / ".linux-debug-mcp" / "runs").exists()
+
+
+def test_console_open_ipmi_cipher_zero_is_configuration_error() -> None:
+    response = console_open_session_handler(
+        architecture="x86_64",
+        target_name="host-01",
+        access_method="ipmi-sol",
+        ipmi_cipher_suite=0,
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    fields = [item["field"] for item in response.error.details["validation_errors"]]
+    assert any("ipmi_cipher_suite" in field for field in fields)
+    assert response.suggested_next_actions == ["providers.list"]
+
+
+def test_console_open_ipmi_default_cipher_reaches_not_implemented() -> None:
+    response = console_open_session_handler(
+        architecture="x86_64",
+        target_name="host-01",
+        access_method="ipmi-sol",
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "not_implemented"
+    assert response.error.details["provider_name"] == "console-access-stub"
+    assert response.error.details["operation"] == "console.open_session"
+
+
+def test_console_open_cipher_on_ssh_is_configuration_error() -> None:
+    response = console_open_session_handler(
+        architecture="x86_64",
+        target_name="host-01",
+        access_method="ssh",
+        ipmi_cipher_suite=3,
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"

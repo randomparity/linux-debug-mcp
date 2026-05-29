@@ -463,3 +463,54 @@ def test_console_write_rejects_empty_oversized_or_raw_secret_payloads(payload: d
 )
 def test_models_reject_raw_credential_token_or_password_fields(model: type, payload: dict, hidden: str) -> None:
     assert_rejects(model, payload, hidden=hidden)
+
+
+def _ipmi_request(**overrides: object) -> dict:
+    payload = {
+        "architecture": "x86_64",
+        "target_name": "vm-01",
+        "access_method": "ipmi-sol",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_ipmi_sol_defaults_cipher_to_three() -> None:
+    request = ConsoleSessionRequest(**_ipmi_request())
+    assert request.ipmi_cipher_suite == 3
+
+
+def test_ipmi_sol_accepts_explicit_cipher_three() -> None:
+    request = ConsoleSessionRequest(**_ipmi_request(ipmi_cipher_suite=3))
+    assert request.ipmi_cipher_suite == 3
+
+
+def test_ipmi_sol_rejects_cipher_zero() -> None:
+    with pytest.raises(ValidationError) as exc:
+        ConsoleSessionRequest(**_ipmi_request(ipmi_cipher_suite=0))
+    assert "ipmi_cipher_suite" in str(exc.value)
+
+
+@pytest.mark.parametrize("suite", [1, 2, 17])
+def test_ipmi_sol_rejects_non_allowlisted_cipher(suite: int) -> None:
+    assert_rejects(ConsoleSessionRequest, _ipmi_request(ipmi_cipher_suite=suite))
+
+
+def test_cipher_rejected_for_non_ipmi_method() -> None:
+    payload = {
+        "architecture": "x86_64",
+        "target_name": "vm-01",
+        "access_method": "ssh",
+        "ipmi_cipher_suite": 3,
+    }
+    assert_rejects(ConsoleSessionRequest, payload)
+
+
+def test_serial_method_without_cipher_is_accepted() -> None:
+    request = ConsoleSessionRequest(architecture="x86_64", target_name="vm-01", access_method="serial")
+    assert request.ipmi_cipher_suite is None
+
+
+def test_legacy_ipmi_access_method_rejected() -> None:
+    payload = {"architecture": "x86_64", "target_name": "vm-01", "access_method": "ipmi"}
+    assert_rejects(ConsoleSessionRequest, payload)
