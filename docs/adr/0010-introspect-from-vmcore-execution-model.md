@@ -40,6 +40,19 @@ defence-in-depth. A mismatch is `CONFIGURATION_ERROR` / `provenance_mismatch` an
 no symbols are loaded. This matches AC#2 ("mismatch between the vmcore and the
 provided vmlinux") and §4.2 ("verify against the crashed kernel before loading").
 
+Two classification choices follow from this being a **caller-input** decision, not
+a server-state one: (a) an unreadable/compressed/stripped vmlinux (`read_elf_build_id`
+raises) is `CONFIGURATION_ERROR` / `vmlinux_build_id_unreadable`, *not*
+`provenance_corrupt`/infrastructure — the agent fixes it by supplying the right
+file; (b) a core that embeds **no** build-id (`main_module().build_id is None`)
+fails loud with a distinct `CONFIGURATION_ERROR` / `provenance_unverifiable` rather
+than being misreported as `drgn_version_skew` or silently skipping the §4.2 check.
+The drgn ordering this rests on — `set_core_dump` populating `main_module().build_id`
+from VMCOREINFO/`NT_GNU_BUILD_ID` before any DWARF load — is named as an explicit
+assumption and pinned by the env-gated integration test. The design is deliberately
+*stricter* than drgn (which can load a matching vmlinux without a build-id): it
+fails closed when provenance cannot be proven.
+
 ### 3. One wrapper body, two prologues
 
 The live `WRAPPER_TEMPLATE` is split (no behaviour change) into
@@ -49,7 +62,16 @@ the live and vmcore templates are `Template(prologue + _WRAPPER_BODY)`. A test
 asserts the recomposed live template is byte-identical to a golden snapshot. The
 vmcore prologue swaps `set_kernel()/load_default_debug_info()` for
 `set_core_dump(vmcore)` + post-check `load_debug_info([vmlinux])` and adds
-`${VMCORE_PATH}`/`${VMLINUX_PATH}`/`${MODULES_PATH}` placeholders.
+`${VMCORE_PATH_B64}`/`${VMLINUX_PATH_B64}`/`${MODULES_PATH_B64}` placeholders. The
+three host paths are **base64-encoded** into pure-ASCII literals and decoded to
+`str` in the prologue — identical to how the user script is carried — because
+`confine_run_relative` enforces only sandbox containment and does **not** reject
+`"`/newline/`${` in the user-supplied ref tail, so raw substitution of a confined
+path would still be a literal-injection vector. Module debuginfo loads
+**best-effort after** the verified vmlinux load: a present-but-corrupt bundle yields
+a non-fatal `modules_debuginfo_load_failed` warning rather than turning a valid
+core+vmlinux pair into a hard `drgn_open_failure`, matching `resolve_symbols`'s
+non-fatal modules stance.
 
 ### 4. Local execution reuses `SubprocessSshRunner`; post-runner stages are a shared finalizer
 
@@ -129,7 +151,17 @@ vmcore orchestrators keep their own pre-runner setup.
    is not called — there is no profile in the request and no admission tier to
    narrow.
 
-8. **Run `drgn -c <core> -s <vmlinux> <script>` as a CLI instead of the
+8. **Substitute the confined host paths raw into the wrapper's string literals,
+   guarded by a `"`/newline reject filter.** Rejected: `confine_run_relative`
+   guarantees containment, not character safety — a file confined inside the run
+   sandbox whose name contains `"`, a newline, or `${` would break out of a raw
+   Python string literal or collide with a `Template` sigil, and a reject filter is
+   an easy-to-erode denylist. Base64-encoding the paths (decode-in-wrapper) is the
+   same allowlist-by-construction technique already used for the user script and
+   eliminates the injection class outright; the filter approach was an early draft
+   that mislabelled a load-bearing control as belt-and-suspenders.
+
+9. **Run `drgn -c <core> -s <vmlinux> <script>` as a CLI instead of the
    python-wrapper-on-stdin.** Rejected: the wrapper owns the `emit()` JSON framing,
    the caps, the truncation markers, and the build_id self-abort; the `drgn` CLI
    gives none of those and would force re-implementing the entire output contract.

@@ -181,34 +181,64 @@ Structurally mirrors the live prologue, substituting the drgn-open lines. Pseudo
 of the only differences (full template is byte-exact in the implementation):
 
 ```python
+# Paths arrive base64-encoded (see §4.3) and are decoded into Python str
+# objects — never substituted as raw text into a literal.
+import base64 as _li_base64
+_li_vmcore = _li_base64.b64decode("${VMCORE_PATH_B64}").decode("utf-8")
+_li_vmlinux = _li_base64.b64decode("${VMLINUX_PATH_B64}").decode("utf-8")
+_li_modules = _li_base64.b64decode("${MODULES_PATH_B64}").decode("utf-8") or None
+
 try:
     import drgn
     <capture drgn.helpers.linux namespace — identical to live>
     prog = drgn.Program()
-    prog.set_core_dump("${VMCORE_PATH}")          # vs set_kernel()
+    prog.set_core_dump(_li_vmcore)                # vs set_kernel()
 except Exception as exc:
     <emit outcome drgn_open_failure, exit 3>      # identical shape to live
 
 _li_result["prelude_ms"] = ...                    # identical
 
 try:
-    _li_result["build_id"] = prog.main_module().build_id.hex()   # vmcore's embedded id
+    _li_bid = prog.main_module().build_id         # vmcore's embedded id (see ordering note below)
+    _li_result["build_id"] = _li_bid.hex() if _li_bid else None
 except Exception as exc:
-    <emit outcome drgn_version_skew, exit 3>      # identical
+    <emit outcome drgn_version_skew, exit 3>      # drgn too old to expose main_module().build_id
+
+if _li_result["build_id"] is None:                # core carries no embedded build-id
+    <emit outcome provenance_unverifiable, exit 4>   # cannot honour §4.2 — fail loud, distinct code
 
 if _li_result["build_id"] != "${EXPECTED_BUILD_ID}":             # vmlinux id (host-supplied)
-    <emit outcome provenance_mismatch, exit 4>    # identical — BEFORE loading symbols
+    <emit outcome provenance_mismatch, exit 4>    # BEFORE loading symbols
 
 try:
-    prog.load_debug_info(["${VMLINUX_PATH}"])     # load symbols only after the check passes
-    <if modules: prog.load_debug_info(["${MODULES_PATH}"])>      # optional
+    prog.load_debug_info([_li_vmlinux])           # load symbols only after the check passes
 except Exception as exc:
-    <emit outcome drgn_open_failure, exit 3>      # symbol-load failure reuses the open-failure code
+    <emit outcome drgn_open_failure, exit 3>      # vmlinux load failure reuses the open-failure code
+
+if _li_modules:                                   # optional — best-effort, NEVER fatal
+    try:
+        prog.load_debug_info([_li_modules])
+    except Exception as exc:
+        _li_result.setdefault("warnings", []).append(
+            {"code": "modules_debuginfo_load_failed", "error_type": type(exc).__name__})
 ```
 
+**drgn ordering assumption (must be verified by the env-gated integration test):**
+the design requires `prog.main_module().build_id` to be populated by
+`set_core_dump` (from the core's VMCOREINFO / `NT_GNU_BUILD_ID` note) *before*
+any DWARF is loaded, so the §4.2 check runs before `load_debug_info`. If a captured
+core embeds **no** build-id, `main_module().build_id` is `None`; the wrapper emits
+the distinct `provenance_unverifiable` outcome (exit 4) and loads no symbols —
+the pair cannot be verified, so it fails loud rather than guessing. This is a
+stricter contract than drgn itself (which can load a matching vmlinux without a
+build-id); the design deliberately fails closed when provenance cannot be proven.
+
 The provenance check happens **before** `load_debug_info`, so mismatched symbols
-are never loaded — the §4.2 fail-loud guarantee. `${EXPECTED_BUILD_ID}`,
-`${VMCORE_PATH}`, `${VMLINUX_PATH}`, and the optional `${MODULES_PATH}` are
+are never loaded — the §4.2 fail-loud guarantee. Module debuginfo is loaded
+**best-effort after** the verified vmlinux load: a present-but-corrupt modules
+bundle yields a `modules_debuginfo_load_failed` warning, never a hard failure —
+matching `resolve_symbols`'s non-fatal modules stance (§5 of ADR 0008). The three
+path placeholders are base64-encoded blobs (§4.3); `${EXPECTED_BUILD_ID}` is
 host-validated before substitution (see §4.3). `${CALL_ID}`, `${ARGS_B64}`,
 `${USER_SCRIPT_B64}`, `${CAPS_JSON}` are reused from the live render verbatim.
 
@@ -218,15 +248,23 @@ host-validated before substitution (see §4.3). `${CALL_ID}`, `${ARGS_B64}`,
 raising `WrapperRenderError` (mapped to `INFRASTRUCTURE_FAILURE` /
 `wrapper_render_error` by the handler) on failure:
 
-- `expected_build_id` matches `BUILD_ID_RE` (host-parsed from vmlinux; a non-match
-  means the vmlinux ELF note was unreadable/corrupt → `provenance_corrupt`).
+- `expected_build_id` matches `BUILD_ID_RE` (host-parsed from vmlinux). It is
+  produced by `read_elf_build_id` *before* the renderer is called; a vmlinux whose
+  ELF note is unreadable never reaches the renderer (it fails earlier in step 6 as
+  a `CONFIGURATION_ERROR`, see §8).
 - `call_id` matches the UUIDv4-hex regex (internal invariant).
 - `vmcore_path`, `vmlinux_path`, `modules_path` are **already-confined absolute
-  paths** (the handler resolved them via `confine_run_relative`); the renderer
-  rejects any that contain a `"` or newline (defence-in-depth against a path that
-  would break out of the Python string literal). Confinement guarantees they live
-  under `<run_dir>`; the run-id and artifact-root grammar forbids quotes/newlines,
-  so this check is belt-and-suspenders.
+  paths** (the handler resolved them via `confine_run_relative`). They are
+  **base64-encoded** into pure-ASCII literals (`${VMCORE_PATH_B64}` etc.) and
+  decoded back to `str` in the wrapper prologue — exactly as the user script is
+  handled. This is a **required security control, not belt-and-suspenders**:
+  `confine_run_relative` (`safety/paths.py`) only enforces sandbox *containment*,
+  it does **not** reject `"`/newline/`${` characters in the user-supplied ref tail,
+  so a filename like `evil".__import__('os')...` confined inside the run dir would
+  break out of a raw string literal. Base64 removes the entire injection class; the
+  renderer additionally rejects a `modules_path` (and any path) that fails to
+  round-trip as UTF-8. The absent-modules case substitutes the base64 of the empty
+  string, which the prologue decodes to `None`.
 - `user_script` is base64-encoded into a pure-ASCII literal (identical to the live
   render) so triple quotes / NUL / `${...}` in the script cannot escape.
 - `caps`/`args_json` validated by the reused `_merge_and_validate_caps` / JSON parse.
@@ -244,7 +282,10 @@ def read_elf_build_id(path: Path) -> str:
     Parses the ELF header → program headers → PT_NOTE segments (falling back to
     the `.note.gnu.build-id` section if no PT_NOTE carries it), extracts the
     NT_GNU_BUILD_ID (type 3, name "GNU") note's descriptor, and hex-encodes it.
-    Raises BuildIdReadError on a non-ELF / truncated / note-absent file.
+    Raises BuildIdReadError on a non-ELF (incl. compressed vmlinux.xz / vmlinuz),
+    truncated, or note-absent file. The handler maps this to a caller-facing
+    CONFIGURATION_ERROR (`vmlinux_build_id_unreadable`), not an infrastructure
+    fault — the caller supplied the wrong file.
     """
 ```
 
@@ -285,9 +326,16 @@ new shared finalizer (§7). Steps:
    `SymbolResolutionError` → `configuration_error` (`symbol_resolution_failed`,
    carrying the resolver's `code`). Separately confine `vmcore_ref`; a missing/
    escaping vmcore is `configuration_error` (`vmcore_not_found`).
-6. `expected_build_id = build_id_reader(vmlinux_path)`; `BuildIdReadError` →
-   `infrastructure_failure` (`provenance_corrupt`) — the symbol source is
-   unusable, the call cannot proceed safely.
+6. `expected_build_id = build_id_reader(vmlinux_path)`; `BuildIdReadError` (the
+   vmlinux is not an ELF, is compressed, is stripped of its build-id note, or is
+   truncated) → `configuration_error` (`vmlinux_build_id_unreadable`). This is a
+   **caller input** error — the agent supplied the wrong/compressed file and can
+   fix it by supplying the uncompressed ELF vmlinux that carries a GNU build-id
+   note (the same file drgn needs for DWARF). It is deliberately *not*
+   `provenance_corrupt`/`infrastructure_failure`: that code is reserved for
+   server-recorded malformed data (the live path's manifest build_id), not a
+   caller-supplied ref. **Precondition:** `vmlinux_ref` is the uncompressed ELF
+   vmlinux containing an `NT_GNU_BUILD_ID` note.
 7. Mint `call_id`; create `<run>/debug/introspect/<call_id>/` (0700) and
    `<run>/sensitive/debug/introspect/<call_id>/` (0700); render wrapper +
    skeleton; write `wrapper.py` `O_EXCL` mode-0600, `wrapper.skeleton.py`, and the
@@ -329,10 +377,17 @@ differ:
 | Parameter | Live | Vmcore |
 |---|---|---|
 | `expected_build_id` | manifest `KernelProvenance.build_id` | `read_elf_build_id(vmlinux)` |
-| `ssh_user` (forensic detail only) | `resolved_rootfs.ssh_user` | `None` |
+| `ssh_user` (forensic detail) | `resolved_rootfs.ssh_user` | omitted (`None`) |
 | `operation_name` (next-action echo) | `debug.introspect.run` / `.helper` | `debug.introspect.from_vmcore` / `.from_vmcore_helper` |
 | `drgn_open_message` | "drgn could not attach to the live target" | "drgn could not open the vmcore" |
 | `post_validator` | `None` / helper validator | `None` / helper validator |
+
+The `ssh_user` step-detail key is **kept unchanged** for the live path (renaming it
+would churn the live manifest schema, its consumers, and its tests for no functional
+gain). The finalizer takes the principal as an optional argument and **omits the
+key entirely** when it is `None` — so a vmcore step, which never opens SSH, simply
+has no `ssh_user` field rather than a misleading `ssh_user=null`. The live path's
+recorded shape is byte-for-byte identical to today.
 
 The live `_execute_introspect_call` keeps its admission/SSH/sudo orchestration and
 calls `_finalize_introspect_call` for the tail; its existing test suite proves the
@@ -349,16 +404,23 @@ redaction/manifest/outcome logic — the same hazard ADR 0009 cited when it extr
 | `sensitive/` missing/too-permissive | `CONFIGURATION_ERROR` | `sensitive_dir_missing` / `sensitive_dir_too_permissive` |
 | vmcore ref missing/escaping | `CONFIGURATION_ERROR` | `vmcore_not_found` |
 | vmlinux/modules ref unsafe/missing | `CONFIGURATION_ERROR` | `symbol_resolution_failed` (+ resolver `code`) |
-| vmlinux ELF build-id unreadable | `INFRASTRUCTURE_FAILURE` | `provenance_corrupt` |
+| vmlinux ELF build-id unreadable (non-ELF/compressed/stripped/truncated) | `CONFIGURATION_ERROR` | `vmlinux_build_id_unreadable` |
 | unknown helper / bad helper args | `CONFIGURATION_ERROR` | `unknown_helper` / `helper_args_invalid` |
 | wrapper render error | `INFRASTRUCTURE_FAILURE` | `wrapper_render_error` |
 | drgn cannot open vmcore / load vmlinux | `INFRASTRUCTURE_FAILURE` | `drgn_open_failure` |
-| drgn lacks `main_module().build_id` | `INFRASTRUCTURE_FAILURE` | `drgn_version_skew` |
+| drgn lacks `main_module().build_id` (too old) | `INFRASTRUCTURE_FAILURE` | `drgn_version_skew` |
+| vmcore carries no embedded build-id (cannot verify) | `CONFIGURATION_ERROR` | `provenance_unverifiable` |
 | **vmcore build_id ≠ vmlinux build_id** | `CONFIGURATION_ERROR` | `provenance_mismatch` |
 | user script syntax error | `CONFIGURATION_ERROR` | `script_compile_error` |
 | timeout / oversized / unparseable wrapper output | `INFRASTRUCTURE_FAILURE` | `introspect_timeout` / `oversized_output` / `wrapper_crash` |
 | user script raised | success, `status=script_error` | — |
+| present-but-corrupt modules bundle | success + `warnings[]` | `modules_debuginfo_load_failed` (non-fatal) |
 | helper schema drift / helper script raised | `INFRASTRUCTURE_FAILURE` | `helper_schema_drift` / `helper_script_error` |
+
+`provenance_unverifiable` (core has no embedded build-id) is `CONFIGURATION_ERROR`
+because the agent can fix it by capturing a core from a `CONFIG_BUILD_ID`-bearing
+kernel; it is distinct from `provenance_mismatch` so the agent does not waste effort
+hunting for a "matching" vmlinux that can never satisfy a missing key.
 
 `provenance_mismatch` is `CONFIGURATION_ERROR` (the caller paired the wrong vmlinux
 with the vmcore — a fixable input error), matching the live path's classification
@@ -402,36 +464,53 @@ Handler tests instantiate handlers directly with injected fakes (`runner=`,
 
 - `read_elf_build_id`: valid ELFCLASS32/64 little/big-endian; note absent;
   truncated; non-ELF magic; build-id in `.note.gnu.build-id` section vs PT_NOTE.
-- Wrapper render: byte-identical recomposed live `WRAPPER_TEMPLATE` (regression
-  guard); vmcore wrapper substitutes all placeholders; path with `"`/newline
-  rejected; bad `expected_build_id`/`call_id` rejected.
-- Handler happy path: a fake runner returning a wrapper-shaped JSON document with
-  matching build_id → `ToolResponse.success`, `introspect:<call_id>` SUCCEEDED,
-  `stdout.json` redacted, raw files under `sensitive/`, equivalent `emits` to the
-  live runner for the same canned payload (AC#1).
+- Wrapper render: byte-identical recomposed live `WRAPPER_TEMPLATE` against a
+  golden snapshot of the pre-refactor template (proves the live path is unchanged);
+  vmcore wrapper substitutes all placeholders; a path byte-sequence that is not
+  valid UTF-8 (or otherwise fails to round-trip through base64-decode) is rejected;
+  an injection-shaped path (`x".__import__('os')...`) round-trips intact through
+  base64 and produces a literal-safe wrapper (proving the base64 control, finding 1);
+  bad `expected_build_id`/`call_id` rejected.
+- **Finalizer/shared-body regression (NOT a live-equivalence proof):** a fake runner
+  returning a wrapper-shaped JSON document with matching build_id → `ToolResponse.success`,
+  `introspect:<call_id>` SUCCEEDED, `stdout.json` redacted, raw files under
+  `sensitive/`. Because the live and vmcore paths share `_WRAPPER_BODY` and
+  `_finalize_introspect_call`, feeding both the *same* canned payload yields
+  identical output by construction — this test proves the shared tail is wired in
+  both, it does **not** prove a real vmcore run matches a real live run (see AC#1
+  note below).
 - Build_id mismatch: fake runner returns `outcome=provenance_mismatch` (wrapper
   self-abort) **and** a separate test where the wrapper reports `ok` with a
   build_id ≠ `read_elf_build_id` (host verify catches it) → `provenance_mismatch`,
-  no symbols trusted (AC#2).
+  no symbols trusted (AC#2). Plus `provenance_unverifiable` when the wrapper
+  reports `build_id=None`.
 - Lifecycle independence: handler succeeds with **no** boot step / no snapshot /
   no admission service injected (AC#3) — proving the gate is not in the path.
 - Redaction: a secret-shaped token in `user_stdout`/`stderr` is masked in the
   response and in the persisted `stdout.json`/`stderr.log` (AC#4).
-- Edges: missing run; missing vmcore; escaping vmcore/vmlinux ref; oversized
+- Edges: missing run; missing vmcore; escaping vmcore/vmlinux ref;
+  `vmlinux_build_id_unreadable` (non-ELF and compressed fixtures); oversized
   script; bad timeout; budget exhausted; sensitive-dir too permissive; runner
   timeout (`exit 124`); unparseable stdout; `drgn_open_failure`;
-  `drgn_version_skew`; unknown helper; bad helper args; helper schema drift.
+  `drgn_version_skew`; corrupt-modules → non-fatal `modules_debuginfo_load_failed`
+  warning; unknown helper; bad helper args; helper schema drift.
 - Live-path regression: the full existing `test_introspect_run`/`helper` suites
   must stay green after the finalizer extraction.
 
-Integration tests that exercise real drgn against a real vmcore are env-gated
-(`LDM_VMCORE` / drgn import guard), skipped in CI like the libvirt/gdb suites.
+**AC#1 real-equivalence is verified only by the env-gated integration test** (not
+by the merge gate): `test_from_vmcore_matches_live` runs a fixed drgn script first
+via `debug.introspect.run` against a live booted target and then via
+`debug.introspect.from_vmcore` against a vmcore captured from that same kernel, and
+asserts the two `emits` payloads are equal. It is gated on `LDM_VMCORE` (a path to a
+captured core + matching vmlinux) and a host `import drgn`, and is skipped in CI
+exactly like the libvirt/gdb suites. The unit tests above cannot substantiate AC#1
+because they share the code under test on both sides.
 
 ## 13. Acceptance-criteria mapping
 
 | Issue AC | Where satisfied |
 |---|---|
-| vmcore + matching vmlinux ⇒ JSON equivalent to live `run` | §4.1 shared body, §6, §12 equivalence test |
+| vmcore + matching vmlinux ⇒ JSON equivalent to live `run` | §4.1 shared body, §6; verified by the **env-gated** `test_from_vmcore_matches_live` integration test (§12) — the unit tests are a shared-tail regression check, not an equivalence proof |
 | build_id mismatch fails loud (§4.2) | §4.2 prologue check before load + §7 host verify; §8 `provenance_mismatch`; §12 two mismatch tests |
 | unaffected by target lifecycle (no gate in path) | §3.1, §3.2, §6 (no admission), §9; §12 lifecycle-independence test |
 | persisted artifacts go through `Redactor` | §6, §7; §12 redaction test |
