@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import contextlib
+import logging
 import threading
 import uuid
-from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from typing import Literal, Protocol, runtime_checkable
 
 from linux_debug_mcp.seams.target import TargetKey
+from linux_debug_mcp.transport.base import ExecutionState, TransportSession
+
+logger = logging.getLogger(__name__)
 
 
 class GuardConflict(RuntimeError):
@@ -72,3 +78,149 @@ class InProcessStopCapableGuard:
         fenced: a subsequent release(old_token) is a no-op."""
         with self._lock:
             self._holders.pop(target_key, None)
+
+
+TeardownReason = Literal["ended", "attach_error"]
+
+
+class PreconditionError(RuntimeError):
+    """Raised by a Precondition.check to abort a session enter/verify. `name` identifies the
+    failing precondition for the handler's READINESS_FAILURE response."""
+
+    def __init__(self, message: str, *, name: str) -> None:
+        super().__init__(message)
+        self.name = name
+
+
+@dataclass(frozen=True)
+class SessionGuardContext:
+    """Run-scoped facts a precondition/teardown step needs. No live handles, so it is built on
+    each handler exit path from values already in scope. `session_id` is None only during enter
+    before the transaction commits a session id (ADR 0013)."""
+
+    target_key: TargetKey
+    generation: int
+    session_id: str | None
+    reason: TeardownReason
+
+
+@dataclass(frozen=True)
+class TeardownReport:
+    """Outcome of teardown(). `resume_ok` is the AC1 post-condition (no orphaned HALTED record)
+    after close()+force_reap; resume_ok=False is a logged INFRASTRUCTURE_FAILURE, never raised."""
+
+    step_errors: dict[str, str] = field(default_factory=dict)
+    close_error: str | None = None
+    resume_ok: bool = True
+    resume_detail: str = ""
+
+
+@runtime_checkable
+class PreAttachPrecondition(Protocol):
+    name: str
+
+    def check(self, ctx: SessionGuardContext) -> None:
+        """Runs before any resource is acquired. Raise PreconditionError to abort the enter."""
+        ...
+
+
+@runtime_checkable
+class PostAttachPrecondition(Protocol):
+    name: str
+
+    def check(self, ctx: SessionGuardContext, session: TransportSession) -> None:
+        """Runs after the attach commits a session (can read the running kernel over RSP).
+        Raise PreconditionError to abort; the caller runs teardown(reason="attach_error")."""
+        ...
+
+
+@runtime_checkable
+class TeardownStep(Protocol):
+    name: str
+
+    def teardown(self, ctx: SessionGuardContext) -> None:
+        """Idempotent, non-fatal teardown action (e.g. watchdog-restore). MUST NOT raise to abort
+        teardown; SessionGuard suppresses+aggregates exceptions."""
+        ...
+
+
+class SessionGuard:
+    """Stateless lifecycle policy for interactive stop-capable debug sessions (spec
+    docs/superpowers/specs/2026-05-29-session-guard-design.md, ADR 0013). Composes the existing
+    guard/lease/transaction primitives; holds no per-session state. #66 ships empty slots; #69
+    adds a TeardownStep, #70 adds pre/post-attach Preconditions."""
+
+    def __init__(
+        self,
+        *,
+        pre_attach: Sequence[PreAttachPrecondition] = (),
+        post_attach: Sequence[PostAttachPrecondition] = (),
+        teardown_steps: Sequence[TeardownStep] = (),
+    ) -> None:
+        self._pre_attach = tuple(pre_attach)
+        self._post_attach = tuple(post_attach)
+        self._teardown_steps = tuple(teardown_steps)
+
+    def enter(self, ctx: SessionGuardContext) -> None:
+        """Run pre_attach preconditions in declared order. First failure raises PreconditionError
+        and aborts; nothing is acquired (the caller attaches only after enter() returns)."""
+        for precondition in self._pre_attach:
+            precondition.check(ctx)
+
+    def verify_attached(self, ctx: SessionGuardContext, session: TransportSession) -> None:
+        """Run post_attach preconditions against the live session. First failure raises
+        PreconditionError; the caller runs teardown(reason="attach_error")."""
+        for precondition in self._post_attach:
+            precondition.check(ctx, session)
+
+    def teardown(
+        self,
+        ctx: SessionGuardContext,
+        *,
+        close: Callable[[], None],
+        read_record: Callable[[], TransportSession | None],
+        force_reap: Callable[[], None],
+    ) -> TeardownReport:
+        """The single idempotent teardown invariant (ADR 0013). Run teardown_steps in REVERSE
+        order (suppress+aggregate), then close() (suppress+record), verify the resume
+        post-condition via read_record, and if a live HALTED record remains invoke force_reap and
+        re-verify. Never raises; resume_ok=False is a logged INFRASTRUCTURE_FAILURE."""
+        step_errors: dict[str, str] = {}
+        for step in reversed(self._teardown_steps):
+            try:
+                step.teardown(ctx)
+            except Exception as exc:  # noqa: BLE001 - a step must never abort teardown
+                step_errors[step.name] = repr(exc)
+                logger.warning("session-guard: teardown step %s raised: %r", step.name, exc)
+
+        close_error: str | None = None
+        try:
+            close()
+        except Exception as exc:  # noqa: BLE001 - close failure is exactly what force_reap remediates
+            close_error = repr(exc)
+            logger.warning("session-guard: close raised during teardown: %r", exc)
+
+        resume_ok, detail = self._resume_holds(read_record)
+        if not resume_ok:
+            with contextlib.suppress(Exception):
+                force_reap()
+            resume_ok, detail = self._resume_holds(read_record)
+            if not resume_ok:
+                logger.error(
+                    "session-guard: resume invariant violated for %s after force_reap: %s",
+                    ctx.target_key,
+                    detail,
+                )
+        return TeardownReport(
+            step_errors=step_errors, close_error=close_error, resume_ok=resume_ok, resume_detail=detail
+        )
+
+    @staticmethod
+    def _resume_holds(read_record: Callable[[], TransportSession | None]) -> tuple[bool, str]:
+        """The AC1 post-condition: the durable record is gone, or present but not HALTED."""
+        record = read_record()
+        if record is None:
+            return True, ""
+        if record.execution_state is ExecutionState.HALTED:
+            return False, "durable record still reports HALTED with no owner"
+        return True, ""
