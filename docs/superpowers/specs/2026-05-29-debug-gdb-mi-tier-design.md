@@ -1,0 +1,211 @@
+# `debug.gdb` KGDB/RSP tier (gdb/MI) — design & decomposition
+
+**Type:** Design spec · **Issue:** #13 (epic #9) · **ADR:** [0019](../../adr/0019-debug-gdb-mi-tier-decomposition.md) · **Status:** proposed (2026-05-29)
+
+## Summary
+
+Issue #13 adds the **source-level** kernel debug tier: breakpoints, single-step,
+locals, backtraces, and register/memory access over the gdb Remote Serial
+Protocol (RSP), driven through the gdb **Machine Interface** (`gdb --interpreter=mi3`)
+and parsed with `pygdbmi` so the agent receives typed JSON instead of scraped
+terminal text. It works over two transports: the QEMU gdbstub (RSP over TCP) and
+serial KGDB (RSP demuxed off the console by `agent-proxy`/`kdmx`, #10).
+
+This spec covers the tier as a whole and **intentionally splits it into four
+focused sub-issues** so each ships as a defensible PR — mirroring how #11
+(`debug.introspect`) was decomposed into #51–#56. ADR
+[0019](../../adr/0019-debug-gdb-mi-tier-decomposition.md) records the load-bearing
+decisions (persistent MI engine replacing the batch text-scraper; in-place
+migration of the existing `debug.*` surface; the `pygdbmi` dependency; the phase
+boundaries) and their rejected alternatives.
+
+## Why this is a migration, not a greenfield add
+
+A `debug.*` surface already exists from the Phase-4 live-debug MVP (#5):
+`debug.start_session`, `debug.set_breakpoint`, `debug.continue`,
+`debug.read_memory`, `debug.read_registers`, `debug.evaluate`,
+`debug.interrupt`, `debug.end_session` (`server.py:6621–6781`). It drives gdb in
+**one-shot batch mode** — `argv = [gdb_path, "-nx", "-batch", "-q"]`
+(`providers/qemu_gdbstub.py:305,786`) — a fresh gdb per call, parsing
+human-formatted output, unable to hold breakpoint/stepping state across calls.
+#13 replaces that engine with a persistent `gdb -i=mi3` process and re-points the
+existing tools at it (gaining the missing `step`/`next`/`finish`, frames, and
+variable listing). Per "replace, don't deprecate," the batch paths are removed,
+not kept alongside.
+
+## Dependencies — all satisfied
+
+| Dependency | Status | What #13 consumes |
+|---|---|---|
+| #10 transport abstraction | **closed** | `TransportSession.rsp_endpoint`; `transport.open()`/`close()`; `transport.inject_break` |
+| #68 `StopCapableGuard` (ADR 0015) | **merged** | single stop-capable session per `TargetKey`, acquired in `transport.open()` |
+| #66 `SessionGuard` (ADR 0013) | **merged** | precondition/teardown + guaranteed-resume invariant |
+| #70 symbol version-lock (ADR 0017) | **merged** | pre-attach `build_id` verification primitive |
+| #71 break policy (ADR 0018) | **merged** | `BreakPolicy` → break method from channel topology + `PlatformMetadata` |
+| #69 watchdog relax/restore (ADR 0016) | **merged** | watchdog handling across an interactive stop |
+| #65 secrets + redaction (ADR 0012) | **merged** | redaction of RSP/console transcripts before response + persistence |
+
+### Prerequisites (verified)
+
+The transport/admission/guard seam is not just "available" — it is **already wired
+and integration-tested** for the local QEMU path, so Phase A inherits working
+plumbing rather than building it:
+
+- `target.boot` publishes a READY snapshot plus a `qemu-gdbstub` `TransportRef`
+  via `_publish_boot_ready_snapshot` (`server.py:1775`, snapshot producer at
+  `server.py:1485-1524`).
+- `debug.start_session` has a `transport_enabled` branch (`server.py:4180`) that
+  builds an `OpenRequest` from that snapshot (`_debug_open_request`,
+  `server.py:3968`) and calls `transaction.open()`, which acquires the
+  `StopCapableGuard` as step 4 of the admission transaction
+  (`coordination/transaction.py:249`).
+- `test_transport_open_close_integration.py` exercises this open/guard/close cycle
+  end to end.
+
+**Residual Phase A gap (the real work).** The dependency table is accurate, but
+the seam is wired *around* the provider, not *through* it: `QemuGdbstubProvider`
+still drives gdb in `-batch` mode against the **raw boot endpoint** that
+`debug.start_session` reads from the boot result
+(`server.py:4124` → `start_session(..., gdbstub_endpoint=...)` at `server.py:4233`;
+`target remote {host}:{port}` in `providers/qemu_gdbstub.py:288-302`). It does
+**not** consume `TransportSession.rsp_endpoint`. Phase A's residual scope is to
+re-point the new MI engine at `TransportSession.rsp_endpoint` instead of the raw
+boot endpoint, so the guard-protected transport session is the only RSP path.
+
+## Phase breakdown (sibling issues under #13)
+
+Each phase lands behind the constrained `ALLOWED_DEBUG_OPERATIONS` gate
+(`config.py`), so partially-delivered operations stay unreachable until their
+phase merges.
+
+### Phase A — MI engine foundation
+**Scope.** New `providers/gdb_mi.py`: persistent `gdb --interpreter=mi3`
+subprocess + `pygdbmi` parse layer (add the pinned dependency). RSP connect via
+`-target-select remote <host>:<port>` against **`TransportSession.rsp_endpoint`**
+— *not* the raw boot endpoint the legacy provider reads (see "Prerequisites
+(verified)"), so the guard-protected transport session owns the only RSP path.
+Attach/detach lifecycle with a persisted session id. **`StopCapableGuard`
+acquisition through `transport.open()`** (§5.3) on every transport — including
+`qemu-gdbstub`, where there is no console lease and the guard is the only thing
+preventing a second stop-capable session. **Guaranteed resume invariant:** any
+engine crash, RSP timeout, or tool-level exception returns a best-effort
+`continue` + report and releases the guard/lease — the target is never left
+`HALTED`.
+
+**gdb version & MI-capability probe.** Today `host.check_prerequisites` checks
+only that `gdb` is *present* (`prereqs/checks.py:48`). Phase A pins a **minimum
+gdb version of 9.1** — the release in which the GDB manual documents the `mi3`
+interpreter was introduced ("GDB/MI" chapter) — and adds an MI-capability probe
+that does more than read the version string: it **runs one mi3 MI command and
+asserts a well-formed `^done` record**, e.g.
+`gdb -nx -q --interpreter=mi3 -ex "-list-features" -ex "-gdb-exit"`. **Pass:** the
+probe returns a valid mi3 `^done` record. **Fail:** gdb absent, gdb < 9.1, or no
+valid mi3 `^done` record (older gdb may accept the `mi3` *name* without yielding
+usable records) → `host.check_prerequisites` reports the probe failed and the tier
+**hard-fails with a clear, actionable message** naming the detected version and
+the required minimum. `mi3` is required — there is no `mi2` fallback.
+
+**Acceptance.** Against local QEMU gdbstub: attach over `rsp_endpoint`, read one
+MI record as typed JSON, detach cleanly; a second concurrent stop-capable attach
+is refused by the guard. The MI-capability probe passes on gdb ≥ 9.1 by returning
+a valid mi3 `^done` record, and hard-fails with a version-naming message on
+older/`mi3`-less gdb.
+**Fault-injection acceptance.** With a session attached and `HALTED`: an induced
+engine crash, an induced RSP timeout, and a raised tool exception each (a) return
+the target to `EXECUTING`, (b) release the `StopCapableGuard` + any lease, and
+(c) for ssh-tier concurrency, behave per the §5.6 contract on both sides of the
+fault: **during the fault** (target `HALTED`) a concurrently-issued ssh-tier
+operation is **fast-rejected** (not blocked behind the stop), and **after the
+guaranteed resume** a fresh ssh-tier operation **succeeds** with the target back
+in `EXECUTING`.
+
+### Phase B — symbols & provenance
+**Scope.** Load `vmlinux` symbols; verify `KernelProvenance` `build_id`
+**pre-attach in the handler, not over RSP** (consumes ADR 0017 / #70); fail loud
+on mismatch rather than emitting garbage.
+**Acceptance.** A `vmlinux` whose `build_id` does not match the booted image is
+rejected before attach with a `configuration_error`-class response; a matching
+image attaches and resolves a symbol by name.
+
+### Phase C — core operations, MI-typed
+**Scope.** Migrate onto MI typed JSON: set/clear breakpoints & watchpoints,
+`continue`, `step`/`next`/`finish`, `-stack-list-frames`,
+`-stack-list-variables`, register/memory reads (preserve the 4096-byte
+`read_memory` cap). **Delete** the corresponding `-batch` paths in
+`qemu_gdbstub.py`.
+**MI eval stays internal-only behind the inspector allowlist.**
+`-data-evaluate-expression` is used **only as the internal implementation** of the
+existing named inspectors — today `debug.evaluate` accepts `kernel_version` and
+`symbol_address` and rejects any unknown inspector with `CONFIGURATION_ERROR`
+(`providers/qemu_gdbstub.py:497-546`). Phase C preserves that surface exactly: it
+does **not** add an arbitrary-expression capability. Swapping the batch
+text-scrape for an MI `-data-evaluate-expression` call is an implementation
+detail behind the same allowlist; this keeps the constrained-debug-surface
+invariant (CLAUDE.md, `ALLOWED_DEBUG_OPERATIONS`) intact.
+**Acceptance.** Set a breakpoint by symbol, continue, hit it, backtrace, read a
+local — all returned as structured JSON via MI. No batch-mode gdb invocation
+remains. `debug.evaluate` with `kernel_version` / `symbol_address` returns
+MI-typed JSON; an **arbitrary expression (any unknown inspector / raw expression
+string) is rejected** with a `CONFIGURATION_ERROR`-class response — no MI
+`-data-evaluate-expression` is reachable without going through a named inspector.
+
+### Phase D — module symbols, robustness, serial transport
+**Scope.** Per-module section-address discovery + `add-symbol-file` at runtime
+addresses. `set remotetimeout`, retry/backoff, transport-stall detect-and-report
+(never hang the tool call). Break entry via `transport.inject_break` using ADR
+0018's `BreakPolicy`. Serial-KGDB (demuxed) smoke test + transport-quality
+warning (over SOL/HMC vterm, warn that RSP may be unreliable and suggest
+`debug.kdb` / `debug.introspect`). `docs/debug-gdb.md` incl. ppc64le caveats.
+**Serial-KGDB fixture prerequisite.** The serial break/continue criterion needs a
+producible target: a PTY-backed `serial-local` transport plus `agent-proxy`/`kdmx`
+demux yielding an RSP endpoint + break signal, gated exactly like
+`test_serial_local_transport_integration.py` (skipped when `agent-proxy`/the PTY
+fixture is unavailable). That fixture today yields an RSP endpoint over PTY but no
+test drives an actual RSP break/continue over it. Two acceptable paths: (a) build
+this fixture as part of Phase D, or (b) gate the serial criterion on the
+out-of-band-console work (#15/#16) and ship Phase D's QEMU-gdbstub criteria first.
+**No false green:** in local-only CI without the serial fixture, the serial
+break/continue test is reported **skipped** (with the missing prerequisite named),
+never presented as a passing gate.
+**Acceptance.** Module breakpoints resolve at correct runtime addresses; an
+induced transport stall is reported (not hung) and the target is resumed; a basic
+break/continue cycle works over a demuxed serial line **when the serial fixture
+above is present** — otherwise that one criterion is explicitly skipped, not
+counted as passed.
+
+## Coordination (interface contract)
+
+Per `docs/specs/interface-contracts.md`:
+
+- **Stop-capable tier:** one per target, **mutually exclusive with `debug.kdb`**
+  (#12), driving `EXECUTING`↔`HALTED` (§5.6), enforced by the `StopCapableGuard`
+  acquired in `transport.open()` (§5.3) on every transport including
+  `qemu-gdbstub`.
+- Uses the transport `rsp_endpoint`; `required_caps=[provides_rsp]` (§3.3).
+- Consumes `KernelProvenance` (§4.2) for symbol version-locking; MUST fail loud
+  on `build_id` mismatch.
+- Break entry executes #10's `inject_break` using #17's `BreakPolicy`,
+  parameterized by provisioning's `PlatformMetadata` facts (§4.1).
+- A provisioning `reset()` (incl. `mode=kexec`) fully invalidates an open
+  session — re-attach from scratch, never re-sync RSP (§5.4, §9.3).
+
+## Sibling issues
+
+- **Phase A** — `debug.gdb`: persistent gdb/MI engine + RSP attach foundation. *(foundation the others build on)*
+- **Phase B** — `debug.gdb`: vmlinux symbols + `KernelProvenance` version-lock.
+- **Phase C** — `debug.gdb`: core MI operations (break/step/frames/eval/mem/regs); retire batch engine.
+- **Phase D** — `debug.gdb`: module symbols, RSP-stall robustness, serial-KGDB transport + docs.
+
+#13 remains the umbrella tracking issue (it is listed under epic #9). Delivery
+order is strict **A → B → C → D**: C's acceptance ("set a breakpoint by symbol …
+read a local") depends on B's symbol/provenance work, so C is sequenced after B
+rather than reviewed in parallel with it; C also deletes the batch paths, which
+must land after B is in place.
+
+## References
+
+- gdb/MI: gdb manual "GDB/MI" chapter; `pygdbmi`
+- `Documentation/dev-tools/kgdb.rst` (kgdboc, connecting gdb)
+- ADR [0017](../../adr/0017-symbol-version-lock-gdb-tier.md), [0018](../../adr/0018-break-injection-policy-mapping.md), [0019](../../adr/0019-debug-gdb-mi-tier-decomposition.md)
+- `docs/specs/interface-contracts.md` §3.3, §4.1, §4.2, §5.3, §5.6, §9.3
+- Decomposition precedent: `docs/superpowers/specs/2026-05-28-debug-introspect-run-design.md`
