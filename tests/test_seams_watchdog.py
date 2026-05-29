@@ -148,3 +148,105 @@ def test_relax_is_capture_once_second_relax_does_not_reread():
     policy.relax(_ctx())
     assert [c for c in channel.calls if c[0] == "read"] == []
     assert len(reads_after_first) == 5
+
+
+def test_restore_round_trips_captured_values_in_reverse_order():
+    channel = FakeWatchdogControl(values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)})
+    policy = _x86_policy(channel)
+    policy.relax(_ctx())
+    channel.calls.clear()
+    report = policy.restore(_ctx())
+    assert channel.calls == [
+        ("write", "kernel.hardlockup_panic", "1"),
+        ("write", "kernel.softlockup_panic", "1"),
+        ("write", "kernel.watchdog_thresh", "1"),
+        ("write", "kernel.watchdog", "1"),
+        ("write", "kernel.nmi_watchdog", "1"),
+    ]
+    assert report.noop is False
+    assert all(report.restored.values())
+
+
+def test_restore_without_prior_relax_is_noop():
+    channel = FakeWatchdogControl()
+    report = _x86_policy(channel).restore(_ctx())
+    assert report.noop is True
+    assert channel.calls == []
+
+
+def test_second_restore_is_noop_after_capture_cleared():
+    channel = FakeWatchdogControl(values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)})
+    policy = _x86_policy(channel)
+    policy.relax(_ctx())
+    policy.restore(_ctx())
+    channel.calls.clear()
+    second = policy.restore(_ctx())
+    assert second.noop is True
+    assert channel.calls == []
+
+
+def test_restore_clears_capture_even_when_a_write_fails():
+    channel = FakeWatchdogControl(values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)})
+    policy = _x86_policy(channel)
+    policy.relax(_ctx())
+    channel._fail_writes.add("kernel.watchdog")
+    report = policy.restore(_ctx())
+    assert report.failures == {"kernel.watchdog": False}
+    assert report.restored["kernel.nmi_watchdog"] is True
+    assert policy.restore(_ctx()).noop is True
+
+
+def test_restore_does_not_rewrite_absent_or_write_failed_knobs():
+    channel = FakeWatchdogControl(values={"kernel.watchdog": "1"})
+    policy = _x86_policy(channel)
+    policy.relax(_ctx())
+    channel.calls.clear()
+    policy.restore(_ctx())
+    written = [name for op, name, _v in channel.calls if op == "write"]
+    assert written == ["kernel.watchdog"]
+
+
+def test_distinct_sessions_capture_and_restore_independently():
+    channel = FakeWatchdogControl(values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)})
+    policy = _x86_policy(channel)
+    policy.relax(_ctx(session_id="s-A"))
+    policy.relax(_ctx(session_id="s-B"))
+    assert policy.restore(_ctx(session_id="s-A")).noop is False
+    assert policy.restore(_ctx(session_id="s-A")).noop is True
+    assert policy.restore(_ctx(session_id="s-B")).noop is False
+
+
+def test_capture_once_preserves_baseline_across_re_relax():
+    channel = FakeWatchdogControl(values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)})
+    policy = _x86_policy(channel)
+    policy.relax(_ctx())
+    policy.relax(_ctx())
+    channel.calls.clear()
+    policy.restore(_ctx())
+    assert all(value == "1" for op, _name, value in channel.calls if op == "write")
+
+
+def test_concurrent_same_session_relax_reads_exactly_once():
+    """Claim-the-slot guarantees only one thread runs the read-pass for a session, so a
+    concurrent relax cannot overwrite the baseline with already-relaxed values (spec §4.1)."""
+    import threading as _threading
+
+    channel = FakeWatchdogControl(values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)})
+    policy = _x86_policy(channel)
+    barrier = _threading.Barrier(8)
+
+    def _worker() -> None:
+        barrier.wait()
+        policy.relax(_ctx(session_id="shared"))
+
+    threads = [_threading.Thread(target=_worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    reads = [c for c in channel.calls if c[0] == "read"]
+    assert len(reads) == 5
+    channel.calls.clear()
+    policy.restore(_ctx(session_id="shared"))
+    assert all(value == "1" for op, _name, value in channel.calls if op == "write")

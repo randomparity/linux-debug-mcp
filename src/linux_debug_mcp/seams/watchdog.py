@@ -167,6 +167,21 @@ class WatchdogPolicy:
             outcomes[knob.name] = KnobOutcome.RELAXED if ok else KnobOutcome.WRITE_FAILED
         return RelaxReport(outcomes=outcomes)
 
+    def restore(self, ctx: SessionGuardContext) -> RestoreReport:
+        if ctx.session_id is None:
+            return RestoreReport(noop=True)
+        with self._lock:
+            capture = self._captures.pop(ctx.session_id, None)  # clear unconditionally
+        if capture is None:
+            return RestoreReport(noop=True)
+        restored: dict[str, bool] = {}
+        for knob in reversed(self._knobs):
+            if knob.out_of_band or not capture.relaxed.get(knob.name, False):
+                continue  # never relaxed -> nothing to put back
+            prior = capture.prior[knob.name]
+            restored[knob.name] = self._safe_write(knob.name, prior)
+        return RestoreReport(restored=restored, noop=False)
+
     def _safe_read(self, name: str) -> str | None:
         try:
             return self._channel.read_knob(name)
