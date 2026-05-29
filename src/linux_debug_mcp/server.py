@@ -233,6 +233,10 @@ RUNNING_TESTS_MESSAGE = "previous test run is still recorded as running"
 # guards json.loads memory (and covers direct-write test fakes that bypass the
 # streaming path); wall-clock is bounded by the remote `timeout` prefix.
 PROBE_STDOUT_CAP = 256 * 1024
+# debug.introspect.run stdout cap. Sized above the wrapper's 1 MiB total_json
+# payload (local_drgn_introspect.py) so a legitimate run is never killed, while
+# still bounding a hostile target that ignores the wrapper.
+RUN_STDOUT_CAP = 2 * 1024 * 1024
 
 
 def _target_python_remote_argv(*, timeout_seconds: int, use_sudo: bool) -> list[str]:
@@ -2730,6 +2734,7 @@ def debug_introspect_run_handler(
                 stderr_path=stderr_path,
                 cancel=cancel_event,
                 stdin=wrapper,
+                max_stdout_bytes=RUN_STDOUT_CAP,
             )
         finally:
             stop_watcher.set()
@@ -2790,7 +2795,7 @@ def debug_introspect_run_handler(
             )
 
         # Spec §5.2 step 11: exit-code + JSON parsing.
-        raw_stdout = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
+        raw_stdout = _read_capped(stdout_path, RUN_STDOUT_CAP)
         raw_stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
         finished_at = now()
         duration_ms = int((time.monotonic() - started_monotonic) * 1000)
@@ -2833,6 +2838,14 @@ def debug_introspect_run_handler(
                 outcome_status_for_forensics=outcome_status_for_forensics,
                 include_stdout_json=include_stdout_json,
                 redacted_payload=redacted_payload,
+            )
+
+        if ssh_result.oversized_output or raw_stdout is None:
+            return _fail(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                code="oversized_output",
+                message=f"introspect stdout exceeded {RUN_STDOUT_CAP} bytes",
+                outcome_status_for_forensics=None,
             )
 
         if ssh_result.cancelled:
