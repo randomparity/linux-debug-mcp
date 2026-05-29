@@ -140,7 +140,7 @@ from linux_debug_mcp.seams.target import (
     TargetKey,
     publish_ready_snapshot,
 )
-from linux_debug_mcp.symbols.verify import BUILD_ID_RE
+from linux_debug_mcp.symbols.verify import BUILD_ID_RE, ProvenanceMismatch, verify_build_id
 from linux_debug_mcp.transport.base import (
     EndpointExposure,
     ExecutionState,
@@ -2528,26 +2528,32 @@ def debug_introspect_run_handler(
             details={"code": "invalid_script"},
         )
 
-    # Spec §5.2 step 4: build_id from manifest.
-    build_step = manifest.step_results.get("build")
-    if build_step is None or "build_id" not in build_step.details:
-        # Plan review finding 3 / R6-F1: the diagnostic must point at
-        # kernel.create_run (NOT "rerun kernel.build" which is a no-op on
-        # SUCCEEDED, and NOT force_rebuild which is rejected outright). The
-        # explanatory mention of force_rebuild is intentional — it tells
-        # operators *why* a rebuild flag is not a path forward.
+    # Design §4: build_id flows from the boot-recorded KernelProvenance, the
+    # authoritative §4.2 record — not the build step.
+    boot_step = manifest.step_results.get("boot")
+    provenance = boot_step.details.get("kernel_provenance") if boot_step is not None else None
+    if not isinstance(provenance, dict):
+        capture_error = boot_step.details.get("kernel_provenance_capture_error") if boot_step is not None else None
+        if isinstance(capture_error, dict):
+            return ToolResponse.failure(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                run_id=run_id,
+                message=(f"boot did not record a KernelProvenance: {capture_error.get('message', 'capture failed')}"),
+                details={
+                    "code": "provenance_missing",
+                    "capture_error": capture_error.get("code"),
+                },
+            )
         return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
             run_id=run_id,
             message=(
-                "kernel.build for this run did not record a build_id. Start a "
-                "fresh run via kernel.create_run (kernel.build is idempotent on "
-                "SUCCEEDED and force_rebuild is not yet supported). The fresh "
-                "build will populate build_id."
+                "boot for this run did not record a KernelProvenance. Re-run "
+                "target.boot for this run; provenance is captured on a SUCCEEDED boot."
             ),
             details={"code": "provenance_missing"},
         )
-    build_id = build_step.details["build_id"]
+    build_id = provenance.get("build_id")
     if not isinstance(build_id, str) or not BUILD_ID_RE.match(build_id):
         return ToolResponse.failure(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -3055,6 +3061,34 @@ def debug_introspect_run_handler(
                 code="wrapper_crash",
                 message="wrapper exited 6 with a minimal-recovery JSON document",
                 outcome_status_for_forensics="wrapper_internal_error",
+                include_stdout_json=True,
+                redacted_payload=rp,
+            )
+
+        # Design §4: host-authoritative provenance verify. The wrapper already
+        # self-aborted on mismatch (outcome_status == "provenance_mismatch",
+        # handled above); reaching here on an "ok" outcome with a disagreeing or
+        # absent id is a truncation/normalization/wrapper fault — fail loud, never skip.
+        observed_build_id = redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None
+        if not isinstance(observed_build_id, str):
+            # An "ok" outcome that omits build_id is itself a wrapper fault; a
+            # missing observed id must NOT pass silently with symbols trusted.
+            return _fail(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                code="provenance_mismatch",
+                message="wrapper reported success without a build_id; cannot confirm provenance",
+                outcome_status_for_forensics="provenance_inconsistent",
+                include_stdout_json=True,
+                redacted_payload=rp,
+            )
+        try:
+            verify_build_id(expected=build_id, observed=observed_build_id)
+        except ProvenanceMismatch:
+            return _fail(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                code="provenance_mismatch",
+                message="host build_id verify disagrees with the wrapper-reported id",
+                outcome_status_for_forensics="provenance_inconsistent",
                 include_stdout_json=True,
                 redacted_payload=rp,
             )
