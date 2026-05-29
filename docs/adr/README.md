@@ -17,5 +17,6 @@ Each ADR captures one non-trivial design decision — especially decisions the s
 | [0011](0011-introspect-write-mode-enforcement.md) | `debug.introspect` write mode: policy-gate enforcement + cooperative wrapper write-guard | Accepted |
 | [0012](0012-secrets-store-backends-and-redaction.md) | Secrets store backends and global credential redaction | Accepted |
 | [0013](0013-session-guard-precondition-teardown-seam.md) | SessionGuard: precondition/teardown seam composing existing primitives + guaranteed-resume invariant | Accepted |
+| [0014](0014-ipmi-cipher-suite-policy.md) | IPMI cipher-suite policy: contract-layer enforcement + single chokepoint + CI tripwire | Accepted |
 
 **Layer-4 plan amendments (2026-05-27, addressing the `/challenge` review findings):** ADR 0002 amended with the in-process fenced guard token + post-restart `revoke()` soundness (Finding #4); ADR 0005 amended with the `on_partial` `backend_pid` write-through invariant (Finding #1) and the `recovery_required` single-source-of-truth / write-through-cache rule (Finding #5); ADR 0006 amended with the halt→runner cancel-bridge delivery mechanism + RUNNING-step terminalization (Finding #2).
