@@ -677,12 +677,21 @@ def test_restore_error_message_carries_knob_names_not_values():
     channel = FakeWatchdogControl(values={n: "1" for n in knob_names}, fail_writes=knob_names)
     policy = _x86_policy(channel)
     policy.relax(_ctx())
-    try:
+    with pytest.raises(WatchdogRestoreError) as exc_info:
         WatchdogRestoreStep(policy).teardown(_ctx())
-    except WatchdogRestoreError as exc:
-        message = str(exc)
+    message = str(exc_info.value)
     assert "kernel.nmi_watchdog" in message       # knob name is fine
     assert "write kernel.nmi_watchdog failed" not in message  # WriteOutcome.detail must not leak
+
+
+def test_restore_step_is_not_a_lifecycle_subscriber():
+    """ADR 0013 / spec §5: restore must NEVER run on the dispatcher (reboot) path. The
+    step is a TeardownStep only — it has no invalidate/force_drop, so the dispatcher
+    cannot invoke it. Locks the 'no restore obligation on the dispatcher path' invariant."""
+    from linux_debug_mcp.seams.lifecycle import LifecycleSubscriber
+
+    step = WatchdogRestoreStep(_x86_policy(FakeWatchdogControl()))
+    assert not isinstance(step, LifecycleSubscriber)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -871,5 +880,5 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - §3.1 arch knobs → Task 1. §3.2 channel/outcomes/reports → Task 2. §3.3 relax capture-once + §4.1 baseline preservation → Task 3 (+ `test_capture_once_preserves_baseline_across_re_relax` in Task 4). §3.3 restore + §4.3 clear-after-one-pass → Task 4. §3.4 `WatchdogRestoreStep` → Task 5. §5 restore-on-error (reachable + unreachable) / restore-on-timeout → Task 6. §3.2 redaction: the inert #69 helper never surfaces raw channel text — `RelaxReport`/`RestoreReport` carry enums/bools and `WatchdogRestoreError` names failed knobs only, never their values or `WriteOutcome.detail` (asserted by `test_restore_error_message_carries_knob_names_not_values` in Task 5). The implementer MUST keep it that way: if `detail` or a raw knob value is ever propagated into a report/exception/`ToolResponse`, route it through `Redactor` first (spec §3.2). Non-propagation is the chosen mechanism; redaction is the fallback if that changes.
 - §1.2 inert wiring: `create_app` deliberately unchanged — no task modifies `server.py`.
-- §7 "dispatcher path has no restore obligation": #69 wires nothing into the dispatcher, so there is no code to test against; this is asserted structurally (the restore step is constructed only in tests, never registered with `InProcessLifecycleDispatcher`). No standalone test — the absence is guaranteed by `create_app` being untouched.
+- §7 "dispatcher path has no restore obligation": #69 wires nothing into the dispatcher, and `create_app` is untouched, so the restore step is never registered with `InProcessLifecycleDispatcher`. Rather than a near-vacuous "emit an event, assert no writes" test, this is locked executably by `test_restore_step_is_not_a_lifecycle_subscriber` (Task 5): `WatchdogRestoreStep` is a `TeardownStep` but **not** a `LifecycleSubscriber` (no `invalidate`/`force_drop`), so the dispatcher cannot invoke it — a regression that wired restore into the reboot path would fail this test.
 - §7 "x86 vs ppc64le variance" → Task 1 + Task 3 (`test_relax_records_out_of_band_knob_skipped_without_touching_channel`).
