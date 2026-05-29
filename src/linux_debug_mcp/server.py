@@ -4839,8 +4839,17 @@ def debug_end_session_handler(
     if response.ok and transaction is not None and transport_session_id is not None:
         if session_guard is not None and session_registry is not None:
             tkey = TargetKey(provisioner="local-qemu", target_id=run_id)
+            # Carry the real incarnation generation (not a 0 placeholder) so a #69/#70 teardown step
+            # keyed on it fences correctly; fall back to 0 only if the record is already gone.
+            ended_record = session_registry.read_record(tkey)
+            ended_generation = ended_record.generation if ended_record is not None else 0
             session_guard.teardown(
-                SessionGuardContext(target_key=tkey, generation=0, session_id=transport_session_id, reason="ended"),
+                SessionGuardContext(
+                    target_key=tkey,
+                    generation=ended_generation,
+                    session_id=transport_session_id,
+                    reason="ended",
+                ),
                 close=lambda: transaction.close(transport_session_id, force=True),
                 read_record=lambda: session_registry.read_record(tkey),
                 force_reap=lambda: transaction.force_release(transport_session_id),

@@ -95,8 +95,17 @@ class PreconditionError(RuntimeError):
 @dataclass(frozen=True)
 class SessionGuardContext:
     """Run-scoped facts a precondition/teardown step needs. No live handles, so it is built on
-    each handler exit path from values already in scope. `session_id` is None only during enter
-    before the transaction commits a session id (ADR 0013)."""
+    each handler exit path from values already in scope (ADR 0013).
+
+    Field authority by phase (a #69/#70 step MUST respect this):
+    - `session_id` is None only at `enter` (pre-attach), before the transaction commits a session;
+      every teardown/verify context carries it.
+    - `generation` is authoritative on the post-attach `verify_attached` and attach-error/ended
+      `teardown` contexts (the committed incarnation). At `enter` it is a 0 placeholder — the
+      snapshot generation is not yet read — so a pre-attach precondition MUST NOT key on it.
+    - `reason` is the teardown intent on teardown contexts; at `enter` it is set to "attach_error"
+      as a forward-looking default (any abort there fails before acquisition) and is not a signal a
+      pre-attach precondition should branch on."""
 
     target_key: TargetKey
     generation: int
