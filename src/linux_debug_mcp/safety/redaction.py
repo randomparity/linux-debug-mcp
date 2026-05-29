@@ -6,14 +6,23 @@ import traceback
 from collections.abc import Mapping
 from typing import Any
 
-from linux_debug_mcp.safety.secret_registry import SecretRegistry
+from linux_debug_mcp.safety.secret_registry import PROCESS_SECRET_REGISTRY, SecretRegistry
 
 REDACTION = "[REDACTED]"
 
 
 class Redactor:
+    """Redacts known secret values and ``key=value`` patterns from text and structures.
+
+    Every ``Redactor`` seeds from ``PROCESS_SECRET_REGISTRY`` in addition to any
+    ``secret_values`` passed explicitly, so a credential resolved through the
+    ``SecretsStore`` is masked on the return/persistence path without each call site
+    re-supplying it (ADR 0012 Decision 5). The snapshot is taken at construction; build a
+    fresh ``Redactor`` per response so newly registered values are reflected."""
+
     def __init__(self, secret_values: list[str] | None = None) -> None:
-        self._secret_values = [value for value in secret_values or [] if value]
+        merged = [*PROCESS_SECRET_REGISTRY.snapshot(), *(secret_values or [])]
+        self._secret_values = [value for value in merged if value]
         secret_name = r"[A-Za-z0-9_-]*(?:password|passwd|token|api[_-]?key|secret)[A-Za-z0-9_-]*"
         self._key_value_pattern = re.compile(rf"(?i)\b({secret_name})(\s*[=:]\s*)([^\s]+)")
         self._secret_key_pattern = re.compile(r"(?i)(password|passwd|token|api[_-]?key|secret)")
@@ -47,11 +56,13 @@ class Redactor:
 
 
 class SecretRedactionFilter(logging.Filter):
-    """Handler-boundary redaction. Attach to every handler (not only the root logger) so a
-    module that sets ``propagate=False`` or owns its handler cannot bypass redaction. Masks
-    the fully rendered message AND any exception/stack text against the registry snapshot
-    plus the ``Redactor`` key/value patterns. Caches a ``Redactor``, rebuilding only when the
-    registry version changes."""
+    """Handler-boundary redaction for the logging path. ``configure_logging`` installs one
+    on each root-logger handler, so every record that propagates to the root is masked
+    (ADR 0012 Decision 5). A logger that sets ``propagate=False`` and owns its handler does
+    NOT inherit this automatically — such a logger must call ``attach_redaction_filter``
+    itself. Masks the fully rendered message AND any exception/stack text against the
+    registry snapshot plus the ``Redactor`` key/value patterns. Caches a ``Redactor``,
+    rebuilding only when the registry version changes."""
 
     def __init__(self, registry: SecretRegistry) -> None:
         super().__init__()

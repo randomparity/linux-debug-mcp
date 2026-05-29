@@ -5,8 +5,13 @@ import threading
 
 class SecretRegistry:
     """Process-scoped, thread-safe registry of known secret values used to seed the
-    redaction filter and the return/persistence ``Redactor``. Values are reference-counted
-    per eviction scope so a long-running server holds only credentials for live owners.
+    redaction filter and the return/persistence ``Redactor``.
+
+    Values are reference-counted per ``scope`` so a caller that opts into a bounded scope
+    (and calls ``release`` on teardown) keeps only credentials for its live owners. The
+    transport open path registers with ``scope=None`` (process-global), so per ADR 0012
+    those values are retained for the process lifetime — eviction is an opt-in tool (used
+    by tests and any future bounded owner), not something the live server relies on.
 
     Empty/None values are never stored (an empty credential would force-mask every string).
     ``scope=None`` registers process-globally and is never evicted by ``release``."""
@@ -50,3 +55,10 @@ class SecretRegistry:
     def version(self) -> int:
         with self._lock:
             return self._version
+
+
+PROCESS_SECRET_REGISTRY = SecretRegistry()
+"""The one process-global registry. Both the logging ``SecretRedactionFilter`` and every
+``Redactor`` seed from this, so a value resolved through the ``SecretsStore`` is masked on
+the logging path AND the return/persistence path without each call site re-supplying it.
+Lives in this leaf module to keep ``Redactor`` free of an import cycle through ``logging``."""

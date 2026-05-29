@@ -7,7 +7,7 @@ exercised at the seam where credentials enter the process."""
 import logging
 
 from linux_debug_mcp.safety.redaction import REDACTION, Redactor, SecretRedactionFilter
-from linux_debug_mcp.safety.secret_registry import SecretRegistry
+from linux_debug_mcp.safety.secret_registry import PROCESS_SECRET_REGISTRY, SecretRegistry
 from linux_debug_mcp.safety.secrets import SecretReference, SecretReferenceKind
 from linux_debug_mcp.seams.secrets import EnvSecretsBackend, SecretsStore
 
@@ -64,3 +64,22 @@ def test_value_not_registered_is_not_masked_by_value():
     registry = SecretRegistry()
     redactor = Redactor(list(registry.snapshot()))
     assert redactor.redact_text("plain LEAKME-other text") == "plain LEAKME-other text"
+
+
+def test_bare_redactor_seeds_from_process_registry():
+    # The server's return/persistence paths construct a bare ``Redactor()`` with no
+    # secret_values. ADR 0012 Decision 5 requires those to still mask a credential that
+    # was resolved through the SecretsStore. A value registered in the process-global
+    # registry must therefore be redacted by ``Redactor()`` without any explicit seeding.
+    PROCESS_SECRET_REGISTRY.register(LEAK, scope="conformance-bare")
+    try:
+        payload = {"endpoint": f"console://host/{LEAK}", "items": [LEAK, "safe"]}
+        redacted = Redactor().redact_value(payload)
+        assert LEAK not in str(redacted)
+        assert REDACTION in str(redacted)
+        assert redacted["items"][1] == "safe"
+    finally:
+        PROCESS_SECRET_REGISTRY.release("conformance-bare")
+    # After release the process registry is clean again, so a fresh bare Redactor no
+    # longer force-masks the value (keeps the global state isolated across tests).
+    assert Redactor().redact_text(f"plain {LEAK} text") == f"plain {LEAK} text"
