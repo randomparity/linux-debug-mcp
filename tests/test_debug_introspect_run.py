@@ -226,6 +226,25 @@ def _bootstrap_run_with_build(tmp_path: Path) -> tuple[ArtifactStore, str, str]:
             details={"build_id": VALID_BUILD_ID},
         ),
     )
+    store.record_step_result(
+        manifest.run_id,
+        StepResult(
+            step_name="boot",
+            status=StepStatus.SUCCEEDED,
+            summary="boot ok",
+            artifacts=[],
+            details={
+                "kernel_provenance": {
+                    "build_id": VALID_BUILD_ID,
+                    "release": "6.9.0-test",
+                    "vmlinux_ref": "build/vmlinux",
+                    "modules_ref": None,
+                    "cmdline": "root=/dev/vda console=ttyS0",
+                    "config_ref": "build/.config",
+                }
+            },
+        ),
+    )
     return store, manifest.run_id, VALID_BUILD_ID
 
 
@@ -340,7 +359,7 @@ def test_operation_disabled_in_profile(tmp_path: Path) -> None:
     assert response.error.details["code"] == "operation_disabled"
 
 
-def test_provenance_missing_when_manifest_lacks_build_id(tmp_path: Path) -> None:
+def test_provenance_missing_when_boot_lacks_provenance(tmp_path: Path) -> None:
     store = ArtifactStore(artifact_root=tmp_path)
     manifest = store.create_run(
         RunRequest(
@@ -350,6 +369,18 @@ def test_provenance_missing_when_manifest_lacks_build_id(tmp_path: Path) -> None
             target_profile="local-qemu",
             rootfs_profile="minimal",
         )
+    )
+    # A SUCCEEDED boot step whose details carry neither kernel_provenance nor a
+    # kernel_provenance_capture_error.
+    store.record_step_result(
+        manifest.run_id,
+        StepResult(
+            step_name="boot",
+            status=StepStatus.SUCCEEDED,
+            summary="boot ok",
+            artifacts=[],
+            details={},
+        ),
     )
     targets, rootfs, debug = _profiles()
     response = debug_introspect_run_handler(
@@ -364,10 +395,9 @@ def test_provenance_missing_when_manifest_lacks_build_id(tmp_path: Path) -> None
     )
     assert response.ok is False
     assert response.error.details["code"] == "provenance_missing"
-    # Plan review finding 3 (R6-F1 refinement): the diagnostic must direct the
-    # operator at `kernel.create_run` as the recovery action. The explanatory
-    # mention of `force_rebuild` in the message body is intentional.
-    assert "kernel.create_run" in response.error.message
+    # Design §4: the recovery action is now re-running target.boot, which is
+    # what captures provenance on a SUCCEEDED boot.
+    assert "target.boot" in response.error.message
 
 
 def test_malformed_build_id_rejected_as_provenance_corrupt(tmp_path: Path) -> None:
@@ -381,14 +411,25 @@ def test_malformed_build_id_rejected_as_provenance_corrupt(tmp_path: Path) -> No
             rootfs_profile="minimal",
         )
     )
+    # Design §4: build_id is sourced from the boot-recorded kernel_provenance,
+    # so the malformed id must live there (the build step is no longer read).
     store.record_step_result(
         manifest.run_id,
         StepResult(
-            step_name="build",
+            step_name="boot",
             status=StepStatus.SUCCEEDED,
             summary="x",
             artifacts=[],
-            details={"build_id": "not-hex!"},
+            details={
+                "kernel_provenance": {
+                    "build_id": "not-hex!",
+                    "release": "x",
+                    "vmlinux_ref": "build/vmlinux",
+                    "cmdline": "",
+                    "config_ref": None,
+                    "modules_ref": None,
+                }
+            },
         ),
     )
     targets, rootfs, debug = _profiles()
@@ -558,6 +599,101 @@ def test_happy_path_records_step_and_returns_emits(tmp_path: Path) -> None:
     introspect_steps = [n for n in manifest.step_results if n.startswith("introspect:")]
     assert len(introspect_steps) == 1
     assert manifest.step_results[introspect_steps[0]].status == StepStatus.SUCCEEDED
+
+
+def test_introspect_surfaces_capture_error_code(tmp_path: Path) -> None:
+    # Boot recorded a kernel_provenance_capture_error instead of provenance;
+    # the handler surfaces that captured code verbatim under provenance_missing.
+    store = ArtifactStore(artifact_root=tmp_path)
+    manifest = store.create_run(
+        RunRequest(
+            run_id="r1",
+            source_path="/src",
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+        )
+    )
+    store.record_step_result(
+        manifest.run_id,
+        StepResult(
+            step_name="boot",
+            status=StepStatus.SUCCEEDED,
+            summary="boot ok",
+            artifacts=[],
+            details={
+                "kernel_provenance_capture_error": {
+                    "code": "build_id_unavailable",
+                    "message": "build recorded no build_id",
+                }
+            },
+        ),
+    )
+    targets, rootfs, debug = _profiles()
+    ssh = FakeSshRunner()
+    response = debug_introspect_run_handler(
+        _make_request(manifest.run_id),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=ssh,
+        admission=FakeAdmissionService(),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert response.error.details["code"] == "provenance_missing"
+    assert response.error.details["capture_error"] == "build_id_unavailable"
+    assert ssh.calls == []
+
+
+def test_introspect_host_wrapper_divergence_fails_loud(tmp_path: Path) -> None:
+    # Wrapper reports outcome=ok but a build_id differing from the recorded one
+    # (a truncation/normalization fault). The host verify must fail loud.
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    body = json.loads(_happy_ssh_result().stdout)
+    body["build_id"] = "b" * 40
+    targets, rootfs, debug = _profiles()
+    ssh = FakeSshRunner(results=[SshCommandResult(exit_status=6, stdout=json.dumps(body), stderr="")])
+    response = debug_introspect_run_handler(
+        _make_request(run_id),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=ssh,
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    # Forensic outcome_status records provenance_inconsistent; agent-facing code
+    # is provenance_mismatch.
+    assert response.error.details["code"] == "provenance_mismatch"
+
+
+def test_introspect_ok_outcome_without_build_id_fails_loud(tmp_path: Path) -> None:
+    # An "ok" wrapper payload that omits build_id must NOT pass the host verify
+    # silently. Synthetic fault injection: a real ok payload always carries it.
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    body = json.loads(_happy_ssh_result().stdout)
+    del body["build_id"]
+    targets, rootfs, debug = _profiles()
+    ssh = FakeSshRunner(results=[SshCommandResult(exit_status=6, stdout=json.dumps(body), stderr="")])
+    response = debug_introspect_run_handler(
+        _make_request(run_id),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=ssh,
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert response.error.details["code"] == "provenance_mismatch"
 
 
 def test_wrapper_exit_4_provenance_mismatch(tmp_path: Path) -> None:

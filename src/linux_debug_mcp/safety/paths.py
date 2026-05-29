@@ -130,3 +130,30 @@ def validate_secret_file_reference(ref: SecretReference, *, must_exist: bool = F
     if must_exist and not resolved.is_file():
         raise PathSafetyError("secret file reference does not exist")
     return resolved
+
+
+def confine_run_relative(ref: str, *, run_dir: Path) -> Path:
+    """Resolve a run-relative *ref* and confine it under *run_dir*.
+
+    Rejects absolute overrides, ``..`` traversal, and symlink escapes by
+    resolving the joined path and requiring the result to stay under the
+    resolved run directory. The path need not exist; existence is the
+    caller's concern.
+
+    The guard's safety rests on :meth:`Path.resolve` collapsing symlinks in
+    path components that exist on disk: a symlink in an existing component is
+    followed and the escaped target is caught by the containment check. Two
+    boundaries the caller must understand: (a) it is a point-in-time check, so
+    a TOCTOU window exists between confining a ref and using the resolved path;
+    callers that act much later should re-confine or hold a lock. (b) For a ref
+    whose components do not yet exist, ``resolve`` normalizes ``..`` lexically
+    and cannot follow a not-yet-planted symlink. This matches the only callers
+    (the resolver and boot adapter, which confine-then-immediately-stat) and is
+    not a guard against an adversary who can plant symlinks inside the
+    server-owned run sandbox between confine and use.
+    """
+    run_root = run_dir.resolve()
+    resolved = (run_root / ref).resolve()
+    if not _is_relative_to(resolved, run_root):
+        raise PathSafetyError(f"path escapes run sandbox: {ref!r}")
+    return resolved

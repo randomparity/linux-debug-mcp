@@ -88,7 +88,6 @@ from linux_debug_mcp.providers.contracts import (
 )
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from linux_debug_mcp.providers.local_drgn_introspect import (
-    _BUILD_ID_RE,
     SCRIPT_BYTE_CAP,
     TARGET_PYTHON_ARGV,
     WrapperRenderError,
@@ -136,10 +135,12 @@ from linux_debug_mcp.seams.secrets import EnvSecretsResolver
 from linux_debug_mcp.seams.target import (
     BreakHint,
     ConsoleKind,
+    KernelProvenance,
     PlatformMetadata,
     TargetKey,
     publish_ready_snapshot,
 )
+from linux_debug_mcp.symbols.verify import BUILD_ID_RE, ProvenanceMismatch, verify_build_id
 from linux_debug_mcp.transport.base import (
     EndpointExposure,
     ExecutionState,
@@ -617,6 +618,96 @@ def _find_artifact(result: StepResult, kind: str) -> ArtifactRef | None:
         if artifact.kind == kind:
             return artifact
     return None
+
+
+def _artifact_run_relative_ref(artifact: ArtifactRef | None, *, run_root: Path) -> tuple[str | None, str | None]:
+    """Return (run-relative ref, error-code).
+
+    error-code is set only when a present artifact's path is not under run_root.
+    """
+    if artifact is None:
+        return None, None
+    try:
+        return str(Path(artifact.path).resolve().relative_to(run_root)), None
+    except ValueError:
+        return None, "artifact_path_unexpected"
+
+
+def _capture_kernel_provenance(
+    *,
+    build_step: StepResult | None,
+    boot_details: dict[str, Any],
+    run_dir: Path,
+) -> dict[str, Any]:
+    """Synthesize a KernelProvenance from the build + boot records (design §3).
+
+    Returns one of:
+      - ``{"kernel_provenance": <model_dump>, ["kernel_provenance_capture_notes": [...]]}``
+      - ``{"kernel_provenance_capture_error": {"code": ..., "message": ...}}``
+    Never raises; a missing required field is a typed capture error so an
+    otherwise-good boot still SUCCEEDS.
+    """
+    if build_step is None:
+        return {
+            "kernel_provenance_capture_error": {"code": "build_id_unavailable", "message": "no build step recorded"}
+        }
+    build_id = build_step.details.get("build_id")
+    if not isinstance(build_id, str):
+        return {
+            "kernel_provenance_capture_error": {"code": "build_id_unavailable", "message": "build recorded no build_id"}
+        }
+    release = build_step.details.get("kernel_release")
+    if not isinstance(release, str):
+        return {
+            "kernel_provenance_capture_error": {
+                "code": "release_unavailable",
+                "message": "build recorded no kernel_release",
+            }
+        }
+
+    run_root = run_dir.resolve()
+    notes: list[str] = []
+    config_artifact = _find_artifact(build_step, "kernel-config")
+    config_ref, config_err = _artifact_run_relative_ref(config_artifact, run_root=run_root)
+    if config_err is not None:
+        return {
+            "kernel_provenance_capture_error": {
+                "code": config_err,
+                "message": "kernel-config artifact is outside the run directory",
+            }
+        }
+    if config_artifact is None:
+        notes.append("config_artifact_missing")
+
+    vmlinux_artifact = _find_artifact(build_step, "vmlinux")
+    if vmlinux_artifact is not None:
+        vmlinux_ref, vmlinux_err = _artifact_run_relative_ref(vmlinux_artifact, run_root=run_root)
+        if vmlinux_err is not None:
+            return {
+                "kernel_provenance_capture_error": {
+                    "code": vmlinux_err,
+                    "message": "vmlinux artifact is outside the run directory",
+                }
+            }
+    else:
+        vmlinux_ref = "build/vmlinux"
+        notes.append("vmlinux_artifact_missing")
+
+    kernel_args = boot_details.get("kernel_args")
+    cmdline = " ".join(kernel_args) if isinstance(kernel_args, list) else ""
+
+    provenance = KernelProvenance(
+        build_id=build_id,
+        release=release,
+        vmlinux_ref=vmlinux_ref or "build/vmlinux",
+        modules_ref=None,
+        cmdline=cmdline,
+        config_ref=config_ref,
+    )
+    result: dict[str, Any] = {"kernel_provenance": provenance.model_dump(mode="json")}
+    if notes:
+        result["kernel_provenance_capture_notes"] = notes
+    return result
 
 
 def _debug_session_details_from_result(result: StepResult, *, allow_ended: bool = False) -> dict[str, Any] | None:
@@ -1524,7 +1615,9 @@ def target_boot_handler(
 
     provider = provider or LibvirtQemuProvider()
 
-    def execute_boot(*, plan: Any, retrying_after_failure: bool, replace_succeeded: bool, attempt: int) -> ToolResponse:
+    def execute_boot(
+        *, plan: Any, retrying_after_failure: bool, replace_succeeded: bool, attempt: int, manifest: RunManifest
+    ) -> ToolResponse:
         def _failed_attempt_record() -> BootAttempt:
             return BootAttempt(
                 attempt=attempt,
@@ -1600,12 +1693,31 @@ def target_boot_handler(
                 artifacts=failed.artifacts,
                 suggested_next_actions=["artifacts.get_manifest"],
             )
+        terminal_details: dict[str, Any] = {**execution.details, "kernel_image_path": str(kernel_image.path)}
+        if execution.status == StepStatus.SUCCEEDED:
+            try:
+                terminal_details.update(
+                    _capture_kernel_provenance(
+                        build_step=manifest.step_results.get("build"),
+                        boot_details=execution.details,
+                        run_dir=store.run_dir(run_id),
+                    )
+                )
+            except Exception as capture_exc:  # provenance capture must never fail an otherwise-good boot
+                # Broad catch is deliberate (a good boot must not be lost to a
+                # capture defect) but must NOT be silent: log with traceback so a
+                # masked programming bug is observable, then record a typed error.
+                logger.warning("kernel provenance capture failed: %s", capture_exc, exc_info=True)
+                terminal_details["kernel_provenance_capture_error"] = {
+                    "code": "capture_unexpected_error",
+                    "message": f"{type(capture_exc).__name__}: {capture_exc}",
+                }
         terminal = StepResult(
             step_name="boot",
             status=execution.status,
             summary=execution.summary,
             artifacts=execution.artifacts,
-            details={**execution.details, "kernel_image_path": str(kernel_image.path)},
+            details=terminal_details,
         )
         attempt_record = BootAttempt(
             attempt=attempt,
@@ -1705,6 +1817,7 @@ def target_boot_handler(
                     retrying_after_failure=retrying_after_failure,
                     replace_succeeded=replace_succeeded or force_reboot,
                     attempt=next_attempt,
+                    manifest=locked_manifest,
                 )
     except ManifestStateError as exc:
         if "boot is locked" in str(exc):
@@ -2418,27 +2531,35 @@ def debug_introspect_run_handler(
             details={"code": "invalid_script"},
         )
 
-    # Spec §5.2 step 4: build_id from manifest.
-    build_step = manifest.step_results.get("build")
-    if build_step is None or "build_id" not in build_step.details:
-        # Plan review finding 3 / R6-F1: the diagnostic must point at
-        # kernel.create_run (NOT "rerun kernel.build" which is a no-op on
-        # SUCCEEDED, and NOT force_rebuild which is rejected outright). The
-        # explanatory mention of force_rebuild is intentional — it tells
-        # operators *why* a rebuild flag is not a path forward.
+    # Design §4: build_id flows from the boot-recorded KernelProvenance, the
+    # authoritative §4.2 record — not the build step.
+    boot_step = manifest.step_results.get("boot")
+    provenance = boot_step.details.get("kernel_provenance") if boot_step is not None else None
+    if not isinstance(provenance, dict):
+        capture_error = boot_step.details.get("kernel_provenance_capture_error") if boot_step is not None else None
+        if isinstance(capture_error, dict):
+            return ToolResponse.failure(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                run_id=run_id,
+                message=(f"boot did not record a KernelProvenance: {capture_error.get('message', 'capture failed')}"),
+                details={
+                    "code": "provenance_missing",
+                    "capture_error": capture_error.get("code"),
+                },
+            )
         return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
             run_id=run_id,
             message=(
-                "kernel.build for this run did not record a build_id. Start a "
-                "fresh run via kernel.create_run (kernel.build is idempotent on "
-                "SUCCEEDED and force_rebuild is not yet supported). The fresh "
-                "build will populate build_id."
+                "boot for this run did not record a KernelProvenance (it predates "
+                "provenance capture). Re-run target.boot with force_reboot=true; a "
+                "plain re-run short-circuits the recorded SUCCEEDED boot and will "
+                "not re-capture provenance."
             ),
             details={"code": "provenance_missing"},
         )
-    build_id = build_step.details["build_id"]
-    if not isinstance(build_id, str) or not _BUILD_ID_RE.match(build_id):
+    build_id = provenance.get("build_id")
+    if not isinstance(build_id, str) or not BUILD_ID_RE.match(build_id):
         return ToolResponse.failure(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             run_id=run_id,
@@ -2945,6 +3066,36 @@ def debug_introspect_run_handler(
                 code="wrapper_crash",
                 message="wrapper exited 6 with a minimal-recovery JSON document",
                 outcome_status_for_forensics="wrapper_internal_error",
+                include_stdout_json=True,
+                redacted_payload=rp,
+            )
+
+        # Design §4: host-authoritative provenance verify. The wrapper already
+        # self-aborted on mismatch (outcome_status == "provenance_mismatch",
+        # handled above); reaching here on an "ok" outcome with a disagreeing or
+        # absent id is a truncation/normalization/wrapper fault — fail loud, never skip.
+        # Verify the RAW parsed id, never the redacted payload: provenance is a
+        # trust decision and must not depend on a presentation-time redaction pass.
+        observed_build_id = parsed.get("build_id") if isinstance(parsed, dict) else None
+        if not isinstance(observed_build_id, str):
+            # An "ok" outcome that omits build_id is itself a wrapper fault; a
+            # missing observed id must NOT pass silently with symbols trusted.
+            return _fail(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                code="provenance_mismatch",
+                message="wrapper reported success without a build_id; cannot confirm provenance",
+                outcome_status_for_forensics="provenance_inconsistent",
+                include_stdout_json=True,
+                redacted_payload=rp,
+            )
+        try:
+            verify_build_id(expected=build_id, observed=observed_build_id)
+        except ProvenanceMismatch:
+            return _fail(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                code="provenance_mismatch",
+                message="host build_id verify disagrees with the wrapper-reported id",
+                outcome_status_for_forensics="provenance_inconsistent",
                 include_stdout_json=True,
                 redacted_payload=rp,
             )

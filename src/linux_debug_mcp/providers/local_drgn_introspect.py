@@ -17,11 +17,11 @@ from linux_debug_mcp.domain import (
     ProviderCapability,
     TargetKind,
 )
+from linux_debug_mcp.symbols.verify import BUILD_ID_RE
 
 # Spec §3.1 pre-substitution validators. EXPECTED_BUILD_ID is host-validated
 # hex from manifest.steps["build"].details["build_id"]. CALL_ID is a
 # server-minted UUIDv4 hex.
-_BUILD_ID_RE = re.compile(r"^[0-9a-f]{8,}$")
 _CALL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 # Spec §3.1: 256 KiB script cap (enforced by the handler, not Pydantic).
@@ -237,8 +237,8 @@ def render_wrapper(*, user_script: str, expected_build_id: str, call_id: str) ->
     literal, so triple quotes, NUL bytes, and ``${...}`` sigils inside the
     user script cannot escape their enclosing string.
     """
-    if not _BUILD_ID_RE.match(expected_build_id):
-        raise WrapperRenderError(f"expected_build_id must match {_BUILD_ID_RE.pattern}; got {expected_build_id!r}")
+    if not BUILD_ID_RE.match(expected_build_id):
+        raise WrapperRenderError(f"expected_build_id must match {BUILD_ID_RE.pattern}; got {expected_build_id!r}")
     if not _CALL_ID_RE.match(call_id):
         raise WrapperRenderError(f"call_id must match {_CALL_ID_RE.pattern}; got {call_id!r}")
     encoded = base64.b64encode(user_script.encode("utf-8")).decode("ascii")
@@ -267,8 +267,8 @@ def render_wrapper_skeleton(*, expected_build_id: str, call_id: str, user_script
     plaintext from the script and is safe to surface in the response's
     ``artifacts`` list.
     """
-    if not _BUILD_ID_RE.match(expected_build_id):
-        raise WrapperRenderError(f"expected_build_id must match {_BUILD_ID_RE.pattern}; got {expected_build_id!r}")
+    if not BUILD_ID_RE.match(expected_build_id):
+        raise WrapperRenderError(f"expected_build_id must match {BUILD_ID_RE.pattern}; got {expected_build_id!r}")
     if not _CALL_ID_RE.match(call_id):
         raise WrapperRenderError(f"call_id must match {_CALL_ID_RE.pattern}; got {call_id!r}")
     placeholder = (
