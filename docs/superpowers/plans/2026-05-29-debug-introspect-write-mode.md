@@ -74,6 +74,8 @@ def test_missing_destructive_permissions_defaults_to_transport_registry() -> Non
     ]
 ```
 
+> `test_config.py:130-147` is the **only** snapshot affected by the new op: it is the sole test asserting the default `enabled_operations` list. Other `enabled_operations` references construct explicit subsets, and `debug.introspect.write` is a capability token (not an MCP tool and not in any `ProviderCapability.operations` list), so `providers.list` / `_tool_manager._tools` snapshots are unchanged.
+
 Also update the default-profile snapshot at `tests/test_config.py:130-147` — append one entry to the expected list:
 
 ```python
@@ -128,8 +130,8 @@ def missing_destructive_permissions(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run python -m pytest tests/test_config.py tests/test_server_transport_tools.py -q`
-Expected: PASS (transport call site still green via the default registry).
+Run: `uv run python -m pytest -q`
+Expected: PASS — full suite green at this commit (the transport call site stays green via the default registry; `test_config:130` is the only snapshot touched).
 
 - [ ] **Step 5: Commit**
 
@@ -822,32 +824,76 @@ git commit -m "feat(introspect): expose acknowledged_permissions on the MCP run 
 **Files:**
 - Modify: `tests/test_drgn_introspect_integration.py`
 
-- [ ] **Step 1: Add gated tests mirroring the file's existing skip markers**
+These mirror `test_introspect_emit_roundtrip` (lines 226-245) exactly: `_require_integration_env()` first (keeps them gated), `_bootstrap_booted_run(tmp_path)` for the context, `target_ref="pilot-libvirt"`, `artifact_root=tmp_path / "runs"`. The default debug profile (unset) already enables `debug.introspect.write`, so the `allow_write=True` call passes the gate on the ack alone.
 
-Open `tests/test_drgn_introspect_integration.py`, copy its existing skip-guard (drgn + live target markers) verbatim, and add two cases under it:
+- [ ] **Step 1: Add the two gated tests**
+
+Append to `tests/test_drgn_introspect_integration.py`:
 
 ```python
-def test_allow_write_false_blocks_prog_write(<existing fixtures>) -> None:
-    # allow_write=false: prog.write must surface write_mode_disabled.
-    resp = <run a script that calls prog.write(...) with allow_write=False, gated profile>
-    assert resp.error.details["code"] == "write_mode_disabled"
+_WRITE_PERM = "mutate live kernel state via drgn write APIs"
 
 
-def test_allow_write_true_reaches_drgn(<existing fixtures>) -> None:
-    # allow_write=true + ack: the guard is absent, so prog.write reaches drgn,
-    # which fails on the read-only live target (no writable target exists yet).
-    # Asserts the call is NOT rejected as write_mode_disabled (proves the guard
-    # is not installed under write mode); the drgn-level failure is acceptable.
-    resp = <run prog.write(...) with allow_write=True, acknowledged_permissions=[...]>
-    assert resp.error is None or resp.error.details.get("code") != "write_mode_disabled"
+def test_introspect_allow_write_false_blocks_prog_write(tmp_path) -> None:
+    _require_integration_env()
+    ctx = _bootstrap_booted_run(tmp_path)
+    request = DebugIntrospectRunRequest(
+        run_id=ctx.run_id,
+        target_ref="pilot-libvirt",
+        script='prog.write(0, b"\\x00")',
+        timeout_seconds=30,
+        allow_write=False,
+    )
+    response = debug_introspect_run_handler(
+        request,
+        artifact_root=tmp_path / "runs",
+        target_profiles=ctx.target_profiles,
+        rootfs_profiles=ctx.rootfs_profiles,
+        admission=ctx.admission,
+        session_registry=ctx.session_registry,
+    )
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert response.error.details["code"] == "write_mode_disabled"
+
+
+def test_introspect_allow_write_true_reaches_drgn(tmp_path) -> None:
+    _require_integration_env()
+    ctx = _bootstrap_booted_run(tmp_path)
+    request = DebugIntrospectRunRequest(
+        run_id=ctx.run_id,
+        target_ref="pilot-libvirt",
+        script='prog.write(0, b"\\x00"); emit({"reached": True})',
+        timeout_seconds=30,
+        allow_write=True,
+        acknowledged_permissions=[_WRITE_PERM],
+    )
+    response = debug_introspect_run_handler(
+        request,
+        artifact_root=tmp_path / "runs",
+        target_profiles=ctx.target_profiles,
+        rootfs_profiles=ctx.rootfs_profiles,
+        admission=ctx.admission,
+        session_registry=ctx.session_registry,
+    )
+    # Under write mode the guard is absent, so prog.write reaches drgn, which
+    # fails on today's read-only live target (no writable target exists yet).
+    # The contract being asserted: the call is NOT rejected as
+    # write_mode_disabled — proving the guard is not installed under write mode.
+    # A drgn-level write failure surfaces as a script `error` outcome (ok=True
+    # response, outcome.status="error"), not write_mode_disabled.
+    if response.ok:
+        assert response.data["status"] in {"ok", "script_error"}
+    else:
+        assert response.error.details.get("code") != "write_mode_disabled"
 ```
 
-> Fill `<…>` from the file's existing helper fixtures — do NOT invent a new harness, and do NOT remove or weaken the skip markers (CLAUDE.md: keep integration tests gated).
+> Do NOT remove or weaken `_require_integration_env()` (CLAUDE.md: keep integration tests gated).
 
 - [ ] **Step 2: Verify the tests skip without drgn/target**
 
 Run: `uv run python -m pytest tests/test_drgn_introspect_integration.py -q`
-Expected: SKIPPED (no drgn / no live target in CI and on this host).
+Expected: SKIPPED (no drgn / no live target on this host or in CI).
 
 - [ ] **Step 3: Commit**
 
