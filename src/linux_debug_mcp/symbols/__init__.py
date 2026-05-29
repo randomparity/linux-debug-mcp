@@ -11,6 +11,7 @@ from linux_debug_mcp.symbols.verify import (
     BUILD_ID_RE,
     ProvenanceMismatch,
     verify_build_id,
+    verify_vmlinux_provenance,
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "read_elf_build_id",
     "resolve_symbols",
     "verify_build_id",
+    "verify_vmlinux_provenance",
 ]
