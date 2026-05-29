@@ -142,6 +142,8 @@ def test_default_debug_profile_matches_sprint_4_policy() -> None:
         "transport.inject_break",
         "debug.introspect.run",
         "debug.introspect.helper",
+        "debug.introspect.from_vmcore",
+        "debug.introspect.from_vmcore_helper",
     ]
 
 

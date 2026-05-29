@@ -111,6 +111,11 @@ ALLOWED_DEBUG_OPERATIONS = [
     "transport.inject_break",
     "debug.introspect.run",
     "debug.introspect.helper",
+    # Offline vmcore introspection (#55). Listed for enumerability/consistency;
+    # the vmcore path does not call `_ensure_debug_operation_enabled` (no
+    # DebugProfile in the request) — it is never gated (§5.6 rule 3).
+    "debug.introspect.from_vmcore",
+    "debug.introspect.from_vmcore_helper",
 ]
 
 # Spec §5.2 step 4a: soft cap on introspect step records per run. The handler enforces this

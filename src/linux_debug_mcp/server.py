@@ -54,6 +54,8 @@ from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import (
     ArtifactRef,
     DebugIntrospectCheckPrerequisitesRequest,
+    DebugIntrospectFromVmcoreHelperRequest,
+    DebugIntrospectFromVmcoreRequest,
     DebugIntrospectHelperRequest,
     DebugIntrospectRunRequest,
     ErrorCategory,
@@ -93,6 +95,8 @@ from linux_debug_mcp.providers.local_drgn_introspect import (
     SCRIPT_BYTE_CAP,
     TARGET_PYTHON_ARGV,
     WrapperRenderError,
+    render_vmcore_wrapper,
+    render_vmcore_wrapper_skeleton,
     render_wrapper,
     render_wrapper_skeleton,
     user_script_sha256,
@@ -122,7 +126,12 @@ from linux_debug_mcp.providers.stubs import (
     future_not_implemented_response,
     select_future_provider,
 )
-from linux_debug_mcp.safety.paths import PathSafetyError, validate_rootfs_source, validate_source_path
+from linux_debug_mcp.safety.paths import (
+    PathSafetyError,
+    confine_run_relative,
+    validate_rootfs_source,
+    validate_source_path,
+)
 from linux_debug_mcp.safety.redaction import Redactor
 from linux_debug_mcp.safety.runtime_locks import private_runtime_registry_dir
 from linux_debug_mcp.seams.break_policy import ReferenceBreakPolicy
@@ -142,6 +151,8 @@ from linux_debug_mcp.seams.target import (
     TargetKey,
     publish_ready_snapshot,
 )
+from linux_debug_mcp.symbols.build_id import BuildIdReadError, read_elf_build_id
+from linux_debug_mcp.symbols.resolve import SymbolResolutionError, resolve_symbols
 from linux_debug_mcp.symbols.verify import BUILD_ID_RE, ProvenanceMismatch, verify_build_id
 from linux_debug_mcp.transport.base import (
     EndpointExposure,
@@ -425,10 +436,13 @@ def _record_introspect_failure(
         "timeout_seconds": request_timeout_seconds,
         "duration_ms": duration_ms,
         "wrapper_exit_code": ssh_exit,
-        "ssh_user": ssh_user,
         "outcome_status": outcome_status_for_forensics,
         "code": code,
     }
+    # ssh_user is None on the vmcore path (no SSH user); omit the key rather
+    # than recording a misleading `ssh_user: null` on a non-SSH step.
+    if ssh_user is not None:
+        details["ssh_user"] = ssh_user
     step = StepResult(
         step_name=f"introspect:{call_id}",
         status=StepStatus.FAILED,
@@ -2952,335 +2966,28 @@ def _execute_introspect_call(
                 outcome_status_for_forensics=None,
             )
 
-        # Spec §5.2 step 11: exit-code + JSON parsing.
-        raw_stdout = _read_capped(stdout_path, RUN_STDOUT_CAP)
-        raw_stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
+        # Spec §5.2 step 11+: shared post-runner finalization (live + vmcore).
         finished_at = now()
         duration_ms = int((time.monotonic() - started_monotonic) * 1000)
-
-        parsed: dict[str, Any] | None
-        try:
-            parsed = json.loads(raw_stdout) if raw_stdout else None
-        except json.JSONDecodeError:
-            parsed = None
-
-        ssh_exit = ssh_result.exit_status
-
-        # Locally bind a partial-application closure so the many call sites
-        # below don't redeclare every kwarg, while preserving precise types
-        # (a `dict[str, Any]` spread would lose them).
-        def _fail(
-            *,
-            category: ErrorCategory,
-            code: str,
-            message: str,
-            outcome_status_for_forensics: str | None,
-            include_stdout_json: bool = False,
-            redacted_payload: dict[str, Any] | None = None,
-        ) -> ToolResponse:
-            return _record_introspect_failure(
-                store=store,
-                run_id=run_id,
-                call_id=call_id,
-                category=category,
-                code=code,
-                message=message,
-                agent_dir=agent_dir,
-                sensitive_dir=sensitive_call_dir,
-                redactor=redactor,
-                raw_stderr=raw_stderr,
-                ssh_exit=ssh_exit,
-                request_timeout_seconds=request.timeout_seconds,
-                duration_ms=duration_ms,
-                ssh_user=resolved_rootfs.ssh_user,
-                outcome_status_for_forensics=outcome_status_for_forensics,
-                include_stdout_json=include_stdout_json,
-                redacted_payload=redacted_payload,
-            )
-
-        if ssh_result.oversized_output or raw_stdout is None:
-            return _fail(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                code="oversized_output",
-                message=f"introspect stdout exceeded {RUN_STDOUT_CAP} bytes",
-                outcome_status_for_forensics=None,
-            )
-
-        if ssh_result.cancelled:
-            return _fail(
-                category=ErrorCategory.READINESS_FAILURE,
-                code="introspect_cancelled",
-                message="introspect call cancelled by admission fence",
-                outcome_status_for_forensics=None,
-            )
-
-        if ssh_result.stdin_failed:
-            # Wrapper payload was truncated mid-write (BrokenPipe / OSError).
-            # The remote python3 saw an incomplete script — any exit code or
-            # stdout it produced is meaningless. Classify as transport failure
-            # so operators chase the network/SSH path, not a phantom wrapper bug.
-            return _fail(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                code="ssh_stdin_failure",
-                message="wrapper payload was not fully written to ssh stdin",
-                outcome_status_for_forensics=None,
-            )
-
-        if ssh_result.timed_out:
-            return _fail(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                code="ssh_timeout",
-                message="ssh round trip exceeded host-side timeout margin",
-                outcome_status_for_forensics=None,
-            )
-
-        if ssh_exit == 124 and parsed is None:
-            return _fail(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                code="introspect_timeout",
-                message="target-side timeout(1) fired",
-                outcome_status_for_forensics=None,
-            )
-
-        if parsed is None:
-            # Spec §6.1 R3-F2: stdout was non-empty but not JSON. With the
-            # iter-2 finding 2 routing, SSH already wrote to
-            # `sensitive/stdout.raw` directly — no relocation needed; the
-            # explicit chmod above already tightened the mode.
-            return _fail(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                code="wrapper_crash",
-                message=f"wrapper exited {ssh_exit} without a parseable JSON document",
-                outcome_status_for_forensics=None,
-            )
-
-        # JSON parsed. Discriminate on outcome.status per §4.3.
-        redacted_payload = redactor.redact_value(parsed)
-        outcome_obj = redacted_payload.get("outcome") if isinstance(redacted_payload, dict) else None
-        outcome_status = outcome_obj.get("status") if isinstance(outcome_obj, dict) else None
-        rp = redacted_payload if isinstance(redacted_payload, dict) else None
-
-        if outcome_status == "drgn_open_failure":
-            return _fail(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                code="drgn_open_failure",
-                message="drgn could not attach to the live target",
-                outcome_status_for_forensics=outcome_status,
-                include_stdout_json=True,
-                redacted_payload=rp,
-            )
-        if outcome_status == "drgn_version_skew":
-            return _fail(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                code="drgn_version_skew",
-                message="drgn on target lacks main_module().build_id (version skew)",
-                outcome_status_for_forensics=outcome_status,
-                include_stdout_json=True,
-                redacted_payload=rp,
-            )
-        if outcome_status == "provenance_mismatch":
-            return _fail(
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                code="provenance_mismatch",
-                message="target build_id does not match the recorded build_id",
-                outcome_status_for_forensics=outcome_status,
-                include_stdout_json=True,
-                redacted_payload=rp,
-            )
-        if outcome_status == "script_compile_error":
-            return _fail(
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                code="script_compile_error",
-                message="user script failed to compile on the target",
-                outcome_status_for_forensics=outcome_status,
-                include_stdout_json=True,
-                redacted_payload=rp,
-            )
-        if outcome_status == "wrapper_internal_error":
-            # R4-F3: forensic-only on disk; agent-facing collapses to wrapper_crash.
-            return _fail(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                code="wrapper_crash",
-                message="wrapper exited 6 with a minimal-recovery JSON document",
-                outcome_status_for_forensics="wrapper_internal_error",
-                include_stdout_json=True,
-                redacted_payload=rp,
-            )
-
-        # Design §4: host-authoritative provenance verify. The wrapper already
-        # self-aborted on mismatch (outcome_status == "provenance_mismatch",
-        # handled above); reaching here on an "ok" outcome with a disagreeing or
-        # absent id is a truncation/normalization/wrapper fault — fail loud, never skip.
-        # Verify the RAW parsed id, never the redacted payload: provenance is a
-        # trust decision and must not depend on a presentation-time redaction pass.
-        observed_build_id = parsed.get("build_id") if isinstance(parsed, dict) else None
-        if not isinstance(observed_build_id, str):
-            # An "ok" outcome that omits build_id is itself a wrapper fault; a
-            # missing observed id must NOT pass silently with symbols trusted.
-            return _fail(
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                code="provenance_mismatch",
-                message="wrapper reported success without a build_id; cannot confirm provenance",
-                outcome_status_for_forensics="provenance_inconsistent",
-                include_stdout_json=True,
-                redacted_payload=rp,
-            )
-        try:
-            verify_build_id(expected=build_id, observed=observed_build_id)
-        except ProvenanceMismatch:
-            return _fail(
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                code="provenance_mismatch",
-                message="host build_id verify disagrees with the wrapper-reported id",
-                outcome_status_for_forensics="provenance_inconsistent",
-                include_stdout_json=True,
-                redacted_payload=rp,
-            )
-
-        # Spec §5.2 step 12: redaction post-processing for the happy path.
-        (agent_dir / "stdout.json").write_text(json.dumps(redacted_payload), encoding="utf-8")
-        (agent_dir / "stderr.log").write_text(redactor.redact_text(raw_stderr), encoding="utf-8")
-
-        emits = redacted_payload.get("emits", []) if isinstance(redacted_payload, dict) else []
-        user_stdout = redacted_payload.get("user_stdout", "") if isinstance(redacted_payload, dict) else ""
-        truncated = redacted_payload.get("truncated", {}) if isinstance(redacted_payload, dict) else {}
-        prelude_ms = redacted_payload.get("prelude_ms", 0) if isinstance(redacted_payload, dict) else 0
-
-        diagnostic: str | None = None
-        if prelude_ms * 100 >= PRELUDE_WARNING_FRACTION_PCT * request.timeout_seconds * 1000:
-            diagnostic = (
-                f"prelude ({prelude_ms} ms) consumed >= "
-                f"{PRELUDE_WARNING_FRACTION_PCT}% of timeout_seconds "
-                f"({request.timeout_seconds} s); consider raising timeout_seconds."
-            )
-
-        # Spec §4.3: only these keys are part of the response outcome contract
-        # for status=error. Allowlist (not spread) so a buggy/hostile wrapper
-        # output cannot inject keys downstream readers might treat as authoritative.
-        _SCRIPT_ERROR_OUTCOME_KEYS = ("error_type", "error_message", "traceback")
-        status = "script_error" if outcome_status == "error" else "ok"
-        if status == "script_error" and isinstance(outcome_obj, dict):
-            outcome_for_response: dict[str, Any] = {"status": "error"}
-            for _k in _SCRIPT_ERROR_OUTCOME_KEYS:
-                if _k in outcome_obj:
-                    outcome_for_response[_k] = outcome_obj[_k]
-        else:
-            outcome_for_response = {"status": "ok"}
-
-        user_stdout_snippet = _head_tail(user_stdout, head=2048, tail=2048)
-        drgn_stderr_snippet = _head_tail(redactor.redact_text(raw_stderr), head=2048, tail=2048)
-
-        # Spec §5.2 step 13: manifest record under the lock.
-        artifacts: list[ArtifactRef] = [
-            ArtifactRef(path=str(agent_dir / "request.json"), kind="application/json"),
-            ArtifactRef(path=str(agent_dir / "wrapper.skeleton.py"), kind="text/x-python"),
-            ArtifactRef(
-                path=str(sensitive_call_dir / "wrapper.py"),
-                kind="text/x-python",
-                sensitive=True,
-            ),
-            ArtifactRef(path=str(agent_dir / "stdout.json"), kind="application/json"),
-            ArtifactRef(path=str(agent_dir / "stderr.log"), kind="text/plain"),
-        ]
-        # Iter-2 finding 2: SSH now writes raw stdout/stderr straight to
-        # sensitive/, so register both as sensitive artifacts when present
-        # (empty files are still meaningful — they prove SSH wrote nothing).
-        for raw_name in ("stdout.raw", "stderr.raw"):
-            raw_path = sensitive_call_dir / raw_name
-            if raw_path.exists():
-                artifacts.append(
-                    ArtifactRef(
-                        path=str(raw_path),
-                        kind="application/octet-stream",
-                        sensitive=True,
-                    )
-                )
-
-        verdict = post_validator(redacted_payload) if post_validator is not None else None
-        step_status = StepStatus.SUCCEEDED
-        step_failure_code = None
-        if verdict is not None and not verdict.ok:
-            step_status = StepStatus.FAILED
-            step_failure_code = verdict.failure_code
-
-        step_details: dict[str, Any] = {
-            "call_id": call_id,
-            "build_id": redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None,
-            "timeout_seconds": request.timeout_seconds,
-            "wrapper_exit_code": ssh_result.exit_status,
-            "duration_ms": duration_ms,
-            "prelude_ms": prelude_ms,
-            "truncated": truncated,
-            "ssh_user": resolved_rootfs.ssh_user,
-            "outcome_status": outcome_status,
-        }
-        if verdict is not None:
-            step_details.update(verdict.extra_step_details)
-        if step_status is StepStatus.FAILED:
-            step_details["code"] = step_failure_code
-
-        summary = (
-            f"introspect call {call_id[:8]} ok"
-            if step_status is StepStatus.SUCCEEDED
-            else f"introspect call {call_id[:8]} failed: {step_failure_code}"
-        )
-        step = StepResult(
-            step_name=f"introspect:{call_id}",
-            status=step_status,
-            summary=summary,
-            artifacts=artifacts,
-            details=step_details,
-        )
-        _record_terminal_introspect_result(store, run_id, step)
-
-        public_artifacts = [a for a in artifacts if not a.sensitive]
-
-        if verdict is not None and not verdict.ok:
-            return ToolResponse.failure(
-                category=verdict.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
-                run_id=run_id,
-                message=verdict.failure_message or "post-validator rejected the introspect result",
-                details={"code": verdict.failure_code, "call_id": call_id},
-                suggested_next_actions=["artifacts.get_manifest"],
-            )
-        # `verdict.ok` is always True here (the not-ok case returned above); the
-        # explicit check is for self-documentation.
-        if verdict is not None and verdict.ok:
-            return ToolResponse.success(
-                summary=f"introspect call {call_id[:8]} ok",
-                run_id=run_id,
-                status=StepStatus.SUCCEEDED,
-                artifacts=public_artifacts,
-                suggested_next_actions=["artifacts.get_manifest", operation_name],
-                data={
-                    **verdict.extra_response_data,
-                    "call_id": call_id,
-                    "truncated": truncated,
-                    "prelude_ms": prelude_ms,
-                },
-            )
-        return ToolResponse.success(
-            summary=f"introspect call {call_id[:8]} ok",
+        return _finalize_introspect_call(
+            store=store,
             run_id=run_id,
-            status=StepStatus.SUCCEEDED,
-            artifacts=public_artifacts,
-            suggested_next_actions=["artifacts.get_manifest", "debug.introspect.run"],
-            data={
-                "call_id": call_id,
-                "status": status,
-                "outcome": outcome_for_response,
-                "emits": emits,
-                "user_stdout_snippet": user_stdout_snippet,
-                "drgn_stderr_snippet": drgn_stderr_snippet,
-                "build_id": redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None,
-                "truncated": truncated,
-                "started_at": started_at.isoformat(),
-                "finished_at": finished_at.isoformat(),
-                "duration_ms": duration_ms,
-                "prelude_ms": prelude_ms,
-                "artifacts": [a.model_dump(mode="json") for a in public_artifacts],
-                "diagnostic": diagnostic,
-            },
+            call_id=call_id,
+            ssh_result=ssh_result,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            agent_dir=agent_dir,
+            sensitive_call_dir=sensitive_call_dir,
+            redactor=redactor,
+            expected_build_id=build_id,
+            request_timeout_seconds=request.timeout_seconds,
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=duration_ms,
+            operation_name=operation_name,
+            drgn_open_message="drgn could not attach to the live target",
+            exec_principal=resolved_rootfs.ssh_user,
+            post_validator=post_validator,
         )
 
     except Exception:
@@ -3300,6 +3007,368 @@ def _execute_introspect_call(
                 # but the operator still needs admission-state diagnostics.
                 logger.exception("admission rollback failed while unwinding introspect handler for run_id=%s", run_id)
         raise
+
+
+def _finalize_introspect_call(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    call_id: str,
+    ssh_result: SshCommandResult,
+    stdout_path: Path,
+    stderr_path: Path,
+    agent_dir: Path,
+    sensitive_call_dir: Path,
+    redactor: Redactor,
+    expected_build_id: str,
+    request_timeout_seconds: int,
+    started_at: datetime,
+    finished_at: datetime,
+    duration_ms: int,
+    operation_name: str,
+    drgn_open_message: str,
+    exec_principal: str | None,
+    post_validator: IntrospectPostValidator | None,
+) -> ToolResponse:
+    """Shared post-runner stage for both the live (`_execute_introspect_call`)
+    and offline (`_execute_vmcore_introspect_call`) paths (spec §7 / ADR 0010).
+
+    Everything from the runner-result triage through outcome discrimination,
+    host-side `verify_build_id`, redaction, the `introspect:<call_id>` manifest
+    step, and the success/post-validator response is identical between the two
+    paths; only `expected_build_id`, `exec_principal` (None for vmcore — no SSH
+    user), `operation_name`, `drgn_open_message`, and `post_validator` differ.
+    """
+    # Spec §5.2 step 11: exit-code + JSON parsing.
+    raw_stdout = _read_capped(stdout_path, RUN_STDOUT_CAP)
+    raw_stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
+
+    parsed: dict[str, Any] | None
+    try:
+        parsed = json.loads(raw_stdout) if raw_stdout else None
+    except json.JSONDecodeError:
+        parsed = None
+
+    ssh_exit = ssh_result.exit_status
+
+    def _fail(
+        *,
+        category: ErrorCategory,
+        code: str,
+        message: str,
+        outcome_status_for_forensics: str | None,
+        include_stdout_json: bool = False,
+        redacted_payload: dict[str, Any] | None = None,
+    ) -> ToolResponse:
+        return _record_introspect_failure(
+            store=store,
+            run_id=run_id,
+            call_id=call_id,
+            category=category,
+            code=code,
+            message=message,
+            agent_dir=agent_dir,
+            sensitive_dir=sensitive_call_dir,
+            redactor=redactor,
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
+            request_timeout_seconds=request_timeout_seconds,
+            duration_ms=duration_ms,
+            ssh_user=exec_principal,
+            outcome_status_for_forensics=outcome_status_for_forensics,
+            include_stdout_json=include_stdout_json,
+            redacted_payload=redacted_payload,
+        )
+
+    if ssh_result.oversized_output or raw_stdout is None:
+        return _fail(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            code="oversized_output",
+            message=f"introspect stdout exceeded {RUN_STDOUT_CAP} bytes",
+            outcome_status_for_forensics=None,
+        )
+
+    if ssh_result.cancelled:
+        return _fail(
+            category=ErrorCategory.READINESS_FAILURE,
+            code="introspect_cancelled",
+            message="introspect call cancelled by admission fence",
+            outcome_status_for_forensics=None,
+        )
+
+    if ssh_result.stdin_failed:
+        # Wrapper payload was truncated mid-write (BrokenPipe / OSError). The
+        # interpreter saw an incomplete script — any exit code or stdout it
+        # produced is meaningless. Classify as transport failure.
+        return _fail(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            code="ssh_stdin_failure",
+            message="wrapper payload was not fully written to the runner stdin",
+            outcome_status_for_forensics=None,
+        )
+
+    if ssh_result.timed_out:
+        return _fail(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            code="ssh_timeout",
+            message="runner round trip exceeded host-side timeout margin",
+            outcome_status_for_forensics=None,
+        )
+
+    if ssh_exit == 124 and parsed is None:
+        return _fail(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            code="introspect_timeout",
+            message="timeout(1) fired",
+            outcome_status_for_forensics=None,
+        )
+
+    if parsed is None:
+        # Stdout was non-empty but not JSON; raw bytes are already under
+        # sensitive/stdout.raw with a tightened mode.
+        return _fail(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            code="wrapper_crash",
+            message=f"wrapper exited {ssh_exit} without a parseable JSON document",
+            outcome_status_for_forensics=None,
+        )
+
+    # JSON parsed. Discriminate on outcome.status per §4.3.
+    redacted_payload = redactor.redact_value(parsed)
+    outcome_obj = redacted_payload.get("outcome") if isinstance(redacted_payload, dict) else None
+    outcome_status = outcome_obj.get("status") if isinstance(outcome_obj, dict) else None
+    rp = redacted_payload if isinstance(redacted_payload, dict) else None
+
+    if outcome_status == "drgn_open_failure":
+        return _fail(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            code="drgn_open_failure",
+            message=drgn_open_message,
+            outcome_status_for_forensics=outcome_status,
+            include_stdout_json=True,
+            redacted_payload=rp,
+        )
+    if outcome_status == "drgn_version_skew":
+        return _fail(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            code="drgn_version_skew",
+            message="drgn lacks main_module().build_id (version skew)",
+            outcome_status_for_forensics=outcome_status,
+            include_stdout_json=True,
+            redacted_payload=rp,
+        )
+    if outcome_status == "provenance_unverifiable":
+        return _fail(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            code="provenance_unverifiable",
+            message="vmcore carries no embedded build-id; provenance cannot be verified",
+            outcome_status_for_forensics=outcome_status,
+            include_stdout_json=True,
+            redacted_payload=rp,
+        )
+    if outcome_status == "provenance_mismatch":
+        return _fail(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            code="provenance_mismatch",
+            message="kernel build_id does not match the expected build_id",
+            outcome_status_for_forensics=outcome_status,
+            include_stdout_json=True,
+            redacted_payload=rp,
+        )
+    if outcome_status == "script_compile_error":
+        return _fail(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            code="script_compile_error",
+            message="user script failed to compile",
+            outcome_status_for_forensics=outcome_status,
+            include_stdout_json=True,
+            redacted_payload=rp,
+        )
+    if outcome_status == "wrapper_internal_error":
+        # R4-F3: forensic-only on disk; agent-facing collapses to wrapper_crash.
+        return _fail(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            code="wrapper_crash",
+            message="wrapper exited 6 with a minimal-recovery JSON document",
+            outcome_status_for_forensics="wrapper_internal_error",
+            include_stdout_json=True,
+            redacted_payload=rp,
+        )
+
+    # Design §4: host-authoritative provenance verify. The wrapper already
+    # self-aborted on mismatch (handled above); reaching here on an "ok" outcome
+    # with a disagreeing or absent id is a wrapper fault — fail loud, never skip.
+    # Verify the RAW parsed id, never the redacted payload.
+    observed_build_id = parsed.get("build_id") if isinstance(parsed, dict) else None
+    if not isinstance(observed_build_id, str):
+        return _fail(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            code="provenance_mismatch",
+            message="wrapper reported success without a build_id; cannot confirm provenance",
+            outcome_status_for_forensics="provenance_inconsistent",
+            include_stdout_json=True,
+            redacted_payload=rp,
+        )
+    try:
+        verify_build_id(expected=expected_build_id, observed=observed_build_id)
+    except ProvenanceMismatch:
+        return _fail(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            code="provenance_mismatch",
+            message="host build_id verify disagrees with the wrapper-reported id",
+            outcome_status_for_forensics="provenance_inconsistent",
+            include_stdout_json=True,
+            redacted_payload=rp,
+        )
+
+    # Spec §5.2 step 12: redaction post-processing for the happy path.
+    (agent_dir / "stdout.json").write_text(json.dumps(redacted_payload), encoding="utf-8")
+    (agent_dir / "stderr.log").write_text(redactor.redact_text(raw_stderr), encoding="utf-8")
+
+    emits = redacted_payload.get("emits", []) if isinstance(redacted_payload, dict) else []
+    user_stdout = redacted_payload.get("user_stdout", "") if isinstance(redacted_payload, dict) else ""
+    truncated = redacted_payload.get("truncated", {}) if isinstance(redacted_payload, dict) else {}
+    prelude_ms = redacted_payload.get("prelude_ms", 0) if isinstance(redacted_payload, dict) else 0
+    warnings = redacted_payload.get("warnings", []) if isinstance(redacted_payload, dict) else []
+
+    diagnostic: str | None = None
+    if prelude_ms * 100 >= PRELUDE_WARNING_FRACTION_PCT * request_timeout_seconds * 1000:
+        diagnostic = (
+            f"prelude ({prelude_ms} ms) consumed >= "
+            f"{PRELUDE_WARNING_FRACTION_PCT}% of timeout_seconds "
+            f"({request_timeout_seconds} s); consider raising timeout_seconds."
+        )
+
+    # Spec §4.3: only these keys are part of the response outcome contract for
+    # status=error. Allowlist (not spread) so a hostile wrapper cannot inject keys.
+    _SCRIPT_ERROR_OUTCOME_KEYS = ("error_type", "error_message", "traceback")
+    status = "script_error" if outcome_status == "error" else "ok"
+    if status == "script_error" and isinstance(outcome_obj, dict):
+        outcome_for_response: dict[str, Any] = {"status": "error"}
+        for _k in _SCRIPT_ERROR_OUTCOME_KEYS:
+            if _k in outcome_obj:
+                outcome_for_response[_k] = outcome_obj[_k]
+    else:
+        outcome_for_response = {"status": "ok"}
+
+    user_stdout_snippet = _head_tail(user_stdout, head=2048, tail=2048)
+    drgn_stderr_snippet = _head_tail(redactor.redact_text(raw_stderr), head=2048, tail=2048)
+
+    # Spec §5.2 step 13: manifest record under the lock.
+    artifacts: list[ArtifactRef] = [
+        ArtifactRef(path=str(agent_dir / "request.json"), kind="application/json"),
+        ArtifactRef(path=str(agent_dir / "wrapper.skeleton.py"), kind="text/x-python"),
+        ArtifactRef(
+            path=str(sensitive_call_dir / "wrapper.py"),
+            kind="text/x-python",
+            sensitive=True,
+        ),
+        ArtifactRef(path=str(agent_dir / "stdout.json"), kind="application/json"),
+        ArtifactRef(path=str(agent_dir / "stderr.log"), kind="text/plain"),
+    ]
+    for raw_name in ("stdout.raw", "stderr.raw"):
+        raw_path = sensitive_call_dir / raw_name
+        if raw_path.exists():
+            artifacts.append(
+                ArtifactRef(
+                    path=str(raw_path),
+                    kind="application/octet-stream",
+                    sensitive=True,
+                )
+            )
+
+    verdict = post_validator(redacted_payload) if post_validator is not None else None
+    step_status = StepStatus.SUCCEEDED
+    step_failure_code = None
+    if verdict is not None and not verdict.ok:
+        step_status = StepStatus.FAILED
+        step_failure_code = verdict.failure_code
+
+    step_details: dict[str, Any] = {
+        "call_id": call_id,
+        "build_id": redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None,
+        "timeout_seconds": request_timeout_seconds,
+        "wrapper_exit_code": ssh_result.exit_status,
+        "duration_ms": duration_ms,
+        "prelude_ms": prelude_ms,
+        "truncated": truncated,
+        "outcome_status": outcome_status,
+    }
+    # exec_principal is None on the vmcore path (no SSH user); omit the key
+    # rather than recording a misleading `ssh_user: null` on a non-SSH step.
+    if exec_principal is not None:
+        step_details["ssh_user"] = exec_principal
+    if verdict is not None:
+        step_details.update(verdict.extra_step_details)
+    if step_status is StepStatus.FAILED:
+        step_details["code"] = step_failure_code
+
+    summary = (
+        f"introspect call {call_id[:8]} ok"
+        if step_status is StepStatus.SUCCEEDED
+        else f"introspect call {call_id[:8]} failed: {step_failure_code}"
+    )
+    step = StepResult(
+        step_name=f"introspect:{call_id}",
+        status=step_status,
+        summary=summary,
+        artifacts=artifacts,
+        details=step_details,
+    )
+    _record_terminal_introspect_result(store, run_id, step)
+
+    public_artifacts = [a for a in artifacts if not a.sensitive]
+
+    if verdict is not None and not verdict.ok:
+        return ToolResponse.failure(
+            category=verdict.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=verdict.failure_message or "post-validator rejected the introspect result",
+            details={"code": verdict.failure_code, "call_id": call_id},
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+    if verdict is not None and verdict.ok:
+        return ToolResponse.success(
+            summary=f"introspect call {call_id[:8]} ok",
+            run_id=run_id,
+            status=StepStatus.SUCCEEDED,
+            artifacts=public_artifacts,
+            suggested_next_actions=["artifacts.get_manifest", operation_name],
+            data={
+                **verdict.extra_response_data,
+                "call_id": call_id,
+                "truncated": truncated,
+                "prelude_ms": prelude_ms,
+            },
+        )
+    response_data: dict[str, Any] = {
+        "call_id": call_id,
+        "status": status,
+        "outcome": outcome_for_response,
+        "emits": emits,
+        "user_stdout_snippet": user_stdout_snippet,
+        "drgn_stderr_snippet": drgn_stderr_snippet,
+        "build_id": redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None,
+        "truncated": truncated,
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "duration_ms": duration_ms,
+        "prelude_ms": prelude_ms,
+        "artifacts": [a.model_dump(mode="json") for a in public_artifacts],
+        "diagnostic": diagnostic,
+    }
+    # The live wrapper never emits warnings (vmcore-only field); include the key
+    # only when present so the live `debug.introspect.run` response is unchanged.
+    if warnings:
+        response_data["warnings"] = warnings
+    return ToolResponse.success(
+        summary=f"introspect call {call_id[:8]} ok",
+        run_id=run_id,
+        status=StepStatus.SUCCEEDED,
+        artifacts=public_artifacts,
+        suggested_next_actions=["artifacts.get_manifest", operation_name],
+        data=response_data,
+    )
 
 
 def debug_introspect_run_handler(
@@ -3448,6 +3517,339 @@ def debug_introspect_helper_handler(
         session_registry=session_registry,
         clock=clock,
         operation_name="debug.introspect.helper",
+        caps=HELPER_CAP_PROFILE,
+        post_validator=_make_helper_post_validator(spec),
+    )
+
+
+def _execute_vmcore_introspect_call(
+    request: DebugIntrospectFromVmcoreRequest,
+    *,
+    artifact_root: Path,
+    runner: SshRunner | None = None,
+    build_id_reader: Callable[[Path], str] = read_elf_build_id,
+    clock: Callable[[], datetime] | None = None,
+    operation_name: str = "debug.introspect.from_vmcore",
+    caps: dict[str, int] | None = None,
+    post_validator: IntrospectPostValidator | None = None,
+) -> ToolResponse:
+    """Offline vmcore drgn introspection (spec §6 / ADR 0010).
+
+    Runs the user/helper drgn script against a captured vmcore on the agent
+    host via a local ``python3`` subprocess. No admission gate, no SSH, no sudo
+    — vmcore analysis is always concurrent-safe (interface-contracts §5.6 rule
+    3). The build_id fail-loud compares the vmcore's embedded id against the
+    host-parsed id of the supplied vmlinux.
+    """
+    run_id = request.run_id
+    now = clock or _utcnow
+
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        if not (store.run_dir(run_id) / "manifest.json").is_file():
+            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    # Spec §6 step 2: request invariants (no profile fields to reconcile).
+    if request.allow_write:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message="allow_write=true is not yet supported (#56 — write-mode opt-in)",
+            details={"code": "allow_write_not_supported"},
+        )
+    if not (5 <= request.timeout_seconds <= 300):
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=f"timeout_seconds must be in [5, 300]; got {request.timeout_seconds}",
+            details={"code": "invalid_timeout"},
+        )
+    script_bytes = request.script.encode("utf-8")
+    if not script_bytes or len(script_bytes) > SCRIPT_BYTE_CAP:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message="script must be non-empty and <= the script byte cap",
+            details={"code": "invalid_script"},
+        )
+
+    # Spec §6 step 3: shared introspect call budget.
+    if _count_introspect_calls(manifest) >= MAX_INTROSPECT_CALLS_PER_RUN:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=(
+                f"introspect call budget exhausted (>= {MAX_INTROSPECT_CALLS_PER_RUN}); "
+                "start a new run via kernel.create_run"
+            ),
+            details={"code": "manifest_call_budget_exhausted"},
+        )
+
+    # Spec §6 step 4: sensitive/ parent-mode preflight.
+    run_dir = store.run_dir(run_id)
+    sensitive_dir = run_dir / "sensitive"
+    try:
+        mode = sensitive_dir.stat().st_mode & 0o777
+    except FileNotFoundError:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=f"{sensitive_dir} is missing; re-run kernel.create_run to recreate the run layout.",
+            details={"code": "sensitive_dir_missing"},
+        )
+    if mode & 0o077:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=(f"{sensitive_dir} mode is {oct(mode)}; expected 0o700. Re-run kernel.create_run."),
+            details={"code": "sensitive_dir_too_permissive", "actual_mode": oct(mode)},
+        )
+
+    # Spec §6 step 5: resolve symbols (confine vmlinux/modules to run_dir) and
+    # confine the vmcore ref. Build a KernelProvenance shell purely to reuse the
+    # #53 resolver; build_id="" is unused by resolve_symbols.
+    redactor = Redactor(secret_values=[])
+    provenance_shell = KernelProvenance(
+        build_id="",
+        release="",
+        vmlinux_ref=request.vmlinux_ref,
+        modules_ref=request.modules_ref,
+        cmdline="",
+        config_ref=None,
+    )
+    try:
+        resolved = resolve_symbols(provenance_shell, run_dir=run_dir)
+    except SymbolResolutionError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=str(exc),
+            details={"code": "symbol_resolution_failed", "resolver_code": exc.code},
+        )
+    try:
+        vmcore_path = confine_run_relative(request.vmcore_ref, run_dir=run_dir)
+    except PathSafetyError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=str(exc),
+            details={"code": "vmcore_not_found"},
+        )
+    if not vmcore_path.is_file():
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=f"vmcore not found at {request.vmcore_ref!r}",
+            details={"code": "vmcore_not_found"},
+        )
+
+    # Spec §6 step 6: host-authoritative expected build_id from the vmlinux ELF.
+    try:
+        expected_build_id = build_id_reader(resolved.vmlinux_path)
+    except BuildIdReadError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=f"could not read a GNU build-id from the supplied vmlinux: {exc}",
+            details={"code": "vmlinux_build_id_unreadable"},
+        )
+    if not BUILD_ID_RE.match(expected_build_id):
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message="vmlinux build_id is malformed",
+            details={"code": "vmlinux_build_id_unreadable", "recorded": expected_build_id},
+        )
+
+    # Spec §6 step 7: mint call_id, lay out dirs, render + persist the wrapper.
+    call_id = uuid.uuid4().hex
+    agent_dir = run_dir / "debug" / "introspect" / call_id
+    sensitive_call_dir = run_dir / "sensitive" / "debug" / "introspect" / call_id
+    agent_dir.mkdir(parents=True, mode=0o700)
+    sensitive_call_dir.mkdir(parents=True, mode=0o700)
+    sensitive_call_dir.chmod(0o700)
+    sensitive_call_dir.parent.chmod(0o700)
+    sensitive_call_dir.parent.parent.chmod(0o700)
+
+    args_json = json.dumps(request.args or {})
+    modules_arg = str(resolved.modules_path) if resolved.modules_path is not None else None
+    try:
+        wrapper = render_vmcore_wrapper(
+            user_script=request.script,
+            expected_build_id=expected_build_id,
+            call_id=call_id,
+            vmcore_path=str(vmcore_path),
+            vmlinux_path=str(resolved.vmlinux_path),
+            modules_path=modules_arg,
+            args_json=args_json,
+            caps=caps,
+        )
+        skeleton = render_vmcore_wrapper_skeleton(
+            expected_build_id=expected_build_id,
+            call_id=call_id,
+            user_script_sha256_hex=user_script_sha256(request.script),
+            vmcore_path=str(vmcore_path),
+            vmlinux_path=str(resolved.vmlinux_path),
+            modules_path=modules_arg,
+            args_json=args_json,
+            caps=caps,
+        )
+    except WrapperRenderError as exc:
+        shutil.rmtree(agent_dir, ignore_errors=True)
+        shutil.rmtree(sensitive_call_dir, ignore_errors=True)
+        failed = StepResult(
+            step_name=f"introspect:{call_id}",
+            status=StepStatus.FAILED,
+            summary=f"wrapper render error: {exc}",
+            artifacts=[],
+            details={
+                "call_id": call_id,
+                "code": "wrapper_render_error",
+                "outcome_status": None,
+                "timeout_seconds": request.timeout_seconds,
+                "duration_ms": 0,
+                "wrapper_exit_code": None,
+            },
+        )
+        _record_terminal_introspect_result(store, run_id, failed)
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"wrapper render error: {exc}",
+            details={"code": "wrapper_render_error", "call_id": call_id},
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+
+    wrapper_path = sensitive_call_dir / "wrapper.py"
+    wrapper_fd = os.open(wrapper_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(wrapper_fd, "w", encoding="utf-8") as wrapper_handle:
+            wrapper_handle.write(wrapper)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            wrapper_path.unlink()
+        raise
+    (agent_dir / "wrapper.skeleton.py").write_text(skeleton, encoding="utf-8")
+
+    request_dump = request.model_dump(mode="json")
+    request_dump["script"] = f"sha256:{user_script_sha256(request.script)}"
+    (agent_dir / "request.json").write_text(json.dumps(redactor.redact_value(request_dump)), encoding="utf-8")
+
+    # Spec §6 step 8: local drgn subprocess (no SSH, no sudo, no admission).
+    stdout_path = sensitive_call_dir / "stdout.raw"
+    stderr_path = sensitive_call_dir / "stderr.raw"
+    active_runner: SshRunner = runner or SubprocessSshRunner()
+    argv = ["timeout", "--kill-after=2s", f"{request.timeout_seconds}s", "python3", "-"]
+    started_at = now()
+    started_monotonic = time.monotonic()
+    ssh_result = active_runner.run(
+        argv,
+        timeout=request.timeout_seconds + 10,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        cancel=threading.Event(),
+        stdin=wrapper,
+        max_stdout_bytes=RUN_STDOUT_CAP,
+    )
+    for raw_path in (stdout_path, stderr_path):
+        with contextlib.suppress(FileNotFoundError):
+            raw_path.chmod(0o600)
+
+    finished_at = now()
+    duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+    return _finalize_introspect_call(
+        store=store,
+        run_id=run_id,
+        call_id=call_id,
+        ssh_result=ssh_result,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        agent_dir=agent_dir,
+        sensitive_call_dir=sensitive_call_dir,
+        redactor=redactor,
+        expected_build_id=expected_build_id,
+        request_timeout_seconds=request.timeout_seconds,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_ms=duration_ms,
+        operation_name=operation_name,
+        drgn_open_message="drgn could not open the vmcore",
+        exec_principal=None,
+        post_validator=post_validator,
+    )
+
+
+def debug_introspect_from_vmcore_handler(
+    request: DebugIntrospectFromVmcoreRequest,
+    *,
+    artifact_root: Path,
+    runner: SshRunner | None = None,
+    build_id_reader: Callable[[Path], str] = read_elf_build_id,
+    clock: Callable[[], datetime] | None = None,
+) -> ToolResponse:
+    """Spec §6 / ADR 0010. Offline vmcore drgn introspection; no admission gate."""
+    return _execute_vmcore_introspect_call(
+        request,
+        artifact_root=artifact_root,
+        runner=runner,
+        build_id_reader=build_id_reader,
+        clock=clock,
+        operation_name="debug.introspect.from_vmcore",
+        caps=None,
+        post_validator=None,
+    )
+
+
+def debug_introspect_from_vmcore_helper_handler(
+    request: DebugIntrospectFromVmcoreHelperRequest,
+    *,
+    artifact_root: Path,
+    runner: SshRunner | None = None,
+    build_id_reader: Callable[[Path], str] = read_elf_build_id,
+    clock: Callable[[], datetime] | None = None,
+) -> ToolResponse:
+    """Spec §3.1. Run a curated HELPER_REGISTRY helper against a vmcore, reusing
+    the live helper's post-validator and cap profile unchanged.
+    """
+    spec = HELPER_REGISTRY.get(request.name)
+    if spec is None:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=request.run_id,
+            message=f"unknown helper {request.name!r}; valid: {sorted(HELPER_REGISTRY)}",
+            details={"code": "unknown_helper", "valid": sorted(HELPER_REGISTRY)},
+            suggested_next_actions=["debug.introspect.from_vmcore_helper"],
+        )
+    try:
+        validated_args = spec.args_model.model_validate(request.args)
+    except ValidationError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=request.run_id,
+            message=_redact_and_truncate(Redactor(), str(exc), cap=512),
+            details={"code": "helper_args_invalid"},
+            suggested_next_actions=["debug.introspect.from_vmcore_helper"],
+        )
+    run_request = DebugIntrospectFromVmcoreRequest(
+        run_id=request.run_id,
+        vmcore_ref=request.vmcore_ref,
+        vmlinux_ref=request.vmlinux_ref,
+        modules_ref=request.modules_ref,
+        script=spec.script,
+        timeout_seconds=request.timeout_seconds,
+        allow_write=False,
+        args=validated_args.model_dump(mode="json"),
+    )
+    return _execute_vmcore_introspect_call(
+        run_request,
+        artifact_root=artifact_root,
+        runner=runner,
+        build_id_reader=build_id_reader,
+        clock=clock,
+        operation_name="debug.introspect.from_vmcore_helper",
         caps=HELPER_CAP_PROFILE,
         post_validator=_make_helper_post_validator(spec),
     )
@@ -5867,6 +6269,58 @@ def create_app(
             rootfs_profile=rootfs_profile,
         )
         return debug_introspect_check_prerequisites_handler(
+            request,
+            artifact_root=Path(artifact_root),
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.introspect.from_vmcore")
+    def debug_introspect_from_vmcore(
+        run_id: str,
+        vmcore_ref: str,
+        vmlinux_ref: str,
+        script: str,
+        modules_ref: str | None = None,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        timeout_seconds: int = 30,
+        allow_write: bool = False,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        request = DebugIntrospectFromVmcoreRequest(
+            run_id=run_id,
+            vmcore_ref=vmcore_ref,
+            vmlinux_ref=vmlinux_ref,
+            script=script,
+            modules_ref=modules_ref,
+            timeout_seconds=timeout_seconds,
+            allow_write=allow_write,
+            args=args or {},
+        )
+        return debug_introspect_from_vmcore_handler(
+            request,
+            artifact_root=Path(artifact_root),
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.introspect.from_vmcore_helper")
+    def debug_introspect_from_vmcore_helper(
+        run_id: str,
+        vmcore_ref: str,
+        vmlinux_ref: str,
+        name: str,
+        modules_ref: str | None = None,
+        args: dict[str, Any] | None = None,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        timeout_seconds: int = 30,
+    ) -> dict[str, Any]:
+        request = DebugIntrospectFromVmcoreHelperRequest(
+            run_id=run_id,
+            vmcore_ref=vmcore_ref,
+            vmlinux_ref=vmlinux_ref,
+            name=name,
+            modules_ref=modules_ref,
+            args=args or {},
+            timeout_seconds=timeout_seconds,
+        )
+        return debug_introspect_from_vmcore_helper_handler(
             request,
             artifact_root=Path(artifact_root),
         ).model_dump(mode="json")
