@@ -347,6 +347,32 @@ def test_relax_is_capture_once_second_relax_does_not_reread():
     policy.relax(_ctx())  # second relax, same session
     assert [c for c in channel.calls if c[0] == "read"] == []  # no re-read
     assert len(reads_after_first) == 5
+
+
+def test_concurrent_same_session_relax_reads_exactly_once():
+    """Claim-the-slot guarantees only one thread runs the read-pass for a session, so a
+    concurrent relax cannot overwrite the baseline with already-relaxed values (spec §4.1)."""
+    import threading as _threading
+
+    channel = FakeWatchdogControl(values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)})
+    policy = _x86_policy(channel)
+    barrier = _threading.Barrier(8)
+
+    def _worker() -> None:
+        barrier.wait()
+        policy.relax(_ctx(session_id="shared"))
+
+    threads = [_threading.Thread(target=_worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    reads = [c for c in channel.calls if c[0] == "read"]
+    assert len(reads) == 5  # exactly one read-pass across all 8 threads
+    channel.calls.clear()
+    policy.restore(_ctx(session_id="shared"))
+    assert all(value == "1" for op, _name, value in channel.calls if op == "write")  # baseline intact
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -390,14 +416,24 @@ class WatchdogPolicy:
     def relax(self, ctx: SessionGuardContext) -> RelaxReport:
         if ctx.session_id is None:
             raise ValueError("watchdog relax requires a committed session_id (run it post-acquire)")
+        # Claim-the-slot under the lock so only ONE caller ever runs the read-pass for a
+        # session_id. A naive "check existence, release lock, then read+write+store" gap
+        # would let two concurrent same-session relaxes both read — the second reading the
+        # already-relaxed values and overwriting the baseline (the corruption capture-once
+        # exists to prevent, spec §4.1). The owner populates the claimed capture in place;
+        # a racing non-owner takes the reissue path (no re-read). I/O stays OUTSIDE the lock
+        # so distinct sessions relax concurrently (spec §3.3).
         with self._lock:
-            existing = self._captures.get(ctx.session_id)
-        if existing is not None:
-            return self._reissue_relax(existing)
-        return self._first_relax(ctx.session_id)
+            capture = self._captures.get(ctx.session_id)
+            is_owner = capture is None
+            if is_owner:
+                capture = _CapturedState()
+                self._captures[ctx.session_id] = capture  # claim before releasing the lock
+        assert capture is not None
+        return self._first_relax(capture) if is_owner else self._reissue_relax(capture)
 
-    def _first_relax(self, session_id: str) -> RelaxReport:
-        capture = _CapturedState()
+    def _first_relax(self, capture: _CapturedState) -> RelaxReport:
+        # Populates the already-claimed capture object in place (it is the dict entry).
         outcomes: dict[str, KnobOutcome] = {}
         for knob in self._knobs:
             if knob.out_of_band:
@@ -411,8 +447,6 @@ class WatchdogPolicy:
             ok = self._safe_write(knob.name, knob.relaxed_value)
             capture.relaxed[knob.name] = ok
             outcomes[knob.name] = KnobOutcome.RELAXED if ok else KnobOutcome.WRITE_FAILED
-        with self._lock:
-            self._captures[session_id] = capture
         return RelaxReport(outcomes=outcomes)
 
     def _reissue_relax(self, capture: _CapturedState) -> RelaxReport:
@@ -634,6 +668,21 @@ def test_restore_step_teardown_raises_on_restore_write_failure():
 
 def test_restore_step_teardown_is_silent_on_noop():
     WatchdogRestoreStep(_x86_policy(FakeWatchdogControl())).teardown(_ctx())  # no relax -> noop, no raise
+
+
+def test_restore_error_message_carries_knob_names_not_values():
+    """The error surfaced into TeardownReport.step_errors must not leak raw knob values
+    or channel `detail` (guest-derived). It names the failed knobs only (spec §3.2)."""
+    knob_names = {k.name for k in knobs_for_arch(WatchdogArch.X86_64)}
+    channel = FakeWatchdogControl(values={n: "1" for n in knob_names}, fail_writes=knob_names)
+    policy = _x86_policy(channel)
+    policy.relax(_ctx())
+    try:
+        WatchdogRestoreStep(policy).teardown(_ctx())
+    except WatchdogRestoreError as exc:
+        message = str(exc)
+    assert "kernel.nmi_watchdog" in message       # knob name is fine
+    assert "write kernel.nmi_watchdog failed" not in message  # WriteOutcome.detail must not leak
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -820,7 +869,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ## Self-review notes (spec coverage)
 
-- §3.1 arch knobs → Task 1. §3.2 channel/outcomes/reports → Task 2. §3.3 relax capture-once + §4.1 baseline preservation → Task 3 (+ `test_capture_once_preserves_baseline_across_re_relax` in Task 4). §3.3 restore + §4.3 clear-after-one-pass → Task 4. §3.4 `WatchdogRestoreStep` → Task 5. §5 restore-on-error (reachable + unreachable) / restore-on-timeout → Task 6. §3.2 redaction: knob values are not secret and no concrete channel ships, so redaction is the live channel's responsibility (spec §3.2) — no #69 code surfaces guest text into a persisted/returned `ToolResponse`; nothing to redact in the inert helper.
+- §3.1 arch knobs → Task 1. §3.2 channel/outcomes/reports → Task 2. §3.3 relax capture-once + §4.1 baseline preservation → Task 3 (+ `test_capture_once_preserves_baseline_across_re_relax` in Task 4). §3.3 restore + §4.3 clear-after-one-pass → Task 4. §3.4 `WatchdogRestoreStep` → Task 5. §5 restore-on-error (reachable + unreachable) / restore-on-timeout → Task 6. §3.2 redaction: the inert #69 helper never surfaces raw channel text — `RelaxReport`/`RestoreReport` carry enums/bools and `WatchdogRestoreError` names failed knobs only, never their values or `WriteOutcome.detail` (asserted by `test_restore_error_message_carries_knob_names_not_values` in Task 5). The implementer MUST keep it that way: if `detail` or a raw knob value is ever propagated into a report/exception/`ToolResponse`, route it through `Redactor` first (spec §3.2). Non-propagation is the chosen mechanism; redaction is the fallback if that changes.
 - §1.2 inert wiring: `create_app` deliberately unchanged — no task modifies `server.py`.
 - §7 "dispatcher path has no restore obligation": #69 wires nothing into the dispatcher, so there is no code to test against; this is asserted structurally (the restore step is constructed only in tests, never registered with `InProcessLifecycleDispatcher`). No standalone test — the absence is guaranteed by `create_app` being untouched.
 - §7 "x86 vs ppc64le variance" → Task 1 + Task 3 (`test_relax_records_out_of_band_knob_skipped_without_touching_channel`).
