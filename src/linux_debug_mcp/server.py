@@ -3624,13 +3624,15 @@ def _execute_vmcore_introspect_call(
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
 
-    # Spec §6 step 2: request invariants (no profile fields to reconcile).
+    # Spec §6 step 2 / ADR 0011: a vmcore is an immutable core-dump file and the
+    # offline path carries no DebugProfile to gate against, so write mode does not
+    # apply here (it would be a phantom feature) — reject it with an accurate reason.
     if request.allow_write:
         return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
             run_id=run_id,
-            message="allow_write=true is not yet supported (#56 — write-mode opt-in)",
-            details={"code": "allow_write_not_supported"},
+            message="write mode is not applicable to offline vmcore analysis; the core file is immutable",
+            details={"code": "write_mode_not_applicable"},
         )
     if not (5 <= request.timeout_seconds <= 300):
         return ToolResponse.failure(

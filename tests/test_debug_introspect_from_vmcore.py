@@ -224,12 +224,13 @@ def test_unreadable_vmlinux_is_config_error(tmp_path: Path) -> None:
     assert resp.error.details["code"] == "vmlinux_build_id_unreadable"
 
 
-def test_allow_write_rejected(tmp_path: Path) -> None:
+def test_allow_write_not_applicable(tmp_path: Path) -> None:
     _run(tmp_path)
     resp = debug_introspect_from_vmcore_handler(
         _req(allow_write=True), artifact_root=tmp_path, runner=FakeRunner(), build_id_reader=lambda p: VALID
     )
-    assert resp.error.details["code"] == "allow_write_not_supported"
+    assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert resp.error.details["code"] == "write_mode_not_applicable"
 
 
 def test_bad_timeout(tmp_path: Path) -> None:
