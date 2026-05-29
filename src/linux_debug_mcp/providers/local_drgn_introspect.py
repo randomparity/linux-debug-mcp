@@ -74,7 +74,7 @@ def _merge_and_validate_caps(caps: dict[str, int] | None) -> dict[str, int]:
 
 # Spec §4.2 wrapper body — verbatim. The raw triple-quoted string preserves
 # the ``${...}`` ``string.Template`` sigils literally.
-WRAPPER_TEMPLATE = Template(r"""import sys as _li_sys
+_WRAPPER_PROLOGUE_LIVE = r"""import sys as _li_sys
 import json as _li_json
 import io as _li_io
 import traceback as _li_traceback
@@ -143,7 +143,9 @@ if _li_result["build_id"] != "${EXPECTED_BUILD_ID}":
     finally:
         _li_sys.exit(4)
 
-_li_emit_buffer = []
+"""
+
+_WRAPPER_BODY = r"""_li_emit_buffer = []
 _li_emit_overflow = False
 
 def emit(obj):
@@ -245,7 +247,9 @@ except BaseException as exc:
         pass
 finally:
     _li_sys.exit(6)
-""")
+"""
+
+WRAPPER_TEMPLATE = Template(_WRAPPER_PROLOGUE_LIVE + _WRAPPER_BODY)
 
 
 def render_wrapper(
