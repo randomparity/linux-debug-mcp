@@ -7,7 +7,7 @@ from typing import Any, ClassVar
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from linux_debug_mcp.domain import Model
-from linux_debug_mcp.safety.ipmi import IPMI_DEFAULT_CIPHER_SUITE, check_ipmi_cipher_value
+from linux_debug_mcp.safety.ipmi import check_ipmi_cipher_value, validate_ipmi_cipher_suite
 
 KNOWN_ARCHITECTURES = {"x86_64", "ppc64le"}
 MAX_TIMEOUT_SECONDS = 24 * 60 * 60
@@ -281,8 +281,9 @@ class ConsoleSessionRequest(ProviderRequest):
     @model_validator(mode="after")
     def enforce_ipmi_cipher_policy(self) -> ConsoleSessionRequest:
         if self.access_method == "ipmi-sol":
-            if self.ipmi_cipher_suite is None:
-                object.__setattr__(self, "ipmi_cipher_suite", IPMI_DEFAULT_CIPHER_SUITE)
+            normalized = validate_ipmi_cipher_suite(self.ipmi_cipher_suite)
+            if normalized != self.ipmi_cipher_suite:
+                object.__setattr__(self, "ipmi_cipher_suite", normalized)
         elif self.ipmi_cipher_suite is not None:
             raise ValueError("ipmi_cipher_suite is only valid for access_method 'ipmi-sol'")
         return self
