@@ -472,6 +472,7 @@ class LibvirtQemuProvider:
             "debug_boot": plan.debug_gdbstub,
             "gdbstub_endpoint": plan.gdbstub_endpoint.as_dict() if plan.gdbstub_endpoint else None,
             "nokaslr_source": plan.nokaslr_source,
+            "kernel_args": plan.kernel_args,
         }
         if console.status == "ready":
             return self._boot_result(

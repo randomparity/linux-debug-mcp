@@ -832,6 +832,20 @@ class FakeLibvirtRunner:
         return self.console
 
 
+def test_execute_boot_success_details_carry_assembled_kernel_args(tmp_path: Path) -> None:
+    plan = make_plan(tmp_path)
+    provider = LibvirtQemuProvider(runner=FakeLibvirtRunner())
+
+    result = provider.execute_boot(plan)
+
+    assert result.status == StepStatus.SUCCEEDED
+    # The default target_profile() uses kernel_args=["panic=1"]; the provider
+    # assembles root=/console= onto it (libvirt_qemu.py:591-597).
+    assert result.details["kernel_args"] == plan.kernel_args
+    assert "root=/dev/vda" in result.details["kernel_args"]
+    assert "console=ttyS0" in result.details["kernel_args"]
+
+
 def test_execute_boot_first_boot_domain_absent_defines_starts_and_writes_artifacts(tmp_path: Path) -> None:
     plan = make_plan(tmp_path)
     runner = FakeLibvirtRunner()
