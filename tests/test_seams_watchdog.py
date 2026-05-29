@@ -7,7 +7,7 @@ See docs/superpowers/specs/2026-05-29-watchdog-relax-restore-design.md / docs/ad
 
 import pytest
 
-from linux_debug_mcp.seams.guard import SessionGuardContext, TeardownStep
+from linux_debug_mcp.seams.guard import SessionGuard, SessionGuardContext, TeardownStep
 from linux_debug_mcp.seams.lifecycle import LifecycleSubscriber
 from linux_debug_mcp.seams.target import TargetKey
 from linux_debug_mcp.seams.watchdog import (
@@ -23,12 +23,12 @@ from linux_debug_mcp.seams.watchdog import (
 )
 
 
-def _ctx(*, session_id: str | None = "sess-1", generation: int = 7) -> SessionGuardContext:
+def _ctx(*, session_id: str | None = "sess-1", generation: int = 7, reason: str = "ended") -> SessionGuardContext:
     return SessionGuardContext(
         target_key=TargetKey(provisioner="local-qemu", target_id="run-1"),
         generation=generation,
         session_id=session_id,
-        reason="ended",
+        reason=reason,  # type: ignore[arg-type]
     )
 
 
@@ -303,3 +303,51 @@ def test_restore_step_is_not_a_lifecycle_subscriber():
     cannot invoke it."""
     step = WatchdogRestoreStep(_x86_policy(FakeWatchdogControl()))
     assert not isinstance(step, LifecycleSubscriber)
+
+
+def _run_teardown(policy: WatchdogPolicy, *, reason: str):
+    """Drive SessionGuard.teardown with the restore step + minimal clean-resume fakes
+    (record already gone -> resume_ok True), as the attach-error/clean-end handler does."""
+    guard = SessionGuard(teardown_steps=[WatchdogRestoreStep(policy)])
+    closed: list[bool] = []
+    report = guard.teardown(
+        _ctx(reason=reason),
+        close=lambda: closed.append(True),
+        read_record=lambda: None,
+        force_reap=lambda: None,
+    )
+    return report, closed
+
+
+def test_restore_on_error_reachable_channel():
+    channel = FakeWatchdogControl(values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)})
+    policy = _x86_policy(channel)
+    policy.relax(_ctx())
+    report, closed = _run_teardown(policy, reason="attach_error")
+    assert closed == [True]
+    assert report.resume_ok is True
+    assert "watchdog-restore" not in report.step_errors
+    assert channel._values["kernel.nmi_watchdog"] == "1"
+
+
+def test_restore_on_error_unreachable_channel_is_recorded_not_fatal():
+    knob_names = {k.name for k in knobs_for_arch(WatchdogArch.X86_64)}
+    channel = FakeWatchdogControl(values={n: "1" for n in knob_names})
+    policy = _x86_policy(channel)
+    policy.relax(_ctx())
+    channel._fail_writes.update(knob_names)  # target wedged: restore writes fail
+    report, closed = _run_teardown(policy, reason="attach_error")
+    assert closed == [True]
+    assert report.resume_ok is True
+    assert "watchdog-restore" in report.step_errors
+    second, _ = _run_teardown(policy, reason="attach_error")
+    assert "watchdog-restore" not in second.step_errors  # capture cleared -> clean noop
+
+
+def test_restore_on_timeout_runs_on_same_attach_error_path():
+    channel = FakeWatchdogControl(values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)})
+    policy = _x86_policy(channel)
+    policy.relax(_ctx())
+    report, _ = _run_teardown(policy, reason="attach_error")
+    assert report.resume_ok is True
+    assert channel._values["kernel.watchdog"] == "1"
