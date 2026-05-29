@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import tempfile
 import threading
@@ -68,7 +69,7 @@ from linux_debug_mcp.domain import (
     ToolResponse,
 )
 from linux_debug_mcp.introspect_helpers import HELPER_REGISTRY, HelperSpec
-from linux_debug_mcp.logging import configure_logging
+from linux_debug_mcp.logging import SECRET_REGISTRY, configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
 from linux_debug_mcp.prereqs.drgn_probe import (
     PROBE_SCRIPT,
@@ -135,6 +136,7 @@ from linux_debug_mcp.safety.paths import (
 )
 from linux_debug_mcp.safety.redaction import Redactor
 from linux_debug_mcp.safety.runtime_locks import private_runtime_registry_dir
+from linux_debug_mcp.safety.secrets import SecretReferenceKind
 from linux_debug_mcp.seams.break_policy import ReferenceBreakPolicy
 from linux_debug_mcp.seams.guard import GuardConflict, InProcessStopCapableGuard
 from linux_debug_mcp.seams.lifecycle import (
@@ -143,7 +145,14 @@ from linux_debug_mcp.seams.lifecycle import (
     LifecycleEvent,
     LifecycleKind,
 )
-from linux_debug_mcp.seams.secrets import EnvSecretsResolver
+from linux_debug_mcp.seams.secrets import (
+    EnvSecretsBackend,
+    ExternalSecretsBackend,
+    KeyringSecretsBackend,
+    SecretsBackend,
+    SecretsResolutionError,
+    SecretsStore,
+)
 from linux_debug_mcp.seams.target import (
     BreakHint,
     ConsoleKind,
@@ -5817,12 +5826,20 @@ def _build_transport_machinery(
         # to know about the §4.5 reap-source contract.
         session_registry._on_orphan_reaped = _on_orphan_reaped
 
+    secrets_backends: dict[SecretReferenceKind, SecretsBackend] = {SecretReferenceKind.ENV: EnvSecretsBackend()}
+    # keyring extra not installed -> the kind stays unavailable until configured
+    with contextlib.suppress(SecretsResolutionError):
+        secrets_backends[SecretReferenceKind.KEYRING] = KeyringSecretsBackend()
+    _external_cmd = os.environ.get("LDM_SECRETS_EXTERNAL_CMD")
+    if _external_cmd:
+        secrets_backends[SecretReferenceKind.EXTERNAL] = ExternalSecretsBackend(command=shlex.split(_external_cmd))
+
     transaction = TransportTransaction(
         admission=admission,
         registry=session_registry,
         guard=InProcessStopCapableGuard(),
         leases=ConsoleLeaseManager(),
-        secrets=EnvSecretsResolver([]),
+        secrets=SecretsStore(definitions=[], backends=secrets_backends, registry=SECRET_REGISTRY),
         break_policy=ReferenceBreakPolicy(),
         transports=transports,
     )

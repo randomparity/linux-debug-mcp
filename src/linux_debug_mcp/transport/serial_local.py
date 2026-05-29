@@ -13,8 +13,9 @@ import termios
 import threading
 import tty
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from types import MappingProxyType
 
 from linux_debug_mcp.domain import ErrorCategory
 from linux_debug_mcp.safety.runtime_locks import RuntimeLockError, device_lock_filename, private_runtime_lock_dir
@@ -371,6 +372,7 @@ class SerialLocalTransport(Transport):
         cancel: threading.Event,
         deadline,
         on_partial: OnPartial,
+        secrets: Mapping[str, str] = MappingProxyType({}),
     ) -> BackendAttachment:
         check_not_cancelled(cancel)
         bounded = deadline if isinstance(deadline, Deadline) else Deadline.after(float(deadline))
@@ -452,6 +454,7 @@ class SerialLocalTransport(Transport):
         cancel: threading.Event,
         deadline: Deadline,
         on_partial: OnPartial,
+        secrets: Mapping[str, str] = MappingProxyType({}),
     ) -> BackendAttachment:
         opts = request.transport_ref.opts
         target_ref = request.transport_ref.target_ref
@@ -490,6 +493,7 @@ class SerialLocalTransport(Transport):
         cancel: threading.Event,
         deadline: Deadline,
         on_partial: OnPartial,
+        secrets: Mapping[str, str] = MappingProxyType({}),
     ) -> BackendAttachment:
         bridge = SerialConsoleBridge.open(socket_dir=self._socket_dir, device=device, deadline=deadline, cancel=cancel)
         # Record the resolved socket path so Layer-4 reconciliation can find the inode even on

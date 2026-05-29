@@ -13,6 +13,7 @@ from _layer4_fakes import (
     build_txn,
     seed_snapshot,
 )
+from _secrets_helpers import make_env_secrets as EnvSecretsResolver
 
 from linux_debug_mcp.config import TRANSPORT_DESTRUCTIVE_PERMISSIONS
 from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore
@@ -21,7 +22,6 @@ from linux_debug_mcp.coordination.registry import RecoveryTombstone, SessionRegi
 from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import ErrorCategory
 from linux_debug_mcp.seams.guard import InProcessStopCapableGuard
-from linux_debug_mcp.seams.secrets import EnvSecretsResolver
 from linux_debug_mcp.server import (
     transport_close_handler,
     transport_inject_break_handler,

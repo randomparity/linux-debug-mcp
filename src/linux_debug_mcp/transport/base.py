@@ -355,6 +355,7 @@ class Transport(ABC):
         cancel: threading.Event,
         deadline: float,
         on_partial: Callable[[str, object], None],
+        secrets: Mapping[str, str] = MappingProxyType({}),
     ) -> BackendAttachment:
         """Wire-level attach: connect to the target channel and return the discovered
         endpoint(s) and process identity as a BackendAttachment (ADR 0003). Layer 4

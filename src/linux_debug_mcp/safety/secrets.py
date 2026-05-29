@@ -9,6 +9,7 @@ class SecretReferenceKind(StrEnum):
     FILE = "file"
     ENV = "env"
     EXTERNAL = "external"
+    KEYRING = "keyring"
 
 
 class SecretReference(BaseModel):

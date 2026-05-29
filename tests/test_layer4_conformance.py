@@ -29,6 +29,7 @@ from _layer4_fakes import (
     make_request,
     seed_snapshot,
 )
+from _secrets_helpers import make_env_secrets as EnvSecretsResolver
 from conftest import (
     LEGACY_FENCE_KEY,
     LEGACY_FENCE_RUN_ID,
@@ -74,7 +75,6 @@ from linux_debug_mcp.seams.lifecycle import (
     LifecycleEvent,
     LifecycleKind,
 )
-from linux_debug_mcp.seams.secrets import EnvSecretsResolver
 from linux_debug_mcp.seams.target import (
     TargetKey,
     TargetState,

@@ -5,13 +5,16 @@ open()/close()/gating/recovery test, so a contract change touches one file, not 
 from __future__ import annotations
 
 import threading
+from types import MappingProxyType
 
 from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore, TargetSnapshot
 from linux_debug_mcp.coordination.lease import ConsoleLeaseManager
 from linux_debug_mcp.coordination.registry import SessionRegistry
 from linux_debug_mcp.coordination.transaction import TransportTransaction
+from linux_debug_mcp.safety.secret_registry import SecretRegistry
+from linux_debug_mcp.safety.secrets import SecretReferenceKind
 from linux_debug_mcp.seams.guard import InProcessStopCapableGuard
-from linux_debug_mcp.seams.secrets import EnvSecretsResolver
+from linux_debug_mcp.seams.secrets import EnvSecretsBackend, SecretsStore
 from linux_debug_mcp.seams.target import BreakHint, ConsoleKind, PlatformMetadata, TargetKey, TargetState
 from linux_debug_mcp.transport.base import (
     BackendAttachment,
@@ -62,7 +65,7 @@ class FakeQemuTransport(Transport):
             endpoint_exposure=EndpointExposure.LOOPBACK_LOCAL,
         )
 
-    def attach(self, request, *, cancel, deadline, on_partial) -> BackendAttachment:
+    def attach(self, request, *, cancel, deadline, on_partial, secrets=MappingProxyType({})) -> BackendAttachment:
         if self._backend_pid is not None:
             # emit pid+start_time as one partial (mirrors transport/proxy.py:184) so the
             # transaction can write it through into the OPENING record before we return.
@@ -197,7 +200,9 @@ def build_txn(
         registry=registry,
         guard=guard or InProcessStopCapableGuard(),
         leases=leases or ConsoleLeaseManager(),
-        secrets=EnvSecretsResolver([]),
+        secrets=SecretsStore(
+            definitions=[], backends={SecretReferenceKind.ENV: EnvSecretsBackend()}, registry=SecretRegistry()
+        ),
         break_policy=FakeBreakPolicy(),
         transports={transport.capability.provider_name: transport},
     )
