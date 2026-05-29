@@ -203,6 +203,13 @@ def _guest_ssh(
 
     Uses the known_hosts file written by target.boot under
     ``<run>/sensitive/known_hosts``.
+
+    Reads stdout from the on-disk ``stdout_path`` rather than
+    ``SshCommandResult.stdout``: the runner writes full output to the file and
+    only populates ``.stdout_snippet`` (capped at 4096 bytes), so heartbeat
+    output that exceeds the cap would be lost via the result object.  The
+    subprocess timeout is set above ``command_timeout`` so a command running
+    for ~``timeout`` seconds is not killed before returning.
     """
     argv = build_ssh_argv(
         rootfs_profile=rootfs_profile,
@@ -212,8 +219,8 @@ def _guest_ssh(
     )
     out = store.run_dir(run_id) / "logs" / "guest_ssh.stdout"
     err = store.run_dir(run_id) / "logs" / "guest_ssh.stderr"
-    result = SubprocessSshRunner().run(argv, timeout=timeout, stdout_path=out, stderr_path=err)
-    return result.stdout
+    SubprocessSshRunner().run(argv, timeout=timeout + 5, stdout_path=out, stderr_path=err)
+    return out.read_text(encoding="utf-8", errors="replace") if out.exists() else ""
 
 
 def test_introspect_emit_roundtrip(tmp_path) -> None:

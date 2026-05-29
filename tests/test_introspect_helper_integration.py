@@ -127,6 +127,7 @@ def test_irq_counts_length_matches_cpus(tmp_path) -> None:
     assert irq_resp.ok is True, irq_resp.error
     irqs = irq_resp.data["result"]["irqs"]
 
+    assert irqs, "irq helper returned no IRQs"
     for entry in irqs:
         counts = entry["counts_per_cpu"]
         assert len(counts) == cpus_online, (
