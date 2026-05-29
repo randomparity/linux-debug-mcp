@@ -43,10 +43,15 @@
       },
       "title": "Caches",
       "type": "array"
+    },
+    "decode_errors": {
+      "title": "Decode Errors",
+      "type": "integer"
     }
   },
   "required": [
-    "caches"
+    "caches",
+    "decode_errors"
   ],
   "title": "Output",
   "type": "object"

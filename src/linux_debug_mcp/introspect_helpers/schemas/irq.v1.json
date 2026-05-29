@@ -4,11 +4,18 @@
       "additionalProperties": false,
       "properties": {
         "affinity": {
-          "items": {
-            "type": "integer"
-          },
-          "title": "Affinity",
-          "type": "array"
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Affinity"
         },
         "counts_per_cpu": {
           "items": {
@@ -45,6 +52,10 @@
   },
   "additionalProperties": false,
   "properties": {
+    "decode_errors": {
+      "title": "Decode Errors",
+      "type": "integer"
+    },
     "irqs": {
       "items": {
         "$ref": "#/$defs/Irq"
@@ -54,7 +65,8 @@
     }
   },
   "required": [
-    "irqs"
+    "irqs",
+    "decode_errors"
   ],
   "title": "Output",
   "type": "object"

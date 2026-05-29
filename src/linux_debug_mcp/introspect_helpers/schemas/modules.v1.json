@@ -40,6 +40,10 @@
   },
   "additionalProperties": false,
   "properties": {
+    "decode_errors": {
+      "title": "Decode Errors",
+      "type": "integer"
+    },
     "modules": {
       "items": {
         "$ref": "#/$defs/Module"
@@ -49,7 +53,8 @@
     }
   },
   "required": [
-    "modules"
+    "modules",
+    "decode_errors"
   ],
   "title": "Output",
   "type": "object"

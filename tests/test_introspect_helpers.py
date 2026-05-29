@@ -121,7 +121,8 @@ def test_modules_output_validates_sample() -> None:
                     "used_by": ["jbd2"],
                     "state": "live",
                 }
-            ]
+            ],
+            "decode_errors": 0,
         }
     )
 
@@ -142,7 +143,8 @@ def test_slab_output_validates_sample() -> None:
                     "objsize": 64,
                     "objs_per_slab": 64,
                 }
-            ]
+            ],
+            "decode_errors": 0,
         }
     )
 
@@ -153,13 +155,40 @@ def test_slab_output_validates_sample() -> None:
 def test_irq_output_validates_sample() -> None:
     from linux_debug_mcp.introspect_helpers.irq import Output
 
-    Output.model_validate({"irqs": [{"irq": 0, "name": "timer", "counts_per_cpu": [10, 12], "affinity": [0, 1]}]})
+    Output.model_validate(
+        {"irqs": [{"irq": 0, "name": "timer", "counts_per_cpu": [10, 12], "affinity": [0, 1]}], "decode_errors": 0}
+    )
 
 
 def test_irq_name_nullable() -> None:
     from linux_debug_mcp.introspect_helpers.irq import Output
 
-    Output.model_validate({"irqs": [{"irq": 1, "name": None, "counts_per_cpu": [0], "affinity": [0]}]})
+    Output.model_validate(
+        {"irqs": [{"irq": 1, "name": None, "counts_per_cpu": [0], "affinity": [0]}], "decode_errors": 0}
+    )
+
+
+def test_irq_affinity_nullable() -> None:
+    # v1 reports affinity=None rather than fabricating a value when the cpumask
+    # cannot be decoded; the model must accept it.
+    from linux_debug_mcp.introspect_helpers.irq import Output
+
+    Output.model_validate(
+        {"irqs": [{"irq": 2, "name": None, "counts_per_cpu": [0, 0], "affinity": None}], "decode_errors": 1}
+    )
+
+
+def test_decode_errors_is_required() -> None:
+    # decode_errors is part of the contract for the silent-degradation-prone helpers:
+    # an empty list must carry an explicit error count so a true-empty result is
+    # distinguishable from a decode failure.
+    from pydantic import ValidationError
+
+    from linux_debug_mcp.introspect_helpers import irq, modules, slab
+
+    for mod in (irq, modules, slab):
+        with pytest.raises(ValidationError):
+            mod.Output.model_validate({list(mod.Output.model_fields)[0]: []})
 
 
 def test_schema_snapshots_match_models() -> None:
