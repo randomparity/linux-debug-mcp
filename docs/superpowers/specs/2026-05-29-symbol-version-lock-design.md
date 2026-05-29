@@ -1,6 +1,6 @@
 # Symbol version-locking for the live gdb debug tier — design
 
-**Issue:** #70 (epic #9, split from #17, consumed by #13/#14/#53) · **Status:** proposed
+**Issue:** #70 (epic #9, split from #17, consumed by #13/#14/#53) · **Status:** accepted
 **Contract:** `docs/specs/interface-contracts.md` §4.2 (`KernelProvenance`) · **Owns:** the §4.2 version-lock contract
 **ADR:** [0017](../../adr/0017-symbol-version-lock-gdb-tier.md)
 **Reference:** ELF `NT_GNU_BUILD_ID`; `symbols/build_id.py`, `symbols/verify.py` (ADR 0008)
