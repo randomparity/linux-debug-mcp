@@ -174,3 +174,20 @@ def test_schema_snapshots_match_models() -> None:
         assert snap.is_file(), f"missing snapshot for {spec.name} v{spec.version}"
         expected = json.dumps(spec.output_model.model_json_schema(), indent=2, sort_keys=True) + "\n"
         assert snap.read_text() == expected, f"{spec.name} model changed without a snapshot/version bump (spec §3.4)"
+
+
+def test_helper_request_defaults() -> None:
+    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
+
+    r = DebugIntrospectHelperRequest(run_id="r", target_ref="t", name="sysinfo")
+    assert r.args == {}
+    assert r.timeout_seconds == 30
+
+
+def test_helper_request_forbids_extra() -> None:
+    from pydantic import ValidationError
+
+    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
+
+    with pytest.raises(ValidationError):
+        DebugIntrospectHelperRequest(run_id="r", target_ref="t", name="sysinfo", bogus=1)
