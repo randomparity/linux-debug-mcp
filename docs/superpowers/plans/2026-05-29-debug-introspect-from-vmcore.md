@@ -829,7 +829,13 @@ parameters of the finalizer):**
   `ssh_user=` kwarg and the success `step_details`);
 - the hard-coded `"drgn could not attach to the live target"` → `drgn_open_message`;
 - in both the success step `details` and the `_fail`/`_record_introspect_failure`
-  call, pass `ssh_user=exec_principal`.
+  call, pass `ssh_user=exec_principal`;
+- **the `verdict is None` success return hard-codes
+  `suggested_next_actions=["artifacts.get_manifest", "debug.introspect.run"]`** —
+  replace the second element with `operation_name` (for the live path
+  `operation_name == "debug.introspect.run"`, so live output is unchanged; for the
+  vmcore path it correctly echoes `debug.introspect.from_vmcore`). The
+  `verdict is not None` branch already uses `operation_name` — leave it.
 
 The `_fail` inner closure moves with the tail and now closes over the finalizer's
 parameters (`store`, `run_id`, `call_id`, `agent_dir`, `sensitive_call_dir`,
@@ -958,6 +964,7 @@ def test_happy_path_succeeds(tmp_path):
         build_id_reader=lambda p: VALID)
     assert resp.status == StepStatus.SUCCEEDED
     assert resp.data["emits"] == [{"k": 1}]
+    assert resp.suggested_next_actions == ["artifacts.get_manifest", "debug.introspect.from_vmcore"]
     manifest = store.load_manifest("r1")
     step = next(s for n, s in manifest.step_results.items() if n.startswith("introspect:"))
     assert step.status == StepStatus.SUCCEEDED
