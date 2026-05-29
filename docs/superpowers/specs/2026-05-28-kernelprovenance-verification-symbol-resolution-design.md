@@ -330,7 +330,7 @@ with `provenance_mismatch` (code detail `provenance_inconsistent`).
 
 ## ADR: a dedicated `symbols/` package
 
-**Status:** proposed.
+**Status:** accepted — extracted to [`docs/adr/0008-symbols-package.md`](../../adr/0008-symbols-package.md).
 
 **Context:** #53 introduces host-side build_id verification and vmlinux/modules
 path resolution consumed by #51 and #55.
