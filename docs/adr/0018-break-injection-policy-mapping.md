@@ -1,6 +1,6 @@
 # ADR 0018 — Break-injection policy: an injectable `BreakPolicy` seam mapping the selected channel's topology + platform facts to a break method
 
-**Status:** Accepted (2026-05-29) · **Issue:** #71 (epic #9, split from #17, facts from #10 `PlatformMetadata`, consumed by #12 `debug.kdb` / #13 `debug.gdb`) · **Affects:** `seams/break_policy.py` (`BreakPolicy` Protocol + `ReferenceBreakPolicy`); `coordination/selection.py` (`select_stop_capable_channel`, `BreakDisproof`); `coordination/transaction.py` (open transaction step 4 wiring + recorded `break_plan`); `transport/break_inject.py` (`inject_break` executes the recorded plan). No change to the executing mechanisms (`transport/proxy.py`, the ssh runner) — those are #10's, not this issue's.
+**Status:** Accepted (2026-05-29) · **Issue:** #71 (epic #9, split from #17, facts from #10 `PlatformMetadata`, consumed by #12 `debug.kdb` / #13 `debug.gdb`) · **Affects:** `seams/break_policy.py` (`BreakPolicy` Protocol + `ReferenceBreakPolicy`); `coordination/selection.py` (`select_stop_capable_channel`, `BreakDisproof`); `coordination/transaction.py` (open-transaction break-plan selection + recorded `break_plan`); `transport/break_inject.py` (`inject_break` executes the recorded plan). No change to the executing mechanisms (`transport/proxy.py`, the ssh runner) — those are #10's, not this issue's.
 
 ## Context
 
