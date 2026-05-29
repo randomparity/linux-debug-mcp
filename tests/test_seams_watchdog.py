@@ -7,7 +7,8 @@ See docs/superpowers/specs/2026-05-29-watchdog-relax-restore-design.md / docs/ad
 
 import pytest
 
-from linux_debug_mcp.seams.guard import SessionGuardContext
+from linux_debug_mcp.seams.guard import SessionGuardContext, TeardownStep
+from linux_debug_mcp.seams.lifecycle import LifecycleSubscriber
 from linux_debug_mcp.seams.target import TargetKey
 from linux_debug_mcp.seams.watchdog import (
     KnobOutcome,
@@ -15,6 +16,8 @@ from linux_debug_mcp.seams.watchdog import (
     RestoreReport,
     WatchdogArch,
     WatchdogPolicy,
+    WatchdogRestoreError,
+    WatchdogRestoreStep,
     WriteOutcome,
     knobs_for_arch,
 )
@@ -250,3 +253,53 @@ def test_concurrent_same_session_relax_reads_exactly_once():
     channel.calls.clear()
     policy.restore(_ctx(session_id="shared"))
     assert all(value == "1" for op, _name, value in channel.calls if op == "write")
+
+
+def test_restore_step_is_a_teardown_step():
+    step = WatchdogRestoreStep(_x86_policy(FakeWatchdogControl()))
+    assert isinstance(step, TeardownStep)
+    assert step.name == "watchdog-restore"
+
+
+def test_restore_step_teardown_restores_and_does_not_raise_on_success():
+    channel = FakeWatchdogControl(values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)})
+    policy = _x86_policy(channel)
+    policy.relax(_ctx())
+    WatchdogRestoreStep(policy).teardown(_ctx())
+    assert channel._values["kernel.nmi_watchdog"] == "1"
+
+
+def test_restore_step_teardown_raises_on_restore_write_failure():
+    channel = FakeWatchdogControl(values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)})
+    policy = _x86_policy(channel)
+    policy.relax(_ctx())
+    channel._fail_writes.add("kernel.watchdog")
+    with pytest.raises(WatchdogRestoreError):
+        WatchdogRestoreStep(policy).teardown(_ctx())
+
+
+def test_restore_step_teardown_is_silent_on_noop():
+    WatchdogRestoreStep(_x86_policy(FakeWatchdogControl())).teardown(_ctx())
+
+
+def test_restore_error_message_carries_knob_names_not_values():
+    """The error surfaced into TeardownReport.step_errors must not leak raw knob values
+    or channel `detail` (guest-derived). It names the failed knobs only (spec §3.2)."""
+    knob_names = {k.name for k in knobs_for_arch(WatchdogArch.X86_64)}
+    channel = FakeWatchdogControl(values={n: "1" for n in knob_names})
+    policy = _x86_policy(channel)
+    policy.relax(_ctx())  # relax succeeds (writes ok); fail only the restore writes
+    channel._fail_writes.update(knob_names)
+    with pytest.raises(WatchdogRestoreError) as exc_info:
+        WatchdogRestoreStep(policy).teardown(_ctx())
+    message = str(exc_info.value)
+    assert "kernel.nmi_watchdog" in message
+    assert "write kernel.nmi_watchdog failed" not in message
+
+
+def test_restore_step_is_not_a_lifecycle_subscriber():
+    """ADR 0013 / spec §5: restore must NEVER run on the dispatcher (reboot) path. The
+    step is a TeardownStep only — it has no invalidate/force_drop, so the dispatcher
+    cannot invoke it."""
+    step = WatchdogRestoreStep(_x86_policy(FakeWatchdogControl()))
+    assert not isinstance(step, LifecycleSubscriber)

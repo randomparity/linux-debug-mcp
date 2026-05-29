@@ -195,3 +195,30 @@ class WatchdogPolicy:
         except Exception as exc:  # noqa: BLE001 - a channel error is recorded, never raised
             logger.warning("watchdog: write_knob(%s) raised: %r", name, exc)
             return False
+
+
+class WatchdogRestoreError(RuntimeError):
+    """Raised by WatchdogRestoreStep.teardown when one or more restore writes failed,
+    so SessionGuard.teardown aggregates it into TeardownReport.step_errors. It never
+    aborts teardown (the guard suppresses+records it) — the resume + reap invariant
+    holds regardless (ADR 0013)."""
+
+    def __init__(self, report: RestoreReport) -> None:
+        super().__init__(f"watchdog restore failed for knobs: {sorted(report.failures)}")
+        self.report = report
+
+
+class WatchdogRestoreStep:
+    """SessionGuard TeardownStep (the exit slot) that restores the captured watchdog
+    baseline. Raises WatchdogRestoreError only on a restore-write failure so the
+    failure lands in TeardownReport.step_errors; silent on a noop restore."""
+
+    name = "watchdog-restore"
+
+    def __init__(self, policy: WatchdogPolicy) -> None:
+        self._policy = policy
+
+    def teardown(self, ctx: SessionGuardContext) -> None:
+        report = self._policy.restore(ctx)
+        if report.failures:
+            raise WatchdogRestoreError(report)
