@@ -1,6 +1,6 @@
 # ADR 0016 — Watchdog relax/restore helper: a stateful capture/restore policy behind the SessionGuard slots, wired inert with a documented post-acquire placement contract
 
-**Status:** Accepted (2026-05-29) · **Issue:** #69 (epic #9, split from #17, consumed by #66) · **Affects:** `seams/watchdog.py` (new); plugs into `seams/guard.py` `SessionGuard` enter (`PreAttachPrecondition`) and exit (`TeardownStep`) slots. No change to `guard.py`, `transaction.py`, the dispatcher, or `server.py` wiring.
+**Status:** Accepted (2026-05-29) · **Issue:** #69 (epic #9, split from #17, consumed by #66) · **Affects:** `seams/watchdog.py` (new); the restore plugs into `seams/guard.py` `SessionGuard`'s exit (`TeardownStep`) slot, the relax is a post-acquire `policy.relax(ctx)` call (decision 4). No change to `guard.py`, `transaction.py`, the dispatcher, or `server.py` wiring.
 
 ## Context
 
@@ -27,10 +27,14 @@ is not a `SessionGuard` exit and a reboot restores watchdog defaults anyway.
 ## Decision
 
 1. **The helper is a stateful capture/restore policy behind a channel
-   abstraction.** `WatchdogPolicy` holds, per `(target_key, generation)`, the knob
-   values it read at relax time; `relax` reads-then-captures-then-writes-relaxed,
-   `restore` writes the captured values back idempotently and clears the capture.
-   All target I/O goes through an injected `WatchdogControl` Protocol
+   abstraction.** `WatchdogPolicy` holds, keyed by `session_id`, the knob values it
+   read at relax time; `relax` reads-then-captures-then-writes-relaxed **once per
+   session**, `restore` writes the captured values back idempotently and clears the
+   capture. The key is `session_id` — **not** `generation` — because `generation` is
+   a 0 placeholder at enter and falls back to 0 at clean-end teardown when the record
+   is already gone (`server.py:4845`), so it is not stable across the relax and
+   restore contexts; `session_id` is authoritative wherever relax runs (post-acquire)
+   and at teardown. All target I/O goes through an injected `WatchdogControl` Protocol
    (`read_knob`/`write_knob`), so the mechanism is decoupled from any transport and
    unit-testable with a fake. #69 ships **no** concrete channel; the live tier
    supplies one over `SshRunner` (in-band) and/or an out-of-band power channel.
@@ -43,24 +47,28 @@ is not a `SessionGuard` exit and a reboot restores watchdog defaults anyway.
    out-of-band channel, is **recorded skipped, never executed** — matching the
    repo's future-stub posture for power/console tools.
 
-3. **#69 wires the steps inert, like #66's empty slots.** The QEMU gdbstub tier
+3. **#69 wires the helper inert, like #66's empty slots.** The QEMU gdbstub tier
    freezes the whole VM (no guest time passes), so its lockup detectors cannot fire
    during a stop and there is nothing to relax; wiring an ssh sysctl path into the
    gdbstub handler would be speculative dead code on a tier that does not need it. So
-   `create_app` is **unchanged**: the `WatchdogRelaxStep`/`WatchdogRestoreStep`
-   adapters exist and are exercised through `SessionGuard.enter`/`teardown` in
-   **tests** with a fake channel, and the live KGDB/remote/POWER tier (epic #9) owns
-   the concrete channel and the wiring.
+   `create_app` is **unchanged**: the `WatchdogRestoreStep` adapter and the
+   `policy.relax` call are exercised through `SessionGuard.teardown` + a direct
+   `relax` call in **tests** with a fake channel, and the live KGDB/remote/POWER tier
+   (epic #9) owns the concrete channel and the wiring.
 
-4. **The live relax must run in the post-acquire / pre-halt window** — recorded as
-   the integration contract. After `transaction.open()` commits, every later failure
-   runs `teardown` (so a restore is guaranteed); before `provider.start_session`
-   attaches, the in-band channel is still reachable (the kernel is running). The
-   bare `pre_attach` slot is **insufficient for live use**: it runs before `open()`,
-   and the handler early-returns on an `open()` failure without calling teardown, so
-   a relax there would leak a relaxed watchdog. #69's tests use the `pre_attach`
-   slot only to exercise the enter→relax **mechanism**; the live tier must place the
-   relax in the guaranteed-teardown window (or add a dedicated hook there).
+4. **Only restore is a SessionGuard Protocol adapter; relax is a post-acquire
+   call.** `WatchdogRestoreStep` is a `TeardownStep` (the exit slot). Relax is a
+   direct `policy.relax(ctx)` call the live integrator places in the **post-acquire /
+   pre-halt window** — after `transaction.open()` commits (every later failure runs
+   `teardown`, so a restore is guaranteed, and `session_id` is now authoritative for
+   the key) and before `provider.start_session` attaches (the in-band channel is
+   still reachable). Relax is deliberately **not** a `pre_attach` precondition: that
+   slot runs before `open()` with `session_id=None`, and the handler early-returns on
+   an `open()` failure without calling teardown, so a relax there would both mis-key
+   under a `None` session and leak a relaxed watchdog. #69's tests invoke relax with a
+   post-acquire-shaped context (real `session_id`) and restore via `teardown` with the
+   same `session_id`; the live tier must place the relax in that window (or add a
+   dedicated hook there).
 
 5. **"Restore on timeout" is the operation timeout via the synchronous teardown;
    the dispatcher reboot path is a deliberate no-op.** An attach/interactive-stop
@@ -114,11 +122,13 @@ is not a `SessionGuard` exit and a reboot restores watchdog defaults anyway.
    live KGDB/remote tier that actually needs it — the same "defer the slot to the
    issue that fills it" discipline ADR 0013 used.
 
-3. **Relax as a `PreAttachPrecondition` for live use (accept the open-failure
-   leak).** Rejected: `debug_start_session_handler` early-returns on an `open()`
-   failure without teardown, so a pre-attach relax would leave the watchdog relaxed
-   with no restore — a correctness leak. The seam tests use the slot to drive the
-   mechanism, but the live contract forbids this placement (decision 4).
+3. **Relax as a `PreAttachPrecondition`.** Rejected on two counts: (a)
+   `debug_start_session_handler` early-returns on an `open()` failure without
+   teardown, so a pre-attach relax would leave the watchdog relaxed with no restore —
+   a correctness leak; and (b) at enter `session_id` is `None`, so a relax keyed on
+   `session_id` there would store under a placeholder and never match the teardown
+   lookup — restore would silently no-op. Relax is a post-acquire call instead
+   (decision 4).
 
 4. **Relax as a `PostAttachPrecondition` (runs after `open()` commits, so teardown
    is guaranteed).** Rejected: the post-attach phase runs **after**
@@ -154,6 +164,15 @@ is not a `SessionGuard` exit and a reboot restores watchdog defaults anyway.
    teardown has no second trigger for. A live tier that wants post-resume retry
    re-runs `relax`/`restore`. #69 keeps the simple "clear after one pass" rule that
    makes the second `teardown` a clean no-op.
+
+9. **Re-read the live knobs on a re-`relax` (replace the capture each time).**
+   Rejected: after the first relax, the live knob values **are** the relaxed values,
+   so a re-read would capture e.g. `nmi_watchdog=0` as the "prior" value and `restore`
+   would write the relaxed value back — destroying the operator's true baseline. The
+   accepted rule is capture-once per `session_id`: a re-`relax` re-issues the relax
+   writes but never re-reads into the capture, so the baseline survives until a
+   `restore` consumes it. ("Stacking relaxed-over-relaxed" was never the hazard;
+   baseline corruption is.)
 
 ## References
 

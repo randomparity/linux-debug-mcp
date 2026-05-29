@@ -25,17 +25,23 @@ invariants by seam-level test.
 - A `WatchdogPolicy` helper in a new `seams/watchdog.py`:
   - Architecture variants (`x86_64`, `ppc64le`) selecting an ordered list of
     `WatchdogKnob`s with their relaxed target values.
-  - A stateful `relax(ctx)` / `restore(ctx)` pair keyed by `(target_key,
-    generation)`: `relax` reads-then-captures each knob's current value and writes
-    the relaxed value; `restore` is idempotent and writes the captured values back.
+  - A stateful `relax(ctx)` / `restore(ctx)` pair keyed by `ctx.session_id`:
+    `relax` reads-then-captures each knob's current value (once per session) and
+    writes the relaxed value; `restore` is idempotent and writes the captured values
+    back. `session_id` is the only `SessionGuardContext` field authoritative both
+    where `relax` runs (post-acquire) and at teardown (§4.2) — `generation` is a 0
+    placeholder at enter and even falls back to 0 at clean-end teardown when the
+    record is already gone (`server.py:4845`), so it is unsafe as a key.
   - Execution through an injected `WatchdogControl` channel (`read_knob`/
     `write_knob`), so the mechanism is decoupled from any transport and unit-testable
     with a fake.
-- Two thin `SessionGuard` adapters:
-  - `WatchdogRelaxStep` — a `PreAttachPrecondition` (the **enter** slot) that calls
-    `policy.relax`.
-  - `WatchdogRestoreStep` — a `TeardownStep` (the **exit** slot) that calls
-    `policy.restore`, run on the clean-end and attach-error teardown paths.
+- `WatchdogRestoreStep` — a `TeardownStep` (the SessionGuard **exit** slot) that
+  calls `policy.restore`, run on the clean-end and attach-error teardown paths.
+- `policy.relax(ctx)` — invoked at session setup in the **post-acquire / pre-halt
+  window** (§4.2). It is **not** a `pre_attach` precondition: at enter `session_id`
+  is `None` and an `open()` failure skips teardown, so the literal enter slot is
+  unsafe for relax. The issue's "hook into enter" maps to this post-acquire setup
+  point; #69 ships it inert (§1.2) and the live tier invokes it there.
 - Seam-level tests proving: capture-then-relax order; restore round-trips the
   captured values; restore is idempotent (double teardown); restore-on-error
   (`reason="attach_error"`); restore-on-timeout (an attach/operation timeout
@@ -162,49 +168,57 @@ class WatchdogPolicy:
     def restore(self, ctx: SessionGuardContext) -> RestoreReport: ...
 ```
 
-State: a `dict[tuple[TargetKey, int], CapturedState]` keyed by `(ctx.target_key,
-ctx.generation)`, guarded by a `threading.Lock` (the guard handlers can run
-concurrently for distinct targets). `CapturedState` holds, per in-band knob, the
-value read at relax time and a `relaxed: bool` recording whether the relax write
-itself succeeded (a knob whose relax write failed is **not** restored — there is
-nothing to put back, and writing the captured value would be a no-op write of a
-value we never changed).
+State: a `dict[str, CapturedState]` keyed by `ctx.session_id`, guarded by a
+`threading.Lock` (the guard handlers can run concurrently for distinct sessions).
+`CapturedState` holds, per in-band knob, the value read at relax time and a
+`relaxed: bool` recording whether the relax write itself succeeded (a knob whose
+relax write failed is **not** restored — there is nothing to put back, and writing
+the captured value would be a no-op write of a value we never changed).
 
-**`relax(ctx)`** — for each knob in declared order:
+**`relax(ctx)`** — **capture-once per session.** If a `CapturedState` already
+exists for `ctx.session_id`, `relax` does **not** re-read (re-reading after a prior
+relax would capture the already-*relaxed* value as the "prior" value and so destroy
+the operator's true baseline — see §4.1); it re-issues the relax writes against the
+existing capture and returns. On the first relax for the session, for each knob in
+declared order:
 - `out_of_band` knob → record `skipped` (reason: no out-of-band channel), continue.
 - in-band knob → `read_knob` (capture prior value; `None` ⇒ knob absent ⇒ record
   `absent`, skip the write), then `write_knob(relaxed_value)`; record the
-  `WriteOutcome`. Store the captured map under the `(target_key, generation)` key,
-  **replacing** any prior capture for that key (a re-`relax` of the same incarnation
-  re-reads current state — see §4.1 idempotency).
+  `WriteOutcome`. Store the captured map under the `session_id` key.
+
+`relax` requires a non-`None` `ctx.session_id` (it runs post-acquire, §4.2); a
+`None` session_id is a programming error (relax invoked pre-acquire) and raises
+`ValueError` rather than silently keying under a placeholder.
 
 Returns a `RelaxReport` (knob → outcome: `relaxed` / `absent` / `skipped` /
 `write_failed`). `relax` never raises; a channel that itself raises is caught and
 recorded as `write_failed` for that knob.
 
-**`restore(ctx)`** — look up the captured map for `(target_key, generation)`:
-- no entry (relax never ran for this incarnation, or restore already ran and cleared
+**`restore(ctx)`** — look up the captured map for `ctx.session_id`:
+- no entry (relax never ran for this session, or restore already ran and cleared
   it) → return an empty `RestoreReport(restored={}, noop=True)`.
 - entry present → for each knob that was actually `relaxed` (captured value known
   and the relax write succeeded), in **reverse** declared order, `write_knob(captured
-  value)`; record the outcome. Then **delete** the captured map for the key (so a
-  second restore is the no-op above). Knobs recorded `absent`/`skipped`/`write_failed`
-  at relax are not restored.
+  value)`; record the outcome. Then **delete** the captured map for the session key,
+  **unconditionally and regardless of per-knob write outcomes** (so a second restore
+  is the no-op above; ADR 0016 rejected-alt 8 — a live tier wanting retry re-runs
+  `relax`/`restore`). Knobs recorded `absent`/`skipped`/`write_failed` at relax are
+  not restored.
 
 Returns a `RestoreReport`. `restore` never raises (the `TeardownStep` contract); a
 write that fails is recorded in the report and surfaces via the adapter into
 `TeardownReport.step_errors`.
 
-### 3.4 SessionGuard adapters
+### 3.4 SessionGuard adapter + relax invocation
+
+Only the **restore** is a `SessionGuard` Protocol adapter, because only the exit
+(teardown) slot runs where its key field (`session_id`) is authoritative and a later
+run is guaranteed. The **relax** is a direct `policy.relax(ctx)` call the live
+integrator places in the post-acquire window (§4.2) — not a `pre_attach`
+precondition (where `session_id` is `None` and an `open()` failure skips teardown).
 
 ```python
-class WatchdogRelaxStep:                  # PreAttachPrecondition
-    name = "watchdog-relax"
-    def __init__(self, policy: WatchdogPolicy) -> None: ...
-    def check(self, ctx: SessionGuardContext) -> None:
-        self._policy.relax(ctx)           # side-effecting; never raises to abort enter
-
-class WatchdogRestoreStep:                # TeardownStep
+class WatchdogRestoreStep:                # TeardownStep (the SessionGuard exit slot)
     name = "watchdog-restore"
     def __init__(self, policy: WatchdogPolicy) -> None: ...
     def teardown(self, ctx: SessionGuardContext) -> None:
@@ -220,8 +234,9 @@ suppress-with-logging). It does **not** raise on a `noop` restore (nothing was
 relaxed). The resume + reap invariant is unaffected either way — `close` runs
 regardless.
 
-Both adapters share one `WatchdogPolicy` instance (the captured-state owner), so the
-relax capture and the restore lookup address the same store.
+The restore step and the live relax call share one `WatchdogPolicy` instance (the
+captured-state owner) and pass contexts carrying the **same** `session_id`, so the
+relax capture and the restore lookup address the same store entry.
 
 ## 4. Integration contract (how the live tier wires it)
 
@@ -230,10 +245,14 @@ relax capture and the restore lookup address the same store.
 A `debug.end_session` may be retried, so `SessionGuard.teardown` (and thus
 `restore`) may run twice. `restore` is idempotent by construction: the first run
 restores and deletes the captured map; the second finds no entry and returns a
-`noop` report. `relax` is also re-entrant per incarnation: a re-`relax` re-reads the
-live knobs and replaces the capture, so a relax that ran, then a stop that was
-abandoned and re-entered, captures the **then-current** values rather than stacking
-relaxed-over-relaxed.
+`noop` report. `relax` is **capture-once per `session_id`**: a second `relax` for a
+session that already has a capture re-issues the relax writes but does **not**
+re-read into the capture. This is required for correctness, not just efficiency —
+after the first relax the live knob values are the *relaxed* values, so a re-read
+would capture (say) `nmi_watchdog=0` as the "prior" value and `restore` would then
+write the relaxed value back, **destroying the operator's true baseline**. The
+captured baseline survives any number of re-relaxes until a `restore` consumes and
+clears it.
 
 ### 4.2 Placement: relax must run in a guaranteed-teardown window
 
@@ -247,17 +266,24 @@ relaxed with **no** restore — a leak.
 
 Therefore the **live** integration contract (recorded in ADR 0016) is: the relax
 invocation must sit in the **post-acquire / pre-halt window** — after
-`transaction.open()` commits (teardown is then guaranteed on every later failure)
-and before `provider.start_session` performs the attach that halts the kernel (the
-in-band channel is then still reachable). #66's `SessionGuard` has no slot in that
-window; adding one enlarges the #66 seam, so it is deferred to the live KGDB/remote
-tier that needs it (ADR 0016 rejected-alt 2).
+`transaction.open()` commits (teardown is then guaranteed on every later failure,
+and `session_id` is now authoritative for the capture key) and before
+`provider.start_session` performs the attach that halts the kernel (the in-band
+channel is then still reachable). #66's `SessionGuard` has no slot in that window;
+adding one enlarges the #66 seam, so it is deferred to the live KGDB/remote tier
+that needs it (ADR 0016 rejected-alt 2). This is also why relax is a direct
+`policy.relax(ctx)` call rather than a `pre_attach` precondition (§3.4): the
+`pre_attach` slot runs at enter, where `session_id` is `None` and the open-failure
+leak above applies.
 
-Because #69 wires the steps **inert** (§1.2), this is a documented contract, not a
-live bug: the seam tests construct a `SessionGuard(pre_attach=[relax],
-teardown_steps=[restore])` to exercise the **mechanism** (enter → relax, teardown →
-restore) with a fake channel, while the spec/ADR record the **placement** the live
-tier must honor.
+Because #69 ships the helper **inert** (§1.2), this is a documented contract, not a
+live bug: the seam tests call `policy.relax(ctx)` with a **post-acquire-shaped**
+context (a real `session_id`, as the live tier produces) and then run
+`SessionGuard(teardown_steps=[restore]).teardown(ctx)` with the **same**
+`session_id`, exercising the relax→restore round-trip with a fake channel while the
+spec/ADR record the **placement** the live tier must honor. The tests do **not**
+drive relax through the `pre_attach` slot (that would mis-key under `session_id=None`
+and mask the real skew).
 
 ### 4.3 What the channel reaches, and when
 
@@ -269,11 +295,11 @@ the kernel may still be parked at the durable `HALTED` record and the actual CPU
 state is uncertain; the channel's bounded/cancelable contract (the live `SshRunner`
 backing already enforces a per-command timeout) means a restore write against an
 unreachable target fails fast and is recorded `write_failed` rather than hanging
-teardown. The captured state is **not** cleared for a knob whose restore write
-failed only if we choose to allow a later retry — for #69 the restore deletes the
-whole map after one pass (idempotency §4.1); a live tier that wants post-resume
-retry can re-`relax`/re-`restore`. This bounded-best-effort behavior is the same
-posture `SessionGuard.teardown` already takes for `close`.
+teardown. `restore` then **clears the whole capture after this one pass regardless
+of per-knob write outcomes** (§3.3) — it does not retain failed knobs for an
+auto-retry, so a second `teardown` is a clean `noop`; a live tier that wants
+post-resume retry re-runs `relax`/`restore`. This bounded-best-effort behavior is the
+same posture `SessionGuard.teardown` already takes for `close`.
 
 ## 5. restore-on-error and restore-on-timeout
 
@@ -333,6 +359,16 @@ Seam-level, injected `FakeWatchdogControl`, following the repo convention (no MC
   with no further `write_knob` calls.
 - **restore with no prior relax**: `restore` without a preceding `relax` is a `noop`,
   no writes.
+- **capture-once (baseline preserved across re-relax)**: `relax`, then a second
+  `relax` for the **same** `session_id` before any `restore`, then `restore` — assert
+  each knob is written back to its **original** captured value (e.g. `1`), not the
+  relaxed value (`0`); the second relax re-issued the relax writes but did not
+  re-read into the capture.
+- **session_id keying / pre-acquire guard**: `relax(ctx)` with `ctx.session_id=None`
+  raises `ValueError` (relax was invoked pre-acquire); `relax` and `restore` keyed on
+  the same real `session_id` round-trip even though the relax ctx and teardown ctx
+  carry different `generation` values (proving the helper does not key on the
+  non-authoritative `generation`).
 - **restore-on-error**: a `SessionGuard` with the restore step + a `provider`/step
   that raises drives `teardown(reason="attach_error")`; assert each captured knob
   restored and `resume_ok` still holds (close still ran).
@@ -350,8 +386,8 @@ Seam-level, injected `FakeWatchdogControl`, following the repo convention (no MC
 - **dispatcher path has no restore obligation** (conformance): emit a
   `target.resetting` event for a session and assert no watchdog restore is expected
   on that path (the step is not on the dispatcher) — documenting §5.
-- **concurrency**: two distinct `(target_key, generation)` keys capture/restore
-  independently (no cross-talk in the shared store).
+- **concurrency**: two distinct `session_id` keys capture/restore independently (no
+  cross-talk in the shared store).
 - Integration tests touching real ssh/gdb stay env-gated and untouched.
 
 ## 8. Open questions
