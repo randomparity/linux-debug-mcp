@@ -277,6 +277,10 @@ def render_wrapper(
     if not _CALL_ID_RE.match(call_id):
         raise WrapperRenderError(f"call_id must match {_CALL_ID_RE.pattern}; got {call_id!r}")
     merged_caps = _merge_and_validate_caps(caps)
+    try:
+        json.loads(args_json)
+    except json.JSONDecodeError as exc:
+        raise WrapperRenderError(f"args_json must be valid JSON; got {args_json!r}: {exc}") from exc
     encoded = base64.b64encode(user_script.encode("utf-8")).decode("ascii")
     args_b64 = base64.b64encode(args_json.encode("utf-8")).decode("ascii")
     # `substitute` (not `safe_substitute`) raises KeyError on unknown
@@ -321,6 +325,10 @@ def render_wrapper_skeleton(
     if not _CALL_ID_RE.match(call_id):
         raise WrapperRenderError(f"call_id must match {_CALL_ID_RE.pattern}; got {call_id!r}")
     merged_caps = _merge_and_validate_caps(caps)
+    try:
+        json.loads(args_json)
+    except json.JSONDecodeError as exc:
+        raise WrapperRenderError(f"args_json must be valid JSON; got {args_json!r}: {exc}") from exc
     placeholder = (
         f"# <user script: sha256:{user_script_sha256_hex}; "
         f"full source under sensitive/debug/introspect/{call_id}/wrapper.py>"
