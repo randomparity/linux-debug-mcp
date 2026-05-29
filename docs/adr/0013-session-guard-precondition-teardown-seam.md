@@ -85,12 +85,17 @@ in?**
    ssh-admission concern, asserted by its own test, not folded into `resume_ok`).
    `teardown` runs `close` (suppressing+recording any raise as `close_error`),
    verifies the post-condition via `read_record`, and **if it does not hold,
-   invokes `force_reap`** — the transaction's existing session-id-fenced out-of-band
-   release — and re-checks. `resume_ok=False` therefore means even `force_reap`
-   failed: a genuine `INFRASTRUCTURE_FAILURE` logged loudly, not a silently-stranded
-   target. A **failed attach that never halted the kernel** (`halt_recorded=False`)
-   uses `close(force=True)` so it deletes the record with no tombstone — a running
-   kernel is never left ssh-blocked.
+   invokes `force_reap`** — `transaction.force_release(session_id)`, a **more
+   forceful primitive than `close`, not a retry of it**: it skips the
+   failure-prone `transport.close` (the likely cause of the partial close) and does
+   only the session-id-fenced `delete_record` + `guard.revoke` + lease release that
+   stops the ssh-tier probe reading `HALTED`, rebuilt from the durable record;
+   any still-live backend is reaped by `reconcile()` on next start (§5.5 backstop).
+   `resume_ok=False` therefore means even `force_reap` failed: a genuine
+   `INFRASTRUCTURE_FAILURE` logged loudly, not a silently-stranded target. The
+   attach-error path keeps today's `close(force=False)`/`closed_while_halted`
+   tombstone semantics — see rejected-alt 9 for why no `halt_recorded` discriminator
+   is introduced.
 
 ## Consequences
 
@@ -153,7 +158,7 @@ in?**
    site. Injected lists make the ordered, per-`SessionGuard` step set visible and
    testable.
 
-7. **Route `teardown_steps` through the lifecycle dispatcher's
+6. **Route `teardown_steps` through the lifecycle dispatcher's
    `invalidate`/`force_drop` (with a `phase` discriminator so steps know whether
    they may block).** Considered in spec-review round 1, rejected in round 2: no
    teardown step does useful work on the invalidation path — every invalidation is
@@ -165,17 +170,38 @@ in?**
    leaves the dispatcher untouched and conformance-tests that its existing reap
    satisfies the "times out" clause of AC1.
 
-8. **Treat resume as an observe-and-log post-condition with no remediation** (the
+7. **Treat resume as an observe-and-log post-condition with no remediation** (the
    round-1 design: `teardown` reads the record after `close` and logs
    `resume_ok=False` but takes no further action). Rejected in round 2: AC1 demands
    a *guarantee*, and a monitor that only logs its own violation is not one — a
    partial `close` that left a stranded `HALTED` record (or a fenced `delete_record`
    no-op under a concurrent reopen) would leave `target.run_tests` gated
-   indefinitely. The accepted design adds the `force_reap` remediation (reusing the
-   transaction's proven out-of-band release) so `resume_ok=False` means *even the
-   backstop failed*, a true infrastructure fault — not a routine stranding.
+   indefinitely. The accepted design adds the `force_reap` remediation so
+   `resume_ok=False` means *even the backstop failed*, a true infrastructure fault —
+   not a routine stranding.
 
-6. **Re-enable ssh-tier mid-session on `debug.continue` (flip the durable record
+8. **Define `force_reap` as a re-run of `close` / `_SessionSubscriber.force_drop`.**
+   Rejected in round 3: `force_reap` is invoked *because* `close` already failed and
+   stranded a `HALTED` record, so repeating `close`'s `transport.close → release →
+   delete` sequence would wedge identically and back nothing up; and `force_drop`'s
+   release reads in-memory `_OpenState` the `TransportTransaction` cannot address by
+   `session_id`. The accepted `force_release(session_id)` is therefore strictly more
+   forceful and record-derived: skip `transport.close`, do the fenced
+   `delete_record` + `guard.revoke` + lease release, leave any live backend to
+   `reconcile()`.
+
+9. **Add a `halt_recorded` discriminator so a failed attach that never halted the
+   kernel resumes with no recovery tombstone.** Considered in round 2, rejected in
+   round 3: `_halt_debug_transport` runs *before* `provider.start_session`
+   (`server.py:4111` precedes `4113`) and a `SessionGuard` teardown is reached only
+   *after* `open()` commits a session, so every teardown-reachable attach failure
+   has the kernel already parked `HALTED` — the `halt_recorded=False` branch has no
+   trigger in the real handler and only a synthetic test could exercise it.
+   Introducing it would also silently change the existing deliberate unconditional
+   `close(force=False)` attach-error semantics for a case that cannot occur. The
+   accepted design keeps the unconditional `force=False` on attach-error.
+
+10. **Re-enable ssh-tier mid-session on `debug.continue` (flip the durable record
    back to `EXECUTING` + bump epoch) as part of the resume invariant.** Rejected
    for #66 scope: that is execution-state-gate territory (§5.6 rule 2's
    *permitted-while-EXECUTING* half), a distinct change to the live admission

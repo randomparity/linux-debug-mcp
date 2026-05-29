@@ -30,7 +30,7 @@ the target is never left stopped.
   - `PreAttachPrecondition`, `PostAttachPrecondition`, and `TeardownStep`
     Protocols (the #69/#70 plug-in points).
   - A `SessionGuardContext` carrying the run-scoped facts steps need (`reason`,
-    `halt_recorded`, the `TargetKey`/generation/session id).
+    the `TargetKey`/generation/session id).
   - `SessionGuard` with injected **ordered** `pre_attach`, `post_attach`, and
     `teardown_steps` lists (empty default in #66), `enter(ctx)` /
     `verify_attached(ctx, session)` methods, and one idempotent
@@ -89,8 +89,8 @@ when a close leaves a stranded `HALTED` record, and no slot for #69/#70 to exten
 ### 3.1 `SessionGuardContext`
 
 A frozen dataclass carrying exactly the facts the preconditions/teardown steps
-and the resume assertion need — no live handles, so it can be reconstructed on any
-of the three entry points from the durable record:
+and the resume verification need — no live handles, so it is built on each handler
+exit path from values already in scope:
 
 ```python
 TeardownReason = Literal["ended", "attach_error"]
@@ -101,28 +101,24 @@ class SessionGuardContext:
     generation: int
     session_id: str | None       # None before the attach commits a session
     reason: TeardownReason       # why teardown is running: clean end vs failed attach
-    halt_recorded: bool          # True iff the durable record was parked HALTED before this teardown
 ```
 
 `session_id` is `None` only during `enter` before the transaction commits a
 session id; both teardown reasons carry it.
 
 `reason` is the caller's intent — `"ended"` (a clean `debug.end_session`) or
-`"attach_error"` (an attach failure or a post-attach precondition rejection). #66
-deliberately does **not** route `SessionGuard` teardown through the lifecycle
-dispatcher's invalidation path (reset/crash/release): that path is the target
-being torn down or rebooted, where the existing `_SessionSubscriber` reap already
-guarantees no orphan (§4 item 3) and where a session-level teardown step (e.g.
-watchdog-restore) would be meaningless — a reboot restores defaults anyway. So
-`SessionGuard` has no `force_drop`/blocking distinction to model; every
-`SessionGuard.teardown` runs synchronously on the handler thread and MAY block.
-(Spec-review round 2, Findings 2/3: a `phase` discriminator and dispatcher
-routing were dropped as speculative — no teardown step does useful work on the
-invalidation path.)
-
-`halt_recorded` lets `teardown` distinguish a session that actually parked the
-kernel `HALTED` from a failed attach that never did, which drives the resume
-post-condition and the `close` `force` flag (§3.5).
+`"attach_error"` (a post-commit attach failure or a post-attach precondition
+rejection). It is the single discriminator `teardown` needs: `"ended"` →
+`close(force=True)` (clean detach resumed the kernel), `"attach_error"` →
+`close(force=False)` (preserve today's `closed_while_halted` semantics — see §3.5
+for why a `halt_recorded` flag was rejected as vestigial). #66 deliberately does
+**not** route `SessionGuard` teardown through the lifecycle dispatcher's
+invalidation path (reset/crash/release): that path is the target being torn down
+or rebooted, where the existing `_SessionSubscriber` reap already guarantees no
+orphan (§4) and where a session-level teardown step (e.g. watchdog-restore) would
+be meaningless — a reboot restores defaults anyway. So `SessionGuard` has no
+`force_drop`/blocking distinction to model; every `SessionGuard.teardown` runs
+synchronously on the handler thread and MAY block.
 
 ### 3.2 `Precondition` Protocol
 
@@ -251,9 +247,8 @@ class SessionGuard:
         2. calls `read_record` to verify the §3.5 post-condition (no orphaned
            HALTED record).
         3. if the post-condition does NOT hold (close raised partway and left a
-           live HALTED record with no owner), invokes `force_reap` — the
-           transaction's existing session-id-fenced out-of-band release (the same
-           primitive the dispatcher's force_drop uses) — and re-reads.
+           live HALTED record with no owner), invokes `force_reap` — a MORE
+           FORCEFUL primitive than `close`, not a retry of it (§4) — and re-reads.
 
         Sets `resume_ok` from the final read. `resume_ok=False` means even
         `force_reap` could not clear a live HALTED record — a genuine
@@ -268,12 +263,26 @@ in-memory token map.
 
 `close`, `read_record`, and `force_reap` are passed in rather than `SessionGuard`
 reaching into the transaction/registry, so the guard stays decoupled from
-`TransportTransaction` and is unit-testable with fakes. All three are wired by the
-handler to the existing transaction primitives: `close` →
-`transaction.close(sid, force=...)`, `read_record` →
-`session_registry.read_record(target_key)`, `force_reap` → the transaction's
-session-id-fenced out-of-band release (the same call the dispatcher's `force_drop`
-makes). `SessionGuard` itself touches none of them directly.
+`TransportTransaction` and is unit-testable with fakes. They are wired by the
+handler to: `close` → `transaction.close(sid, force=...)`; `read_record` →
+`session_registry.read_record(target_key)`; `force_reap` →
+`transaction.force_release(sid)`. `SessionGuard` itself touches none of them
+directly.
+
+`force_reap` is **deliberately more forceful than `close`, not a re-run of it**
+(spec-review round 3, Finding 1). It is only ever called *because* `close` already
+failed and left a stranded `HALTED` record, so repeating `close`'s sequence
+(`transport.close` → release → `delete_record`) would just wedge the same way. So
+`transaction.force_release(session_id)` **skips the failure-prone
+`transport.close`** and does only the in-memory/durable line drop that stops the
+ssh-tier probe reading `HALTED`: a session-id-fenced `delete_record` + a
+by-`TargetKey` `guard.revoke` + console-lease release, rebuilt from the durable
+record (the way `close` resolves a session-id, `transaction.py:415`), **not** from
+`_SessionSubscriber.force_drop`'s in-memory `_OpenState` (which `TransportTransaction`
+cannot address by `session_id`). Any still-live backend left by the skipped
+`transport.close` is reaped by `SessionRegistry.reconcile()` on the next process
+start — the same §5.5 backstop the dispatcher relies on. `force_release` is the one
+new method #66 adds to `TransportTransaction`.
 
 The lifecycle dispatcher's invalidation path is **not** routed through
 `SessionGuard` (§3.1): `_SessionSubscriber` keeps its existing reap unchanged, so
@@ -303,23 +312,26 @@ expected it is asserted by its own test (§6), not folded into the resume check.
 `teardown` checks the post-condition via `read_record` after `close`; on failure
 it invokes `force_reap` and re-checks (§3.4). The two `SessionGuard` exit paths:
 
-- **Clean end** (`reason="ended"`, `halt_recorded=True`):
-  `transaction.close(force=True)` reaps the backend (QEMU auto-resumes the VM when
-  gdb disconnects in the batch-controller model) and deletes the record.
-  `read_record()` → `None` → `resume_ok=True`. ssh-tier admits again because the
-  next probe reads `UNKNOWN` against the (still-`READY`) snapshot.
-- **Attach error / post-attach precondition failure** (`reason="attach_error"`):
-  the `close` `force` flag follows `ctx.halt_recorded`. **Kernel never parked
-  `HALTED`** (`halt_recorded=False` — attach failed before/at connect, kernel
-  still running): `close(force=True)` deletes the record with **no** tombstone, so
-  a never-halted kernel is not left ssh-blocked (resolves the AC1 tension). **Halt
-  was recorded** (`halt_recorded=True` — the halt landed but no clean resume was
-  confirmed): `close(force=False)` reaps the backend (resuming the kernel) and
-  leaves a `closed_while_halted` recovery tombstone, because the server cannot
-  *prove* the kernel resumed; the agent clears it with
-  `transport.open(recovery=True)` (the existing clearance path). Either way the
-  backend is reaped and the record is deleted, so `resume_ok=True`; the tombstone
-  presence on the halted branch is asserted separately.
+- **Clean end** (`reason="ended"` → `close(force=True)`): reaps the backend (QEMU
+  auto-resumes the VM when gdb disconnects in the batch-controller model) and
+  deletes the record. `read_record()` → `None` → `resume_ok=True`. ssh-tier admits
+  again because the next probe reads `UNKNOWN` against the (still-`READY`) snapshot.
+- **Attach error / post-attach precondition failure** (`reason="attach_error"` →
+  `close(force=False)`): this preserves today's deliberate semantics
+  (`server.py:4132-4134`). A `SessionGuard` teardown is reached **only after
+  `transaction.open()` has committed a session** (§4 item 1), and
+  `_halt_debug_transport` runs *before* `provider.start_session`
+  (`server.py:4111` precedes `4113`), so by the time any post-commit failure
+  occurs the record was already parked `HALTED`. The server therefore cannot prove
+  the kernel resumed, so `close(force=False)` reaps the backend (resuming the
+  kernel under the batch model) and leaves a `closed_while_halted` recovery
+  tombstone; the agent clears it with `transport.open(recovery=True)` (the existing
+  clearance path). The record is deleted, so `resume_ok=True`; the tombstone
+  presence is asserted separately (§6). A `halt_recorded` discriminator was
+  considered and rejected: because `_halt` always precedes the attach, every
+  teardown-reachable failure has the kernel already parked `HALTED`, so a
+  "never-halted, resume-clean" branch has no trigger in the real handler (ADR 0013
+  rejected-alt 9).
 
 The **timeout / invalidation** path (`target.resetting/crashed/released/...`) is
 not a `SessionGuard` exit path: the dispatcher's `_SessionSubscriber` already
@@ -344,23 +356,25 @@ existing transaction/admission/registry optionality). The lifecycle dispatcher a
 
 1. **`debug_start_session_handler`** — call `guard.enter(ctx)` (pre-attach) **before**
    `transaction.open()`; after `open()`+`_halt`+`provider.start_session` commit,
-   call `guard.verify_attached(ctx, session)` (post-attach) before returning. On any
-   exception from `open()`/`_halt`/`provider.start_session`/`verify_attached`, call
-   `guard.teardown` with `reason="attach_error"`, `halt_recorded=<did _halt run?>`,
-   `close=lambda: transaction.close(sid, force=not halt_recorded)`,
+   call `guard.verify_attached(ctx, session)` (post-attach) before returning. The
+   teardown is wired **only to failures after `open()` commits a session** —
+   `_halt`, `provider.start_session`, `verify_attached`: those are the cases where a
+   `sid` exists and resources are held. `transaction.open()`'s own failures keep
+   their **existing early-return** (`server.py:4090-4108`): `open()` is a
+   self-rolling-back write-ahead transaction (`transaction.py:367-369`), so there is
+   no `sid` to tear down and `SessionGuard` does not wrap it (spec-review round 3,
+   Finding 2). On a post-commit failure, call `guard.teardown` with
+   `reason="attach_error"`, `close=lambda: transaction.close(sid, force=False)`,
    `read_record=lambda: session_registry.read_record(target_key)`, and
    `force_reap=lambda: transaction.force_release(sid)` — replacing today's bare
-   `transaction.close(force=False)`. `halt_recorded` is `True` iff
-   `_halt_debug_transport` ran before the failure (§3.5).
+   `transaction.close(sid, force=False)`.
 2. **`debug_end_session_handler`** — on a clean provider detach, call
-   `guard.teardown` with `reason="ended"`, `halt_recorded=True`,
+   `guard.teardown` with `reason="ended"`,
    `close=lambda: transaction.close(sid, force=True)`, the same `read_record`, and
-   `force_reap` — replacing today's bare `transaction.close(force=True)`.
+   `force_reap` — replacing today's bare `transaction.close(sid, force=True)`.
 
-`transaction.force_release(session_id)` is a thin public wrapper exposing the
-existing session-id-fenced out-of-band release that `_SessionSubscriber.force_drop`
-already performs internally (`transaction.py:105-138`); #66 adds this one method so
-the handler-side `force_reap` reuses the proven path rather than duplicating it.
+`transaction.force_release(session_id)` (the one new transaction method, §3.4) is
+the more-forceful remediation `force_reap` binds to.
 
 The handlers' existing manifest/redaction/`ToolResponse` behavior is unchanged;
 `SessionGuard` slots in around the attach/teardown only.
@@ -371,7 +385,7 @@ The handlers' existing manifest/redaction/`ToolResponse` behavior is unchanged;
   `READINESS_FAILURE` with the precondition `name` in details and
   `suggested_next_actions=["artifacts.get_manifest"]`. Nothing acquired.
 - A failed **post-attach** `PreconditionError` → the handler runs
-  `teardown(reason="attach_error", halt_recorded=...)` to release the
+  `teardown(reason="attach_error")` to release the
   just-acquired guard/lease and reap the backend, then returns
   `READINESS_FAILURE` with the precondition `name`. The session is fully torn
   down — a post-attach rejection never leaves an acquired session live.
@@ -397,19 +411,24 @@ Handler/seam-level (no MCP, injected fakes), following the repo convention:
   `teardown(reason="attach_error")`; assert the just-acquired guard/lease are
   released and the backend reaped (a post-attach rejection never leaves a live
   session), and the handler returns `READINESS_FAILURE` with the precondition name.
-- **Resume-on-error, halt recorded** (`halt_recorded=True`): a failure after
-  `_halt` drives `teardown` → `close(force=False)`; assert backend reaped,
-  guard/lease released, the record left non-`HALTED` (`resume_ok=True`), **and**
-  (separate assertion) a current `closed_while_halted` recovery tombstone exists.
-- **Resume-on-error, no halt** (`halt_recorded=False`): a failure before `_halt`
-  drives `teardown` → `close(force=True)`; assert the record is deleted, **no**
-  recovery tombstone, and a subsequent ssh-tier admit succeeds (a never-halted
-  kernel is not left ssh-blocked — the AC1 edge).
-- **Partial-close remediation**: a fake `close` that releases nothing and raises
-  (leaving a live `HALTED` record) → `teardown` records `close_error`, invokes
-  `force_reap`, re-reads, and `resume_ok=True`; assert `force_reap` was called and
-  the record is gone. A `force_reap` that also fails → `resume_ok=False` with
+- **Resume-on-error** (`reason="attach_error"`): a `provider.start_session` that
+  raises after `_halt` drives `teardown` → `close(force=False)`; assert backend
+  reaped, guard/lease released, the record left non-`HALTED` (`resume_ok=True`),
+  **and** (separate assertion) a current `closed_while_halted` recovery tombstone
+  exists.
+- **`open()` failure does not invoke the guard teardown**: a `transaction.open()`
+  that raises (`GuardConflict`/`AdmissionError`) returns the existing early
+  failure response with **no** `guard.teardown` call (open self-rolled-back; no
+  `sid`) — asserts Finding 2's scoping.
+- **Partial-close remediation**: a fake `close` that raises after releasing
+  nothing (leaving a live `HALTED` record) → `teardown` records `close_error`,
+  invokes `force_reap`, re-reads, `resume_ok=True`; assert `force_reap` was called
+  and the record is gone. A `force_reap` that also fails → `resume_ok=False` with
   `resume_detail` set (the loud `INFRASTRUCTURE_FAILURE` signal).
+- **`force_release` skips `transport.close`**: assert `transaction.force_release`
+  does **not** call the provider/transport `close` (so it cannot re-wedge the way
+  the failed `close` did) and still drops the record + revokes the guard + releases
+  the lease.
 - **Clean end resume**: `teardown(reason="ended")` deletes the record
   (`resume_ok=True`); a subsequent ssh-tier admit succeeds.
 - **Idempotency**: a double `teardown` (a re-attempted `debug.end_session`) is a
