@@ -110,14 +110,20 @@ the raw-secret-field guard or `_safe_label_fields`.
 ### CI guard — `just check-ipmi`
 
 A `justfile` target mirroring `check-docs`, plus a CI job step that runs it. The guard
-greps `src/` for forbidden IPMI invocation literals and fails if any are present outside
-`safety/ipmi.py`. The patterns are boundary-anchored so the compliant invocation is not
-flagged:
+greps `src/` with **default ripgrep** (Rust regex, no PCRE2 — matching the `check-docs`
+precedent) for forbidden IPMI invocation literals and fails if any are present outside
+`safety/ipmi.py`. The patterns use `\b` word boundaries (not negative lookahead, which
+the default Rust-regex engine rejects) so the compliant invocation is not flagged:
 
-- bare-`lan` interface selection: `-I lan` **not** immediately followed by `plus`
-  (regex `-I lan(?!plus)`). `-I lanplus` must pass.
-- cipher-suite-0 selection: `-C` then optional spaces then `0` **not** followed by
-  another digit (regex `-C\s*0(?![0-9])`). `-C 3` and `-C 30` must pass.
+- bare-`lan` interface selection: `-I lan\b`. In `-I lanplus`, `lan` is immediately
+  followed by the word char `p`, so there is no boundary and the pattern does **not**
+  match; `-I lanplus` passes. `-I lan ` (or `-I lan` at line end) matches and fails.
+- cipher-suite-0 selection: `-C *0\b`. The `0` must sit immediately after `-C` and any
+  spaces, so `-C 30` (a `3` follows `-C `) does **not** match and passes; `-C 0`,
+  `-C0`, and `-C  0` match and fail. `-C 3` does not match.
+
+The two patterns are combined into one alternation (`-I lan\b|-C *0\b`) so a single
+`rg` invocation drives the guard, mirroring `check-docs`'s single-pattern form.
 
 **Limitation (deliberate).** This guard catches only *hardcoded* offending literals. It
 cannot see a cipher suite assembled at runtime from a variable
