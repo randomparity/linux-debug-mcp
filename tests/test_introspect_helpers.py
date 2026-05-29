@@ -191,3 +191,15 @@ def test_helper_request_forbids_extra() -> None:
 
     with pytest.raises(ValidationError):
         DebugIntrospectHelperRequest(run_id="r", target_ref="t", name="sysinfo", bogus=1)
+
+
+def test_helper_op_in_allowlist() -> None:
+    from linux_debug_mcp.config import ALLOWED_DEBUG_OPERATIONS
+
+    assert "debug.introspect.helper" in ALLOWED_DEBUG_OPERATIONS
+
+
+def test_capability_advertises_helper_op() -> None:
+    from linux_debug_mcp.providers.local_drgn_introspect import local_drgn_introspect_capability
+
+    assert "debug.introspect.helper" in local_drgn_introspect_capability().operations

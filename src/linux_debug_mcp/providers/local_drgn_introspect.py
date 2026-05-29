@@ -369,7 +369,7 @@ def local_drgn_introspect_capability() -> ProviderCapability:
         architectures=["x86_64"],
         target_kinds=[TargetKind.VIRTUAL],
         transports=["ssh"],
-        operations=["debug.introspect.run", "debug.introspect.check_prerequisites"],
+        operations=["debug.introspect.run", "debug.introspect.check_prerequisites", "debug.introspect.helper"],
         required_host_tools=["ssh"],
         destructive_permissions=[],
         access_methods=["ssh"],
