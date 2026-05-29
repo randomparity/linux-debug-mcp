@@ -54,12 +54,19 @@ interim live cross-check, which the architecture design explicitly sanctions
 
 ### 1.1 In scope
 
-- A shared verification primitive in `symbols/verify.py` that ties together
-  "read the vmlinux ELF build-id and compare it to an expected build-id", raising
-  the existing typed errors (`BuildIdReadError`, `ProvenanceMismatch`) that the
-  handler maps to `CONFIGURATION_ERROR` codes (`vmlinux_build_id_unreadable`,
+- A named verification entry point in `symbols/verify.py`,
+  `verify_vmlinux_provenance`, that ties together "read the vmlinux ELF build-id
+  and compare it to an expected build-id", raising the existing typed errors
+  (`BuildIdReadError`, `ProvenanceMismatch`) that the handler maps to
+  `CONFIGURATION_ERROR` codes (`vmlinux_build_id_unreadable`,
   `provenance_mismatch`). It composes the existing `read_elf_build_id` +
-  `verify_build_id` (ADR 0008) into the one read+compare both offline callers need.
+  `verify_build_id` (ADR 0008). This is not premature abstraction: the issue's
+  explicit task is to "Expose verification for the symbol-using tiers to consume
+  (§4.2)", so a named, independently unit-tested §4.2 entry point is a first-class
+  deliverable — it is the seam the deferred RSP running-kernel read (§1.2) and any
+  future symbol tier reuse. It currently has **one** caller (the gdb handler,
+  §3.2); the #53/#14 tiers verify build-id through their own established paths
+  (§1.2) and are not re-pointed.
 - `debug.start_session` (#13) extracting the boot-recorded §4.2
   `KernelProvenance.build_id` and running the primitive against the on-disk
   vmlinux **before attaching gdb** (and after the idempotent return of an
@@ -94,8 +101,9 @@ those tiers (§1.2).
 
 ## 2. Failure contract
 
-All version-lock failures are `CONFIGURATION_ERROR` (the artifacts the caller
-supplied are inconsistent — not infrastructure). The gdb tier runs the check
+Version-lock failures are `CONFIGURATION_ERROR` (the artifacts the caller supplied
+are inconsistent) **except** a corrupt recorded record (`provenance_corrupt`),
+which is `INFRASTRUCTURE_FAILURE` — see the table. The gdb tier runs the check
 **pre-attach**, so every failure below returns before `transaction.open()` / the
 gdb halt; nothing is acquired and no `debug` step is recorded SUCCEEDED.
 
@@ -114,9 +122,11 @@ build_id that fails `BUILD_ID_RE` is `INFRASTRUCTURE_FAILURE` (`provenance_corru
 because boot validated it on the way in, so a corrupt record is an internal fault,
 not caller misconfiguration.
 
-The message on `provenance_mismatch` names both ids (opaque lower-case hex, safe
-to surface — `ProvenanceMismatch` docstring) and the actionable fix ("rebuild or
-re-boot so the booted kernel and the vmlinux on disk share a build-id").
+The `ProvenanceMismatch` exception itself carries only the two ids (opaque
+lower-case hex, safe to surface — `ProvenanceMismatch` docstring / `symbols/verify.py`).
+The **handler** composes the agent-facing `ToolResponse.message` from those ids
+plus the actionable remediation ("rebuild or re-boot so the booted kernel and the
+vmlinux on disk share a build-id"); the ids also go into `details`.
 
 ## 3. Design
 
