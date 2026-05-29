@@ -12,8 +12,8 @@ the chosen method. Provisioning MUST NOT hardcode a method.
 The mapping seam already landed under #10's transport work
 (`787d2ef feat: add reference break-plan policy seam (#10)`) because the Layer-4
 `transport.open` transaction needs an executable break plan to admit a stop-capable
-session (§4.1): `open()` MUST fail loud **before creating the session** if no
-method's predicate holds. This ADR retroactively records the design #71 owns —
+session (the design §4.8 *executable preflight*): `open()` MUST fail loud **before
+creating the session** if no method's predicate holds (contract §4.1). This ADR retroactively records the design #71 owns —
 the predicates, the preference ordering, the disproof taxonomy and its scope, and
 the deliberate non-consumption of `break_hints` — none of which any prior ADR
 defines. ADR 0003 only notes that `break_plan` is "computed by `BreakPolicy` in
@@ -34,6 +34,15 @@ record plus tests for a previously-uncovered fact-set.
 `console_count`, `dedicated_debug_line`, `ssh_reachable`, and a
 provider-suggested, **non-authoritative** `break_hints` list. `BreakMethod` /
 `LineRole` are the enums at `transport/base.py:78,72`.
+
+Two documents govern the policy and this ADR cites both: the interface **contract**
+§4.1 (the predicate table and reference mappings above, plus the fail-loud admission
+requirement) and the transport-abstraction **design**
+(`docs/superpowers/specs/2026-05-26-transport-abstraction-design.md`) §4.8
+"Break-plan executable preflight" (the *disproof-only* admission layer and the exact
+`no_break_plan`/`break_disproved` taxonomy). References below read "§4.1" for the
+contract and "design §4.8" for the preflight; they are distinct sections of distinct
+documents, not the same number.
 
 ## Decision
 
@@ -74,13 +83,13 @@ provider-suggested, **non-authoritative** `break_hints` list. `BreakMethod` /
 
 4. **The policy is pure: topology predicates plus a caller-injected `disproved`
    set; it never probes.** `plan()` is deterministic — its only dynamic input is
-   the `disproved: set[BreakMethod]` the §4.1 admission layer passes for that
+   the `disproved: set[BreakMethod]` the design §4.8 admission layer passes for that
    channel. It raises `BreakPlanError` with one of two codes
    (`seams/break_policy.py:19,54,63`): `no_break_plan` (no method's topology
    predicate holds for the channel) and `break_disproved` (every
    topology-admissible candidate was positively disproved). The two are distinct
-   because §4.1 distinguishes "never had a plan" from "had candidates, all proven
-   unexecutable" — different operator remediation.
+   because design §4.8 distinguishes "never had a plan" from "had candidates, all
+   proven unexecutable" — different operator remediation.
 
 5. **Disproof scope is method-aware, resolved at selection.**
    `select_stop_capable_channel` (`coordination/selection.py:63`) iterates
@@ -126,8 +135,9 @@ provider-suggested, **non-authoritative** `break_hints` list. `BreakMethod` /
   topology gap from a probe disproof.
 - Because the policy is pure and disproof is injected, `ReferenceBreakPolicy.plan`
   is exhaustively unit-testable per fact-set without a live target
-  (`tests/test_seams_break_policy.py`); the §4.1 probing that produces disproofs is
-  tested separately at the selection layer (`tests/test_coordination_selection.py`).
+  (`tests/test_seams_break_policy.py`); the design §4.8 probing that produces
+  disproofs is tested separately at the selection layer
+  (`tests/test_coordination_selection.py`).
 - `break_hints` remains carried-but-unread. If a future need arises to use it (e.g.
   as a tiebreaker among equally-preferred candidates), that is a new decision that
   must supersede this point 6, not a silent change — the contract still says hints
@@ -160,14 +170,14 @@ provider-suggested, **non-authoritative** `break_hints` list. `BreakMethod` /
 
 - **D. Fold disproof *discovery* into `plan()` — have the policy probe liveness
   itself.** Rejected: probing whether `gdbstub_native` / `sysrq_g` actually works is
-  arch- and transport-specific and is §4.1 admission's job. Keeping `plan()` pure
+  arch- and transport-specific and is design §4.8 admission's job. Keeping `plan()` pure
   (topology + an injected disproof set) makes it deterministic and unit-testable, and
   lets `select_stop_capable_channel` aggregate disproofs across channels and apply
   method-aware scope — logic that would be duplicated per call site if the policy
   probed inline.
 
 - **E. Collapse `no_break_plan` and `break_disproved` into a single error.**
-  Rejected: §4.1 separates "no topology predicate ever held" (a static
+  Rejected: design §4.8 separates "no topology predicate ever held" (a static
   mis-provisioning the operator fixes by adding a break-capable line) from "a
   candidate existed but every one was positively disproved at probe time" (a runtime
   condition). Selection must not downgrade a positive disproof on one channel to
