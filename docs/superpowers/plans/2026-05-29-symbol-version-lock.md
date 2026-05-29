@@ -312,11 +312,15 @@ In the `debug_start_session_handler` signature (currently ~line 4008–4021), ad
 
 - [ ] **Step 2: Insert the pre-attach call after the idempotent short-circuit**
 
-In the `with store.debug_lock(run_id):` block, the existing code computes
-`replace_existing_debug` (the line `replace_existing_debug = existing.status == StepStatus.SUCCEEDED`, ~line 4088), and the next line is `transport_enabled = transaction is not None and ...`. Insert between them:
+In the `with store.debug_lock(run_id):` block there is a line
+`transport_enabled = transaction is not None and admission is not None and session_registry is not None`
+(~line 4089). It sits at the `with`-body indent (12 spaces / 3 levels), **outside** the
+`if existing and not new_session:` block above it. Insert the new block immediately
+**before** that `transport_enabled = …` line, at the **same indent as
+`transport_enabled`** (do not match the more-indented `replace_existing_debug = …`
+line, which lives one level deeper inside the `if`):
 
 ```python
-                replace_existing_debug = existing.status == StepStatus.SUCCEEDED
             # #70 / ADR 0017: symbol version-lock BEFORE any acquisition or attach.
             # Runs on every fresh attach (incl. new_session / replace / recovery), after the
             # idempotent SUCCEEDED short-circuit above so re-reading a healthy session never
@@ -329,10 +333,12 @@ In the `with store.debug_lock(run_id):` block, the existing code computes
             )
             if version_lock_failure is not None:
                 return version_lock_failure
-            transport_enabled = transaction is not None and admission is not None and session_registry is not None
 ```
 
-(The `boot_result` and `vmlinux` locals are already in scope from the top of the handler. Match the surrounding indentation: the inserted block is at the same indent as `transport_enabled`, inside the `with store.debug_lock` body but outside the `if existing and not new_session:` block.)
+(The `boot_result` and `vmlinux` locals are already in scope from the top of the
+handler. The block must sit at the same indent as `transport_enabled` — inside the
+`with store.debug_lock` body but outside the `if existing and not new_session:`
+block — so it runs on the `new_session=True` path too.)
 
 - [ ] **Step 3: Wire the tool wrapper to pass through (no behavior change for callers)**
 
@@ -410,26 +416,16 @@ def kernel_provenance_details(build_id_hex: str = GDB_TEST_BUILD_ID, *, release:
 
 (Place the `import struct` at module top with the other imports and drop the local `import struct` inside the function — shown inline only for clarity.)
 
-- [ ] **Step 2: Smoke-test the ELF helper round-trips through the real reader**
-
-Run:
-```bash
-uv run python -c "
-import tempfile, pathlib
-from tests.conftest import write_vmlinux_with_build_id, GDB_TEST_BUILD_ID
-from linux_debug_mcp.symbols.build_id import read_elf_build_id
-d=pathlib.Path(tempfile.mkdtemp())/'vmlinux'
-write_vmlinux_with_build_id(d)
-assert read_elf_build_id(d)==GDB_TEST_BUILD_ID, read_elf_build_id(d)
-print('ok')
-"
-```
-Expected: `ok`. (If `tests` is not importable this way, run the equivalent inside `uv run python -m pytest` via a temporary test; the Task 6 happy-path test also proves it.)
-
-- [ ] **Step 3: Lint**
+- [ ] **Step 2: Lint**
 
 Run: `uv run ruff check tests/conftest.py`
 Expected: no errors.
+
+(No standalone smoke step: the ELF helper is exercised end-to-end by Task 6's
+`test_matching_build_id_attaches`, which runs the real `read_elf_build_id` against a
+file written by `write_vmlinux_with_build_id`. A `python -c` import of `tests.conftest`
+would not resolve — `tests/` has no `__init__.py` and is on `sys.path` directly, so
+sibling modules import as top-level `conftest`, not `tests.conftest`.)
 
 - [ ] **Step 4: Commit**
 
@@ -437,6 +433,11 @@ Expected: no errors.
 git add tests/conftest.py
 git commit -m "test: add real-ELF vmlinux + kernel_provenance seeding helpers"
 ```
+
+> **Sibling-import convention (applies to Task 6):** `tests/` is on `sys.path`
+> directly and has no `__init__.py`, so import sibling test modules as top-level
+> names — `from conftest import …`, `from test_debug_handlers import …` — **never**
+> `from tests.conftest import …` / `from tests.test_debug_handlers import …`.
 
 ---
 
@@ -458,7 +459,7 @@ from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import DebugProfile
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
 from linux_debug_mcp.symbols.build_id import BuildIdReadError
-from tests.test_debug_handlers import FakeDebugProvider  # reuse the existing fake
+from test_debug_handlers import FakeDebugProvider  # reuse the existing fake (top-level sibling import)
 
 from linux_debug_mcp.server import debug_start_session_handler
 
@@ -666,7 +667,31 @@ In `_create_debug_ready_run` (~line 91–135): same two edits (vmlinux ~line 109
 
 In `_create_debug_ready_run` (~line 320–360): same two edits (vmlinux ~line 337; boot `details` ~line 355). Import helpers.
 
-- [ ] **Step 6: Run each migrated file**
+- [ ] **Step 6: Update exact `boot_metadata` equality assertions (REQUIRED, not conditional)**
+
+`_debug_boot_metadata` returns `{**boot_result.details, "kernel_image_path": …}`
+(`server.py:791-795`) — it spreads **all** boot-step `details`, so the new
+`kernel_provenance` key now appears in the `boot_metadata` dict passed to the
+provider. Any test asserting `boot_metadata == {…}` by exact equality will break.
+
+First find them:
+```bash
+rg -n "boot_metadata\s*==" tests/
+```
+Known site: `tests/test_debug_handlers.py:180-184`
+(`assert provider.call_kwargs[0]["boot_metadata"] == {...}`). Add the new key to
+each matched literal:
+```python
+    assert provider.call_kwargs[0]["boot_metadata"] == {
+        "debug_boot": True,
+        "gdbstub_endpoint": {"host": "127.0.0.1", "port": 1234},
+        "kernel_image_path": str(artifact_root / run_id / "build" / "bzImage"),
+        "kernel_provenance": kernel_provenance_details(),
+    }
+```
+Apply the analogous edit to every other `boot_metadata ==` literal the `rg` finds.
+
+- [ ] **Step 7: Run each migrated file**
 
 Run:
 ```bash
@@ -674,9 +699,9 @@ uv run python -m pytest tests/test_debug_handlers.py tests/test_session_guard_wi
   tests/test_server_debug_session_migration.py tests/test_server_debug_reads_while_halted.py \
   tests/test_phase_b_integration_gaps.py -q
 ```
-Expected: PASS. If a test asserts on exact boot-step `details` equality (e.g. `test_debug_start_session_records_manifest_debug_step` checks `boot_metadata`), confirm those assertions read `boot_metadata` (which is derived, not the raw boot `details`) and are unaffected; if any asserts equality on the raw boot `details`, update it to include the new `kernel_provenance` key.
+Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add tests/test_debug_handlers.py tests/test_session_guard_wiring.py \
