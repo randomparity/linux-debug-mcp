@@ -53,20 +53,23 @@ scripts fed through the same execution path, not a parallel one.
 ```
 agent ──MCP──▶ debug.introspect.helper handler
                      │
-                     │  1. resolve name → HelperSpec (registry)
-                     │  2. validate args → spec.args_model
-                     │  3. render helper script + args_json
+                     │  1. _ensure_debug_operation_enabled("debug.introspect.helper")
+                     │  2. resolve name → HelperSpec (registry)
+                     │  3. validate args → spec.args_model
+                     │  4. select helper cap profile (§3.3)
+                     │  5. render helper script + args_json
                      ▼
-            ┌────────────────────────────────────────────┐
-            │  shared core executor (extracted from #51)  │
-            │  admission → render wrapper(${ARGS_B64})    │
-            │  → SSH exec → caps → provenance verify      │
-            │  → redaction → manifest record              │
-            └────────────────────────────────────────────┘
+            ┌─────────────────────────────────────────────────┐
+            │  shared core executor (extracted from #51)       │
+            │  no op-gating — caller gates                     │
+            │  admission → render wrapper(${ARGS_B64},${CAPS})  │
+            │  → SSH exec → caps → provenance verify           │
+            │  → redaction → manifest record                   │
+            └─────────────────────────────────────────────────┘
                      │  returns redacted wrapper result
                      ▼
-            4. validate single emit → spec.output_model
-            5. ToolResponse.success(data={result: model_dump})
+            6. validate single emit → spec.output_model
+            7. ToolResponse.success(data={result: model_dump})
 ```
 
 `debug.introspect.run` becomes a second thin consumer of the same core executor,
@@ -104,10 +107,12 @@ class HelperSpec:
 `built_in_helper_specs()`. The handler resolves `name` against it; an unknown
 name returns `CONFIGURATION_ERROR` whose message lists the valid names.
 
-### 3.3 Single-emit convention
+### 3.3 Single-emit convention and the helper cap profile
 
 Every helper script calls `emit(result)` **exactly once** with a dict matching
-its `output_model`. The handler:
+its `output_model`. The helper handler supplies this logic to the core executor
+as its **post-validator** (§5), so the recorded manifest step status matches the
+agent-visible outcome. The validator:
 
 1. Reads the redacted wrapper result's `emits` list.
 2. Requires exactly one element. Zero or more than one → `helper_schema_drift`.
@@ -120,12 +125,84 @@ fault, not the agent's input error). The raw and redacted payloads remain on
 disk under the call's artifact dir for forensics; the response carries the
 helper name, version, and the validation error summary (redacted).
 
+#### Cap interaction (load-bearing)
+
+The runner wrapper (`local_drgn_introspect.py` `_li_caps`) enforces
+`per_emit_bytes = 32 KiB`, `emits = 100`, and `total_json = 1 MiB`. A single
+emit of one large object — which is exactly what this convention produces —
+**exceeds `per_emit_bytes` for the list-returning helpers** (`tasks` at
+`limit=200` with kernel stacks is 100–400 KiB; `dmesg` at 1000 entries is
+~80 KiB). When that happens the wrapper silently replaces the emit with an
+`{"__emit_oversized__": true, …}` marker, which then fails `output_model`
+validation → `helper_schema_drift` on **every** such call. Splitting into one
+emit per row does not help: `tasks(200)` / `dmesg(1000)` blow the 100-emit cap
+instead.
+
+The helper path therefore runs under a **helper cap profile**, not the runner's
+default caps. Because helper scripts are server-authored and trusted (unlike the
+arbitrary user script `debug.introspect.run` accepts), the core executor is
+parameterised with a per-call cap set, and the helper handler raises the bounds
+to fit the curated contracts:
+
+`_li_caps` has six keys (`local_drgn_introspect.py`): `emits`, `per_emit_bytes`,
+`total_json`, `user_stdout`, `traceback`, `error_message`. The wrapper indexes
+all of them — including `error_message`/`traceback` on its earliest exception
+paths, before any helper code runs — so the cap set passed to the wrapper must
+**always carry all six**. The cap profile is therefore expressed as overrides
+**merged onto the runner defaults**: the helper handler overrides only the four
+rows below, and `traceback`/`error_message` inherit the runner values unchanged.
+`render_wrapper` rejects a `caps` object that, after the merge, is missing any of
+the six keys or contains a non-positive int (`WrapperRenderError`), so a
+malformed profile fails at render time rather than as a `KeyError`/`wrapper_crash`
+on the target.
+
+| Cap | Runner default | Helper profile |
+|---|---|---|
+| `per_emit_bytes` | 32 KiB | 4 MiB (one structured result document) |
+| `emits` | 100 | 4 (single-emit convention + headroom to *detect* a buggy >1-emit helper rather than silently keep the first) |
+| `total_json` | 1 MiB | 8 MiB |
+| `user_stdout` | 256 KiB | 256 KiB (unchanged; helpers must not print) |
+| `traceback` | 16 KiB | 16 KiB (inherited) |
+| `error_message` | 4 KiB | 4 KiB (inherited) |
+
+These bounds are still finite — a helper that somehow exceeds the helper profile
+hits the same wrapper truncation path: an over-`per_emit_bytes` result becomes
+an `__emit_oversized__` marker, and an over-`total_json` result has its single
+emit popped to empty. Both surface cleanly as `helper_schema_drift` (the
+validator sees an oversized marker or zero emits), never a corrupt result or an
+unbounded transfer.
+
+The two **unbounded-growth** helpers — `tasks` (every runnable/blocked task ×
+its stack) and `dmesg` (the whole printk ring) — carry their own `limit` /
+`max_entries` arg and a `truncated: bool` field, and set it `true` when they cap
+their own row list, so the agent sees deterministic, helper-level truncation
+rather than wrapper-level mangling. The other three (`modules`, `slab`, `irq`)
+are **naturally bounded** — module count, named slab caches, and IRQ lines are
+all in the hundreds even on large hosts — so they take no `limit` and have no
+`truncated` field; their backstop is the wrapper cap (oversized →
+`helper_schema_drift`), which §8.1's cap test confirms is not reachable at
+realistic sizes. §8.1 also tests that the §7 defaults (`tasks` 200 tasks × deep
+stacks, `dmesg` 1000 entries) serialise within the helper profile.
+
+`debug.introspect.run` keeps the runner default caps unchanged — only the
+helper handler opts into the larger profile.
+
 ### 3.4 Versioning
 
 `version` is an integer per helper, surfaced in the response `data` and the
 manifest step `details`. It is bumped whenever the script body or the output
-model changes shape. Golden tests are keyed on `(name, version)` so a bump is a
-deliberate, reviewed event rather than silent drift.
+model changes shape.
+
+To give the version mechanical teeth, each helper ships a checked-in JSON-Schema
+snapshot at `introspect_helpers/schemas/<name>.v<version>.json` generated from
+`output_model.model_json_schema()`. A unit test (§8.1) regenerates the schema
+from the live model and diffs it against the checked-in snapshot for the current
+`version`; any shape change that is not accompanied by a new snapshot (and thus
+a version bump) fails the test. This is what makes a bump "a deliberate,
+reviewed event" — without the snapshot diff, a loosened model would drift
+silently past the schema-validation tests. The golden *integration* tests
+(§8.2) assert against the live model, not the snapshot; the snapshot exists
+solely to force the version discipline.
 
 ## 4. Wrapper arg seam (modifies #51)
 
@@ -145,7 +222,14 @@ cannot break out of its literal regardless of contents.
 Changes that ride along (all in lockstep, covered by #51's tests):
 
 - `render_wrapper(...)` and `render_wrapper_skeleton(...)` gain an `args_json`
-  parameter.
+  parameter and a `caps` parameter. The wrapper's `_li_caps` literal becomes a
+  `${CAPS_JSON}` substitution (a server-produced, host-validated JSON object of
+  positive ints) so the cap profile (§3.3) is per-call rather than hard-coded.
+  `render_wrapper` merges the caller's `caps` overrides onto the runner-default
+  six-key set and validates the merged object is complete (all six keys) and
+  all-positive before substitution, raising `WrapperRenderError` otherwise.
+  `debug.introspect.run` passes an empty override (the runner defaults verbatim),
+  preserving its current behaviour byte-for-byte.
 - The skeleton renderer encodes the same `args_json` (args are
   server-validated, non-secret) so the agent-visible skeleton is faithful.
 - `user_script_sha256` is unchanged (it hashes the user script bytes only); the
@@ -156,24 +240,50 @@ Changes that ride along (all in lockstep, covered by #51's tests):
 ## 5. Shared core executor (refactor of #51)
 
 The common pipeline currently inlined in `debug_introspect_run_handler` is
-extracted into a core function (working name `_execute_introspect_call`) that:
+extracted into a core function (working name `_execute_introspect_call`) that
+takes the rendered `script`, `args_json`, and a **cap profile** (§3.3) and:
 
 1. Validates run/profile/manifest invariants and resolves the target/rootfs.
 2. Acquires admission (ssh-tier; HALTED fast-reject per interface-contracts
    §5.6 rule 2).
-3. Mints `call_id`, renders the wrapper (`script` + `args_json`), writes
-   `request.json`, `wrapper.skeleton.py`, and the sensitive `wrapper.py`.
+3. Mints `call_id`, renders the wrapper (`script` + `args_json` + the caller's
+   cap profile substituted into `_li_caps`), writes `request.json`,
+   `wrapper.skeleton.py`, and the sensitive `wrapper.py`.
 4. Runs the SSH invocation with the timeout and output caps, bridging
    cancellation to the admission fence.
 5. Parses stdout, performs host-authoritative provenance verify, and runs the
    payload through `Redactor()`.
-6. Records the terminal `introspect:<call_id>` `StepResult`.
+6. Calls the caller-supplied **post-validator** (a callback over the redacted
+   payload) and records the terminal `introspect:<call_id>` `StepResult` *once*,
+   with a status that reflects the validator's verdict.
+
+The post-validator keeps the recorded manifest step in agreement with the
+agent-visible outcome, and preserves record-once semantics (no SUCCEEDED step
+later contradicted by a failure response, no double-record race):
+
+- `debug.introspect.run` passes an identity validator — a clean wrapper "ok"
+  outcome records **SUCCEEDED**, exactly as today (a user script error is still
+  a SUCCEEDED step with `data.status="script_error"`).
+- `debug.introspect.helper` passes a validator that parses the single emit into
+  `output_model`. On success the step is **SUCCEEDED**; on a drift/validation
+  failure the step is recorded **FAILED** with code `helper_schema_drift` and the
+  handler returns the matching failure response. The wrapper-level failure shapes
+  (provenance, timeout, drgn open) still record FAILED inside the core before the
+  validator is ever reached.
 
 It returns a result object exposing the **redacted** payload (`emits`,
 `user_stdout`, `outcome`, `truncated`, `build_id`, `prelude_ms`), the
 `call_id`, the public artifact list, and any non-fatal `diagnostic`. The two
 failure shapes from #51 (`_fail` / `_record_introspect_failure`) are preserved
 inside the core so both handlers inherit identical error mapping.
+
+The core executor performs **no operation gating**: it serves two operations
+(`debug.introspect.run`, `debug.introspect.helper`) with different allowlist
+strings, so each thin handler calls `_ensure_debug_operation_enabled` with its
+own op string *before* invoking the core. The cap profile (`_li_caps` values)
+becomes a parameter of `render_wrapper` rather than a hard-coded constant;
+`debug.introspect.run` passes the runner defaults, the helper handler passes
+the helper profile (§3.3).
 
 - `debug.introspect.run` maps the redacted result to today's untyped `data`.
 - `debug.introspect.helper` validates the single emit into `output_model` and
@@ -224,11 +334,19 @@ is `CONFIGURATION_ERROR`.
     "helper": "sysinfo",
     "version": 1,
     "result": { /* spec.output_model.model_dump(mode="json") */ },
-    "truncated": { /* wrapper caps */ },
+    "truncated": { /* wrapper-cap flags: emits/total_json/user_stdout/… */ },
     "prelude_ms": 0
   }
 }
 ```
+
+Two distinct truncation signals can appear and mean different things:
+`data.truncated` is **transport/wrapper** truncation (the result didn't fit the
+helper cap profile — a tooling problem, expected to be rare and worth surfacing
+as a warning), while `data.result.truncated` (present only on the
+unbounded-growth helpers, §3.3) means the **helper hit its own `limit` /
+`max_entries`** — expected, and the agent's remedy is to raise the limit or
+narrow the query. An agent checking "did I get everything?" reads both.
 
 ### 6.3 Response (failure)
 
@@ -285,8 +403,17 @@ more.
   `dmesg` emit; assert the validated model and the response contain the
   redaction marker, not the secret.
 - Core-executor seam: `debug.introspect.run` still returns its untyped contract
-  after the refactor (existing #51 tests must stay green unchanged except for
-  the new `args_json` parameter).
+  after the refactor, and renders with the runner default caps (existing #51
+  tests must stay green unchanged except for the new `args_json` / `caps`
+  parameters, which default to the runner profile).
+- Cap profile fits the contract: synthesize the largest in-contract result for
+  each list helper (`tasks` with `limit=200` × deep stacks, `dmesg` with
+  `max_entries=1000`), serialize it, and assert it is under the helper profile's
+  `per_emit_bytes` / `total_json` (§3.3) — i.e. the §7 defaults cannot
+  deterministically trip the oversized-marker path.
+- Schema snapshot discipline: for each helper, `output_model.model_json_schema()`
+  equals the checked-in `schemas/<name>.v<version>.json`; a deliberate model
+  edit without a new snapshot fails this test (§3.4).
 
 ### 8.2 Golden integration (gated on `virsh` + VM)
 
@@ -308,9 +435,18 @@ A dedicated test drives the `tasks` D-state acceptance criterion: spawn a
 synthetic kernel-side blocker on the VM, then assert `tasks(states=["D"])`
 returns it with a non-empty `kernel_stack`.
 
-No helper emits a stop-the-world pause (drgn-over-SSH reads live memory without
-halting the target); the `sysinfo` acceptance test asserts the call completes
-without the target entering a stopped state.
+**On "no stop-the-world pause" (acceptance criterion 1).** Non-stopping is a
+property of the transport, not something a single helper call can be asked to
+*prove* — drgn-over-SSH reads `/proc/kcore`-style live memory and never issues
+a stop request, unlike the gdbstub tier. The design treats "no pause" as an
+inherited invariant of the ssh/drgn tier (interface-contracts §3.3), not a
+per-helper assertion. To make it falsifiable rather than vacuous, the `sysinfo`
+acceptance test runs a continuous heartbeat on the guest (a loop appending a
+monotonic timestamp to a file at a fixed interval) spanning the helper call and
+asserts the heartbeat's inter-sample gap never exceeds a threshold during the
+call window — a genuine stop-the-world pause would show up as a gap. A helper
+that completes with an unbroken heartbeat satisfies the criterion; a gap fails
+it.
 
 ## 9. ADR
 
@@ -323,10 +459,20 @@ their rejected alternatives:
      — awkward double-handling, manifest step indistinguishable from a plain
      run.
 2. **Single-`emit` typed-result convention**, validated host-side into a
-   per-helper Pydantic model, fail-loud on drift.
+   per-helper Pydantic model, fail-loud on drift, under a **raised helper cap
+   profile** (§3.3) carried as a per-call parameter of the core executor.
    - Rejected: advisory validation (lets malformed data reach the agent, weakens
-     the acceptance criterion); JSON-Schema files + `jsonschema` (new
-     dependency, diverges from the all-Pydantic domain model).
+     the acceptance criterion); JSON-Schema files + `jsonschema` for the *return*
+     contract (new dependency, diverges from the all-Pydantic domain model — note
+     `model_json_schema()` snapshots are still used for §3.4 version discipline,
+     which is generation, not a runtime validator).
+   - Rejected (caps): keeping the runner's 32 KiB per-emit / 100-emit caps for
+     helpers (the list helpers' own defaults would always trip the oversized
+     marker → permanent `helper_schema_drift`); streaming one emit per row (still
+     overflows the 100-emit cap for `tasks(200)`/`dmesg(1000)`). The raised
+     profile is safe because helper scripts are server-authored and trusted,
+     unlike `debug.introspect.run`'s arbitrary user script, which keeps the
+     tighter defaults.
 3. **`${ARGS_B64}` wrapper seam** + **single unit-gated operation**.
    - Rejected (args): text-level prepend of `args = …` into the script body
      (less clean, quoting hazards); deferring args entirely (tool signature
@@ -337,8 +483,12 @@ their rejected alternatives:
 
 ## 10. Coordination
 
-- `providers/local_drgn_introspect.py`: `WRAPPER_TEMPLATE`, `render_wrapper`,
-  `render_wrapper_skeleton`, capability `operations`.
+- `providers/local_drgn_introspect.py`: `WRAPPER_TEMPLATE` (add `${ARGS_B64}`
+  and `${CAPS_JSON}`), `render_wrapper` / `render_wrapper_skeleton` (add
+  `args_json`, `caps`), the runner-default cap profile constant, capability
+  `operations`.
+- `introspect_helpers/`: the registry, six helper modules, and the
+  `schemas/<name>.v<version>.json` snapshots (§3.4).
 - `server.py`: extract `_execute_introspect_call`; add
   `debug_introspect_helper_handler` and its `@app.tool` registration; reuse
   `_count_introspect_calls` / `MAX_INTROSPECT_CALLS_PER_RUN`,
@@ -353,7 +503,8 @@ their rejected alternatives:
 ## 11. Acceptance criteria (from #54)
 
 - [ ] `debug.introspect.helper(name="sysinfo")` returns its typed JSON contract
-      from a live VM with no observable stop-the-world pause on the target.
+      from a live VM with no observable stop-the-world pause — verified by the
+      guest-heartbeat gap test (§8.2), not assumed.
 - [ ] `tasks` returns D-state / blocked processes from a synthetic kernel-side
       test.
 - [ ] `dmesg` redacts secrets per `Redactor`.
