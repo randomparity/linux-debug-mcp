@@ -18,7 +18,7 @@ from linux_debug_mcp.domain import (
     StepStatus,
 )
 from linux_debug_mcp.providers.local_ssh_tests import SshCommandResult
-from linux_debug_mcp.server import PROBE_STDOUT_CAP, debug_introspect_check_prerequisites_handler
+from linux_debug_mcp.server import PROBE_STDOUT_CAP, create_app, debug_introspect_check_prerequisites_handler
 
 VALID_BUILD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
@@ -305,3 +305,9 @@ def test_ssh_connect_failure_exit_255(tmp_path: Path) -> None:
     assert resp.error.details["code"] == "ssh_connect_failure"
     assert "Connection refused" in resp.error.details["stderr"]
     assert secret not in json.dumps(resp.model_dump(mode="json"))
+
+
+def test_tool_is_registered() -> None:
+    # Project idiom for enumerating registered tools (tests/test_server.py:40).
+    names = set(create_app()._tool_manager._tools)
+    assert "debug.introspect.check_prerequisites" in names

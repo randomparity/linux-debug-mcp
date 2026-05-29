@@ -5397,6 +5397,29 @@ def create_app(
             session_registry=durable_registry,
         ).model_dump(mode="json")
 
+    @app.tool(name="debug.introspect.check_prerequisites")
+    def debug_introspect_check_prerequisites(
+        run_id: str,
+        target_ref: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        timeout_seconds: int = 20,
+        debug_profile: str | None = None,
+        target_profile: str | None = None,
+        rootfs_profile: str | None = None,
+    ) -> dict[str, Any]:
+        request = DebugIntrospectCheckPrerequisitesRequest(
+            run_id=run_id,
+            target_ref=target_ref,
+            timeout_seconds=timeout_seconds,
+            debug_profile=debug_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+        )
+        return debug_introspect_check_prerequisites_handler(
+            request,
+            artifact_root=Path(artifact_root),
+        ).model_dump(mode="json")
+
     @app.tool(name="artifacts.collect")
     def artifacts_collect(
         run_id: str,
