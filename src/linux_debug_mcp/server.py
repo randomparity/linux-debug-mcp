@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -2389,7 +2389,29 @@ def _probe_success(
     )
 
 
-def debug_introspect_run_handler(
+IntrospectPostValidator = Callable[[dict[str, Any]], "PostValidatorVerdict | None"]
+
+
+@dataclass
+class PostValidatorVerdict:
+    """Lets a caller turn a wrapper-`ok` payload into a typed failure while
+    keeping the manifest record and the response in agreement.
+    """
+
+    ok: bool
+    failure_code: str | None = None
+    failure_message: str | None = None
+    failure_category: ErrorCategory | None = None
+    extra_step_details: dict[str, Any] = field(default_factory=dict)
+    extra_response_data: dict[str, Any] = field(default_factory=dict)
+
+
+def _introspect_args_json(request: object) -> str:
+    """Helper requests expose `args`; run requests do not (yet)."""
+    return json.dumps(getattr(request, "args", {}) or {})
+
+
+def _execute_introspect_call(
     request: DebugIntrospectRunRequest,
     *,
     artifact_root: Path,
@@ -2400,6 +2422,9 @@ def debug_introspect_run_handler(
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
     clock: Callable[[], datetime] | None = None,
+    operation_name: str = "debug.introspect.run",
+    caps: dict[str, int] | None = None,
+    post_validator: IntrospectPostValidator | None = None,
 ) -> ToolResponse:
     """Spec §5.2. Execute a user-supplied drgn Python script over SSH against
     a live target VM and return structured JSON.
@@ -2491,7 +2516,7 @@ def debug_introspect_run_handler(
 
     # Spec §5.2 step 2: operation gating.
     try:
-        _ensure_debug_operation_enabled(resolved_debug, "debug.introspect.run")
+        _ensure_debug_operation_enabled(resolved_debug, operation_name)
     except ProviderDebugError as exc:
         return ToolResponse.failure(
             category=exc.category,
@@ -2726,11 +2751,15 @@ def debug_introspect_run_handler(
                 user_script=request.script,
                 expected_build_id=build_id,
                 call_id=call_id,
+                args_json=_introspect_args_json(request),
+                caps=caps,
             )
             skeleton = render_wrapper_skeleton(
                 expected_build_id=build_id,
                 call_id=call_id,
                 user_script_sha256_hex=user_script_sha256(request.script),
+                args_json=_introspect_args_json(request),
+                caps=caps,
             )
         except WrapperRenderError as exc:
             # R6-F3: render failure before SSH ran. Release the admission
@@ -3159,26 +3188,62 @@ def debug_introspect_run_handler(
                     )
                 )
 
+        verdict = post_validator(redacted_payload) if post_validator is not None else None
+        step_status = StepStatus.SUCCEEDED
+        step_failure_code = None
+        if verdict is not None and not verdict.ok:
+            step_status = StepStatus.FAILED
+            step_failure_code = verdict.failure_code
+
+        step_details: dict[str, Any] = {
+            "call_id": call_id,
+            "build_id": redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None,
+            "timeout_seconds": request.timeout_seconds,
+            "wrapper_exit_code": ssh_result.exit_status,
+            "duration_ms": duration_ms,
+            "prelude_ms": prelude_ms,
+            "truncated": truncated,
+            "ssh_user": resolved_rootfs.ssh_user,
+            "outcome_status": outcome_status,
+        }
+        if verdict is not None:
+            step_details.update(verdict.extra_step_details)
+        if step_status is StepStatus.FAILED:
+            step_details["code"] = step_failure_code
+
         step = StepResult(
             step_name=f"introspect:{call_id}",
-            status=StepStatus.SUCCEEDED,
+            status=step_status,
             summary=f"introspect call {call_id[:8]} ok",
             artifacts=artifacts,
-            details={
-                "call_id": call_id,
-                "build_id": redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None,
-                "timeout_seconds": request.timeout_seconds,
-                "wrapper_exit_code": ssh_result.exit_status,
-                "duration_ms": duration_ms,
-                "prelude_ms": prelude_ms,
-                "truncated": truncated,
-                "ssh_user": resolved_rootfs.ssh_user,
-                "outcome_status": outcome_status,
-            },
+            details=step_details,
         )
         _record_terminal_introspect_result(store, run_id, step)
 
         public_artifacts = [a for a in artifacts if not a.sensitive]
+
+        if verdict is not None and not verdict.ok:
+            return ToolResponse.failure(
+                category=verdict.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
+                run_id=run_id,
+                message=verdict.failure_message or "post-validator rejected the introspect result",
+                details={"code": verdict.failure_code, "call_id": call_id},
+                suggested_next_actions=["artifacts.get_manifest"],
+            )
+        if verdict is not None and verdict.ok:
+            return ToolResponse.success(
+                summary=f"introspect call {call_id[:8]} ok",
+                run_id=run_id,
+                status=StepStatus.SUCCEEDED,
+                artifacts=public_artifacts,
+                suggested_next_actions=["artifacts.get_manifest", "debug.introspect.run"],
+                data={
+                    **verdict.extra_response_data,
+                    "call_id": call_id,
+                    "truncated": truncated,
+                    "prelude_ms": prelude_ms,
+                },
+            )
         return ToolResponse.success(
             summary=f"introspect call {call_id[:8]} ok",
             run_id=run_id,
@@ -3220,6 +3285,35 @@ def debug_introspect_run_handler(
                 # but the operator still needs admission-state diagnostics.
                 logger.exception("admission rollback failed while unwinding introspect handler for run_id=%s", run_id)
         raise
+
+
+def debug_introspect_run_handler(
+    request: DebugIntrospectRunRequest,
+    *,
+    artifact_root: Path,
+    target_profiles: dict[str, TargetProfile] | None = None,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    ssh_runner: SshRunner | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> ToolResponse:
+    """Thin wrapper over the shared core. `run` opts into no cap override and no post-validator."""
+    return _execute_introspect_call(
+        request,
+        artifact_root=artifact_root,
+        target_profiles=target_profiles,
+        rootfs_profiles=rootfs_profiles,
+        debug_profiles=debug_profiles,
+        ssh_runner=ssh_runner,
+        admission=admission,
+        session_registry=session_registry,
+        clock=clock,
+        operation_name="debug.introspect.run",
+        caps=None,
+        post_validator=None,
+    )
 
 
 def _require_snapshot(admission: AdmissionService, target_key: TargetKey) -> TargetSnapshot:

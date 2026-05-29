@@ -1310,3 +1310,37 @@ def test_root_ssh_user_omits_sudo_from_remote_argv(tmp_path: Path) -> None:
     remote_cmd = wrapper_call["argv"][-1]
     assert "sudo" not in remote_cmd.split()
     assert "python3" in remote_cmd
+
+
+# ---------------------------------------------------------------------------
+# Characterization test: render_wrapper receives caps/args_json from run handler
+# ---------------------------------------------------------------------------
+
+
+def test_run_uses_runner_default_caps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import linux_debug_mcp.server as server
+
+    captured: dict = {}
+    orig = server.render_wrapper
+
+    def spy(**kwargs):
+        captured.update(kwargs)
+        return orig(**kwargs)
+
+    monkeypatch.setattr(server, "render_wrapper", spy)
+
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    response = debug_introspect_run_handler(
+        _make_request(run_id),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=FakeSshRunner(results=[_happy_ssh_result()]),
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert response.ok is True, response.error
+    assert captured["caps"] is None  # run opts into no override → runner defaults
+    assert captured["args_json"] == "{}"  # run passes empty args
