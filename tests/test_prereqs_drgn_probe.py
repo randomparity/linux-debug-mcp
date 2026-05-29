@@ -1,9 +1,13 @@
 """Unit tests for the host-side drgn-probe core (spec §4-§5)."""
 
+import json
+import subprocess
+import sys
 from typing import Any
 
 from linux_debug_mcp.domain import PrerequisiteCheck, PrerequisiteStatus
 from linux_debug_mcp.prereqs.drgn_probe import (
+    PROBE_SCRIPT,
     UNKNOWN,
     UNUSABLE,
     USABLE,
@@ -157,3 +161,31 @@ def test_module_debuginfo_absent_is_warning_only() -> None:
     checks, verdict = build_probe_checks(probe, host_build_id=HOST)
     assert _ids(checks)["target.module_debuginfo"].status == PrerequisiteStatus.WARNING
     assert verdict == USABLE
+
+
+def test_probe_script_compiles() -> None:
+    compile(PROBE_SCRIPT, "<probe>", "exec")
+
+
+def test_probe_script_runs_and_emits_valid_json() -> None:
+    # Runs on the test host; sub-steps that can't read /sys degrade to null
+    # rather than crashing, so this is portable (incl. minimal CI containers).
+    proc = subprocess.run(
+        [sys.executable, "-"],
+        input=PROBE_SCRIPT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    doc = json.loads(proc.stdout)
+    for key in (
+        "python_version",
+        "python_executable",
+        "drgn_present",
+        "kernel_release",
+        "running_build_id",
+        "vmlinux_debuginfo",
+    ):
+        assert key in doc
+    assert isinstance(doc["vmlinux_debuginfo"]["candidates"], list)

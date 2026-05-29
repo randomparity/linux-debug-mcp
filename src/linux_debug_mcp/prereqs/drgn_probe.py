@@ -253,3 +253,139 @@ def build_probe_checks(probe: dict[str, Any], *, host_build_id: Any) -> tuple[li
         wrong_debuginfo=wrong_debuginfo,
     )
     return checks, verdict
+
+
+# Spec §4. On-target probe: stdlib-only python3, emits one JSON object on
+# stdout. Never imports drgn to open the kernel (only to read its version).
+# Debuginfo search order is pinned to drgn's default kernel search; review
+# this list when the runner's drgn pin changes (see the gated cross-check in
+# tests/test_drgn_probe_integration.py).
+PROBE_SCRIPT = r"""import json, os, struct, sys
+
+
+def _safe(fn):
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
+def _os_release():
+    data = {}
+    try:
+        with open("/etc/os-release", "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    data[k.strip()] = v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return data
+
+
+def _parse_notes(blob):
+    off, n = 0, len(blob)
+    while off + 12 <= n:
+        namesz, descsz, ntype = struct.unpack_from("<III", blob, off)
+        off += 12
+        name = blob[off:off + namesz]
+        off += (namesz + 3) & ~3
+        desc = blob[off:off + descsz]
+        off += (descsz + 3) & ~3
+        if ntype == 3 and name.rstrip(b"\x00") == b"GNU":
+            return desc.hex()
+    return None
+
+
+def _running_build_id():
+    try:
+        with open("/sys/kernel/notes", "rb") as fh:
+            return _parse_notes(fh.read())
+    except Exception:
+        return None
+
+
+def _elf_build_id(path):
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(64)
+            if head[:4] != b"\x7fELF":
+                return None
+            is64 = head[4] == 2
+            end = "<" if head[5] == 1 else ">"
+            if is64:
+                e_phoff = struct.unpack_from(end + "Q", head, 32)[0]
+                e_phentsize = struct.unpack_from(end + "H", head, 54)[0]
+                e_phnum = struct.unpack_from(end + "H", head, 56)[0]
+            else:
+                e_phoff = struct.unpack_from(end + "I", head, 28)[0]
+                e_phentsize = struct.unpack_from(end + "H", head, 42)[0]
+                e_phnum = struct.unpack_from(end + "H", head, 44)[0]
+            for i in range(e_phnum):
+                fh.seek(e_phoff + i * e_phentsize)
+                ph = fh.read(e_phentsize)
+                if is64:
+                    p_type, _flags, p_off, _va, _pa, p_filesz = struct.unpack_from(end + "IIQQQQ", ph, 0)
+                else:
+                    p_type, p_off, _va, _pa, p_filesz = struct.unpack_from(end + "IIIII", ph, 0)
+                if p_type != 4:
+                    continue
+                fh.seek(p_off)
+                bid = _parse_notes(fh.read(p_filesz))
+                if bid:
+                    return bid
+    except Exception:
+        return None
+    return None
+
+
+def _candidates(rel, rbid):
+    paths = []
+    if rbid:
+        paths.append("/usr/lib/debug/.build-id/%s/%s.debug" % (rbid[:2], rbid[2:]))
+    paths += [
+        "/usr/lib/debug/boot/vmlinux-%s" % rel,
+        "/usr/lib/debug/lib/modules/%s/vmlinux" % rel,
+        "/lib/modules/%s/build/vmlinux" % rel,
+        "/lib/modules/%s/vmlinux" % rel,
+        "/boot/vmlinux-%s" % rel,
+    ]
+    out = []
+    for p in paths:
+        if os.path.exists(p):
+            out.append({"path": p, "file_build_id": _elf_build_id(p)})
+    return out
+
+
+rel = _safe(lambda: os.uname().release) or ""
+rbid = _running_build_id()
+osr = _os_release()
+
+drgn_present = False
+drgn_version = None
+try:
+    import drgn
+    drgn_present = True
+    drgn_version = _safe(lambda: getattr(drgn, "__version__", None))
+except Exception:
+    pass
+
+module_dir = "/usr/lib/debug/lib/modules/%s/kernel" % rel
+result = {
+    "python_version": "%d.%d.%d" % (sys.version_info[0], sys.version_info[1], sys.version_info[2]),
+    "python_executable": sys.executable,
+    "drgn_present": drgn_present,
+    "drgn_version": drgn_version,
+    "distro_id": osr.get("ID"),
+    "distro_version": osr.get("VERSION_ID"),
+    "kernel_release": rel,
+    "running_build_id": rbid,
+    "vmlinux_debuginfo": {
+        "candidates": _candidates(rel, rbid),
+        "btf": os.path.exists("/sys/kernel/btf/vmlinux"),
+        "module_debuginfo": _safe(lambda: bool(os.path.isdir(module_dir) and os.listdir(module_dir))) or False,
+        "module_path": module_dir,
+    },
+}
+sys.stdout.write(json.dumps(result))
+"""
