@@ -501,20 +501,23 @@ def test_read_only_call_emits_no_audit_line(tmp_path: Path, caplog: pytest.LogCa
     assert not [r for r in caplog.records if "write-mode invocation" in r.getMessage()]
 
 
-def test_allow_write_failure_records_flag(tmp_path: Path) -> None:
+def test_allow_write_failed_call_records_flag_via_failure_recorder(tmp_path: Path) -> None:
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
-    # A script-error outcome routes through the failure recorder.
+    # A drgn_open_failure outcome routes through _fail -> _record_introspect_failure
+    # (a genuinely FAILED step), exercising the failure recorder's allow_write path.
+    # NB: outcome.status="error" would NOT work here — it is the SUCCESS path
+    # (status="script_error", SUCCEEDED step) and never reaches _record_introspect_failure.
     body = {
         "call_id": "0" * 32,
-        "build_id": VALID_BUILD_ID,
-        "outcome": {"status": "error", "error_type": "ValueError", "error_message": "boom", "traceback": "t"},
+        "build_id": None,
+        "outcome": {"status": "drgn_open_failure", "error_type": "OSError", "error_message": "x"},
         "emits": [],
         "user_stdout": "",
         "prelude_ms": 1,
         "truncated": {k: False for k in ("emits", "user_stdout", "traceback", "total_json", "per_emit_size", "error_message")},
     }
-    ssh = FakeSshRunner(results=[SshCommandResult(exit_status=6, stdout=json.dumps(body), stderr="")])
+    ssh = FakeSshRunner(results=[SshCommandResult(exit_status=3, stdout=json.dumps(body), stderr="")])
     debug_introspect_run_handler(
         _make_request(run_id, allow_write=True, acknowledged_permissions=_WRITE_PERMS),
         artifact_root=tmp_path,
@@ -527,8 +530,9 @@ def test_allow_write_failure_records_flag(tmp_path: Path) -> None:
     )
     manifest = store.load_manifest(run_id)
     step = next(v for k, v in manifest.step_results.items() if k.startswith("introspect:"))
-    assert step.status == StepStatus.SUCCEEDED  # status=error is a successful run with a script error
+    assert step.status == StepStatus.FAILED
     assert step.details["allow_write"] is True
+    assert step.details["acknowledged_permissions"] == _WRITE_PERMS
 
 
 def test_write_mode_disabled_outcome_rejected(tmp_path: Path) -> None:
@@ -925,5 +929,5 @@ git commit -m "chore(introspect): guardrail fixups for write-mode (#56)"
 ## Self-review notes
 
 - **Spec coverage:** §2 gate → Task 4(b); §3.1 request field → Task 2; §3.2 failure codes → Tasks 4/5; §4 vmcore → Task 5; §5 config → Task 1; §6 wrapper subclass guard + ordering + finalize branch → Tasks 3 & 4(j); §7 audit (both paths + log) → Task 4(c,e,f,g,h,i); §8 tests → Tasks 1-7; §9 risks → covered by Task 7 gated tests + Task 3/4 unit tests.
-- **Two regression anchors (review-surfaced):** `test_write_mode_disabled_outcome_rejected` (silent-success default) and `test_allow_write_failure_records_flag` (failure-path recording) are both in Task 4.
+- **Two regression anchors (review-surfaced):** `test_write_mode_disabled_outcome_rejected` (silent-success default) and `test_allow_write_failed_call_records_flag_via_failure_recorder` (failure-path recording — uses a `drgn_open_failure` outcome that genuinely routes through `_record_introspect_failure`, since `outcome.status="error"` is the success path) are both in Task 4.
 - **Naming consistency:** `_li_program_class`, `_li_GuardedProgram`, `_li_WriteModeDisabled`, `write_mode_permissions`, code `write_mode_disabled` / `write_mode_not_applicable` / `permission_required` / `operation_disabled` are used identically across tasks.
