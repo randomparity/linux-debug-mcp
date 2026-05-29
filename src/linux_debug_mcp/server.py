@@ -4021,6 +4021,10 @@ def _verify_gdb_symbol_version_lock(
     boot-recorded §4.2 KernelProvenance.build_id. Returns a failure ToolResponse to
     abort the attach, or None to proceed. Unconditional (independent of
     symbol_identity_required) -- a detected mismatch is bogus symbols.
+
+    *vmlinux_path* is the manifest-recorded build artifact (trusted: the artifact
+    root is the trust boundary), read read-only for its ELF build-id note; the gdb
+    provider performs the authoritative under-run-dir path confinement at attach.
     """
     provenance = boot_result.details.get("kernel_provenance")
     if not isinstance(provenance, dict):
