@@ -545,11 +545,16 @@ rather than racing teardown. Having closed admission, it then:
    can drive boot selection again. `revoke()` bumps the **lease** generation,
    fencing out any console write from a not-yet-torn-down helper.
 4. **Free the `StopCapableGuard`** for the `TargetKey` (§5.6) under the same
-   ordering as session teardown — by the fenced `release(target_key, token)` where
-   the invalidator holds the session's token (the in-process Layer-4 path), else
-   `revoke(target_key)` — releasing the stop-capable slot so a fresh session can
-   attach after recovery; otherwise an invalidated target would be stranded
-   permanently stop-session-busy.
+   ordering as session teardown — by the fenced `release(target_key, token)`,
+   which the invalidator holds the session's token to perform (the in-process
+   Layer-4 path always does) — releasing the stop-capable slot so a fresh session
+   can attach after recovery; otherwise an invalidated target would be stranded
+   permanently stop-session-busy. A tokenless invalidator that cannot present the
+   token may coarsely `revoke(target_key)` **only where no concurrent re-acquire
+   is possible** (e.g. post-restart reconcile, where the prior holder is provably
+   dead): because this is a live within-lifetime invalidation, a `revoke()` racing
+   a fresh acquire would clear the *newer* holder — the "stale clears newer"
+   violation the fenced release exists to prevent.
 5. **Bump the `TargetKey`'s handle `generation`** (§3.1). Every `TargetHandle` and
    `OpenRequest` minted in the incarnation just torn down is now `stale_handle`;
    when the target next reaches `READY`, `wait_ready()` stamps the new generation
@@ -634,9 +639,12 @@ rather than fail. Three rules (resolved, §9.4):
    detach/close `release(target_key, token)`s it idempotently (a stale token is a
    no-op), and §5.4 invalidation/force-reap frees the slot — by the same fenced
    `release(target_key, token)` where the invalidator holds the session's token
-   (the in-process Layer-4 path; every in-process holder does), with
-   `revoke(target_key)` the coarse tokenless force-free retained for a holder that
-   does not. The guard never outlives the session that holds it, so an invalidation
+   (the in-process Layer-4 path; every in-process holder does). `revoke(target_key)`
+   is the coarse tokenless force-free retained for a holder that does not, but is
+   sound on a §5.4 invalidation **only where no concurrent re-acquire can occur**
+   (e.g. post-restart reconcile): within one server lifetime a `revoke()` racing a
+   fresh acquire could clear the newer holder, so live invalidators use the fenced
+   release. The guard never outlives the session that holds it, so an invalidation
    can never strand a target permanently stop-session-busy and a stale release can
    never clear a newer holder.
 2. **ssh-tier ops are gated on `EXECUTING`.** While `HALTED`, `debug.introspect`
