@@ -1,6 +1,6 @@
 # SessionGuard — interactive session preconditions + teardown invariants — design
 
-**Issue:** #66 (epic #9, split from #17) · **Status:** proposed design
+**Issue:** #66 (epic #9, split from #17) · **Status:** accepted (implemented)
 **Contract:** `docs/specs/interface-contracts.md` §5.5, §5.6, §9.1
 **ADR:** [0013](../../adr/0013-session-guard-precondition-teardown-seam.md)
 
