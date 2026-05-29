@@ -449,6 +449,32 @@ class TransportTransaction:
         if self._dispatcher is not None:
             self._dispatcher.unsubscribe(record.target_key, session_id)
 
+    def force_release(self, session_id: str) -> None:
+        """Last-resort remediation when close() failed and stranded a HALTED record (SessionGuard
+        teardown, ADR 0013). MORE forceful than close, NOT a retry: skip the failure-prone
+        transport.close and drop only the lines that keep the ssh-tier probe reading HALTED — a
+        session-id-fenced delete_record, a FENCED by-token guard release (never revoke — ADR 0002),
+        and a by-token console-lease release. Any still-live backend is reaped by
+        SessionRegistry.reconcile() on next start. Idempotent; an unknown session_id is a no-op."""
+        record = next((r for r in self._registry.list_records() if r.session_id == session_id), None)
+        if record is None:
+            self._tokens.pop(session_id, None)
+            self._handles.pop(session_id, None)
+            return
+        if record.console_lease_token is not None:
+            self._leases.release(record.target_key, record.console_lease_token)
+        token = self._tokens.pop(session_id, None)
+        if token is not None:
+            self._guard.release(record.target_key, token)  # FENCED by-token (ADR 0002), never revoke()
+        handle = self._handles.pop(session_id, None)
+        if handle is not None:
+            with contextlib.suppress(Exception):
+                self._admission.confirm_reaped(handle)
+                self._admission.abandon(handle)
+        self._registry.delete_record(record.target_key, expected_session_id=record.session_id)
+        if self._dispatcher is not None:
+            self._dispatcher.unsubscribe(record.target_key, session_id)
+
     def _mark_recovery(self, target_key: TargetKey, generation: int, *, reason: str) -> None:
         """Single source of truth is the durable tombstone; admission's `_recovery_required` is a
         write-through cache (Finding #5 / ADR 0005). Always write BOTH atomically."""
