@@ -39,75 +39,79 @@ in?**
    via `read_record` and records it, rather than relying on QEMU auto-resume as an
    untested implicit side effect.
 
-3. **One idempotent `teardown(ctx, *, close, read_record)` routine is the single
-   source of truth**, invoked by the handler exit paths:
+3. **One idempotent `teardown(ctx, *, close, read_record, force_reap)` routine is
+   the single source of truth**, invoked by the two handler exit paths:
    `debug_start_session_handler`'s attach-error path and
-   `debug_end_session_handler`'s clean path. `close` and `read_record` are
-   **injected** so `SessionGuard` stays decoupled from the transaction/registry and
-   is unit-testable with fakes. The dispatcher's `_SessionSubscriber`
-   (timeout/invalidation) does **not** call this method — see decision 3a — but it
-   runs the same `teardown_steps`, so the precondition/teardown *steps* are shared
-   even though the orchestration entry points differ.
-
-3a. **The dispatcher carries the `teardown_steps` as opaque data, not a
-   `SessionGuard` reference.** `bind_lifecycle(dispatcher, teardown_steps=...)`
-   passes the step list into `TransportTransaction`, which forwards it to each
-   `_SessionSubscriber`; the subscriber invokes the steps directly with the correct
-   `phase`. The transaction never holds a `SessionGuard` object, so decision 1's
-   decoupling holds — the coupling is to a list of `TeardownStep` data, which the
-   transaction already conceptually owns (it owns session teardown). This keeps the
-   single shared step set without inverting the layer dependency.
+   `debug_end_session_handler`'s clean path. `close`, `read_record`, and
+   `force_reap` are **injected** so `SessionGuard` stays decoupled from the
+   transaction/registry and is unit-testable with fakes. The dispatcher's
+   `_SessionSubscriber` (timeout/invalidation) is **not** routed through
+   `SessionGuard` at all (see decision 5) — its existing reap already satisfies the
+   "times out" clause of AC1 and #66 only conformance-tests it.
 
 4. **Plug-in points are injected, ordered, Protocol-typed lists**, in three slots:
    `pre_attach` (`PreAttachPrecondition`, runs before any acquisition),
    `post_attach` (`PostAttachPrecondition`, runs after the attach with the live
    `TransportSession` so it can read the running kernel), and `teardown_steps`
-   (`TeardownStep`). #66 ships all three empty (plus the built-in resume in
-   `close`). #70's symbol version-lock adds a `pre_attach` static check **and** a
-   `post_attach` build-id-vs-running-kernel check (the live check cannot run before
-   attach, so a single pre-attach slot would not host it). #69's watchdog-restore
-   adds a `TeardownStep`. Teardown steps run in reverse declared order (LIFO
-   unwind), are idempotent, non-fatal (suppressed + aggregated, never block
-   resume/reap).
+   (`TeardownStep`, run on the two synchronous handler exit paths only). #66 ships
+   all three empty (plus the built-in resume in `close`). #70's symbol version-lock
+   adds a `pre_attach` static check **and** a `post_attach`
+   build-id-vs-running-kernel check (the live check cannot run before attach, so a
+   single pre-attach slot would not host it). #69's watchdog-restore adds a
+   `TeardownStep`, which is meaningful exactly on the clean-end and attach-error
+   paths (same kernel keeps running) and not on the dispatcher path (target
+   resetting). Teardown steps run in reverse declared order (LIFO unwind), are
+   idempotent, non-fatal (suppressed + aggregated, never block resume/reap).
 
-5. **Execution constraint is an explicit `phase` on the context, not inferred from
-   `reason`.** `SessionGuardContext.phase ∈ {"bounded","force_drop"}` tells a
-   teardown step whether it may block: `"bounded"` (clean end and the dispatcher's
-   deadline-supervised `invalidate` worker) allows I/O; `"force_drop"` (the
-   dispatcher's non-blocking out-of-band path, §5.5) forbids it. A blocking step
-   no-ops under `"force_drop"`. Without this, a step could not distinguish the two
-   dispatcher methods (they carry the same `reason`) and the non-blocking contract
-   would be unsatisfiable.
+5. **The lifecycle-dispatcher invalidation path is NOT routed through
+   `SessionGuard`.** Every dispatcher invalidation (`resetting`, `crashed`,
+   `releasing`, `lease_expired`, `booting`) is a target teardown/reboot, where the
+   existing `_SessionSubscriber` already reaps the backend and releases
+   guard/lease/record under the bounded `teardown_deadline`, and where a
+   session-level teardown step (e.g. watchdog-restore) would be meaningless (a
+   reboot restores defaults). Routing `teardown_steps` through that path would
+   require a `phase`/`force_drop`-safety discriminator on the context to honor
+   §5.5's non-blocking rule — machinery with **no consumer that does useful work
+   there**. So #66 leaves the dispatcher untouched, drops the `phase` concept, and
+   `SessionGuard.teardown` always runs synchronously on the handler thread (may
+   block). The "times out" clause of AC1 is satisfied by the existing reap and
+   proven by a conformance test.
 
-6. **The resume invariant is an observational post-condition, not a snapshot
-   transition.** The local-qemu admission snapshot stays `READY` throughout a
-   gdbstub session; ssh-tier `HALTED` gating is carried by the durable
-   `TransportSession` record's `execution_state`. "Resume" therefore means: after
-   `teardown` the durable record is deleted, or — only when a halt was recorded and
-   a clean resume was not confirmed — carries a current `recovery_required`
-   tombstone; never a live `HALTED` record with no owner. `teardown` checks this
-   via an injected `read_record` and records `resume_ok` in the report; a violation
-   is logged, never raised. A **failed attach that never halted the kernel**
-   (`halt_recorded=False`) deletes the record with no tombstone, so a running
+6. **Resume is actively guaranteed, not merely observed.** The local-qemu
+   admission snapshot stays `READY` throughout a gdbstub session; ssh-tier `HALTED`
+   gating is carried by the durable `TransportSession` record's `execution_state`.
+   The `resume_ok` post-condition is exactly the AC1 property — after `teardown`,
+   `read_record()` is `None` or non-`HALTED` (the recovery tombstone is a separate
+   ssh-admission concern, asserted by its own test, not folded into `resume_ok`).
+   `teardown` runs `close` (suppressing+recording any raise as `close_error`),
+   verifies the post-condition via `read_record`, and **if it does not hold,
+   invokes `force_reap`** — the transaction's existing session-id-fenced out-of-band
+   release — and re-checks. `resume_ok=False` therefore means even `force_reap`
+   failed: a genuine `INFRASTRUCTURE_FAILURE` logged loudly, not a silently-stranded
+   target. A **failed attach that never halted the kernel** (`halt_recorded=False`)
+   uses `close(force=True)` so it deletes the record with no tombstone — a running
    kernel is never left ssh-blocked.
 
 ## Consequences
 
-- #66 is a small, low-risk change: a new stateless seam class, three call-site
-  rewrites that wrap (not replace) existing `transaction.close` calls, one
-  teardown-step hook on `_SessionSubscriber`, and tests. No working, tested
-  primitive is rewritten.
-- The resume invariant becomes an explicit, tested statement (record deleted or
-  tombstoned; never orphaned `HALTED`) rather than an emergent property.
+- #66 is a small, low-risk change: a new stateless seam class, two handler
+  call-site rewrites that wrap (not replace) existing `transaction.close` calls,
+  one thin `transaction.force_release` wrapper over the existing out-of-band
+  release, and tests. No working, tested primitive is rewritten; the dispatcher is
+  untouched.
+- Resume becomes an actively-enforced, tested guarantee (verify post-condition,
+  then `force_reap` remediation, then loud `INFRASTRUCTURE_FAILURE` only if even
+  that fails) rather than an emergent or merely-logged property.
 - #69 and #70 land as single injected steps with no further `SessionGuard`
-  changes; #69's blocking ssh restore is constrained to the `invalidate`/clean
-  paths and is a documented no-op on `force_drop`.
+  changes; #69's restore runs on the clean-end/attach-error paths (same kernel
+  running) and is simply absent from the dispatcher path (target resetting).
 - The §5.6 rule 2 `HALTED` fast-reject is left in `admit_ssh_tier` where it
   already lives and is already tested; #66 adds a conformance test binding it to
   the `SessionGuard` lifecycle rather than relocating the check.
-- `SessionGuard.teardown` aggregating teardown-step errors means a misbehaving
-  extension (e.g. a watchdog-restore that throws) is visible in the response
-  details but can never strand the target stopped or leak a helper.
+- `SessionGuard.teardown` aggregating teardown-step + close errors means a
+  misbehaving extension (a watchdog-restore that throws) or a partial close is
+  visible in the response details but can never strand the target stopped or leak
+  a helper — `force_reap` is the backstop.
 
 ## Considered & rejected
 
@@ -132,8 +136,8 @@ in?**
    operation.** Rejected: a debug session spans many stateless MCP requests, so
    "enter" would re-run preconditions (symbol-lock, watchdog-relax) on every read,
    which is both wrong (watchdog already relaxed) and expensive. Preconditions
-   belong at attach (once); teardown belongs at the three real exit points. A
-   stateless policy object whose `teardown` all three paths call is the correct
+   belong at attach (once); teardown belongs at the real exit points. A stateless
+   policy object whose `teardown` the handler exit paths call is the correct
    granularity.
 
 4. **Overridable subclass hook methods (`check_symbols()`,
@@ -148,6 +152,28 @@ in?**
    explicit about ordering and lifetime, and hides the dependency from the call
    site. Injected lists make the ordered, per-`SessionGuard` step set visible and
    testable.
+
+7. **Route `teardown_steps` through the lifecycle dispatcher's
+   `invalidate`/`force_drop` (with a `phase` discriminator so steps know whether
+   they may block).** Considered in spec-review round 1, rejected in round 2: no
+   teardown step does useful work on the invalidation path — every invalidation is
+   a target reset/crash/release/reboot, where a watchdog-restore is meaningless and
+   the existing `_SessionSubscriber` reap already prevents orphans. Routing through
+   it would add a `phase`/`force_drop`-safety contract to satisfy §5.5's
+   non-blocking rule purely to serve a consumer that does nothing there —
+   speculative machinery the repo's "no speculative features" rule forbids. #66
+   leaves the dispatcher untouched and conformance-tests that its existing reap
+   satisfies the "times out" clause of AC1.
+
+8. **Treat resume as an observe-and-log post-condition with no remediation** (the
+   round-1 design: `teardown` reads the record after `close` and logs
+   `resume_ok=False` but takes no further action). Rejected in round 2: AC1 demands
+   a *guarantee*, and a monitor that only logs its own violation is not one — a
+   partial `close` that left a stranded `HALTED` record (or a fenced `delete_record`
+   no-op under a concurrent reopen) would leave `target.run_tests` gated
+   indefinitely. The accepted design adds the `force_reap` remediation (reusing the
+   transaction's proven out-of-band release) so `resume_ok=False` means *even the
+   backstop failed*, a true infrastructure fault — not a routine stranding.
 
 6. **Re-enable ssh-tier mid-session on `debug.continue` (flip the durable record
    back to `EXECUTING` + bump epoch) as part of the resume invariant.** Rejected
