@@ -192,16 +192,21 @@ def test_reports_are_constructible():
 Run: `uv run python -m pytest tests/test_seams_watchdog.py -q`
 Expected: FAIL — `ImportError: cannot import name 'KnobOutcome'`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Update imports**
 
-Add to `src/linux_debug_mcp/seams/watchdog.py` (after the imports, extend them; add below `knobs_for_arch`):
+Edit the top of `src/linux_debug_mcp/seams/watchdog.py` so the import block reads exactly (each name is used by the code added in this task, keeping the commit ruff-clean):
 
 ```python
-# extend the top-of-file imports to:
-# from dataclasses import dataclass, field
-# from enum import StrEnum
-# from typing import Protocol, runtime_checkable
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Protocol, runtime_checkable
+```
 
+- [ ] **Step 4: Write minimal implementation**
+
+Add below `knobs_for_arch` in `src/linux_debug_mcp/seams/watchdog.py`:
+
+```python
 
 class KnobOutcome(StrEnum):
     RELAXED = "relaxed"          # read captured + relax write ok
@@ -243,12 +248,12 @@ class WatchdogControl(Protocol):
         ...
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 5: Run test to verify it passes**
 
 Run: `uv run python -m pytest tests/test_seams_watchdog.py -q`
 Expected: PASS (4 tests).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/linux_debug_mcp/seams/watchdog.py tests/test_seams_watchdog.py
@@ -380,9 +385,26 @@ def test_concurrent_same_session_relax_reads_exactly_once():
 Run: `uv run python -m pytest tests/test_seams_watchdog.py -q`
 Expected: FAIL — `ImportError: cannot import name 'WatchdogPolicy'`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Update imports**
 
-Add to `src/linux_debug_mcp/seams/watchdog.py` (add `import threading` and `from collections.abc import Sequence` to the imports):
+Edit the top of `src/linux_debug_mcp/seams/watchdog.py` so the import block reads exactly (all names are used by the code added in this task, keeping the commit ruff-clean):
+
+```python
+import logging
+import threading
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Protocol, runtime_checkable
+
+from linux_debug_mcp.seams.guard import SessionGuardContext
+
+logger = logging.getLogger(__name__)
+```
+
+- [ ] **Step 4: Write minimal implementation**
+
+Add below `knobs_for_arch` in `src/linux_debug_mcp/seams/watchdog.py`:
 
 ```python
 @dataclass
@@ -469,22 +491,24 @@ class WatchdogPolicy:
     def _safe_read(self, name: str) -> str | None:
         try:
             return self._channel.read_knob(name)
-        except Exception:  # noqa: BLE001 - a channel error is data, never control flow
+        except Exception as exc:  # noqa: BLE001 - a channel error is data, never control flow
+            logger.warning("watchdog: read_knob(%s) raised: %r", name, exc)
             return None
 
     def _safe_write(self, name: str, value: str) -> bool:
         try:
             return self._channel.write_knob(name, value).ok
-        except Exception:  # noqa: BLE001 - a channel error is recorded, never raised
+        except Exception as exc:  # noqa: BLE001 - a channel error is recorded, never raised
+            logger.warning("watchdog: write_knob(%s) raised: %r", name, exc)
             return False
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 5: Run test to verify it passes**
 
 Run: `uv run python -m pytest tests/test_seams_watchdog.py -q`
 Expected: PASS (all relax tests).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/linux_debug_mcp/seams/watchdog.py tests/test_seams_watchdog.py
