@@ -56,6 +56,8 @@ from linux_debug_mcp.domain import (
     DebugIntrospectCheckPrerequisitesRequest,
     DebugIntrospectRunRequest,
     ErrorCategory,
+    PrerequisiteCheck,
+    PrerequisiteStatus,
     RunRequest,
     StepResult,
     StepStatus,
@@ -63,6 +65,13 @@ from linux_debug_mcp.domain import (
 )
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
+from linux_debug_mcp.prereqs.drgn_probe import (
+    PROBE_SCRIPT,
+    UNKNOWN,
+    USABLE,
+    build_probe_checks,
+    python_missing_checks,
+)
 from linux_debug_mcp.providers.contracts import (
     ConsoleReadRequest,
     ConsoleSessionRequest,
@@ -94,6 +103,7 @@ from linux_debug_mcp.providers.local_kernel_build import (
 )
 from linux_debug_mcp.providers.local_ssh_tests import (
     LocalSshTestProvider,
+    SshCommandResult,
     SshRunner,
     SubprocessSshRunner,
     TestExecutionResult,
@@ -216,6 +226,9 @@ RUNNING_BUILD_MESSAGE = (
 )
 RUNNING_BOOT_MESSAGE = "previous boot is still recorded as running"
 RUNNING_TESTS_MESSAGE = "previous test run is still recorded as running"
+# Spec §6/§7: cap the probe stdout read so a noisy/hostile target cannot
+# balloon handler memory before json.loads. Mirrors the runner's output caps.
+PROBE_STDOUT_CAP = 256 * 1024
 
 
 def _recorded_build_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
@@ -2014,7 +2027,219 @@ def debug_introspect_check_prerequisites_handler(
     _ctx, failure = _resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
     if failure is not None:
         return failure
-    raise NotImplementedError("SSH body added in Task 8")
+    assert _ctx is not None
+    ctx = _ctx
+    run_id = ctx.run_id
+
+    runner: SshRunner = ssh_runner or SubprocessSshRunner()
+    probe_id = uuid.uuid4().hex
+    agent_dir, sensitive_dir = _prepare_probe_dirs(ctx.store, run_id, probe_id)
+
+    remote_argv = ["timeout", "--kill-after=2s", f"{request.timeout_seconds}s", *TARGET_PYTHON_ARGV]
+    try:
+        ssh_argv = build_ssh_argv(
+            rootfs_profile=ctx.rootfs,
+            known_hosts_path=ctx.store.run_dir(run_id) / "sensitive" / "known_hosts",
+            command=remote_argv,
+            command_timeout=request.timeout_seconds + 10,
+        )
+    except ValueError as exc:
+        return _configuration_failure(
+            run_id=run_id,
+            message=_redact_and_truncate(ctx.redactor, str(exc), cap=256),
+            details={"code": "invalid_ssh_options"},
+        )
+
+    stdout_path = sensitive_dir / "stdout.raw"
+    stderr_path = sensitive_dir / "stderr.raw"
+    try:
+        ssh_result = runner.run(
+            ssh_argv,
+            timeout=request.timeout_seconds + 10,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            stdin=PROBE_SCRIPT,
+        )
+    except Exception as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=_redact_and_truncate(ctx.redactor, f"ssh probe raised: {exc}", cap=256),
+            details={"code": "ssh_failure"},
+        )
+    for _path in (stdout_path, stderr_path):
+        with contextlib.suppress(FileNotFoundError):
+            _path.chmod(0o600)
+
+    return _assemble_probe_response(
+        ctx,
+        ssh_result=ssh_result,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        agent_dir=agent_dir,
+        probe_id=probe_id,
+    )
+
+
+def _read_capped(path: Path, cap: int) -> str | None:
+    """Read the file iff its byte size is within *cap*; None if oversized."""
+    if not path.exists():
+        return ""
+    if path.stat().st_size > cap:
+        return None
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _prepare_probe_dirs(store: ArtifactStore, run_id: str, probe_id: str) -> tuple[Path, Path]:
+    """Create the agent-visible and sensitive probe directories with 0o700.
+
+    Returns ``(agent_dir, sensitive_dir)``.
+    """
+    agent_dir = store.run_dir(run_id) / "debug" / "checkprereq" / probe_id
+    sensitive_dir = store.run_dir(run_id) / "sensitive" / "debug" / "checkprereq" / probe_id
+    agent_dir.mkdir(parents=True, mode=0o700)
+    sensitive_dir.mkdir(parents=True, mode=0o700)
+    for _dir in (sensitive_dir, sensitive_dir.parent, sensitive_dir.parent.parent):
+        with contextlib.suppress(FileNotFoundError):
+            _dir.chmod(0o700)
+    return agent_dir, sensitive_dir
+
+
+def _no_json_response(
+    ctx: _ProbeContext,
+    *,
+    ssh_result: SshCommandResult,
+    agent_dir: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    probe_id: str,
+    parsed: Any,
+) -> ToolResponse | None:
+    """Handle the cases where the probe returned no parseable JSON dict.
+
+    Returns the 127-success / 255-failure / non-dict-failure response, or
+    ``None`` to fall through to the normal ``build_probe_checks`` path.
+    """
+    if isinstance(parsed, dict):
+        return None
+    run_id = ctx.run_id
+    if ssh_result.exit_status == 127:
+        checks, verdict = python_missing_checks()
+        return _probe_success(
+            ctx,
+            agent_dir=agent_dir,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            probe_id=probe_id,
+            checks=checks,
+            verdict=verdict,
+            parsed=None,
+        )
+    if ssh_result.exit_status == 255:
+        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="probe ssh transport failed before the target ran",
+            details={"code": "ssh_connect_failure", "stderr": snippet},
+        )
+    snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        run_id=run_id,
+        message=f"probe did not return parseable JSON (exit {ssh_result.exit_status})",
+        details={"code": "probe_unparseable", "stderr": snippet},
+    )
+
+
+def _assemble_probe_response(
+    ctx: _ProbeContext,
+    *,
+    ssh_result: SshCommandResult,
+    stdout_path: Path,
+    stderr_path: Path,
+    agent_dir: Path,
+    probe_id: str,
+) -> ToolResponse:
+    run_id = ctx.run_id
+    raw_stdout = _read_capped(stdout_path, PROBE_STDOUT_CAP)
+    if raw_stdout is None:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"probe stdout exceeded {PROBE_STDOUT_CAP} bytes",
+            details={"code": "oversized_output"},
+        )
+    if ssh_result.cancelled or ssh_result.timed_out or ssh_result.stdin_failed:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="probe ssh round trip failed",
+            details={"code": "ssh_failure"},
+        )
+    try:
+        parsed = json.loads(raw_stdout) if raw_stdout else None
+    except json.JSONDecodeError:
+        parsed = None
+
+    no_json = _no_json_response(
+        ctx,
+        ssh_result=ssh_result,
+        agent_dir=agent_dir,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        probe_id=probe_id,
+        parsed=parsed,
+    )
+    if no_json is not None:
+        return no_json
+
+    assert isinstance(parsed, dict)
+    checks, verdict = build_probe_checks(parsed, host_build_id=ctx.host_build_id)
+    return _probe_success(
+        ctx,
+        agent_dir=agent_dir,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        probe_id=probe_id,
+        checks=checks,
+        verdict=verdict,
+        parsed=parsed,
+    )
+
+
+def _probe_success(
+    ctx: _ProbeContext,
+    *,
+    agent_dir: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    probe_id: str,
+    checks: list[PrerequisiteCheck],
+    verdict: str,
+    parsed: dict[str, Any] | None,
+) -> ToolResponse:
+    artifacts = [
+        ArtifactRef(path=str(stdout_path), kind="probe-stdout", sensitive=True),
+        ArtifactRef(path=str(stderr_path), kind="probe-stderr", sensitive=True),
+    ]
+    if parsed is not None:
+        report_path = agent_dir / "probe.json"
+        report_path.write_text(json.dumps(ctx.redactor.redact_value(parsed)), encoding="utf-8")
+        artifacts.append(ArtifactRef(path=str(report_path), kind="probe-report", sensitive=False))
+    failed = sum(1 for c in checks if c.status == PrerequisiteStatus.FAILED)
+    next_actions = ["debug.introspect.run"] if verdict in {USABLE, UNKNOWN} else ["host.check_prerequisites"]
+    return ToolResponse.success(
+        summary=f"introspect prerequisites: {verdict} ({failed} failed checks)",
+        run_id=ctx.run_id,
+        data={
+            "introspect_usable": verdict,
+            "probe_id": probe_id,
+            "checks": ctx.redactor.redact_value([c.model_dump(mode="json") for c in checks]),
+        },
+        artifacts=artifacts,
+        suggested_next_actions=next_actions,
+    )
 
 
 def debug_introspect_run_handler(
