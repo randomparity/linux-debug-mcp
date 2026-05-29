@@ -138,7 +138,13 @@ from linux_debug_mcp.safety.redaction import Redactor
 from linux_debug_mcp.safety.runtime_locks import private_runtime_registry_dir
 from linux_debug_mcp.safety.secrets import SecretReferenceKind
 from linux_debug_mcp.seams.break_policy import ReferenceBreakPolicy
-from linux_debug_mcp.seams.guard import GuardConflict, InProcessStopCapableGuard
+from linux_debug_mcp.seams.guard import (
+    GuardConflict,
+    InProcessStopCapableGuard,
+    PreconditionError,
+    SessionGuard,
+    SessionGuardContext,
+)
 from linux_debug_mcp.seams.lifecycle import (
     InProcessLifecycleDispatcher,
     LifecycleDispatcher,
@@ -4010,6 +4016,7 @@ def debug_start_session_handler(
     transaction: TransportTransaction | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     recovery: bool = False,
 ) -> ToolResponse:
     try:
@@ -4084,6 +4091,24 @@ def debug_start_session_handler(
             if transport_enabled:
                 # mypy/ty narrowing: transport_enabled proves these are not None.
                 assert transaction is not None and admission is not None and session_registry is not None
+                target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+                if session_guard is not None:
+                    # Pre-attach preconditions (#70 static checks) run BEFORE any acquisition; a
+                    # failure aborts with nothing acquired, so there is nothing to tear down.
+                    try:
+                        session_guard.enter(
+                            SessionGuardContext(
+                                target_key=target_key, generation=0, session_id=None, reason="attach_error"
+                            )
+                        )
+                    except PreconditionError as exc:
+                        return ToolResponse.failure(
+                            category=ErrorCategory.READINESS_FAILURE,
+                            message=str(exc),
+                            run_id=run_id,
+                            details={"code": "precondition_failed", "precondition": exc.name},
+                            suggested_next_actions=["artifacts.get_manifest"],
+                        )
                 try:
                     request = _debug_open_request(run_id=run_id, gdbstub_endpoint=gdbstub_endpoint, admission=admission)
                     transport_session = transaction.open(request, recovery=recovery)
@@ -4130,8 +4155,23 @@ def debug_start_session_handler(
                 # tombstone semantics (a future recovery=True reattach clears it). Guarded so a
                 # close hiccup never masks the original ProviderDebugError.
                 if transport_session is not None and transaction is not None:
-                    with contextlib.suppress(Exception):
-                        transaction.close(transport_session.session_id, force=False)
+                    if session_guard is not None and session_registry is not None:
+                        sid = transport_session.session_id
+                        tkey = transport_session.target_key
+                        session_guard.teardown(
+                            SessionGuardContext(
+                                target_key=tkey,
+                                generation=transport_session.generation,
+                                session_id=sid,
+                                reason="attach_error",
+                            ),
+                            close=lambda: transaction.close(sid, force=False),
+                            read_record=lambda: session_registry.read_record(tkey),
+                            force_reap=lambda: transaction.force_release(sid),
+                        )
+                    else:
+                        with contextlib.suppress(Exception):
+                            transaction.close(transport_session.session_id, force=False)
                 exc_details = dict(exc.details)
                 if transport_session is not None:
                     exc_details["transport_session_id"] = transport_session.session_id
@@ -4155,6 +4195,37 @@ def debug_start_session_handler(
             if transport_session is not None:
                 # bind the DebugSession to the transport-ownership record so close() can tear it down.
                 details["transport_session_id"] = transport_session.session_id
+            # Post-attach preconditions (#70 build-id-vs-running-kernel) run with the live session,
+            # BEFORE the SUCCEEDED debug step is persisted: a rejection tears the session down and
+            # returns READINESS_FAILURE, so the manifest never records a SUCCEEDED session that
+            # teardown just deleted.
+            if (
+                session_guard is not None
+                and transport_session is not None
+                and session_registry is not None
+                and transaction is not None
+            ):
+                sid = transport_session.session_id
+                tkey = transport_session.target_key
+                post_ctx = SessionGuardContext(
+                    target_key=tkey, generation=transport_session.generation, session_id=sid, reason="attach_error"
+                )
+                try:
+                    session_guard.verify_attached(post_ctx, transport_session)
+                except PreconditionError as exc:
+                    session_guard.teardown(
+                        post_ctx,
+                        close=lambda: transaction.close(sid, force=False),
+                        read_record=lambda: session_registry.read_record(tkey),
+                        force_reap=lambda: transaction.force_release(sid),
+                    )
+                    return ToolResponse.failure(
+                        category=ErrorCategory.READINESS_FAILURE,
+                        message=str(exc),
+                        run_id=run_id,
+                        details={"code": "precondition_failed", "precondition": exc.name},
+                        suggested_next_actions=["artifacts.get_manifest"],
+                    )
             terminal = StepResult(
                 step_name="debug",
                 status=result.status,
@@ -4730,6 +4801,7 @@ def debug_end_session_handler(
     transaction: TransportTransaction | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
 ) -> ToolResponse:
     # Capture the transport binding BEFORE the provider detach rewrites the debug step (end_session
     # records `current_execution_state="ended"` and may drop the start_session details).
@@ -4765,7 +4837,16 @@ def debug_end_session_handler(
     # attach), so the target needs no recovery gating — skip the close-while-halted tombstone that
     # would otherwise leave the next attach `recovery_required`.
     if response.ok and transaction is not None and transport_session_id is not None:
-        transaction.close(transport_session_id, force=True)
+        if session_guard is not None and session_registry is not None:
+            tkey = TargetKey(provisioner="local-qemu", target_id=run_id)
+            session_guard.teardown(
+                SessionGuardContext(target_key=tkey, generation=0, session_id=transport_session_id, reason="ended"),
+                close=lambda: transaction.close(transport_session_id, force=True),
+                read_record=lambda: session_registry.read_record(tkey),
+                force_reap=lambda: transaction.force_release(transport_session_id),
+            )
+        else:
+            transaction.close(transport_session_id, force=True)
     # B7 review (#10): a LEGACY session bypassed the pre-detach fence so end_session could force-end
     # the unmanaged stop, but target.run_tests would otherwise stay BLIND to that detach — exactly the
     # failure mode B7 fences against. Dual-write a recovery_required tombstone AFTER the successful
@@ -5511,6 +5592,7 @@ def workflow_build_boot_debug_handler(
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
     transaction: TransportTransaction | None = None,
+    session_guard: SessionGuard | None = None,
 ) -> ToolResponse:
     if run_id is not None:
         try:
@@ -5622,6 +5704,7 @@ def workflow_build_boot_debug_handler(
         transaction=transaction,
         admission=admission,
         session_registry=session_registry,
+        session_guard=session_guard,
     )
     if not debug_response.ok:
         return _workflow_failure_response(
@@ -5732,6 +5815,7 @@ class _TransportMachinery:
     transaction: TransportTransaction
     transport_registry: TransportRegistry
     lifecycle_dispatcher: LifecycleDispatcher
+    session_guard: SessionGuard
 
 
 def _default_local_transports() -> dict[str, Transport]:
@@ -5872,6 +5956,9 @@ def _build_transport_machinery(
         transaction=transaction,
         transport_registry=transport_registry,
         lifecycle_dispatcher=lifecycle_dispatcher,
+        # One stateless SessionGuard for the debug start/end handlers. #66 ships empty slots;
+        # #69 (watchdog) and #70 (symbol version-lock) add steps/preconditions here later.
+        session_guard=SessionGuard(),
     )
 
 
@@ -5897,6 +5984,7 @@ def create_app(
     transport_transaction = machinery.transaction
     admission_service = machinery.admission
     durable_registry = machinery.session_registry
+    session_guard = machinery.session_guard
     # Stash the assembled machinery on the FastMCP instance so test-injection and any future
     # in-process lifecycle event source can reach the SAME admission/transaction/dispatcher trio
     # the tool wrappers close over (rather than constructing a parallel set that would not share
@@ -6445,6 +6533,7 @@ def create_app(
             transaction=transport_transaction,
             admission=admission_service,
             session_registry=durable_registry,
+            session_guard=session_guard,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.read_registers")
@@ -6602,6 +6691,7 @@ def create_app(
             transaction=transport_transaction,
             admission=admission_service,
             session_registry=durable_registry,
+            session_guard=session_guard,
         ).model_dump(mode="json")
 
     @app.tool(name="transport.open")
@@ -6704,6 +6794,7 @@ def create_app(
             admission=admission_service,
             session_registry=durable_registry,
             transaction=transport_transaction,
+            session_guard=session_guard,
         ).model_dump(mode="json")
 
     return app
