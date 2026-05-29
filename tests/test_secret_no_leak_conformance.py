@@ -83,3 +83,16 @@ def test_bare_redactor_seeds_from_process_registry():
     # After release the process registry is clean again, so a fresh bare Redactor no
     # longer force-masks the value (keeps the global state isolated across tests).
     assert Redactor().redact_text(f"plain {LEAK} text") == f"plain {LEAK} text"
+
+
+def test_process_registry_isolation_invariant():
+    # Locks the safety invariant behind Redactor's process-global seeding: the registry is
+    # empty by default (a bare Redactor masks nothing it wasn't given), and a scoped
+    # register/release round-trip leaves no residue. A leak here means global state is
+    # bleeding across tests and silently force-masking unrelated output.
+    arbitrary = "NOT-A-SECRET-7yQ2"  # pragma: allowlist secret
+    assert Redactor().redact_text(arbitrary) == arbitrary
+    PROCESS_SECRET_REGISTRY.register(arbitrary, scope="isolation-probe")
+    assert arbitrary not in Redactor().redact_text(arbitrary)  # masked while registered
+    PROCESS_SECRET_REGISTRY.release("isolation-probe")
+    assert Redactor().redact_text(arbitrary) == arbitrary  # no residue after release

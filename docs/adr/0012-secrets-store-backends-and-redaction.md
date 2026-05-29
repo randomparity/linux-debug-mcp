@@ -67,6 +67,12 @@ viable alternatives, recorded below.
   keyring tests fake the `get` seam so they run without it.
 - The `SecretRegistry` holds resolved values in memory for the process lifetime. This is
   the accepted cost of guaranteed masking; values are never persisted.
+- The store, backends, and the `LDM_SECRETS_EXTERNAL_CMD` knob are infrastructure ahead of
+  their first consumer: the server wires `definitions=[]` and no local transport populates
+  `secret_refs`, so nothing resolves a credential yet. The keyring/external backends become
+  reachable only once a credential-consuming transport (the future remote transport) and a
+  server-side `SecretReference` definition source land. Until then a supplied ref fails
+  loudly (`unknown secret reference`) rather than silently — the knob is inert, not a trap.
 
 ## Considered & rejected
 
