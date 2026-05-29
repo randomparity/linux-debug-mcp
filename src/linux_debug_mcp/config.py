@@ -116,6 +116,10 @@ ALLOWED_DEBUG_OPERATIONS = [
     # DebugProfile in the request) — it is never gated (§5.6 rule 3).
     "debug.introspect.from_vmcore",
     "debug.introspect.from_vmcore_helper",
+    # ADR 0011 / #56: capability token (NOT an MCP tool) gating allow_write=true on the live
+    # introspect path. Only ever passed to `_ensure_debug_operation_enabled`, never registered
+    # as a tool. A read-only profile narrows `enabled_operations` to exclude it to refuse writes.
+    "debug.introspect.write",
 ]
 
 # Spec §5.2 step 4a: soft cap on introspect step records per run. The handler enforces this
@@ -135,6 +139,12 @@ TRANSPORT_OPERATIONS = [
 TRANSPORT_DESTRUCTIVE_PERMISSIONS = {
     "transport.inject_break": ["drop target kernel into the debugger"],
 }
+# ADR 0011 / #56: per-call ack required for live introspect write mode (allow_write=true),
+# mirroring TRANSPORT_DESTRUCTIVE_PERMISSIONS. Only the live `debug.introspect.run` path has a
+# writable target; the vmcore path rejects allow_write upstream and so has no entry here.
+INTROSPECT_DESTRUCTIVE_PERMISSIONS = {
+    "debug.introspect.run": ["mutate live kernel state via drgn write APIs"],
+}
 
 
 def validate_transport_operation(operation: str) -> str:
@@ -143,12 +153,20 @@ def validate_transport_operation(operation: str) -> str:
     return operation
 
 
-def missing_destructive_permissions(operation: str, acknowledged: list[str]) -> list[str]:
-    """Return the destructive permissions a transport operation requires that the caller has not
+def missing_destructive_permissions(
+    operation: str,
+    acknowledged: list[str],
+    *,
+    registry: dict[str, list[str]] | None = None,
+) -> list[str]:
+    """Return the destructive permissions an operation requires that the caller has not
     acknowledged. A non-destructive (or unknown) operation requires nothing, so the list is empty.
-    The tool layer refuses the call when this is non-empty so an agent never drops a kernel into
-    the debugger (or runs any future destructive transport op) without explicit acknowledgement."""
-    required = TRANSPORT_DESTRUCTIVE_PERMISSIONS.get(operation, [])
+    The tool layer refuses the call when this is non-empty so an agent never performs a destructive
+    operation (drop a kernel into the debugger, mutate live kernel state) without explicit
+    acknowledgement. ``registry`` selects the permission table (defaults to
+    ``TRANSPORT_DESTRUCTIVE_PERMISSIONS``; introspect passes ``INTROSPECT_DESTRUCTIVE_PERMISSIONS``)."""
+    table = registry if registry is not None else TRANSPORT_DESTRUCTIVE_PERMISSIONS
+    required = table.get(operation, [])
     acknowledged_set = set(acknowledged)
     return [permission for permission in required if permission not in acknowledged_set]
 
