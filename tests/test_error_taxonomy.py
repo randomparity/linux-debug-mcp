@@ -4,13 +4,13 @@ from _layer4_fakes import (
     FakeQemuTransport,
     build_txn,
 )
+from _secrets_helpers import make_env_secrets as EnvSecretsResolver
 
 from linux_debug_mcp.coordination.lease import ConsoleLeaseManager
 from linux_debug_mcp.coordination.registry import SessionRegistry
 from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import ErrorCategory
 from linux_debug_mcp.seams.guard import InProcessStopCapableGuard
-from linux_debug_mcp.seams.secrets import EnvSecretsResolver
 from linux_debug_mcp.server import transport_open_handler
 
 

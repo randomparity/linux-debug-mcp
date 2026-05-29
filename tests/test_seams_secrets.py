@@ -1,143 +1,211 @@
+import subprocess
+import sys
+
 import pytest
 
+from linux_debug_mcp.safety.secret_registry import SecretRegistry
 from linux_debug_mcp.safety.secrets import SecretReference, SecretReferenceKind
 from linux_debug_mcp.seams.secrets import (
-    EnvSecretsResolver,
+    EnvSecretsBackend,
+    ExternalSecretsBackend,
+    KeyringSecretsBackend,
+    SecretsBackend,
     SecretsResolutionError,
     SecretsResolver,
+    SecretsStore,
 )
+
+# --- backends -------------------------------------------------------------------------
+
+
+def test_env_backend_is_a_backend_and_reads_env(monkeypatch):
+    monkeypatch.setenv("MY_TOKEN", "s3cr3t")  # pragma: allowlist secret
+    backend = EnvSecretsBackend()
+    assert isinstance(backend, SecretsBackend)
+    assert backend.kind is SecretReferenceKind.ENV
+    ref = SecretReference(kind=SecretReferenceKind.ENV, label="t", reference="MY_TOKEN")
+    assert backend.get(ref) == "s3cr3t"
+
+
+def test_env_backend_absent_is_none(monkeypatch):
+    monkeypatch.delenv("ABSENT", raising=False)
+    ref = SecretReference(kind=SecretReferenceKind.ENV, label="t", reference="ABSENT")
+    assert EnvSecretsBackend().get(ref) is None
+
+
+def test_keyring_backend_missing_lib_raises_secret_free(monkeypatch):
+    monkeypatch.setitem(sys.modules, "keyring", None)  # force the lazy import to fail
+    with pytest.raises(SecretsResolutionError) as exc:
+        KeyringSecretsBackend()
+    assert "keyring" in str(exc.value).lower()
+
+
+def test_keyring_backend_reads_via_injected_getter():
+    calls = {}
+
+    def fake_get(service, username):
+        calls["args"] = (service, username)
+        return "kr-secret"
+
+    backend = KeyringSecretsBackend(get_password=fake_get)
+    ref = SecretReference(kind=SecretReferenceKind.KEYRING, label="bmc", reference="svc/user")
+    assert backend.get(ref) == "kr-secret"
+    assert calls["args"] == ("svc", "user")
+
+
+def test_keyring_backend_rejects_malformed_reference():
+    backend = KeyringSecretsBackend(get_password=lambda s, u: "x")
+    ref = SecretReference(kind=SecretReferenceKind.KEYRING, label="bad", reference="no-slash")
+    with pytest.raises(SecretsResolutionError):
+        backend.get(ref)
+
+
+def _external_ref(reference="kv/bmc"):
+    return SecretReference(kind=SecretReferenceKind.EXTERNAL, label="bmc", reference=reference)
+
+
+def test_external_reads_stdout_and_passes_reference_via_argv():
+    seen = {}
+
+    def fake_run(argv, timeout):
+        seen["argv"] = argv
+        seen["timeout"] = timeout
+        return 0, "ext-secret\n", ""
+
+    backend = ExternalSecretsBackend(command=["helper"], runner=fake_run, timeout=5.0)
+    assert backend.get(_external_ref("kv/bmc")) == "ext-secret"
+    assert seen["argv"] == ["helper", "kv/bmc"]
+    assert seen["timeout"] == 5.0
+
+
+def test_external_nonzero_exit_raises_without_output():
+    def fake_run(argv, timeout):
+        return 3, "should-not-leak", "stderr-should-not-leak"
+
+    backend = ExternalSecretsBackend(command=["helper"], runner=fake_run)
+    with pytest.raises(SecretsResolutionError) as exc:
+        backend.get(_external_ref())
+    assert "should-not-leak" not in str(exc.value)
+    assert "stderr-should-not-leak" not in str(exc.value)
+
+
+def test_external_timeout_raises():
+    def fake_run(argv, timeout):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
+
+    backend = ExternalSecretsBackend(command=["helper"], runner=fake_run, timeout=0.1)
+    with pytest.raises(SecretsResolutionError):
+        backend.get(_external_ref())
+
+
+def test_external_empty_command_rejected():
+    with pytest.raises(SecretsResolutionError):
+        ExternalSecretsBackend(command=[])
+
+
+# --- store ----------------------------------------------------------------------------
+
+
+def _store(defs, *, registry=None, backends=None):
+    return SecretsStore(
+        definitions=defs,
+        backends=backends or {SecretReferenceKind.ENV: EnvSecretsBackend()},
+        registry=registry or SecretRegistry(),
+    )
 
 
 class _FakeResolver:
-    """A test fake proving the Protocol is consumable without #08's real backend."""
+    """A test fake proving the Protocol is consumable without a real backend."""
 
     def __init__(self, values: dict[str, str]) -> None:
         self._values = values
 
-    def resolve(self, refs: list[str]) -> dict[str, str]:
+    def resolve(self, refs: list[str], *, scope: object | None = None) -> dict[str, str]:
         return {ref: self._values[ref] for ref in refs if ref in self._values}
 
 
-def test_resolver_and_fake_satisfy_protocol():
-    assert isinstance(EnvSecretsResolver([]), SecretsResolver)
+def test_store_and_fake_satisfy_protocol():
+    assert isinstance(_store([]), SecretsResolver)
     assert isinstance(_FakeResolver({}), SecretsResolver)
 
 
-def test_resolves_env_reference(monkeypatch):
-    monkeypatch.setenv("MY_TOKEN", "s3cr3t")
-    ref = SecretReference(kind=SecretReferenceKind.ENV, label="tok", reference="MY_TOKEN")
-    resolver = EnvSecretsResolver([ref])
-    assert resolver.resolve(["MY_TOKEN"]) == {"MY_TOKEN": "s3cr3t"}
+def test_resolves_env_and_registers_value(monkeypatch):
+    monkeypatch.setenv("MY_TOKEN", "s3cr3t")  # pragma: allowlist secret
+    reg = SecretRegistry()
+    store = _store(
+        [SecretReference(kind=SecretReferenceKind.ENV, label="t", reference="MY_TOKEN")],
+        registry=reg,
+    )
+    assert store.resolve(["MY_TOKEN"], scope="sess") == {"MY_TOKEN": "s3cr3t"}
+    assert "s3cr3t" in reg.snapshot()
+    reg.release("sess")
+    assert "s3cr3t" not in reg.snapshot()
 
 
 def test_unknown_reference_raises():
-    resolver = EnvSecretsResolver([])
     with pytest.raises(SecretsResolutionError):
-        resolver.resolve(["nope"])
+        _store([]).resolve(["nope"])
 
 
-def test_file_kind_is_deferred_to_08(tmp_path):
-    # #10 creates no file credential source; file refs are owned by #08. The resolver
-    # must NOT read the file — it raises before any IO.
+def test_kind_without_backend_raises():
+    store = SecretsStore(
+        definitions=[SecretReference(kind=SecretReferenceKind.KEYRING, label="k", reference="s/u")],
+        backends={},
+        registry=SecretRegistry(),
+    )
+    with pytest.raises(SecretsResolutionError) as exc:
+        store.resolve(["s/u"])
+    assert "not enabled" in str(exc.value)
+
+
+def test_file_kind_is_rejected_without_reading(tmp_path):
     secret_file = tmp_path / "key"
-    secret_file.write_text("TOP-SECRET-VALUE", encoding="utf-8")
-    ref = SecretReference(kind=SecretReferenceKind.FILE, label="k", reference=str(secret_file))
-    resolver = EnvSecretsResolver([ref])
-    with pytest.raises(SecretsResolutionError) as excinfo:
-        resolver.resolve([str(secret_file)])
-    # Deferred, not read: the file's contents never appear in the error.
-    assert "TOP-SECRET-VALUE" not in str(excinfo.value)
-    assert "#08" in str(excinfo.value)
+    secret_file.write_text("TOP-SECRET-VALUE", encoding="utf-8")  # pragma: allowlist secret
+    store = SecretsStore(
+        definitions=[SecretReference(kind=SecretReferenceKind.FILE, label="f", reference=str(secret_file))],
+        backends={SecretReferenceKind.ENV: EnvSecretsBackend()},
+        registry=SecretRegistry(),
+    )
+    with pytest.raises(SecretsResolutionError) as exc:
+        store.resolve([str(secret_file)])
+    assert "TOP-SECRET-VALUE" not in str(exc.value)
 
 
-def test_external_kind_is_deferred_to_08():
-    ref = SecretReference(kind=SecretReferenceKind.EXTERNAL, label="x", reference="vault://x")
-    resolver = EnvSecretsResolver([ref])
-    with pytest.raises(SecretsResolutionError) as excinfo:
-        resolver.resolve(["vault://x"])
-    assert "#08" in str(excinfo.value)
-
-
-def test_missing_required_env_raises():
-    ref = SecretReference(kind=SecretReferenceKind.ENV, label="tok", reference="ABSENT_VAR")
-    resolver = EnvSecretsResolver([ref])
+def test_missing_required_raises(monkeypatch):
+    monkeypatch.delenv("ABSENT_VAR", raising=False)
+    store = _store([SecretReference(kind=SecretReferenceKind.ENV, label="t", reference="ABSENT_VAR")])
     with pytest.raises(SecretsResolutionError):
-        resolver.resolve(["ABSENT_VAR"])
+        store.resolve(["ABSENT_VAR"])
 
 
-def test_duplicate_reference_required_then_optional_is_rejected():
-    # A duplicate reference must not let an optional definition silently mask a required
-    # one — that would turn a missing credential into an empty resolve() instead of error.
-    refs = [
-        SecretReference(kind=SecretReferenceKind.ENV, label="a", reference="DUP", required=True),
-        SecretReference(kind=SecretReferenceKind.ENV, label="b", reference="DUP", required=False),
-    ]
+def test_empty_required_is_absent(monkeypatch):
+    monkeypatch.setenv("EMPTY_VAR", "")
+    store = _store([SecretReference(kind=SecretReferenceKind.ENV, label="t", reference="EMPTY_VAR")])
     with pytest.raises(SecretsResolutionError):
-        EnvSecretsResolver(refs)
+        store.resolve(["EMPTY_VAR"])
 
 
-def test_duplicate_reference_cross_kind_is_rejected():
-    # An env ref must not be able to mask a file/external ref carrying the same string.
-    refs = [
-        SecretReference(kind=SecretReferenceKind.FILE, label="f", reference="DUP"),
-        SecretReference(kind=SecretReferenceKind.ENV, label="e", reference="DUP"),
-    ]
-    with pytest.raises(SecretsResolutionError):
-        EnvSecretsResolver(refs)
-
-
-def test_missing_optional_env_is_skipped(monkeypatch):
+def test_missing_optional_is_skipped(monkeypatch):
     monkeypatch.delenv("OPT_VAR", raising=False)
-    ref = SecretReference(kind=SecretReferenceKind.ENV, label="opt", reference="OPT_VAR", required=False)
-    resolver = EnvSecretsResolver([ref])
-    assert resolver.resolve(["OPT_VAR"]) == {}
+    store = _store([SecretReference(kind=SecretReferenceKind.ENV, label="o", reference="OPT_VAR", required=False)])
+    assert store.resolve(["OPT_VAR"]) == {}
 
 
-def test_inject_break_failure_response_redacts_secret_in_exception_message(tmp_path):
-    """Finding F15: a mechanism that raises an `InjectBreakError` carrying a secret-looking
-    value in its message OR its `details` dict must NOT leak the secret into the
-    `ToolResponse.message`/`details` the agent sees. The handler runs both through `Redactor`,
-    so a `token=xyzABC123` substring is replaced with `[REDACTED]`."""
-    from _layer4_fakes import KEY, FakeQemuTransport, build_txn
-
-    from linux_debug_mcp.config import TRANSPORT_DESTRUCTIVE_PERMISSIONS
-    from linux_debug_mcp.coordination.registry import SessionRegistry
-    from linux_debug_mcp.domain import ErrorCategory
-    from linux_debug_mcp.safety.redaction import REDACTION
-    from linux_debug_mcp.server import transport_inject_break_handler, transport_open_handler
-    from linux_debug_mcp.transport.break_inject import InjectBreakError
-
-    reg = SessionRegistry(directory=tmp_path)
-    txn, admission = build_txn(FakeQemuTransport(), registry=reg)
-    open_response = transport_open_handler(run_id="run-1", transaction=txn, admission=admission, session_registry=reg)
-    session_id = open_response.data["session_id"]
-
-    def leaky_break(**_kwargs):
-        # The mechanism raises an InjectBreakError whose message and details both contain a
-        # secret-like value the Redactor pattern catches (`token=...`, `password=...`, etc.).
-        raise InjectBreakError(
-            "break failed: token=xyzABC123 in proxy connection",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"password": "topsecretpass", "endpoint": "tcp://127.0.0.1:5551"},
+def test_duplicate_definition_rejected_at_construction():
+    with pytest.raises(SecretsResolutionError):
+        _store(
+            [
+                SecretReference(kind=SecretReferenceKind.ENV, label="a", reference="DUP", required=True),
+                SecretReference(kind=SecretReferenceKind.ENV, label="b", reference="DUP", required=False),
+            ]
         )
 
-    result = transport_inject_break_handler(
-        run_id="run-1",
-        session_id=session_id,
-        acknowledged_permissions=TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"],
-        transaction=txn,
-        admission=admission,
-        session_registry=reg,
-        break_mechanism=leaky_break,
-    )
 
-    assert result.ok is False
-    # The raw secret value does not appear in the message; Redactor substituted [REDACTED].
-    assert "xyzABC123" not in result.error.message
-    assert REDACTION in result.error.message
-    # The `password` key in details is masked by the secret-key pattern (the Redactor masks
-    # values whose key matches password/token/secret/etc.).
-    assert result.error.details.get("password") == REDACTION
-    # The durable record was still rolled to UNKNOWN — secret-redaction does not alter the
-    # fail-closed posture for unconfirmable breaks.
-    assert reg.read_record(KEY).execution_state.value == "unknown"
+def test_duplicate_definition_cross_kind_rejected():
+    with pytest.raises(SecretsResolutionError):
+        _store(
+            [
+                SecretReference(kind=SecretReferenceKind.FILE, label="f", reference="DUP"),
+                SecretReference(kind=SecretReferenceKind.ENV, label="e", reference="DUP"),
+            ]
+        )

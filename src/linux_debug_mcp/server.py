@@ -68,7 +68,7 @@ from linux_debug_mcp.domain import (
     ToolResponse,
 )
 from linux_debug_mcp.introspect_helpers import HELPER_REGISTRY, HelperSpec
-from linux_debug_mcp.logging import configure_logging
+from linux_debug_mcp.logging import SECRET_REGISTRY, configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
 from linux_debug_mcp.prereqs.drgn_probe import (
     PROBE_SCRIPT,
@@ -135,6 +135,7 @@ from linux_debug_mcp.safety.paths import (
 )
 from linux_debug_mcp.safety.redaction import Redactor
 from linux_debug_mcp.safety.runtime_locks import private_runtime_registry_dir
+from linux_debug_mcp.safety.secrets import SecretReferenceKind
 from linux_debug_mcp.seams.break_policy import ReferenceBreakPolicy
 from linux_debug_mcp.seams.guard import GuardConflict, InProcessStopCapableGuard
 from linux_debug_mcp.seams.lifecycle import (
@@ -143,7 +144,7 @@ from linux_debug_mcp.seams.lifecycle import (
     LifecycleEvent,
     LifecycleKind,
 )
-from linux_debug_mcp.seams.secrets import EnvSecretsResolver
+from linux_debug_mcp.seams.secrets import EnvSecretsBackend, SecretsStore
 from linux_debug_mcp.seams.target import (
     BreakHint,
     ConsoleKind,
@@ -5822,7 +5823,9 @@ def _build_transport_machinery(
         registry=session_registry,
         guard=InProcessStopCapableGuard(),
         leases=ConsoleLeaseManager(),
-        secrets=EnvSecretsResolver([]),
+        secrets=SecretsStore(
+            definitions=[], backends={SecretReferenceKind.ENV: EnvSecretsBackend()}, registry=SECRET_REGISTRY
+        ),
         break_policy=ReferenceBreakPolicy(),
         transports=transports,
     )
