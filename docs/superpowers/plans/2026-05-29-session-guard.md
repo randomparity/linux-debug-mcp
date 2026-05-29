@@ -705,7 +705,7 @@ In `src/linux_debug_mcp/server.py`, add `session_guard: SessionGuard | None = No
                         )
 ```
 
-Then, after the successful `result = provider.start_session(...)` block and the `transport_session.session_id` is known (after line ~4154 where `details["transport_session_id"]` is set, still inside the `with store.debug_lock`), add a post-attach verify that tears down on failure:
+Then add a post-attach verify that tears down on failure. **Placement is load-bearing:** it MUST run *after* `details["transport_session_id"]` is set (~`4157`) but *before* the `terminal = StepResult(...)` / `store.record_step_result(run_id, terminal, ...)` at `4158-4165` that persists the SUCCEEDED debug step. If `verify_attached` raises, the handler tears the session down and returns `READINESS_FAILURE` **without writing any SUCCEEDED (or FAILED) debug step** — otherwise the manifest would claim a live debug session that teardown just deleted. Insert between `4157` and `4158`:
 
 ```python
             if session_guard is not None and transport_session is not None:
@@ -734,7 +734,7 @@ Then, after the successful `result = provider.start_session(...)` block and the 
                     )
 ```
 
-Then replace the existing attach-error recovery in the `except ProviderDebugError` block (line ~4132) — change the bare `transaction.close(...)` call to route through the guard when one is wired:
+Then, in the existing `except ProviderDebugError` block (~`4122-4153`), **replace ONLY the existing close call** — the current `if transport_session is not None and transaction is not None: with contextlib.suppress(Exception): transaction.close(transport_session.session_id, force=False)` at ~`4132-4134`. **Everything else in that except block is unchanged:** the `exc_details = dict(exc.details)` build, `exc_details["transport_session_id"] = transport_session.session_id`, the FAILED `StepResult` + `store.record_step_result(run_id, failed, replace_succeeded=replace_existing_debug)`, and the `Redactor`-scrubbed `ToolResponse.failure(category=exc.category, ...)` return MUST all remain. Drop-in replacement for the three close lines:
 
 ```python
                 if transport_session is not None and transaction is not None:
@@ -754,6 +754,8 @@ Then replace the existing attach-error recovery in the `except ProviderDebugErro
                         with contextlib.suppress(Exception):
                             transaction.close(sid, force=False)
 ```
+
+The guard teardown replaces only the recovery action; the FAILED-step persistence and redacted response that follow it in the except block are retained verbatim.
 
 - [ ] **Step 4: Add the `session_guard` kwarg + clean teardown to `debug_end_session_handler`**
 
