@@ -58,10 +58,13 @@ def _install_stub_drgn(
                 raise AttributeError("main_module().build_id unavailable")
             return SimpleNamespace(build_id=main_module_build_id)
 
-    def _make_program(*_a: Any, **_k: Any) -> _StubProg:
-        return _StubProg()
+        def write(self, *_a: Any, **_k: Any) -> None:
+            # Base write succeeds; the #56 guard overrides this in a subclass.
+            return None
 
-    drgn_module.Program = _make_program  # type: ignore[attr-defined]
+    # drgn.Program must be a *subclassable class* — the #56 write-guard renders
+    # `class _li_GuardedProgram(drgn.Program)` for the default allow_write=false.
+    drgn_module.Program = _StubProg  # type: ignore[attr-defined]
 
     helpers_pkg = types.ModuleType("drgn.helpers")
     helpers_linux = types.ModuleType("drgn.helpers.linux")
@@ -597,3 +600,84 @@ def test_render_wrapper_skeleton_caps_override_visible() -> None:
         caps={"per_emit_bytes": 4 * 1024 * 1024},
     )
     assert '"per_emit_bytes": 4194304' in rendered
+
+
+# ---------------------------------------------------------------------------
+# #56 write-mode guard (drgn.Program subclass)
+# ---------------------------------------------------------------------------
+
+
+def _exec_rendered(rendered: str) -> tuple[str, int]:
+    buf = StringIO()
+    code = 0
+    ns: dict[str, Any] = {"__name__": "__wrapper__", "__builtins__": builtins}
+    with redirect_stdout(buf):
+        try:
+            exec(compile(rendered, "<wrapper>", "exec"), ns)
+        except SystemExit as exc:
+            code = int(exc.code) if exc.code is not None else 0
+    return buf.getvalue(), code
+
+
+def test_wrapper_write_guard_blocks_write_when_allow_write_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_stub_drgn(monkeypatch, main_module_build_id=bytes.fromhex(EXPECTED_BUILD_ID))
+    rendered = render_wrapper(
+        user_script="prog.write(0, b'x')",
+        expected_build_id=EXPECTED_BUILD_ID,
+        call_id=CALL_ID,
+        allow_write=False,
+    )
+    stdout, code = _exec_rendered(rendered)
+    assert code == 6
+    payload = json.loads(stdout)
+    assert payload["outcome"]["status"] == "write_mode_disabled"
+
+
+def test_wrapper_write_allowed_when_allow_write_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_stub_drgn(monkeypatch, main_module_build_id=bytes.fromhex(EXPECTED_BUILD_ID))
+    rendered = render_wrapper(
+        user_script="prog.write(0, b'x'); emit({'wrote': True})",
+        expected_build_id=EXPECTED_BUILD_ID,
+        call_id=CALL_ID,
+        allow_write=True,
+    )
+    stdout, code = _exec_rendered(rendered)
+    assert code == 6
+    payload = json.loads(stdout)
+    assert payload["outcome"] == {"status": "ok"}
+    assert payload["emits"] == [{"wrote": True}]
+
+
+def test_wrapper_read_only_script_identical_across_modes(monkeypatch: pytest.MonkeyPatch) -> None:
+    # AC#1: a read-only script behaves identically false-vs-true (the guard is a
+    # real Program subclass, so reads are native in both modes).
+    _install_stub_drgn(monkeypatch, main_module_build_id=bytes.fromhex(EXPECTED_BUILD_ID))
+    guarded = render_wrapper(
+        user_script="emit({'pid': 1})",
+        expected_build_id=EXPECTED_BUILD_ID,
+        call_id=CALL_ID,
+        allow_write=False,
+    )
+    out_false, code_false = _exec_rendered(guarded)
+    plain = render_wrapper(
+        user_script="emit({'pid': 1})",
+        expected_build_id=EXPECTED_BUILD_ID,
+        call_id=CALL_ID,
+        allow_write=True,
+    )
+    out_true, code_true = _exec_rendered(plain)
+    assert code_false == code_true == 6
+    assert json.loads(out_false)["emits"] == json.loads(out_true)["emits"] == [{"pid": 1}]
+    assert json.loads(out_false)["outcome"] == json.loads(out_true)["outcome"] == {"status": "ok"}
+
+
+def test_render_wrapper_threads_allow_write_setup() -> None:
+    guarded = render_wrapper(
+        user_script="pass", expected_build_id=EXPECTED_BUILD_ID, call_id=CALL_ID, allow_write=False
+    )
+    plain = render_wrapper(user_script="pass", expected_build_id=EXPECTED_BUILD_ID, call_id=CALL_ID, allow_write=True)
+    assert "_li_GuardedProgram" in guarded
+    assert "_li_GuardedProgram" not in plain
+    assert "_li_program_class = drgn.Program" in plain
