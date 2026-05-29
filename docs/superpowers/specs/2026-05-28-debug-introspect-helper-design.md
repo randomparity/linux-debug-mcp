@@ -355,6 +355,7 @@ narrow the query. An agent checking "did I get everything?" reads both.
 | `unknown_helper` | CONFIGURATION_ERROR | `name` not in registry |
 | `helper_args_invalid` | CONFIGURATION_ERROR | `args` fails `args_model` validation |
 | `helper_schema_drift` | INFRASTRUCTURE_FAILURE | not exactly one emit, or emit fails `output_model` |
+| `helper_script_error` | INFRASTRUCTURE_FAILURE | curated drgn script raised on the target (carries redacted `error_type`/`error_message` from the wrapper outcome) |
 | (inherited) | — | every failure mode of #51's core: admission/HALTED, provenance mismatch, drgn open/skew, timeout, cap overflow, wrapper crash |
 
 ### 6.4 Gating

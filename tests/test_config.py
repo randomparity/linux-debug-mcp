@@ -141,6 +141,7 @@ def test_default_debug_profile_matches_sprint_4_policy() -> None:
         "debug.end_session",
         "transport.inject_break",
         "debug.introspect.run",
+        "debug.introspect.helper",
     ]
 
 

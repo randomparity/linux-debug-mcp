@@ -1344,3 +1344,130 @@ def test_run_uses_runner_default_caps(tmp_path: Path, monkeypatch: pytest.Monkey
     assert response.ok is True, response.error
     assert captured["caps"] is None  # run opts into no override → runner defaults
     assert captured["args_json"] == "{}"  # run passes empty args
+
+
+# ---------------------------------------------------------------------------
+# Step F: debug.introspect.helper handler tests
+# ---------------------------------------------------------------------------
+
+
+def _helper_ssh_result(emit_obj: dict) -> SshCommandResult:
+    """Build a wrapper-stdout envelope shaped like _happy_ssh_result() but with
+    a caller-supplied emit.  Copies the full envelope so tests see realistic JSON."""
+    body = {
+        "call_id": "0" * 32,
+        "build_id": VALID_BUILD_ID,
+        "outcome": {"status": "ok"},
+        "emits": [emit_obj],
+        "user_stdout": "",
+        "prelude_ms": 5,
+        "truncated": {
+            "emits": False,
+            "user_stdout": False,
+            "traceback": False,
+            "total_json": False,
+            "per_emit_size": False,
+            "error_message": False,
+        },
+    }
+    return SshCommandResult(exit_status=6, stdout=json.dumps(body), stderr="")
+
+
+def test_helper_success_returns_typed_result(tmp_path: Path) -> None:
+    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
+    from linux_debug_mcp.server import debug_introspect_helper_handler
+
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    emit = {
+        "release": "6.8",
+        "version": "#1",
+        "machine": "x86_64",
+        "nodename": "vm",
+        "boot_cmdline": "ro",
+        "cpus_online": 2,
+        "mem_total_pages": 100,
+    }
+    resp = debug_introspect_helper_handler(
+        DebugIntrospectHelperRequest(run_id=run_id, target_ref="local-qemu", name="sysinfo"),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=FakeSshRunner(results=[_helper_ssh_result(emit)]),
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert resp.ok is True, resp.error
+    assert resp.data["helper"] == "sysinfo"
+    assert resp.data["result"]["release"] == "6.8"
+    assert "emits" not in resp.data
+    steps = store.load_manifest(run_id).step_results
+    assert any(n.startswith("introspect:") and s.status.name == "SUCCEEDED" for n, s in steps.items())
+
+
+def test_helper_malformed_emit_records_failed_step(tmp_path: Path) -> None:
+    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
+    from linux_debug_mcp.server import debug_introspect_helper_handler
+
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    resp = debug_introspect_helper_handler(
+        DebugIntrospectHelperRequest(run_id=run_id, target_ref="local-qemu", name="sysinfo"),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=FakeSshRunner(results=[_helper_ssh_result({"wrong": "shape"})]),
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert resp.ok is False
+    assert resp.error.details["code"] == "helper_schema_drift"
+    steps = store.load_manifest(run_id).step_results
+    assert any(n.startswith("introspect:") and s.status.name == "FAILED" for n, s in steps.items())
+
+
+def test_helper_gating_enforced(tmp_path: Path) -> None:
+    from linux_debug_mcp.config import DebugProfile
+    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
+    from linux_debug_mcp.server import debug_introspect_helper_handler
+
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, _ = _profiles()
+    resp = debug_introspect_helper_handler(
+        DebugIntrospectHelperRequest(run_id=run_id, target_ref="local-qemu", name="sysinfo"),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default", enabled_operations=[])},
+        ssh_runner=FakeSshRunner(),
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert resp.ok is False
+    assert resp.error.details["code"] == "operation_disabled"
+
+
+def test_helper_unknown_name(tmp_path: Path) -> None:
+    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
+    from linux_debug_mcp.server import debug_introspect_helper_handler
+
+    resp = debug_introspect_helper_handler(
+        DebugIntrospectHelperRequest(run_id="missing", target_ref="t", name="nope"),
+        artifact_root=tmp_path,
+    )
+    assert resp.ok is False
+    assert resp.error.details["code"] == "unknown_helper"
+
+
+def test_helper_args_invalid(tmp_path: Path) -> None:
+    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
+    from linux_debug_mcp.server import debug_introspect_helper_handler
+
+    resp = debug_introspect_helper_handler(
+        DebugIntrospectHelperRequest(run_id="missing", target_ref="t", name="tasks", args={"limit": "lots"}),
+        artifact_root=tmp_path,
+    )
+    assert resp.ok is False
+    assert resp.error.details["code"] == "helper_args_invalid"

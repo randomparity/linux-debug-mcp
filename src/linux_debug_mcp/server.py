@@ -54,6 +54,7 @@ from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import (
     ArtifactRef,
     DebugIntrospectCheckPrerequisitesRequest,
+    DebugIntrospectHelperRequest,
     DebugIntrospectRunRequest,
     ErrorCategory,
     PrerequisiteCheck,
@@ -63,6 +64,8 @@ from linux_debug_mcp.domain import (
     StepStatus,
     ToolResponse,
 )
+from linux_debug_mcp.introspect_helpers import HELPER_REGISTRY
+from linux_debug_mcp.introspect_helpers.base import HelperSpec
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
 from linux_debug_mcp.prereqs.drgn_probe import (
@@ -3325,6 +3328,126 @@ def debug_introspect_run_handler(
     )
 
 
+HELPER_CAP_PROFILE: dict[str, int] = {
+    "per_emit_bytes": 4 * 1024 * 1024,
+    "emits": 4,
+    "total_json": 8 * 1024 * 1024,
+}
+
+
+def _make_helper_post_validator(spec: HelperSpec) -> IntrospectPostValidator:
+    """Spec §3.3/§6: validate the single redacted emit into the helper's
+    output_model; keep the manifest step status in agreement with the response.
+    """
+
+    def _validate(redacted_payload: dict[str, Any]) -> PostValidatorVerdict:
+        details_stub: dict[str, Any] = {"helper": spec.name, "version": spec.version}
+        # A drgn script that RAISED is a script error, NOT schema drift —
+        # surface helper_script_error with the redacted traceback so the
+        # primary diagnostic is in the response, not buried on disk.
+        outcome = redacted_payload.get("outcome") if isinstance(redacted_payload, dict) else None
+        outcome_status = outcome.get("status") if isinstance(outcome, dict) else None
+        if outcome_status == "error":
+            etype = outcome.get("error_type") if isinstance(outcome, dict) else None
+            emsg = outcome.get("error_message") if isinstance(outcome, dict) else None
+            return PostValidatorVerdict(
+                ok=False,
+                failure_code="helper_script_error",
+                failure_message=_redact_and_truncate(Redactor(), f"{etype}: {emsg}", cap=512),
+                failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                extra_step_details={**details_stub, "error_type": etype},
+            )
+        emits = redacted_payload.get("emits") if isinstance(redacted_payload, dict) else None
+        if not isinstance(emits, list) or len(emits) != 1:
+            return PostValidatorVerdict(
+                ok=False,
+                failure_code="helper_schema_drift",
+                failure_message=(f"expected exactly one emit, got {0 if not isinstance(emits, list) else len(emits)}"),
+                failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                extra_step_details=details_stub,
+            )
+        try:
+            model = spec.output_model.model_validate(emits[0])
+        except ValidationError as exc:
+            return PostValidatorVerdict(
+                ok=False,
+                failure_code="helper_schema_drift",
+                failure_message=_redact_and_truncate(Redactor(), str(exc), cap=512),
+                failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                extra_step_details=details_stub,
+            )
+        return PostValidatorVerdict(
+            ok=True,
+            extra_step_details=details_stub,
+            extra_response_data={
+                "helper": spec.name,
+                "version": spec.version,
+                "result": model.model_dump(mode="json"),
+            },
+        )
+
+    return _validate
+
+
+def debug_introspect_helper_handler(
+    request: DebugIntrospectHelperRequest,
+    *,
+    artifact_root: Path,
+    target_profiles: dict[str, TargetProfile] | None = None,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    ssh_runner: SshRunner | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> ToolResponse:
+    """Spec §6. Resolve a curated helper, validate its args, and run its drgn
+    script through the shared core under the raised helper cap profile.
+    """
+    spec = HELPER_REGISTRY.get(request.name)
+    if spec is None:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=request.run_id,
+            message=f"unknown helper {request.name!r}; valid: {sorted(HELPER_REGISTRY)}",
+            details={"code": "unknown_helper", "valid": sorted(HELPER_REGISTRY)},
+        )
+    try:
+        validated_args = spec.args_model.model_validate(request.args)
+    except ValidationError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=request.run_id,
+            message=_redact_and_truncate(Redactor(), str(exc), cap=512),
+            details={"code": "helper_args_invalid"},
+        )
+    run_request = DebugIntrospectRunRequest(
+        run_id=request.run_id,
+        target_ref=request.target_ref,
+        script=spec.script,
+        timeout_seconds=request.timeout_seconds,
+        allow_write=False,
+        debug_profile=request.debug_profile,
+        target_profile=request.target_profile,
+        rootfs_profile=request.rootfs_profile,
+        args=validated_args.model_dump(mode="json"),
+    )
+    return _execute_introspect_call(
+        run_request,
+        artifact_root=artifact_root,
+        target_profiles=target_profiles,
+        rootfs_profiles=rootfs_profiles,
+        debug_profiles=debug_profiles,
+        ssh_runner=ssh_runner,
+        admission=admission,
+        session_registry=session_registry,
+        clock=clock,
+        operation_name="debug.introspect.helper",
+        caps=HELPER_CAP_PROFILE,
+        post_validator=_make_helper_post_validator(spec),
+    )
+
+
 def _require_snapshot(admission: AdmissionService, target_key: TargetKey) -> TargetSnapshot:
     """Read the authoritative snapshot for a target, raising `snapshot_missing` when boot has
     not published one yet. `stale_handle` means a caller's handle/request is bound to a
@@ -5685,6 +5808,35 @@ def create_app(
             rootfs_profile=rootfs_profile,
         )
         return debug_introspect_run_handler(
+            request,
+            artifact_root=Path(artifact_root),
+            admission=admission_service,
+            session_registry=durable_registry,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.introspect.helper")
+    def debug_introspect_helper(
+        run_id: str,
+        target_ref: str,
+        name: str,
+        args: dict[str, Any] | None = None,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        timeout_seconds: int = 30,
+        debug_profile: str | None = None,
+        target_profile: str | None = None,
+        rootfs_profile: str | None = None,
+    ) -> dict[str, Any]:
+        request = DebugIntrospectHelperRequest(
+            run_id=run_id,
+            target_ref=target_ref,
+            name=name,
+            args=args or {},
+            timeout_seconds=timeout_seconds,
+            debug_profile=debug_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+        )
+        return debug_introspect_helper_handler(
             request,
             artifact_root=Path(artifact_root),
             admission=admission_service,

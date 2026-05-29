@@ -113,6 +113,7 @@ class DebugIntrospectRunRequest(Model):
     debug_profile: str | None = None
     target_profile: str | None = None
     rootfs_profile: str | None = None
+    args: dict[str, Any] = Field(default_factory=dict)
 
 
 class DebugIntrospectCheckPrerequisitesRequest(Model):

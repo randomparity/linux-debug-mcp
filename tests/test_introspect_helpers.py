@@ -203,3 +203,73 @@ def test_capability_advertises_helper_op() -> None:
     from linux_debug_mcp.providers.local_drgn_introspect import local_drgn_introspect_capability
 
     assert "debug.introspect.helper" in local_drgn_introspect_capability().operations
+
+
+# ---------------------------------------------------------------------------
+# Step B: post-validator unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_post_validator_drift_on_zero_emits() -> None:
+    from linux_debug_mcp.server import _make_helper_post_validator
+
+    v = _make_helper_post_validator(HELPER_REGISTRY["sysinfo"])
+    verdict = v({"emits": []})
+    assert verdict is not None and verdict.ok is False
+    assert verdict.failure_code == "helper_schema_drift"
+
+
+def test_post_validator_drift_on_two_emits() -> None:
+    from linux_debug_mcp.server import _make_helper_post_validator
+
+    v = _make_helper_post_validator(HELPER_REGISTRY["sysinfo"])
+    assert v({"emits": [{}, {}]}).ok is False
+
+
+def test_post_validator_ok_on_valid_single_emit() -> None:
+    from linux_debug_mcp.server import _make_helper_post_validator
+
+    v = _make_helper_post_validator(HELPER_REGISTRY["sysinfo"])
+    good = {
+        "emits": [
+            {
+                "release": "6.8",
+                "version": "#1",
+                "machine": "x86_64",
+                "nodename": "vm",
+                "boot_cmdline": "",
+                "cpus_online": 1,
+                "mem_total_pages": 1,
+            }
+        ]
+    }
+    verdict = v(good)
+    assert verdict.ok is True
+    assert verdict.extra_response_data["result"]["release"] == "6.8"
+
+
+def test_post_validator_redacted_emit_still_validates() -> None:
+    from linux_debug_mcp.server import _make_helper_post_validator
+
+    v = _make_helper_post_validator(HELPER_REGISTRY["dmesg"])
+    payload = {"emits": [{"entries": [{"ts_usec": 1, "level": 6, "text": "[REDACTED]"}], "truncated": False}]}
+    assert v(payload).ok is True
+
+
+def test_post_validator_script_error_is_not_drift() -> None:
+    from linux_debug_mcp.server import _make_helper_post_validator
+
+    v = _make_helper_post_validator(HELPER_REGISTRY["sysinfo"])
+    payload = {
+        "outcome": {
+            "status": "error",
+            "error_type": "KeyError",
+            "error_message": "'__num_online_cpus'",
+            "traceback": "...",
+        },
+        "emits": [],
+    }
+    verdict = v(payload)
+    assert verdict.ok is False
+    assert verdict.failure_code == "helper_script_error"
+    assert "KeyError" in verdict.failure_message
