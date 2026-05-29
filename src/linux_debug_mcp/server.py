@@ -666,7 +666,9 @@ def _capture_kernel_provenance(
         }
 
     run_root = run_dir.resolve()
-    config_ref, config_err = _artifact_run_relative_ref(_find_artifact(build_step, "kernel-config"), run_root=run_root)
+    notes: list[str] = []
+    config_artifact = _find_artifact(build_step, "kernel-config")
+    config_ref, config_err = _artifact_run_relative_ref(config_artifact, run_root=run_root)
     if config_err is not None:
         return {
             "kernel_provenance_capture_error": {
@@ -674,8 +676,9 @@ def _capture_kernel_provenance(
                 "message": "kernel-config artifact is outside the run directory",
             }
         }
+    if config_artifact is None:
+        notes.append("config_artifact_missing")
 
-    notes: list[str] = []
     vmlinux_artifact = _find_artifact(build_step, "vmlinux")
     if vmlinux_artifact is not None:
         vmlinux_ref, vmlinux_err = _artifact_run_relative_ref(vmlinux_artifact, run_root=run_root)
@@ -2548,8 +2551,10 @@ def debug_introspect_run_handler(
             category=ErrorCategory.CONFIGURATION_ERROR,
             run_id=run_id,
             message=(
-                "boot for this run did not record a KernelProvenance. Re-run "
-                "target.boot for this run; provenance is captured on a SUCCEEDED boot."
+                "boot for this run did not record a KernelProvenance (it predates "
+                "provenance capture). Re-run target.boot with force_reboot=true; a "
+                "plain re-run short-circuits the recorded SUCCEEDED boot and will "
+                "not re-capture provenance."
             ),
             details={"code": "provenance_missing"},
         )
@@ -3069,7 +3074,9 @@ def debug_introspect_run_handler(
         # self-aborted on mismatch (outcome_status == "provenance_mismatch",
         # handled above); reaching here on an "ok" outcome with a disagreeing or
         # absent id is a truncation/normalization/wrapper fault — fail loud, never skip.
-        observed_build_id = redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None
+        # Verify the RAW parsed id, never the redacted payload: provenance is a
+        # trust decision and must not depend on a presentation-time redaction pass.
+        observed_build_id = parsed.get("build_id") if isinstance(parsed, dict) else None
         if not isinstance(observed_build_id, str):
             # An "ok" outcome that omits build_id is itself a wrapper fault; a
             # missing observed id must NOT pass silently with symbols trusted.

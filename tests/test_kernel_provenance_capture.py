@@ -49,6 +49,14 @@ def test_missing_vmlinux_records_conventional_ref_plus_note(tmp_path):
     assert "vmlinux_artifact_missing" in result["kernel_provenance_capture_notes"]
 
 
+def test_missing_config_artifact_records_note(tmp_path):
+    build = _build_step(tmp_path)
+    build.artifacts = [a for a in build.artifacts if a.kind != "kernel-config"]
+    result = _capture_kernel_provenance(build_step=build, boot_details={"kernel_args": []}, run_dir=tmp_path)
+    assert result["kernel_provenance"]["config_ref"] is None
+    assert "config_artifact_missing" in result["kernel_provenance_capture_notes"]
+
+
 def test_missing_build_id_is_typed_capture_error(tmp_path):
     build = _build_step(tmp_path, build_id=None)
     result = _capture_kernel_provenance(build_step=build, boot_details={"kernel_args": []}, run_dir=tmp_path)
