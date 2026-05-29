@@ -17,7 +17,7 @@ class _RecordingSsh:
     def __init__(self):
         self.argv = None
 
-    def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None):
+    def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None, max_stdout_bytes=None):
         # Plan review finding 4: this fake was missing both `cancel` and
         # `stdin` — the audit added them at once so ty check accepts the
         # SshRunner protocol assignment in server.py.

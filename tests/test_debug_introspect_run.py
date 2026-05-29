@@ -1019,7 +1019,7 @@ def test_chmod_survives_missing_raw_file_race(tmp_path: Path) -> None:
     targets, rootfs, debug = _profiles()
 
     class _DeletingFakeSsh(FakeSshRunner):
-        def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None):
+        def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None, max_stdout_bytes=None):
             result = super().run(
                 argv,
                 timeout=timeout,

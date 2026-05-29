@@ -139,7 +139,7 @@ class FakeSshRunner:
     def which(self, command: str) -> str | None:
         return f"/usr/bin/{command}"
 
-    def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None):
+    def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None, max_stdout_bytes=None):
         self.calls.append({"argv": argv, "stdin": stdin})
         result = self.results.pop(0) if self.results else SshCommandResult(exit_status=0, stdout="{}")
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -180,6 +180,31 @@ def test_usable_target(tmp_path: Path) -> None:
     assert resp.data["introspect_usable"] == "usable"
     assert resp.suggested_next_actions == ["debug.introspect.run"]
     assert runner.calls[0]["stdin"] is not None and "import json" in runner.calls[0]["stdin"]
+
+
+def test_probe_uses_sudo_for_non_root(tmp_path: Path) -> None:
+    """Spec §4: the probe's remote argv must carry the same sudo prefix the
+    runner uses for a non-root SSH login, and must omit it for root."""
+    run_id = _booted_run(tmp_path)
+    runner = FakeSshRunner(results=[SshCommandResult(exit_status=0, stdout=_probe_json())])
+    debug_introspect_check_prerequisites_handler(
+        _req(run_id),
+        artifact_root=tmp_path,
+        rootfs_profiles=_rootfs(ssh_user="debug"),
+        ssh_runner=runner,
+    )
+    # build_ssh_argv folds the remote argv into the trailing shell-command
+    # string, so the sudo prefix surfaces in the last ssh_argv element.
+    assert "sudo python3 -" in runner.calls[0]["argv"][-1]
+
+    root_runner = FakeSshRunner(results=[SshCommandResult(exit_status=0, stdout=_probe_json())])
+    debug_introspect_check_prerequisites_handler(
+        _req(run_id),
+        artifact_root=tmp_path,
+        rootfs_profiles=_rootfs(ssh_user="root"),
+        ssh_runner=root_runner,
+    )
+    assert "sudo" not in root_runner.calls[0]["argv"][-1]
 
 
 def test_drgn_missing_reports_unusable(tmp_path: Path) -> None:
@@ -241,7 +266,7 @@ def test_runner_raises_is_infrastructure_failure(tmp_path: Path) -> None:
 
     @dataclass
     class RaisingSshRunner(FakeSshRunner):
-        def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None):
+        def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None, max_stdout_bytes=None):
             raise OSError("transport broke")
 
     resp = debug_introspect_check_prerequisites_handler(

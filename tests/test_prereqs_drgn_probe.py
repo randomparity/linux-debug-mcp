@@ -104,11 +104,22 @@ def test_proven_provenance_mismatch_is_unusable() -> None:
     assert verdict == UNUSABLE
 
 
-def test_wrong_debuginfo_is_unusable() -> None:
+def test_wrong_debuginfo_no_btf_is_unusable() -> None:
     probe = _probe()
     probe["vmlinux_debuginfo"]["candidates"] = [{"path": "/boot/vmlinux-6.7.0", "file_build_id": OTHER}]
+    probe["vmlinux_debuginfo"]["btf"] = False
     _, verdict = build_probe_checks(probe, host_build_id=HOST)
     assert verdict == UNUSABLE
+
+
+def test_wrong_debuginfo_with_btf_is_unknown() -> None:
+    # A present-but-wrong DWARF alongside BTF is unconfirmable: drgn may fall
+    # back to BTF, so the honest verdict is UNKNOWN, never a false UNUSABLE.
+    probe = _probe()
+    probe["vmlinux_debuginfo"]["candidates"] = [{"path": "/boot/vmlinux-6.7.0", "file_build_id": OTHER}]
+    probe["vmlinux_debuginfo"]["btf"] = True
+    _, verdict = build_probe_checks(probe, host_build_id=HOST)
+    assert verdict == UNKNOWN
 
 
 def test_set_based_match_avoids_false_unusable() -> None:

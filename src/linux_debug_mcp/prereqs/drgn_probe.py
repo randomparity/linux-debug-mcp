@@ -93,7 +93,11 @@ def _verdict(
         return UNUSABLE
     if running is not None and host is not None and running != host:
         return UNUSABLE
-    if wrong_debuginfo:
+    # A present-but-wrong on-disk DWARF is only a proven blocker when there is no
+    # BTF to fall back on. With /sys/kernel/btf/vmlinux present, drgn may still
+    # attach via BTF, so the mismatch is unconfirmable — emit UNKNOWN, never a
+    # false UNUSABLE (spec §5).
+    if wrong_debuginfo and not btf:
         return UNUSABLE
     if found and build_id_verified and running is not None and host is not None and running == host:
         return USABLE

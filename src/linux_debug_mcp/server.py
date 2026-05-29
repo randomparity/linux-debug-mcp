@@ -226,9 +226,30 @@ RUNNING_BUILD_MESSAGE = (
 )
 RUNNING_BOOT_MESSAGE = "previous boot is still recorded as running"
 RUNNING_TESTS_MESSAGE = "previous test run is still recorded as running"
-# Spec §6/§7: cap the probe stdout read so a noisy/hostile target cannot
-# balloon handler memory before json.loads. Mirrors the runner's output caps.
+# Spec §6/§7: bound the probe's local footprint at three layers. The streaming
+# cap passed to the SSH runner (max_stdout_bytes) kills the probe the moment its
+# transcript on disk exceeds the cap, so a noisy/hostile target cannot fill local
+# disk within the timeout window; `_read_capped` is the post-run backstop that
+# guards json.loads memory (and covers direct-write test fakes that bypass the
+# streaming path); wall-clock is bounded by the remote `timeout` prefix.
 PROBE_STDOUT_CAP = 256 * 1024
+
+
+def _target_python_remote_argv(*, timeout_seconds: int, use_sudo: bool) -> list[str]:
+    """Build the remote argv shared by the probe and the introspect runner.
+
+    Spec §4 shared-interpreter invariant: both ``debug.introspect.run`` and
+    ``debug.introspect.check_prerequisites`` must run the interpreter through a
+    byte-identical SSH + interpreter invocation, *including* the privilege
+    prefix. A non-root SSH login runs the interpreter under ``sudo`` in both
+    paths so the probe checks drgn/debuginfo at the same privilege level the
+    runner will use.
+    """
+    argv = ["timeout", "--kill-after=2s", f"{timeout_seconds}s"]
+    if use_sudo:
+        argv.append("sudo")
+    argv.extend(TARGET_PYTHON_ARGV)
+    return argv
 
 
 def _recorded_build_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
@@ -2035,7 +2056,8 @@ def debug_introspect_check_prerequisites_handler(
     probe_id = uuid.uuid4().hex
     agent_dir, sensitive_dir = _prepare_probe_dirs(ctx.store, run_id, probe_id)
 
-    remote_argv = ["timeout", "--kill-after=2s", f"{request.timeout_seconds}s", *TARGET_PYTHON_ARGV]
+    use_sudo = ctx.rootfs.ssh_user != "root"
+    remote_argv = _target_python_remote_argv(timeout_seconds=request.timeout_seconds, use_sudo=use_sudo)
     try:
         ssh_argv = build_ssh_argv(
             rootfs_profile=ctx.rootfs,
@@ -2059,6 +2081,7 @@ def debug_introspect_check_prerequisites_handler(
             stdout_path=stdout_path,
             stderr_path=stderr_path,
             stdin=PROBE_SCRIPT,
+            max_stdout_bytes=PROBE_STDOUT_CAP,
         )
     except Exception as exc:
         return ToolResponse.failure(
@@ -2162,6 +2185,13 @@ def _assemble_probe_response(
     probe_id: str,
 ) -> ToolResponse:
     run_id = ctx.run_id
+    if ssh_result.oversized_output:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"probe stdout exceeded {PROBE_STDOUT_CAP} bytes",
+            details={"code": "oversized_output"},
+        )
     raw_stdout = _read_capped(stdout_path, PROBE_STDOUT_CAP)
     if raw_stdout is None:
         return ToolResponse.failure(
@@ -2643,10 +2673,7 @@ def debug_introspect_run_handler(
         # Iter-1 finding 6: ssh_user=root means sudo is a no-op (spec §3.2);
         # invoking it anyway risks a confusing in-SSH failure when sudo is
         # missing on a root-login target.
-        remote_argv = ["timeout", "--kill-after=2s", f"{user_timeout}s"]
-        if use_sudo:
-            remote_argv.append("sudo")
-        remote_argv.extend(TARGET_PYTHON_ARGV)
+        remote_argv = _target_python_remote_argv(timeout_seconds=user_timeout, use_sudo=use_sudo)
         try:
             ssh_argv = build_ssh_argv(
                 rootfs_profile=resolved_rootfs,

@@ -68,6 +68,10 @@ class SshCommandResult:
     # before delivering the full payload. The caller cannot trust that the
     # remote process saw the complete script — surface as a transport failure.
     stdin_failed: bool = False
+    # True when the streaming stdout cap (max_stdout_bytes) was exceeded and the
+    # process group was killed mid-run. The caller surfaces this as an
+    # oversized-output transport failure rather than parsing a truncated stream.
+    oversized_output: bool = False
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,7 @@ class SshRunner(Protocol):
         stderr_path: Path,
         cancel: threading.Event | None = None,
         stdin: str | None = None,
+        max_stdout_bytes: int | None = None,
     ) -> SshCommandResult:
         raise NotImplementedError
 
@@ -110,11 +115,13 @@ class SubprocessSshRunner:
         stderr_path: Path,
         cancel: threading.Event | None = None,
         stdin: str | None = None,
+        max_stdout_bytes: int | None = None,
     ) -> SshCommandResult:
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
         stderr_path.parent.mkdir(parents=True, exist_ok=True)
         cancelled_flag = False
         timed_out_flag = False
+        oversized_flag = False
         with (
             stdout_path.open("w", encoding="utf-8") as stdout_file,
             stderr_path.open("w", encoding="utf-8") as stderr_file,
@@ -175,10 +182,16 @@ class SubprocessSshRunner:
                         proc.wait()
                         timed_out_flag = True
                         break
+                    if max_stdout_bytes is not None and self._stdout_size(stdout_path) > max_stdout_bytes:
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        proc.wait()
+                        oversized_flag = True
+                        break
             if stdin_thread is not None:
                 stdin_thread.join(timeout=2)
-        # -1 sentinel: process was killed (cancel/timeout), so there is no real exit code.
-        exit_status = -1 if (cancelled_flag or timed_out_flag) else proc.returncode
+        # -1 sentinel: process was killed (cancel/timeout/oversized), so there is no real exit code.
+        exit_status = -1 if (cancelled_flag or timed_out_flag or oversized_flag) else proc.returncode
         return SshCommandResult(
             exit_status=exit_status,
             stdout_snippet=self._read_snippet(stdout_path),
@@ -186,7 +199,14 @@ class SubprocessSshRunner:
             timed_out=timed_out_flag,
             cancelled=cancelled_flag,
             stdin_failed=bool(stdin_write_error),
+            oversized_output=oversized_flag,
         )
+
+    def _stdout_size(self, path: Path) -> int:
+        try:
+            return path.stat().st_size
+        except FileNotFoundError:
+            return 0
 
     def _read_snippet(self, path: Path) -> str:
         if not path.exists():

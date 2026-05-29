@@ -211,7 +211,8 @@ Verdict values below are the tri-state `introspect_usable` (`usable`/`unknown`/`
 | drgn present, DWARF at `/boot/vmlinux-<rel>` (path #6), ELF note parses `F==R==H` | `build_id_verified=true`, verdict `usable` (non-#1 paths reach `usable` when parse+match succeed) |
 | drgn present, DWARF found at path #6, `running_build_id=null` (non-root), `F==H` proxy only | `target.vmlinux_debuginfo` WARNING, `details.file_matches_host=true`, verdict **`unknown`** (not `usable`) |
 | stale vmlinux at path #2 (`F₂≠R`) **and** correct vmlinux at path #4 (`F₄==R`) | set-based match wins → `build_id_verified=true`, `details.path`=#4, verdict `usable` (no false `unusable`) |
-| drgn present, DWARF found only via build-id index for a *different* build | proven mismatch → verdict `unusable`, `target.vmlinux_debuginfo`/`target.kernel_buildid` reflect it |
+| drgn present, DWARF found only via build-id index for a *different* build, `btf` absent | proven mismatch → verdict `unusable`, `target.vmlinux_debuginfo`/`target.kernel_buildid` reflect it |
+| DWARF build-id mismatches running (`F≠R`) **and** `btf` present | unconfirmable (drgn may fall back to BTF) → verdict `unknown`, no false `unusable` |
 | host `build_id` absent, drgn + DWARF found | `target.kernel_buildid` SKIPPED ("provenance not checked"), verdict `unknown` |
 | drgn missing, `distro_id=fedora` | `target.drgn` FAILED, `suggested_fix` = dnf hint, verdict `unusable`, `details.executable` populated |
 | drgn missing, `distro_id=ubuntu` | `suggested_fix` = apt/PPA hint |
