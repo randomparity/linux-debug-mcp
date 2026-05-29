@@ -352,33 +352,10 @@ def test_relax_is_capture_once_second_relax_does_not_reread():
     policy.relax(_ctx())  # second relax, same session
     assert [c for c in channel.calls if c[0] == "read"] == []  # no re-read
     assert len(reads_after_first) == 5
-
-
-def test_concurrent_same_session_relax_reads_exactly_once():
-    """Claim-the-slot guarantees only one thread runs the read-pass for a session, so a
-    concurrent relax cannot overwrite the baseline with already-relaxed values (spec §4.1)."""
-    import threading as _threading
-
-    channel = FakeWatchdogControl(values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)})
-    policy = _x86_policy(channel)
-    barrier = _threading.Barrier(8)
-
-    def _worker() -> None:
-        barrier.wait()
-        policy.relax(_ctx(session_id="shared"))
-
-    threads = [_threading.Thread(target=_worker) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    reads = [c for c in channel.calls if c[0] == "read"]
-    assert len(reads) == 5  # exactly one read-pass across all 8 threads
-    channel.calls.clear()
-    policy.restore(_ctx(session_id="shared"))
-    assert all(value == "1" for op, _name, value in channel.calls if op == "write")  # baseline intact
 ```
+
+> The concurrent-relax test asserts the baseline via `restore`, so it lives in Task 4
+> (after `restore` exists) — keeping every task's pass-gate satisfiable in order.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -608,6 +585,33 @@ def test_capture_once_preserves_baseline_across_re_relax():
     policy.restore(_ctx())
     # every restore write puts the ORIGINAL "1" back, never the relaxed "0"
     assert all(value == "1" for op, _name, value in channel.calls if op == "write")
+
+
+def test_concurrent_same_session_relax_reads_exactly_once():
+    """Claim-the-slot guarantees only one thread runs the read-pass for a session, so a
+    concurrent relax cannot overwrite the baseline with already-relaxed values (spec §4.1).
+    Uses restore to verify the baseline survived, so it lives in this (restore) task."""
+    import threading as _threading
+
+    channel = FakeWatchdogControl(values={k.name: "1" for k in knobs_for_arch(WatchdogArch.X86_64)})
+    policy = _x86_policy(channel)
+    barrier = _threading.Barrier(8)
+
+    def _worker() -> None:
+        barrier.wait()
+        policy.relax(_ctx(session_id="shared"))
+
+    threads = [_threading.Thread(target=_worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    reads = [c for c in channel.calls if c[0] == "read"]
+    assert len(reads) == 5  # exactly one read-pass across all 8 threads
+    channel.calls.clear()
+    policy.restore(_ctx(session_id="shared"))
+    assert all(value == "1" for op, _name, value in channel.calls if op == "write")  # baseline intact
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
