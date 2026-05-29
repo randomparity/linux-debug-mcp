@@ -39,6 +39,7 @@
 - `src/linux_debug_mcp/domain.py` — `DebugIntrospectHelperRequest`
 - `src/linux_debug_mcp/config.py` — add `debug.introspect.helper` to `ALLOWED_DEBUG_OPERATIONS`
 - `tests/test_introspect_wrapper.py` — cover new wrapper slots
+- `tests/test_drgn_introspect_integration.py` — wire up the unwired `_bootstrap_booted_run` stub + add the `_guest_ssh` helper (Task 15)
 
 ---
 
@@ -255,22 +256,12 @@ If `test_debug_introspect_run.py` has no `_run_introspect_ok` helper, model this
 Run: `uv run python -m pytest tests/test_debug_introspect_run.py::test_run_uses_runner_default_caps -q`
 Expected: FAIL (`render_wrapper` is currently called without `caps`/`args_json`).
 
-- [ ] **Step 3: Define the core function signature and a result dataclass**
+- [ ] **Step 3: Define the post-validator types**
 
 In `server.py`, add above `debug_introspect_run_handler`:
 
 ```python
 from dataclasses import dataclass, field
-
-
-@dataclass
-class IntrospectCallResult:
-    """Outcome of one core introspect execution (spec §5)."""
-
-    response: ToolResponse
-    redacted_payload: dict[str, Any] | None = None
-    call_id: str | None = None
-    outcome_status: str | None = None
 
 
 IntrospectPostValidator = Callable[[dict[str, Any]], "PostValidatorVerdict | None"]
@@ -330,8 +321,11 @@ Make these edits inside the moved body:
        step_status = StepStatus.FAILED
        step_failure_code = verdict.failure_code
    ```
-   Use `step_status` in the `StepResult(...)` and merge `verdict.extra_step_details` (when present) into its `details`.
-4. After `_record_terminal_introspect_result(store, run_id, step)`: if `verdict is not None and not verdict.ok`, return `ToolResponse.failure(category=verdict.failure_category, run_id=run_id, message=verdict.failure_message, details={"code": verdict.failure_code, "call_id": call_id}, suggested_next_actions=["artifacts.get_manifest"])`. Otherwise return the existing `ToolResponse.success(...)`, merging `verdict.extra_response_data` into its `data` when a verdict is present and ok.
+   Use `step_status` in the `StepResult(...)`, merge `verdict.extra_step_details` into its `details`, and when `step_status` is FAILED also set `details["code"] = step_failure_code` so the manifest forensics carry the failure code (`helper_schema_drift` / `helper_script_error`).
+4. After `_record_terminal_introspect_result(store, run_id, step)`:
+   - If `verdict is not None and not verdict.ok`: return `ToolResponse.failure(category=verdict.failure_category, run_id=run_id, message=verdict.failure_message, details={"code": verdict.failure_code, "call_id": call_id}, suggested_next_actions=["artifacts.get_manifest"])`.
+   - If `verdict is not None and verdict.ok` (helper path): return `ToolResponse.success(...)` whose `data` is built **fresh** to the spec §6.2 shape — `{**verdict.extra_response_data, "call_id": call_id, "truncated": truncated, "prelude_ms": prelude_ms}` — NOT the run superset. This keeps the typed `result` from being shipped alongside the redundant raw `emits`/snippet keys.
+   - If `verdict is None` (run path): return the existing `ToolResponse.success(...)` with run's current `data` dict unchanged.
 
 - [ ] **Step 5: Add a thin `debug_introspect_run_handler` delegating to the core**
 
@@ -684,11 +678,12 @@ class Output(Model):
 
 SCRIPT = r"""
 from drgn.helpers.linux.pid import for_each_task
-from drgn import ProgramFlags
 
-want = set(args.get("states", ["D"]))
-include_stack = bool(args.get("include_stack", True))
-limit = int(args.get("limit", 200))
+# args is the validated, defaulted Args dump (handler passes model_dump), so
+# every key is present — read directly, no per-script defaults.
+want = set(args["states"])
+include_stack = bool(args["include_stack"])
+limit = int(args["limit"])
 
 def state_letter(task):
     # TASK_RUNNING=0 ... use task_state_to_char if available, else a small map.
@@ -806,7 +801,8 @@ class Output(Model):
 SCRIPT = r"""
 from drgn.helpers.linux.printk import get_printk_records
 
-max_entries = int(args.get("max_entries", 1000))
+# args is the validated, defaulted Args dump — read directly.
+max_entries = int(args["max_entries"])
 records = list(get_printk_records(prog))
 truncated = len(records) > max_entries
 rows = []
@@ -1322,7 +1318,7 @@ git commit -m "feat(introspect): allowlist + advertise debug.introspect.helper"
 - Modify: `src/linux_debug_mcp/server.py`
 - Test: `tests/test_introspect_helpers.py`
 
-- [ ] **Step 1: Write failing handler tests (drift, unknown-name, args-invalid, redaction, success)**
+- [ ] **Step 1: Write failing handler + post-validator tests (unknown-name, args-invalid, script-error, drift, redaction, success, FAILED-step)**
 
 These reuse the fakes from `tests/test_debug_introspect_run.py`. Import the existing helpers there or replicate the minimal fake SSH runner that returns a canned wrapper stdout JSON. Add to `tests/test_introspect_helpers.py`:
 
@@ -1396,7 +1392,98 @@ def test_post_validator_redacted_emit_still_validates():
     v = _make_helper_post_validator(HELPER_REGISTRY["dmesg"])
     payload = {"emits": [{"entries": [{"ts_usec": 1, "level": 6, "text": "[REDACTED]"}], "truncated": False}]}
     assert v(payload).ok is True
+
+
+def test_post_validator_script_error_is_not_drift():
+    # A drgn script that raised must surface as helper_script_error (with the
+    # traceback), NOT helper_schema_drift — this is the predicted common
+    # failure (version-specific symbols).
+    from linux_debug_mcp.server import _make_helper_post_validator
+    from linux_debug_mcp.introspect_helpers import HELPER_REGISTRY
+
+    v = _make_helper_post_validator(HELPER_REGISTRY["sysinfo"])
+    payload = {"outcome": {"status": "error", "error_type": "KeyError",
+                           "error_message": "'__num_online_cpus'", "traceback": "..."},
+               "emits": []}
+    verdict = v(payload)
+    assert verdict.ok is False
+    assert verdict.failure_code == "helper_script_error"
+    assert "KeyError" in verdict.failure_message
 ```
+
+**Handler-level coverage belongs in `tests/test_debug_introspect_run.py`, not here.** That module already owns the introspect fakes — `_bootstrap_run_with_build(tmp_path) → (store, run_id, build_id)`, `_profiles() → (targets, rootfs, debug)`, `FakeSshRunner(results=[...])`, `FakeAdmissionService(snapshot=_make_snapshot(run_id))`, `FakeSessionRegistry`, `_happy_ssh_result()`, and `VALID_BUILD_ID` (see its `test_happy_path_records_step_and_returns_emits`). Add a small canned-emit builder and three tests **in that file** (they have no clean import path from `test_introspect_helpers.py` — there's no shared conftest):
+
+```python
+def _helper_ssh_result(emit_obj):
+    """A FakeSshRunner result whose wrapper stdout carries a single `emit_obj`.
+    Adapt _happy_ssh_result(): same envelope (build_id=VALID_BUILD_ID,
+    outcome.status='ok'), but emits=[emit_obj]."""
+    ...  # copy _happy_ssh_result() and set "emits": [emit_obj]
+
+
+def test_helper_success_returns_typed_result(tmp_path: Path) -> None:
+    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
+    from linux_debug_mcp.server import debug_introspect_helper_handler
+
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    emit = {"release": "6.8", "version": "#1", "machine": "x86_64", "nodename": "vm",
+            "boot_cmdline": "ro", "cpus_online": 2, "mem_total_pages": 100}
+    resp = debug_introspect_helper_handler(
+        DebugIntrospectHelperRequest(run_id=run_id, target_ref="local-qemu", name="sysinfo"),
+        artifact_root=tmp_path, target_profiles=targets, rootfs_profiles=rootfs,
+        debug_profiles=debug, ssh_runner=FakeSshRunner(results=[_helper_ssh_result(emit)]),
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert resp.ok is True, resp.error
+    assert resp.data["helper"] == "sysinfo"
+    assert resp.data["result"]["release"] == "6.8"
+    assert "emits" not in resp.data  # spec §6.2 shape, not the run superset
+    steps = store.load_manifest(run_id).step_results
+    assert any(n.startswith("introspect:") and s.status.name == "SUCCEEDED" for n, s in steps.items())
+
+
+def test_helper_malformed_emit_records_failed_step(tmp_path: Path) -> None:
+    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
+    from linux_debug_mcp.server import debug_introspect_helper_handler
+
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    resp = debug_introspect_helper_handler(
+        DebugIntrospectHelperRequest(run_id=run_id, target_ref="local-qemu", name="sysinfo"),
+        artifact_root=tmp_path, target_profiles=targets, rootfs_profiles=rootfs,
+        debug_profiles=debug, ssh_runner=FakeSshRunner(results=[_helper_ssh_result({"wrong": "shape"})]),
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert resp.ok is False
+    assert resp.error.details["code"] == "helper_schema_drift"
+    steps = store.load_manifest(run_id).step_results
+    assert any(n.startswith("introspect:") and s.status.name == "FAILED" for n, s in steps.items())
+
+
+def test_helper_gating_enforced(tmp_path: Path) -> None:
+    # Spec §11 criterion 5: enforcement, not just allowlist membership. Mirror
+    # the run gating test (enabled_operations=[]).
+    from linux_debug_mcp.config import DebugProfile
+    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
+    from linux_debug_mcp.server import debug_introspect_helper_handler
+
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, _ = _profiles()
+    resp = debug_introspect_helper_handler(
+        DebugIntrospectHelperRequest(run_id=run_id, target_ref="local-qemu", name="sysinfo"),
+        artifact_root=tmp_path, target_profiles=targets, rootfs_profiles=rootfs,
+        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default", enabled_operations=[])},
+        ssh_runner=FakeSshRunner(), admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert resp.ok is False
+    assert resp.error.details["code"] == "operation_disabled"
+```
+
+> Do not reinvent `_bootstrap_run_with_build` / `FakeSshRunner` / `_happy_ssh_result` — they exist verbatim in `tests/test_debug_introspect_run.py`. `target_ref="local-qemu"` matches the manifest the bootstrap writes (`target_profile="local-qemu"`), satisfying manifest-immutability. The pure-unit tests above (registry, models, post-validator over hand-built payloads) stay in `tests/test_introspect_helpers.py`; only these fake-SSH handler tests move to `test_debug_introspect_run.py`. Update this task's `git add` to include `tests/test_debug_introspect_run.py`.
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -1422,6 +1509,25 @@ def _make_helper_post_validator(spec: HelperSpec) -> IntrospectPostValidator:
     """
 
     def _validate(redacted_payload: dict[str, Any]) -> PostValidatorVerdict:
+        details_stub = {"helper": spec.name, "version": spec.version}
+        # A drgn script that RAISED (outcome.status == "error") is a script
+        # error, NOT schema drift — the curated script broke on this kernel
+        # (e.g. a version-specific symbol). Surface it as helper_script_error
+        # carrying the redacted traceback, so the primary diagnostic is in the
+        # response rather than buried on disk under a misleading "drift" code.
+        outcome = redacted_payload.get("outcome") if isinstance(redacted_payload, dict) else None
+        outcome_status = outcome.get("status") if isinstance(outcome, dict) else None
+        if outcome_status == "error":
+            etype = outcome.get("error_type") if isinstance(outcome, dict) else None
+            emsg = outcome.get("error_message") if isinstance(outcome, dict) else None
+            return PostValidatorVerdict(
+                ok=False,
+                failure_code="helper_script_error",
+                failure_message=_redact_and_truncate(Redactor(), f"{etype}: {emsg}", cap=512),
+                failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                extra_step_details={**details_stub, "error_type": etype},
+            )
+
         emits = redacted_payload.get("emits") if isinstance(redacted_payload, dict) else None
         if not isinstance(emits, list) or len(emits) != 1:
             return PostValidatorVerdict(
@@ -1429,7 +1535,7 @@ def _make_helper_post_validator(spec: HelperSpec) -> IntrospectPostValidator:
                 failure_code="helper_schema_drift",
                 failure_message=f"expected exactly one emit, got {0 if not isinstance(emits, list) else len(emits)}",
                 failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                extra_step_details={"helper": spec.name, "version": spec.version},
+                extra_step_details=details_stub,
             )
         try:
             model = spec.output_model.model_validate(emits[0])
@@ -1439,7 +1545,7 @@ def _make_helper_post_validator(spec: HelperSpec) -> IntrospectPostValidator:
                 failure_code="helper_schema_drift",
                 failure_message=_redact_and_truncate(Redactor(), str(exc), cap=512),
                 failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                extra_step_details={"helper": spec.name, "version": spec.version},
+                extra_step_details=details_stub,
             )
         return PostValidatorVerdict(
             ok=True,
@@ -1455,6 +1561,8 @@ def _make_helper_post_validator(spec: HelperSpec) -> IntrospectPostValidator:
 ```
 
 Add imports at the top of `server.py`: `from pydantic import ValidationError`, `from linux_debug_mcp.introspect_helpers import HELPER_REGISTRY`, `from linux_debug_mcp.introspect_helpers.base import HelperSpec`, and `from linux_debug_mcp.domain import DebugIntrospectHelperRequest`.
+
+> **Spec note:** this introduces `helper_script_error` (a curated drgn script that raised), which refines spec §6.3 — that table currently folds script execution into the `(inherited)` row, but `run` treats a script error as a SUCCESS with `data.status="script_error"` whereas a *curated* helper script raising is a genuine failure (the helper is supposed to work on this kernel). Update the spec §6.3 failure table to add the `helper_script_error` / INFRASTRUCTURE_FAILURE row as part of this task so spec and code agree.
 
 - [ ] **Step 4: Implement the handler**
 
@@ -1483,7 +1591,7 @@ def debug_introspect_helper_handler(
             details={"code": "unknown_helper", "valid": sorted(HELPER_REGISTRY)},
         )
     try:
-        spec.args_model.model_validate(request.args)
+        validated_args = spec.args_model.model_validate(request.args)
     except ValidationError as exc:
         return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
@@ -1501,7 +1609,11 @@ def debug_introspect_helper_handler(
         debug_profile=request.debug_profile,
         target_profile=request.target_profile,
         rootfs_profile=request.rootfs_profile,
-        args=dict(request.args),  # requires the optional `args` field added below
+        # Pass the VALIDATED + defaulted dump (not raw request.args), so the
+        # Args model is the single source of truth for defaults/coercion and
+        # the drgn script can read `args["limit"]` directly. Requires the
+        # optional `args` field added below.
+        args=validated_args.model_dump(mode="json"),
     )
 
     return _execute_introspect_call(
@@ -1553,16 +1665,16 @@ Find the introspect tool registrations in `create_app()` (near the other `@app.t
 
 Match the exact wrapper style of the existing `debug.introspect.run` registration (same `artifact_root` capture, same `.model_dump(mode="json")`).
 
-- [ ] **Step 6: Run the unit tests**
+- [ ] **Step 6: Run the unit + handler tests**
 
-Run: `uv run python -m pytest tests/test_introspect_helpers.py -q`
-Expected: PASS.
+Run: `uv run python -m pytest tests/test_introspect_helpers.py tests/test_debug_introspect_run.py -q`
+Expected: PASS (pure-unit helper tests + the three fake-SSH handler tests relocated into `test_debug_introspect_run.py`).
 
 - [ ] **Step 7: Lint, type-check, commit**
 
 ```bash
 uv run ruff check src tests && uv run ruff format src tests && uv run ty check src
-git add src/linux_debug_mcp/server.py src/linux_debug_mcp/domain.py tests/test_introspect_helpers.py
+git add src/linux_debug_mcp/server.py src/linux_debug_mcp/domain.py tests/test_introspect_helpers.py tests/test_debug_introspect_run.py
 git commit -m "feat(introspect): debug.introspect.helper handler + tool"
 ```
 
@@ -1615,126 +1727,178 @@ git commit -m "test(introspect): assert §7 defaults fit the helper cap profile"
 
 ---
 
-## Task 15: Golden integration tests (VM-gated)
+## Task 15: Golden integration tests (env-gated, real VM)
 
 **Files:**
+- Modify: `tests/test_drgn_introspect_integration.py` (wire up the shared bootstrap + add a guest-exec helper)
 - Create: `tests/test_introspect_helper_integration.py`
 - Test: itself
 
-- [ ] **Step 1: Write the gated integration module**
+> **Reality check (do not skip):** the existing `tests/test_drgn_introspect_integration.py` gates on `_require_integration_env()` — `drgn` + `qemu-system-x86_64` + `virsh` + `LINUX_DEBUG_MCP_LIBVIRT_TEST=1` (and rootfs/source/domain env), **not** mere `virsh` presence. Its `_bootstrap_booted_run(tmp_path)` is currently an **unwired `pytest.skip` stub** returning `(run_id, store, admission, session_registry)`. There is **no `booted_run` object and no `guest_ssh` channel** anywhere in the repo. This task must therefore (Step 1) actually wire the bootstrap and add a guest-exec helper before the helper tests can run on a VM host. If wiring the real libvirt bootstrap is out of scope for this PR, this task ships the tests behind the same env-gate and they remain manual-only — say so explicitly in Task 17 Step 4 rather than pretending CI covers them.
 
-Model the skip-gating and VM bring-up on `tests/test_drgn_introspect_integration.py`. Reuse its fixtures for booting the smoke VM and obtaining an `artifact_root` + booted `run_id`.
+- [ ] **Step 1: Wire the shared bootstrap + add a guest-exec helper**
+
+In `tests/test_drgn_introspect_integration.py`, replace the `pytest.skip` body of `_bootstrap_booted_run(tmp_path)` with the real `kernel.create_run → kernel.build → target.boot` sequence inlined from `tests/test_libvirt_boot_integration.py` (same env vars, same resource handling), returning `(run_id, store, admission, session_registry)`. Add a guest-exec helper built on the **existing** SSH machinery the runner already uses (no new fixture API):
+
+```python
+def _guest_ssh(run_id, store, rootfs_profile, command, timeout=10):
+    """Run a command inside the booted guest over SSH, reusing build_ssh_argv +
+    SubprocessSshRunner (the same path debug.introspect.run uses). Returns stdout.
+    """
+    from linux_debug_mcp.providers.local_ssh_tests import SubprocessSshRunner, build_ssh_argv
+
+    argv = build_ssh_argv(
+        rootfs_profile=rootfs_profile,
+        known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
+        command=command,
+        command_timeout=timeout,
+    )
+    result = SubprocessSshRunner().run(argv, timeout_seconds=timeout + 5)
+    return result.stdout
+```
+
+> Confirm the exact `build_ssh_argv` / `SubprocessSshRunner.run` signatures against `src/linux_debug_mcp/providers/local_ssh_tests.py` before relying on them (the run handler calls both — mirror its call site at `server.py:~2614`). `rootfs_profile` is the resolved `RootfsProfile` for the run; obtain it the same way the bootstrap does.
+
+- [ ] **Step 2: Write the gated helper integration module**
 
 ```python
 """Golden integration tests for debug.introspect.helper (spec §8.2).
 
-Skipped without virsh + the smoke VM, matching the other *_integration suites.
+Gated identically to test_drgn_introspect_integration.py (env-var + virsh +
+qemu + target-side drgn). Manual/local only — NOT exercised by default CI.
 """
 
 from __future__ import annotations
 
-import shutil
+from linux_debug_mcp.domain import DebugIntrospectHelperRequest
+from linux_debug_mcp.server import debug_introspect_helper_handler
+from tests.test_drgn_introspect_integration import (
+    _bootstrap_booted_run,
+    _guest_ssh,
+    _require_integration_env,
+)
 
-import pytest
-
-pytestmark = pytest.mark.skipif(shutil.which("virsh") is None, reason="requires virsh + smoke VM")
+TARGET_REF = "local-qemu"  # must equal manifest.request.target_profile (manifest-immutability)
 
 
-def _run_helper(booted_run, name, args=None):
-    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
-    from linux_debug_mcp.server import debug_introspect_helper_handler
-
+def _run_helper(tmp_path, name, args=None):
+    _require_integration_env()
+    run_id, store, admission, session_registry = _bootstrap_booted_run(tmp_path)
     resp = debug_introspect_helper_handler(
-        DebugIntrospectHelperRequest(
-            run_id=booted_run.run_id, target_ref=booted_run.target_profile,
-            name=name, args=args or {},
-        ),
-        artifact_root=booted_run.artifact_root,
+        DebugIntrospectHelperRequest(run_id=run_id, target_ref=TARGET_REF, name=name, args=args or {}),
+        artifact_root=tmp_path,
+        admission=admission,
+        session_registry=session_registry,
     )
-    assert resp.error is None, resp
+    assert resp.ok is True, resp.error
     return resp.data["result"]
 
 
-def test_sysinfo_invariants(booted_run):
-    result = _run_helper(booted_run, "sysinfo")
+def test_sysinfo_invariants(tmp_path):
+    result = _run_helper(tmp_path, "sysinfo")
     assert result["release"]
     assert result["cpus_online"] >= 1
 
 
-def test_tasks_includes_pid1(booted_run):
-    result = _run_helper(booted_run, "tasks", {"states": [], "limit": 500})
+def test_tasks_includes_pid1(tmp_path):
+    result = _run_helper(tmp_path, "tasks", {"states": [], "limit": 500})
     comms = {t["comm"] for t in result["tasks"] if t["pid"] == 1}
     assert comms & {"init", "systemd"}
 
 
-def test_dmesg_nonempty(booted_run):
-    result = _run_helper(booted_run, "dmesg")
-    assert result["entries"]
+def test_dmesg_nonempty(tmp_path):
+    assert _run_helper(tmp_path, "dmesg")["entries"]
 
 
-def test_modules_nonempty(booted_run):
-    result = _run_helper(booted_run, "modules")
-    assert result["modules"]
+def test_modules_nonempty(tmp_path):
+    assert _run_helper(tmp_path, "modules")["modules"]
 
 
-def test_slab_has_kmalloc(booted_run):
-    result = _run_helper(booted_run, "slab")
+def test_slab_has_kmalloc(tmp_path):
+    result = _run_helper(tmp_path, "slab")
     assert any(c["name"].startswith("kmalloc") for c in result["caches"])
 
 
-def test_irq_counts_length_matches_cpus(booted_run):
-    sysinfo = _run_helper(booted_run, "sysinfo")
-    result = _run_helper(booted_run, "irq")
-    assert result["irqs"]
-    for entry in result["irqs"]:
-        assert len(entry["counts_per_cpu"]) == sysinfo["cpus_online"]
+def test_irq_counts_length_matches_cpus(tmp_path):
+    # One bootstrap, two helper calls: sysinfo then irq against the same run.
+    _require_integration_env()
+    run_id, store, admission, session_registry = _bootstrap_booted_run(tmp_path)
+
+    def call(name):
+        resp = debug_introspect_helper_handler(
+            DebugIntrospectHelperRequest(run_id=run_id, target_ref=TARGET_REF, name=name),
+            artifact_root=tmp_path, admission=admission, session_registry=session_registry,
+        )
+        assert resp.ok is True, resp.error
+        return resp.data["result"]
+
+    cpus = call("sysinfo")["cpus_online"]
+    irqs = call("irq")["irqs"]
+    assert irqs
+    for entry in irqs:
+        assert len(entry["counts_per_cpu"]) == cpus
 ```
 
-- [ ] **Step 2: Write the D-state acceptance test**
+- [ ] **Step 3: D-state acceptance test (real guest blocker via `_guest_ssh`)**
 
 ```python
-def test_tasks_dstate_blocker(booted_run):
-    # Spec §8.2: spawn a kernel-side D-state blocker on the guest, then assert
-    # tasks(states=["D"]) returns it with a non-empty stack. Use the booted_run
-    # SSH channel to start a process blocked in uninterruptible sleep (e.g.
-    # `vmtouch`/a `dd` on a stalled device, or `cat /proc/<self>/...`); the
-    # integration fixture exposes a `guest_ssh(cmd)` helper — see
-    # test_drgn_introspect_integration.py for the pattern.
-    booted_run.guest_ssh("nohup dd if=/dev/sda of=/dev/null bs=1M &")  # adjust to a reliably-D device
-    result = _run_helper(booted_run, "tasks", {"states": ["D"]})
-    blocked = [t for t in result["tasks"] if t["kernel_stack"]]
+def test_tasks_dstate_blocker(tmp_path):
+    _require_integration_env()
+    run_id, store, admission, session_registry = _bootstrap_booted_run(tmp_path)
+    rootfs = ...  # the resolved RootfsProfile for this run (same one the bootstrap used)
+    # Park a task in uninterruptible sleep. Prefer a deterministic, self-clearing
+    # mechanism: a short `vmtouch`/`dd` on a slow/stalled block device, or a tiny
+    # debugfs/sysfs write that blocks. If none is reliable on the smoke rootfs,
+    # ship a minimal kmod (set_current_state(TASK_UNINTERRUPTIBLE);
+    # schedule_timeout(HZ*3)) as a test asset and insmod it here.
+    _guest_ssh(run_id, store, rootfs, ["sh", "-c", "nohup dd if=/dev/vda of=/dev/null bs=1M >/dev/null 2>&1 &"])
+    resp = debug_introspect_helper_handler(
+        DebugIntrospectHelperRequest(run_id=run_id, target_ref=TARGET_REF, name="tasks", args={"states": ["D"]}),
+        artifact_root=tmp_path, admission=admission, session_registry=session_registry,
+    )
+    assert resp.ok is True, resp.error
+    blocked = [t for t in resp.data["result"]["tasks"] if t["kernel_stack"]]
     assert blocked, "expected at least one D-state task with a stack"
 ```
 
-> If the smoke VM has no device that reliably parks a task in `D`, substitute a tiny out-of-tree kernel module that calls `set_current_state(TASK_UNINTERRUPTIBLE); schedule_timeout(...)`, or use a `fsfreeze`-style stall. The acceptance criterion is "a synthetic kernel-side blocker"; the exact mechanism is the integration author's choice — keep it deterministic and self-cleaning.
+> The exact blocker is the integration author's choice; the criterion is "a synthetic kernel-side blocker" that is deterministic and self-cleaning. If the run is non-idempotent per call_id and the two SSH paths (blocker + helper) contend for the same target admission, sequence them: start the blocker, confirm it via `_guest_ssh(..., ["sh","-c","cat /proc/<pid>/stat"])` showing state `D`, *then* call the helper.
 
-- [ ] **Step 3: Write the no-pause heartbeat test**
+- [ ] **Step 4: No-pause heartbeat test (real guest heartbeat via `_guest_ssh`)**
 
 ```python
-def test_sysinfo_no_stop_the_world(booted_run):
-    # Spec §8.2: a guest heartbeat must not gap across the helper call.
-    booted_run.guest_ssh(
-        "nohup sh -c 'while true; do date +%s.%N >> /tmp/hb; sleep 0.05; done' >/dev/null 2>&1 &"
+import time
+
+
+def test_sysinfo_no_stop_the_world(tmp_path):
+    _require_integration_env()
+    run_id, store, admission, session_registry = _bootstrap_booted_run(tmp_path)
+    rootfs = ...  # resolved RootfsProfile for this run
+    _guest_ssh(run_id, store, rootfs,
+               ["sh", "-c", "nohup sh -c 'while :; do date +%s.%N >>/tmp/hb; sleep 0.05; done' >/dev/null 2>&1 &"])
+    time.sleep(0.5)
+    resp = debug_introspect_helper_handler(
+        DebugIntrospectHelperRequest(run_id=run_id, target_ref=TARGET_REF, name="sysinfo"),
+        artifact_root=tmp_path, admission=admission, session_registry=session_registry,
     )
-    import time
+    assert resp.ok is True, resp.error
     time.sleep(0.5)
-    _run_helper(booted_run, "sysinfo")
-    time.sleep(0.5)
-    samples = [float(x) for x in booted_run.guest_ssh("cat /tmp/hb").split()]
+    samples = [float(x) for x in _guest_ssh(run_id, store, rootfs, ["cat", "/tmp/hb"]).split()]
     gaps = [b - a for a, b in zip(samples, samples[1:])]
-    assert max(gaps) < 0.5, f"heartbeat gap {max(gaps)}s suggests a stop-the-world pause"
+    assert gaps and max(gaps) < 0.5, f"heartbeat gap {max(gaps)}s suggests a stop-the-world pause"
 ```
 
-- [ ] **Step 4: Run (will skip without a VM; run on a VM host to verify)**
+> Note the threshold (`0.5s`) is deliberately ~10× the 0.05s sample interval — generous enough to absorb scheduling jitter on a loaded CI host while still catching a real multi-hundred-ms stop. Tune against observed jitter on the actual VM host.
+
+- [ ] **Step 5: Run (env-gated; SKIPPED unless the full integration env is set)**
 
 Run: `uv run python -m pytest tests/test_introspect_helper_integration.py -q`
-Expected: SKIPPED locally (no virsh); on a VM host, PASS. If a helper's drgn fails on the live kernel, fix the drgn in the corresponding helper module (Tasks 4–9) and re-run — this is where version-specific symbol issues surface.
+Expected: SKIPPED locally (no `LINUX_DEBUG_MCP_LIBVIRT_TEST=1` / no VM). On a configured VM host with the env vars set, PASS. If a helper's drgn fails on the live kernel (`helper_script_error` with a traceback in `resp.error`), fix the drgn in the corresponding helper module (Tasks 4–9) and re-run — this is where version-specific symbol issues surface.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add tests/test_introspect_helper_integration.py
-git commit -m "test(introspect): golden integration tests for helpers"
+git add tests/test_drgn_introspect_integration.py tests/test_introspect_helper_integration.py
+git commit -m "test(introspect): golden integration tests for helpers (env-gated)"
 ```
 
 ---
@@ -1787,9 +1951,11 @@ Expected: clean.
 Run: `timeout 2 uv run linux-debug-mcp || test $? -eq 124`
 Expected: exit 124 (server started, timed out) — confirms `create_app()` registers the new tool without import errors.
 
-- [ ] **Step 4: Acceptance-criteria checklist (spec §11)**
+- [ ] **Step 4: Acceptance-criteria checklist (spec §11) — and be honest about what default CI covers**
 
-Confirm each box: helper returns typed JSON (Task 15 `test_sysinfo_invariants`); D-state (Task 15 `test_tasks_dstate_blocker`); dmesg redaction (Task 13 `test_post_validator_redacted_emit_still_validates` + live in Task 15); golden tests fail loud on schema drift (Task 10 + Task 15 model validation); gating via the single op (Task 12). If any is unmet, file the gap as a follow-up step here before closing.
+Two tiers of evidence. **Default CI (always runs):** typed-JSON success path + SUCCEEDED step (Task 13 `test_helper_success_returns_typed_result`); fail-loud on schema drift + FAILED step (Task 13 `test_helper_malformed_emit_records_failed_step`, Task 10 snapshot discipline); dmesg redaction preserves typing (Task 13 `test_post_validator_redacted_emit_still_validates`); §7 defaults fit caps (Task 14); gating **enforced** (Task 13 `test_helper_gating_enforced`, not merely allowlist membership in Task 12). **Env-gated / manual only (NOT in default CI):** live typed JSON on a real VM, the D-state blocker, and the no-pause heartbeat (Task 15) — these run only with `LINUX_DEBUG_MCP_LIBVIRT_TEST=1` + a configured smoke VM.
+
+State this split plainly in the PR description: the §11 criteria requiring a live kernel (no observable pause; D-state from a synthetic blocker; live dmesg redaction) are verified by Task 15 **on a VM host**, not by default CI. Do not claim a perpetually-skipped test "verifies" a criterion. If the real-VM bootstrap (Task 15 Step 1) is deferred, record that as an open item here and link a follow-up issue rather than checking the box.
 
 ---
 
