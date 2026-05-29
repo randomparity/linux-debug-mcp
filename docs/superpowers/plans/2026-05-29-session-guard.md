@@ -395,12 +395,28 @@ def test_teardown_resume_false_when_force_reap_also_fails():
     assert report.resume_detail
 
 
-def test_teardown_idempotent_second_call_is_noop_resume_ok():
+def test_teardown_idempotent_over_shared_state():
+    # A re-attempted debug.end_session: one shared record, deleted by the first close, absent
+    # thereafter. The second teardown must be a safe no-op (close tolerates the missing record,
+    # force_reap not called, resume_ok stays True).
+    shared = {"record": _FakeHaltedRecord(), "closes": 0, "force_reaps": 0}
+
+    def close() -> None:
+        shared["closes"] += 1
+        shared["record"] = None  # close deletes the durable record (idempotent on the 2nd call)
+
+    def read_record():
+        return shared["record"]
+
+    def force_reap() -> None:
+        shared["force_reaps"] += 1
+
     guard = SessionGuard()
-    report, state = _ended_teardown(guard, record_after_close=lambda s: None)
-    report2, state2 = _ended_teardown(guard, record_after_close=lambda s: None)
-    assert report2.resume_ok is True
-    assert state2["force_reaped"] is False
+    first = guard.teardown(_ctx(reason="ended"), close=close, read_record=read_record, force_reap=force_reap)
+    second = guard.teardown(_ctx(reason="ended"), close=close, read_record=read_record, force_reap=force_reap)
+    assert first.resume_ok is True and second.resume_ok is True
+    assert shared["closes"] == 2  # close called both times, second is a no-op delete
+    assert shared["force_reaps"] == 0  # record gone after first close -> no remediation needed
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -587,12 +603,13 @@ git commit -m "feat(transport): add force_release fenced out-of-band remediation
 
 - [ ] **Step 1: Write the failing wiring tests**
 
-Create `tests/test_session_guard_wiring.py`. Model the run/manifest/provider setup on the existing `tests/test_debug_handlers.py` and `tests/test_server_debug_reads_while_halted.py` (reuse their fixtures/builders for a debug-booted run, a fake `QemuGdbstubProvider`, and the injected `transaction`/`admission`/`session_registry`). Add:
+Create `tests/test_session_guard_wiring.py`. **Reuse the real, existing Layer-4 test helpers** — do **not** invent a new fixture. `tests/test_phase_b_integration_gaps.py` already drives `debug_start_session_handler` through a wired transaction; copy its two module-local helpers verbatim into the new file (or import the shared pieces): `_create_debug_ready_run(tmp_path) -> Path` (builds a SUCCEEDED build+debug-boot manifest for `RUN_ID` with `GDBSTUB_ENDPOINT`) and `_build_debug_transaction(registry, *, generation=1) -> (TransportTransaction, AdmissionService)` (which calls `build_txn(FakeQemuTransport(), registry=registry, generation=generation)` from `_layer4_fakes` and `publish_ready_snapshot(...)`). Reuse its constants `RUN_ID`, `KEY`, `GDBSTUB_ENDPOINT`, `RSP_CHANNEL`, `PLATFORM`, `_make_test_registry`, `_profiles()`, `_FakeDebugProviderOk`, `_FakeDebugProviderFailingAttach`, all already defined in `tests/test_phase_b_integration_gaps.py`. The header comment of the new file must cite `tests/test_phase_b_integration_gaps.py` as the source of these helpers.
 
 ```python
-def test_start_session_runs_enter_before_open(debug_run):
-    # debug_run: helper producing (artifact_root, run_id) for a SUCCEEDED debug boot, mirroring
-    # test_debug_handlers / test_server_debug_reads_while_halted setup.
+def test_start_session_runs_enter_before_open(tmp_path):
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_test_registry(tmp_path)
+    txn, admission = _build_debug_transaction(registry)
     calls: list[str] = []
 
     class _Pre:
@@ -601,33 +618,48 @@ def test_start_session_runs_enter_before_open(debug_run):
         def check(self, ctx) -> None:  # noqa: ANN001
             calls.append("pre")
 
-    guard = SessionGuard(pre_attach=[_Pre()])
     resp = debug_start_session_handler(
-        **debug_run.start_kwargs(session_guard=guard)
+        artifact_root=artifact_root, run_id=RUN_ID, provider=_FakeDebugProviderOk(),
+        debug_profiles=_profiles(), transaction=txn, admission=admission,
+        session_registry=registry, session_guard=SessionGuard(pre_attach=[_Pre()]),
     )
     assert resp.ok is True
     assert calls == ["pre"]
 
 
-def test_start_session_open_failure_does_not_call_guard_teardown(debug_run):
-    # A transaction.open() that raises GuardConflict returns the early failure response
-    # WITHOUT a guard.teardown call (open self-rolls-back; no sid).
-    teardown_calls: list[str] = []
+def test_start_session_open_failure_does_not_call_guard_teardown(tmp_path):
+    # transaction.open() rejecting (the guard already held) returns the existing early failure
+    # WITHOUT a guard.teardown call (open self-rolls-back; there is no committed sid).
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_test_registry(tmp_path)
+    txn, admission = _build_debug_transaction(registry)
+    txn._guard.acquire(KEY)  # pre-hold the stop-capable guard so open() raises GuardConflict
+    teardown_reasons: list[str] = []
 
     class _Guard(SessionGuard):
         def teardown(self, ctx, **kw):  # noqa: ANN001, ANN003
-            teardown_calls.append(ctx.reason)
+            teardown_reasons.append(ctx.reason)
             return super().teardown(ctx, **kw)
 
     resp = debug_start_session_handler(
-        **debug_run.start_kwargs(session_guard=_Guard(), open_raises=GuardConflict("held"))
+        artifact_root=artifact_root, run_id=RUN_ID, provider=_FakeDebugProviderOk(),
+        debug_profiles=_profiles(), transaction=txn, admission=admission,
+        session_registry=registry, session_guard=_Guard(),
     )
-    assert resp.ok is False
-    assert teardown_calls == []  # open() failure is the existing early-return, not a guard teardown
+    assert resp.ok is False  # TRANSPORT_CONFLICT (stop_capable_conflict), the existing early return
+    assert teardown_reasons == []  # open() failure is NOT a guard teardown path
 
 
-def test_end_session_routes_through_guard_teardown(debug_run):
-    debug_run.open_session()
+def test_end_session_routes_through_guard_teardown(tmp_path):
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_test_registry(tmp_path)
+    txn, admission = _build_debug_transaction(registry)
+    start = debug_start_session_handler(
+        artifact_root=artifact_root, run_id=RUN_ID, provider=_FakeDebugProviderOk(),
+        debug_profiles=_profiles(), transaction=txn, admission=admission, session_registry=registry,
+        session_guard=SessionGuard(),
+    )
+    assert start.ok is True
     seen: list[str] = []
 
     class _Guard(SessionGuard):
@@ -635,12 +667,16 @@ def test_end_session_routes_through_guard_teardown(debug_run):
             seen.append(ctx.reason)
             return super().teardown(ctx, **kw)
 
-    resp = debug_end_session_handler(**debug_run.end_kwargs(session_guard=_Guard()))
+    resp = debug_end_session_handler(
+        artifact_root=artifact_root, run_id=RUN_ID, provider=_FakeDebugProviderOk(),
+        debug_profiles=_profiles(), transaction=txn, admission=admission, session_registry=registry,
+        session_guard=_Guard(),
+    )
     assert resp.ok is True
     assert seen == ["ended"]
 ```
 
-> The exact `debug_run` helper API (`start_kwargs`, `end_kwargs`, `open_session`, `open_raises`) is yours to write in the test module — keep it a thin wrapper over the same fixtures the sibling debug-handler tests already use. The behavioral assertions above are the contract.
+> Imports for the new file: `from _layer4_fakes import build_txn, FakeQemuTransport, KEY` (plus the constants/providers copied from `test_phase_b_integration_gaps.py`), `from linux_debug_mcp.seams.guard import SessionGuard`, `from linux_debug_mcp.server import debug_start_session_handler, debug_end_session_handler`. The `_FakeDebugProviderOk` must record a `DebugSession` with `attach_status="attached"` and `current_execution_state="stopped"` (HALTED) exactly like the one in `test_phase_b_integration_gaps.py`/`test_server_debug_reads_while_halted.py:42-63`.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -741,7 +777,7 @@ Add the imports at the top of `server.py` if not present: `from linux_debug_mcp.
 
 - [ ] **Step 5: Construct + inject one `SessionGuard`**
 
-In the transport-machinery builder (near line ~5837 where `TransportTransaction` is built), construct `session_guard = SessionGuard()` and store it on `_TransportMachinery` (add the field). Then at the two `@app.tool` debug registrations for `debug.start_session` and `debug.end_session`, pass `session_guard=machinery.session_guard` alongside the existing `transaction=`/`admission=`/`session_registry=` arguments. (Grep `debug_start_session_handler(` at ~5617 for the registration wrapper and the tool wrapper for `debug.end_session`.)
+In `_build_transport_machinery` (near line ~5837 where `TransportTransaction` is built), construct `session_guard = SessionGuard()` and add a `session_guard: SessionGuard` field to the `_TransportMachinery` dataclass (~5721), passing it in the `return _TransportMachinery(...)` (~5869). Then in `create_app`, where the machinery is destructured into locals (`transport_transaction = machinery.transaction`, etc. at `server.py:5897-5899`), add `session_guard = machinery.session_guard`. Finally, in the `@app.tool` wrappers for `debug.start_session` (~6438) and `debug.end_session`, pass `session_guard=session_guard` alongside the existing `transaction=transport_transaction`/`admission=admission_service`/`session_registry=durable_registry` arguments — these wrappers close over the `create_app` locals, so reference the local `session_guard`, not `machinery.session_guard`.
 
 - [ ] **Step 6: Run the wiring tests + the existing debug-handler suite**
 
@@ -767,48 +803,84 @@ git commit -m "feat(session-guard): route debug start/end through SessionGuard"
 
 - [ ] **Step 1: Write the conformance tests**
 
-Append to `tests/test_session_guard_wiring.py`:
+Append to `tests/test_session_guard_wiring.py`. These reuse the same real helpers as Task 5 (`_create_debug_ready_run`, `_build_debug_transaction`, `_make_test_registry`, `_profiles`, `RUN_ID`, `KEY`, the fake providers — all from `test_phase_b_integration_gaps.py`) plus `_admit_run_tests_ssh_tier` from `server.py` and the lifecycle dispatcher bound by `build_txn`.
 
 ```python
-def test_resume_on_error_reaps_and_tombstones(debug_run):
-    # provider.start_session raises after _halt parked HALTED -> teardown(reason="attach_error").
+def test_resume_on_error_reaps_and_tombstones(tmp_path):
+    # provider.start_session raises after _halt parked HALTED -> guard.teardown(reason="attach_error")
+    # -> transaction.close(force=False). The durable record is deleted, a closed_while_halted
+    # tombstone gates future ssh-tier admit, and the guard is freed. (This is the SessionGuard-routed
+    # equivalent of test_phase_b_integration_gaps.py::test_debug_start_session_closes_transport_on_failed_attach,
+    # which must also stay green — it is the regression anchor for the resume-on-error guarantee.)
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_test_registry(tmp_path)
+    txn, admission = _build_debug_transaction(registry)
     resp = debug_start_session_handler(
-        **debug_run.start_kwargs(session_guard=SessionGuard(), start_session_raises=True)
+        artifact_root=artifact_root, run_id=RUN_ID, provider=_FakeDebugProviderFailingAttach(),
+        debug_profiles=_profiles(), transaction=txn, admission=admission, session_registry=registry,
+        session_guard=SessionGuard(),
     )
     assert resp.ok is False
-    target_key = debug_run.target_key
-    # backend reaped + record not left a live HALTED session (deleted), tombstone gates future admit
-    assert debug_run.session_registry.read_record(target_key) is None
-    assert debug_run.proxy_stop_called is True  # fake backend reap hook fired
+    assert registry.read_record(KEY) is None                       # record deleted (not left HALTED)
+    tombstone = registry.read_tombstone(KEY)
+    assert tombstone is not None and tombstone.reason == "closed_while_halted"
+    assert admission._bindings.get(KEY, []) == []                  # promoted binding deregistered
+    txn._guard.acquire(KEY)                                        # guard is free (no GuardConflict)
 
 
-def test_ssh_tier_rejected_while_halted_then_admitted_after_end(debug_run):
-    debug_run.open_session(session_guard=SessionGuard())  # parks HALTED
+def test_ssh_tier_rejected_while_halted_then_admitted_after_end(tmp_path):
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_test_registry(tmp_path)
+    txn, admission = _build_debug_transaction(registry)
+    start = debug_start_session_handler(
+        artifact_root=artifact_root, run_id=RUN_ID, provider=_FakeDebugProviderOk(),
+        debug_profiles=_profiles(), transaction=txn, admission=admission, session_registry=registry,
+        session_guard=SessionGuard(),
+    )
+    assert start.ok is True  # session parked HALTED (durable record execution_state=HALTED)
     # ssh-tier run_tests admit is fast-rejected target_halted, not hung
     with pytest.raises(AdmissionError) as exc:
-        debug_run.admit_run_tests_ssh_tier()
+        _admit_run_tests_ssh_tier(run_id=RUN_ID, admission=admission, session_registry=registry)
     assert exc.value.code == "target_halted"
-    # clean end resumes; the same admit now succeeds
-    debug_run.end_session(session_guard=SessionGuard())
-    handle = debug_run.admit_run_tests_ssh_tier()
+    # clean end resumes; the record is deleted, so the same admit now succeeds
+    end = debug_end_session_handler(
+        artifact_root=artifact_root, run_id=RUN_ID, provider=_FakeDebugProviderOk(),
+        debug_profiles=_profiles(), transaction=txn, admission=admission, session_registry=registry,
+        session_guard=SessionGuard(),
+    )
+    assert end.ok is True
+    handle = _admit_run_tests_ssh_tier(run_id=RUN_ID, admission=admission, session_registry=registry)
     assert handle is not None
 
 
-def test_timeout_path_leaves_no_orphan_or_halted_record(debug_run):
-    debug_run.open_session(session_guard=SessionGuard())
-    # emit a resetting lifecycle event for the session's target (the existing dispatcher path)
-    debug_run.emit_resetting()
-    target_key = debug_run.target_key
-    assert debug_run.session_registry.read_record(target_key) is None  # reaped by _SessionSubscriber
-    assert debug_run.proxy_stop_called is True  # no orphaned helper
+def test_timeout_path_leaves_no_orphan_or_halted_record(tmp_path):
+    # The dispatcher invalidation path is NOT routed through SessionGuard; this conformance test
+    # asserts the existing _SessionSubscriber reap satisfies AC1's "times out" clause.
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_test_registry(tmp_path)
+    txn, admission = _build_debug_transaction(registry)
+    start = debug_start_session_handler(
+        artifact_root=artifact_root, run_id=RUN_ID, provider=_FakeDebugProviderOk(),
+        debug_profiles=_profiles(), transaction=txn, admission=admission, session_registry=registry,
+        session_guard=SessionGuard(),
+    )
+    assert start.ok is True
+    # close admission then emit the resetting invalidation for KEY. invalidate_lifecycle takes the
+    # bound dispatcher + the incarnation generation (admission.py:931); build_txn binds the
+    # dispatcher to txn, reachable as txn._dispatcher (the exact call shape is at
+    # test_phase_b_integration_gaps.py:124).
+    admission.invalidate_lifecycle(
+        LifecycleEvent(target_key=KEY, kind=LifecycleKind.RESETTING), txn._dispatcher, generation=1
+    )
+    assert registry.read_record(KEY) is None  # reaped by _SessionSubscriber (no orphan, no live HALTED)
 ```
 
-> Reuse the existing `_admit_run_tests_ssh_tier` (`server.py:508`) and the lifecycle-emit helpers from `tests/test_workflow_layer4_wiring.py` / `tests/test_server_run_tests_gating.py` for `admit_run_tests_ssh_tier`/`emit_resetting`. These tests assert AC1 (no orphan, never left HALTED) and AC2 (HALTED fast-reject) bound to the SessionGuard lifecycle.
+> Imports: `from linux_debug_mcp.server import _admit_run_tests_ssh_tier`, `from linux_debug_mcp.coordination.admission import AdmissionError`, `from linux_debug_mcp.seams.lifecycle import LifecycleEvent, LifecycleKind`. The `invalidate_lifecycle(event, dispatcher, generation, *, close_admission=True)` signature and call shape are pinned by the existing `tests/test_phase_b_integration_gaps.py:124` (which passes `LifecycleKind.CRASHED`); use `LifecycleKind.RESETTING` here and pass `txn._dispatcher` for the dispatcher. If `_FakeDebugProviderOk` in the borrowed helpers does not spawn a reapable backend (the `FakeQemuTransport` default has `backend_pid=None`), the record-deletion assertions still hold (no orphan is possible); only add a `proxy_stop_called`/`stop_by_identity` assertion if you construct `build_txn(FakeQemuTransport(backend_pid=...))`.
 
 - [ ] **Step 2: Run to verify they pass (logic already implemented in Tasks 4–5 + existing code)**
 
-Run: `uv run python -m pytest tests/test_session_guard_wiring.py -q`
-Expected: PASS. If `test_resume_on_error_reaps_and_tombstones` fails because the existing attach-error path already tombstones+deletes identically, confirm the assertions match the established `transaction.close(force=False)` behavior (delete record + `closed_while_halted` tombstone) rather than changing production code.
+Run: `uv run python -m pytest tests/test_session_guard_wiring.py tests/test_phase_b_integration_gaps.py -q`
+Expected: PASS — the new conformance tests pass, and the existing `test_debug_start_session_closes_transport_on_failed_attach` regression anchor stays green (the SessionGuard routing preserves its delete-record + `closed_while_halted` tombstone behavior).
 
 - [ ] **Step 3: Run the full guardrail suite**
 
