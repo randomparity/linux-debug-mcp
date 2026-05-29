@@ -135,6 +135,7 @@ from linux_debug_mcp.seams.secrets import EnvSecretsResolver
 from linux_debug_mcp.seams.target import (
     BreakHint,
     ConsoleKind,
+    KernelProvenance,
     PlatformMetadata,
     TargetKey,
     publish_ready_snapshot,
@@ -617,6 +618,93 @@ def _find_artifact(result: StepResult, kind: str) -> ArtifactRef | None:
         if artifact.kind == kind:
             return artifact
     return None
+
+
+def _artifact_run_relative_ref(artifact: ArtifactRef | None, *, run_root: Path) -> tuple[str | None, str | None]:
+    """Return (run-relative ref, error-code).
+
+    error-code is set only when a present artifact's path is not under run_root.
+    """
+    if artifact is None:
+        return None, None
+    try:
+        return str(Path(artifact.path).resolve().relative_to(run_root)), None
+    except ValueError:
+        return None, "artifact_path_unexpected"
+
+
+def _capture_kernel_provenance(
+    *,
+    build_step: StepResult | None,
+    boot_details: dict[str, Any],
+    run_dir: Path,
+) -> dict[str, Any]:
+    """Synthesize a KernelProvenance from the build + boot records (design §3).
+
+    Returns one of:
+      - ``{"kernel_provenance": <model_dump>, ["kernel_provenance_capture_notes": [...]]}``
+      - ``{"kernel_provenance_capture_error": {"code": ..., "message": ...}}``
+    Never raises; a missing required field is a typed capture error so an
+    otherwise-good boot still SUCCEEDS.
+    """
+    if build_step is None:
+        return {
+            "kernel_provenance_capture_error": {"code": "build_id_unavailable", "message": "no build step recorded"}
+        }
+    build_id = build_step.details.get("build_id")
+    if not isinstance(build_id, str):
+        return {
+            "kernel_provenance_capture_error": {"code": "build_id_unavailable", "message": "build recorded no build_id"}
+        }
+    release = build_step.details.get("kernel_release")
+    if not isinstance(release, str):
+        return {
+            "kernel_provenance_capture_error": {
+                "code": "release_unavailable",
+                "message": "build recorded no kernel_release",
+            }
+        }
+
+    run_root = run_dir.resolve()
+    config_ref, config_err = _artifact_run_relative_ref(_find_artifact(build_step, "kernel-config"), run_root=run_root)
+    if config_err is not None:
+        return {
+            "kernel_provenance_capture_error": {
+                "code": config_err,
+                "message": "kernel-config artifact is outside the run directory",
+            }
+        }
+
+    notes: list[str] = []
+    vmlinux_artifact = _find_artifact(build_step, "vmlinux")
+    if vmlinux_artifact is not None:
+        vmlinux_ref, vmlinux_err = _artifact_run_relative_ref(vmlinux_artifact, run_root=run_root)
+        if vmlinux_err is not None:
+            return {
+                "kernel_provenance_capture_error": {
+                    "code": vmlinux_err,
+                    "message": "vmlinux artifact is outside the run directory",
+                }
+            }
+    else:
+        vmlinux_ref = "build/vmlinux"
+        notes.append("vmlinux_artifact_missing")
+
+    kernel_args = boot_details.get("kernel_args")
+    cmdline = " ".join(kernel_args) if isinstance(kernel_args, list) else ""
+
+    provenance = KernelProvenance(
+        build_id=build_id,
+        release=release,
+        vmlinux_ref=vmlinux_ref or "build/vmlinux",
+        modules_ref=None,
+        cmdline=cmdline,
+        config_ref=config_ref,
+    )
+    result: dict[str, Any] = {"kernel_provenance": provenance.model_dump(mode="json")}
+    if notes:
+        result["kernel_provenance_capture_notes"] = notes
+    return result
 
 
 def _debug_session_details_from_result(result: StepResult, *, allow_ended: bool = False) -> dict[str, Any] | None:
@@ -1524,7 +1612,9 @@ def target_boot_handler(
 
     provider = provider or LibvirtQemuProvider()
 
-    def execute_boot(*, plan: Any, retrying_after_failure: bool, replace_succeeded: bool, attempt: int) -> ToolResponse:
+    def execute_boot(
+        *, plan: Any, retrying_after_failure: bool, replace_succeeded: bool, attempt: int, manifest: RunManifest
+    ) -> ToolResponse:
         def _failed_attempt_record() -> BootAttempt:
             return BootAttempt(
                 attempt=attempt,
@@ -1600,12 +1690,31 @@ def target_boot_handler(
                 artifacts=failed.artifacts,
                 suggested_next_actions=["artifacts.get_manifest"],
             )
+        terminal_details: dict[str, Any] = {**execution.details, "kernel_image_path": str(kernel_image.path)}
+        if execution.status == StepStatus.SUCCEEDED:
+            try:
+                terminal_details.update(
+                    _capture_kernel_provenance(
+                        build_step=manifest.step_results.get("build"),
+                        boot_details=execution.details,
+                        run_dir=store.run_dir(run_id),
+                    )
+                )
+            except Exception as capture_exc:  # provenance capture must never fail an otherwise-good boot
+                # Broad catch is deliberate (a good boot must not be lost to a
+                # capture defect) but must NOT be silent: log with traceback so a
+                # masked programming bug is observable, then record a typed error.
+                logger.warning("kernel provenance capture failed: %s", capture_exc, exc_info=True)
+                terminal_details["kernel_provenance_capture_error"] = {
+                    "code": "capture_unexpected_error",
+                    "message": f"{type(capture_exc).__name__}: {capture_exc}",
+                }
         terminal = StepResult(
             step_name="boot",
             status=execution.status,
             summary=execution.summary,
             artifacts=execution.artifacts,
-            details={**execution.details, "kernel_image_path": str(kernel_image.path)},
+            details=terminal_details,
         )
         attempt_record = BootAttempt(
             attempt=attempt,
@@ -1705,6 +1814,7 @@ def target_boot_handler(
                     retrying_after_failure=retrying_after_failure,
                     replace_succeeded=replace_succeeded or force_reboot,
                     attempt=next_attempt,
+                    manifest=locked_manifest,
                 )
     except ManifestStateError as exc:
         if "boot is locked" in str(exc):
