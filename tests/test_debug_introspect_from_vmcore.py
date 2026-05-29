@@ -361,3 +361,16 @@ def test_capability_advertises_vmcore_ops_concurrent_safe() -> None:
     assert by_op["debug.introspect.from_vmcore"].semantics.concurrent_safe is True
     assert by_op["debug.introspect.from_vmcore_helper"].semantics.concurrent_safe is True
     assert by_op["debug.introspect.run"].semantics.concurrent_safe is False
+
+
+# ---------------------------------------------------------------------------
+# Task 9: MCP tool registration
+# ---------------------------------------------------------------------------
+
+
+def test_tools_registered() -> None:
+    from linux_debug_mcp.server import create_app
+
+    names = set(create_app()._tool_manager._tools)
+    assert "debug.introspect.from_vmcore" in names
+    assert "debug.introspect.from_vmcore_helper" in names

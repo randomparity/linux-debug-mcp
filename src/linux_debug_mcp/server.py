@@ -6269,6 +6269,58 @@ def create_app(
             artifact_root=Path(artifact_root),
         ).model_dump(mode="json")
 
+    @app.tool(name="debug.introspect.from_vmcore")
+    def debug_introspect_from_vmcore(
+        run_id: str,
+        vmcore_ref: str,
+        vmlinux_ref: str,
+        script: str,
+        modules_ref: str | None = None,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        timeout_seconds: int = 30,
+        allow_write: bool = False,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        request = DebugIntrospectFromVmcoreRequest(
+            run_id=run_id,
+            vmcore_ref=vmcore_ref,
+            vmlinux_ref=vmlinux_ref,
+            script=script,
+            modules_ref=modules_ref,
+            timeout_seconds=timeout_seconds,
+            allow_write=allow_write,
+            args=args or {},
+        )
+        return debug_introspect_from_vmcore_handler(
+            request,
+            artifact_root=Path(artifact_root),
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.introspect.from_vmcore_helper")
+    def debug_introspect_from_vmcore_helper(
+        run_id: str,
+        vmcore_ref: str,
+        vmlinux_ref: str,
+        name: str,
+        modules_ref: str | None = None,
+        args: dict[str, Any] | None = None,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        timeout_seconds: int = 30,
+    ) -> dict[str, Any]:
+        request = DebugIntrospectFromVmcoreHelperRequest(
+            run_id=run_id,
+            vmcore_ref=vmcore_ref,
+            vmlinux_ref=vmlinux_ref,
+            name=name,
+            modules_ref=modules_ref,
+            args=args or {},
+            timeout_seconds=timeout_seconds,
+        )
+        return debug_introspect_from_vmcore_helper_handler(
+            request,
+            artifact_root=Path(artifact_root),
+        ).model_dump(mode="json")
+
     @app.tool(name="artifacts.collect")
     def artifacts_collect(
         run_id: str,
