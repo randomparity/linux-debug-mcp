@@ -816,10 +816,29 @@ def _finalize_introspect_call(
     ...
 ```
 
-Inside, the only edits versus the moved live code:
-- replace the hard-coded `"drgn could not attach to the live target"` with `drgn_open_message`;
-- replace `resolved_rootfs.ssh_user` references with `exec_principal`;
-- in both the success step `details` and the `_fail`/`_record_introspect_failure` call, pass `ssh_user=exec_principal`.
+**Exact rename checklist for the moved tail (do ALL — each is a guaranteed
+`NameError` otherwise, because `request`, `build_id`, and `resolved_rootfs` are not
+parameters of the finalizer):**
+- every `request.timeout_seconds` → `request_timeout_seconds` (sites: the
+  `PRELUDE_WARNING_FRACTION_PCT * request.timeout_seconds` diagnostic; the success
+  `data`; `step_details["timeout_seconds"]`; the `_fail(...)` →
+  `_record_introspect_failure(request_timeout_seconds=...)`);
+- the `verify_build_id(expected=build_id, observed=...)` call →
+  `expected=expected_build_id`;
+- every `resolved_rootfs.ssh_user` → `exec_principal` (in the `_fail` closure's
+  `ssh_user=` kwarg and the success `step_details`);
+- the hard-coded `"drgn could not attach to the live target"` → `drgn_open_message`;
+- in both the success step `details` and the `_fail`/`_record_introspect_failure`
+  call, pass `ssh_user=exec_principal`.
+
+The `_fail` inner closure moves with the tail and now closes over the finalizer's
+parameters (`store`, `run_id`, `call_id`, `agent_dir`, `sensitive_call_dir`,
+`redactor`, `raw_stderr`, `ssh_exit`, `request_timeout_seconds`, `duration_ms`,
+`exec_principal`). `_read_capped`, `_head_tail`, `_record_introspect_failure`,
+`_record_terminal_introspect_result`, and `PRELUDE_WARNING_FRACTION_PCT` are
+module-level — no change. The `raw_stdout`/`raw_stderr`/`parsed`/`ssh_exit`
+computations at the top of the moved block stay verbatim (they read `ssh_result`
+and the path params).
 
 Then update `_record_introspect_failure` (server.py:423-431) to **omit** the key when `None`:
 
@@ -1227,29 +1246,35 @@ def test_helper_unknown_name(tmp_path):
     assert resp.details["code"] == "unknown_helper"
 
 def test_helper_happy_path(tmp_path):
+    # Use one concrete helper (sysinfo) with a hand-written valid emit that
+    # satisfies its output_model exactly — no generic schema synthesis.
     from linux_debug_mcp.domain import DebugIntrospectFromVmcoreHelperRequest
-    from linux_debug_mcp.introspect_helpers import HELPER_REGISTRY
     from linux_debug_mcp.server import debug_introspect_from_vmcore_helper_handler
     _run(tmp_path)
-    name = sorted(HELPER_REGISTRY)[0]
-    spec = HELPER_REGISTRY[name]
-    emit = spec.output_model.model_construct().model_dump(mode="json") if False else None
-    # Build a minimal valid emit for the chosen helper from its output_model schema.
-    valid_emit = _minimal_valid_emit(spec.output_model)   # helper defined in the test module
+    sysinfo_emit = {
+        "release": "6.1.0", "version": "#1 SMP", "machine": "x86_64",
+        "nodename": "vm", "boot_cmdline": "ro quiet", "cpus_online": 4,
+        "mem_total_pages": 1048576,
+    }
     body = {"call_id": "0"*32, "build_id": VALID, "outcome": {"status": "ok"},
-            "emits": [valid_emit], "user_stdout": "", "prelude_ms": 1,
+            "emits": [sysinfo_emit], "user_stdout": "", "prelude_ms": 1,
             "truncated": {"emits": False, "user_stdout": False, "traceback": False,
                           "total_json": False, "per_emit_size": False, "error_message": False}}
     runner = FakeSshRunner(results=[SshCommandResult(exit_status=6, stdout=json.dumps(body), stderr="")])
     req = DebugIntrospectFromVmcoreHelperRequest(run_id="r1", vmcore_ref="inputs/vmcore",
-        vmlinux_ref="build/vmlinux", name=name)
+        vmlinux_ref="build/vmlinux", name="sysinfo")
     resp = debug_introspect_from_vmcore_helper_handler(req, artifact_root=tmp_path,
         runner=runner, build_id_reader=lambda p: VALID)
     assert resp.status == StepStatus.SUCCEEDED
-    assert resp.data["helper"] == name
+    assert resp.data["helper"] == "sysinfo"
+    assert resp.data["result"]["cpus_online"] == 4
 ```
 
-Add a `_minimal_valid_emit(model)` helper in the test module that constructs a schema-valid dict for a Pydantic model (fill required fields with type-appropriate zero values; lists → `[]`).
+> The `sysinfo` emit above matches `introspect_helpers/sysinfo.py:Output` field-for-field
+> (`release, version, machine, nodename, boot_cmdline, cpus_online, mem_total_pages`).
+> If `sysinfo` is not in `HELPER_REGISTRY` at implementation time, pick any registered
+> helper and paste its `output_model`'s exact fields the same way — do not synthesize
+> a generic valid instance.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -1403,16 +1428,13 @@ Append to `tests/test_debug_introspect_from_vmcore.py`:
 
 ```python
 def test_tools_registered():
+    # Mirror the existing convention (tests/test_server.py:40 uses
+    # create_app()._tool_manager._tools — a dict keyed by tool name).
     from linux_debug_mcp.server import create_app
-    app = create_app()
-    import asyncio
-    tools = asyncio.run(app.list_tools())
-    names = {t.name for t in tools}
+    names = set(create_app()._tool_manager._tools)
     assert "debug.introspect.from_vmcore" in names
     assert "debug.introspect.from_vmcore_helper" in names
 ```
-
-(If the repo already has a tool-listing test pattern, mirror it instead of `list_tools()`.)
 
 - [ ] **Step 2: Run to verify it fails**
 
