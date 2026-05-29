@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import pytest
 
+from linux_debug_mcp.symbols.build_id import BuildIdReadError
 from linux_debug_mcp.symbols.verify import (
     BUILD_ID_RE,
     ProvenanceMismatch,
     verify_build_id,
+    verify_vmlinux_provenance,
 )
 
 FULL = "a" * 40
@@ -37,3 +39,43 @@ def test_build_id_re_rejects_malformed(bad):
 @pytest.mark.parametrize("good", ["a" * 8, "0123456789abcdef", "f" * 64])
 def test_build_id_re_accepts_canonical(good):
     assert BUILD_ID_RE.match(good) is not None
+
+
+def test_verify_vmlinux_provenance_returns_observed_on_match(tmp_path):
+    observed = verify_vmlinux_provenance(
+        expected_build_id=FULL,
+        vmlinux_path=tmp_path / "vmlinux",
+        build_id_reader=lambda _p: FULL,
+    )
+    assert observed == FULL
+
+
+def test_verify_vmlinux_provenance_raises_on_mismatch(tmp_path):
+    other = "b" * 40
+    with pytest.raises(ProvenanceMismatch):
+        verify_vmlinux_provenance(
+            expected_build_id=FULL,
+            vmlinux_path=tmp_path / "vmlinux",
+            build_id_reader=lambda _p: other,
+        )
+
+
+def test_verify_vmlinux_provenance_prefix_is_a_mismatch(tmp_path):
+    with pytest.raises(ProvenanceMismatch):
+        verify_vmlinux_provenance(
+            expected_build_id=FULL,
+            vmlinux_path=tmp_path / "vmlinux",
+            build_id_reader=lambda _p: FULL[:16],
+        )
+
+
+def test_verify_vmlinux_provenance_propagates_read_error(tmp_path):
+    def _boom(_p):
+        raise BuildIdReadError("no NT_GNU_BUILD_ID note found")
+
+    with pytest.raises(BuildIdReadError):
+        verify_vmlinux_provenance(
+            expected_build_id=FULL,
+            vmlinux_path=tmp_path / "vmlinux",
+            build_id_reader=_boom,
+        )

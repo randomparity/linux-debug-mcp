@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from conftest import kernel_provenance_details, write_vmlinux_with_build_id
+
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import DebugProfile
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
@@ -120,7 +122,7 @@ def create_debug_ready_run(tmp_path: Path) -> tuple[Path, str]:
     )
     vmlinux = artifact_root / manifest.run_id / "build" / "vmlinux"
     kernel = artifact_root / manifest.run_id / "build" / "bzImage"
-    vmlinux.write_text("vmlinux", encoding="utf-8")
+    write_vmlinux_with_build_id(vmlinux)
     kernel.write_text("kernel", encoding="utf-8")
     store.record_step_result(
         manifest.run_id,
@@ -144,6 +146,7 @@ def create_debug_ready_run(tmp_path: Path) -> tuple[Path, str]:
             details={
                 "debug_boot": True,
                 "gdbstub_endpoint": {"host": "127.0.0.1", "port": 1234},
+                "kernel_provenance": kernel_provenance_details(),
             },
         ),
     )
@@ -180,6 +183,7 @@ def test_debug_start_session_records_manifest_debug_step(tmp_path: Path) -> None
     assert provider.call_kwargs[0]["boot_metadata"] == {
         "debug_boot": True,
         "gdbstub_endpoint": {"host": "127.0.0.1", "port": 1234},
+        "kernel_provenance": kernel_provenance_details(),
         "kernel_image_path": str(artifact_root / run_id / "build" / "bzImage"),
     }
     manifest = ArtifactStore(artifact_root, create_root=False).load_manifest(run_id)

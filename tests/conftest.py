@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import struct
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -497,3 +498,42 @@ def seed_legacy_debug_session(tmp_path: Path) -> Path:
         ),
     )
     return artifact_root
+
+
+GDB_TEST_BUILD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
+
+
+def write_vmlinux_with_build_id(path: Path, build_id_hex: str = GDB_TEST_BUILD_ID) -> None:
+    """Write a minimal valid 64-bit LE ELF carrying an NT_GNU_BUILD_ID note, so the
+    real ``read_elf_build_id`` returns ``build_id_hex``. Lets the gdb-handler tests
+    exercise the real build-id reader without per-call ``build_id_reader`` injection.
+    """
+    desc = bytes.fromhex(build_id_hex)
+    note = struct.pack("<III", 4, len(desc), 3) + b"GNU\x00" + desc
+    if len(note) % 4:
+        note += b"\x00" * (-len(note) % 4)
+    phoff = 64
+    note_off = phoff + 56
+    ehdr = (
+        b"\x7fELF"
+        + bytes([2, 1, 1, 0])
+        + b"\x00" * 8
+        + struct.pack("<HHI", 2, 62, 1)
+        + struct.pack("<QQQ", 0, phoff, 0)
+        + struct.pack("<IHHHHHH", 0, 64, 56, 1, 0, 0, 0)
+    )
+    phdr = struct.pack("<IIQQQQQQ", 4, 0, note_off, 0, 0, len(note), len(note), 4)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(ehdr + phdr + note)
+
+
+def kernel_provenance_details(build_id_hex: str = GDB_TEST_BUILD_ID, *, release: str = "6.9.0-test") -> dict:
+    """A boot-step ``kernel_provenance`` dict matching ``write_vmlinux_with_build_id``."""
+    return {
+        "build_id": build_id_hex,
+        "release": release,
+        "vmlinux_ref": "build/vmlinux",
+        "modules_ref": None,
+        "cmdline": "",
+        "config_ref": None,
+    }

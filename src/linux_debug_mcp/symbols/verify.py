@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
+from pathlib import Path
+
+from linux_debug_mcp.symbols.build_id import read_elf_build_id
 
 BUILD_ID_RE = re.compile(r"^[0-9a-f]{8,}$")
 
@@ -27,3 +31,26 @@ def verify_build_id(*, expected: str, observed: str) -> None:
     """
     if observed != expected:
         raise ProvenanceMismatch(expected=expected, observed=observed)
+
+
+def verify_vmlinux_provenance(
+    *,
+    expected_build_id: str,
+    vmlinux_path: Path,
+    build_id_reader: Callable[[Path], str] = read_elf_build_id,
+) -> str:
+    """Read the vmlinux ELF build-id and verify it equals *expected_build_id*.
+
+    Returns the observed build-id on success. Raises
+    :class:`linux_debug_mcp.symbols.build_id.BuildIdReadError` when the file is
+    unreadable / not an ELF / carries no GNU build-id note, and
+    :class:`ProvenanceMismatch` when the observed id differs from *expected_build_id*.
+
+    The caller MUST have validated *expected_build_id*'s shape (the recorded §4.2
+    value); ``read_elf_build_id`` already returns canonical lower-case hex, so the
+    observed side needs no separate shape check. This is the §4.2 consumable
+    verification entry point (interface-contracts §4.2).
+    """
+    observed = build_id_reader(vmlinux_path)
+    verify_build_id(expected=expected_build_id, observed=observed)
+    return observed

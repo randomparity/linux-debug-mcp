@@ -21,8 +21,10 @@ from pathlib import Path
 from _layer4_fakes import CHANNEL, FakeQemuTransport, build_txn
 from conftest import (
     FakeTestProvider,
+    kernel_provenance_details,
     make_source_tree,
     rootfs,
+    write_vmlinux_with_build_id,
 )
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
@@ -253,7 +255,7 @@ def _create_debug_ready_run(tmp_path: Path) -> tuple[Path, Path]:
     )
     vmlinux = artifact_root / manifest.run_id / "build" / "vmlinux"
     kernel = artifact_root / manifest.run_id / "build" / "bzImage"
-    vmlinux.write_text("vmlinux", encoding="utf-8")
+    write_vmlinux_with_build_id(vmlinux)
     kernel.write_text("kernel", encoding="utf-8")
     store.record_step_result(
         manifest.run_id,
@@ -274,7 +276,11 @@ def _create_debug_ready_run(tmp_path: Path) -> tuple[Path, Path]:
             step_name="boot",
             status=StepStatus.SUCCEEDED,
             summary="booted",
-            details={"debug_boot": True, "gdbstub_endpoint": {"host": "127.0.0.1", "port": 1234}},
+            details={
+                "debug_boot": True,
+                "gdbstub_endpoint": {"host": "127.0.0.1", "port": 1234},
+                "kernel_provenance": kernel_provenance_details(),
+            },
         ),
     )
     return artifact_root, source
