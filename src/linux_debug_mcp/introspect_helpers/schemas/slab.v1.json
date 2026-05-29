@@ -1,0 +1,53 @@
+{
+  "$defs": {
+    "Cache": {
+      "additionalProperties": false,
+      "properties": {
+        "active_objs": {
+          "title": "Active Objs",
+          "type": "integer"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "num_objs": {
+          "title": "Num Objs",
+          "type": "integer"
+        },
+        "objs_per_slab": {
+          "title": "Objs Per Slab",
+          "type": "integer"
+        },
+        "objsize": {
+          "title": "Objsize",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "active_objs",
+        "num_objs",
+        "objsize",
+        "objs_per_slab"
+      ],
+      "title": "Cache",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "caches": {
+      "items": {
+        "$ref": "#/$defs/Cache"
+      },
+      "title": "Caches",
+      "type": "array"
+    }
+  },
+  "required": [
+    "caches"
+  ],
+  "title": "Output",
+  "type": "object"
+}

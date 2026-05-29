@@ -1,0 +1,48 @@
+{
+  "$defs": {
+    "Entry": {
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "title": "Level",
+          "type": "integer"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "ts_usec": {
+          "title": "Ts Usec",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ts_usec",
+        "level",
+        "text"
+      ],
+      "title": "Entry",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "entries": {
+      "items": {
+        "$ref": "#/$defs/Entry"
+      },
+      "title": "Entries",
+      "type": "array"
+    },
+    "truncated": {
+      "title": "Truncated",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "entries",
+    "truncated"
+  ],
+  "title": "Output",
+  "type": "object"
+}

@@ -1,0 +1,61 @@
+{
+  "$defs": {
+    "Irq": {
+      "additionalProperties": false,
+      "properties": {
+        "affinity": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Affinity",
+          "type": "array"
+        },
+        "counts_per_cpu": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Counts Per Cpu",
+          "type": "array"
+        },
+        "irq": {
+          "title": "Irq",
+          "type": "integer"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Name"
+        }
+      },
+      "required": [
+        "irq",
+        "name",
+        "counts_per_cpu",
+        "affinity"
+      ],
+      "title": "Irq",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "irqs": {
+      "items": {
+        "$ref": "#/$defs/Irq"
+      },
+      "title": "Irqs",
+      "type": "array"
+    }
+  },
+  "required": [
+    "irqs"
+  ],
+  "title": "Output",
+  "type": "object"
+}

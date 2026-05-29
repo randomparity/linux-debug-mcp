@@ -1,0 +1,60 @@
+{
+  "$defs": {
+    "Task": {
+      "additionalProperties": false,
+      "properties": {
+        "comm": {
+          "title": "Comm",
+          "type": "string"
+        },
+        "kernel_stack": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Kernel Stack",
+          "type": "array"
+        },
+        "pid": {
+          "title": "Pid",
+          "type": "integer"
+        },
+        "state": {
+          "title": "State",
+          "type": "string"
+        },
+        "tgid": {
+          "title": "Tgid",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pid",
+        "tgid",
+        "comm",
+        "state"
+      ],
+      "title": "Task",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "tasks": {
+      "items": {
+        "$ref": "#/$defs/Task"
+      },
+      "title": "Tasks",
+      "type": "array"
+    },
+    "truncated": {
+      "title": "Truncated",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "tasks",
+    "truncated"
+  ],
+  "title": "Output",
+  "type": "object"
+}
