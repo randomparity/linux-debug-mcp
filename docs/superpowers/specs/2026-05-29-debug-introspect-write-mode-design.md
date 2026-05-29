@@ -54,7 +54,7 @@ acknowledged_permissions: list[str] = Field(default_factory=list)
 | `allow_write=false`, script calls `prog.write` | `CONFIGURATION_ERROR` | `write_mode_disabled` |
 | `from_vmcore` with `allow_write=true` | `CONFIGURATION_ERROR` | `write_mode_not_applicable` |
 
-The first two are host-side, pre-SSH (no admission acquired, no call_id minted). `write_mode_disabled` is a wrapper outcome surfaced by `_finalize_introspect_call` like the other `outcome.status` branches (a call_id and forensic StepResult exist). `acknowledged_permissions` ⊋ required (acking *more* than required) is accepted — the set-difference only checks the required subset is covered.
+The first two are host-side, pre-SSH (no admission acquired, no call_id minted). `write_mode_disabled` is a wrapper outcome surfaced by `_finalize_introspect_call` like the other `outcome.status` branches (a call_id and forensic StepResult exist). Acking *more* than required is accepted (the set-difference only checks the required subset is covered), but **only the satisfied required permissions** are persisted/logged — never the raw caller list (§7).
 
 ### 3.3 Gate ordering in `_execute_introspect_call`
 
@@ -92,24 +92,32 @@ Adding the op extends the default `enabled_operations`; the committed default-pr
 
 ## 6. Wrapper write-guard
 
-`render_wrapper(..., allow_write: bool = False)` substitutes a `${ALLOW_WRITE_GUARD}` block into the live template:
+The guard is a **`drgn.Program` subclass whose `write()` raises**, not a wrapping proxy. A proxy is unsound: drgn's C constructors (`drgn.Object(prog, …)`) use `PyObject_TypeCheck`, which a Python proxy cannot satisfy — so a proxy would break read-only scripts that pass `prog` to a C constructor, a direct AC#1 violation (ADR 0011 §4, rejected). A subclass instance *is* a real `Program`: `isinstance(prog, drgn.Program)` is true, every read is native, and only the `write` attribute is overridden in Python. AC#1 holds by construction.
 
-- `allow_write=true` → empty block (writes flow to drgn; on today's read-only targets drgn itself fails — that is drgn's call).
-- `allow_write=false` → install a guard that intercepts `prog.write` and raises a sentinel `_li_WriteModeDisabled`; the user-script `exec` wrapper catches it and sets `outcome.status="write_mode_disabled"`.
+`render_wrapper(..., allow_write: bool = False)` parameterises the **live** prologue's program construction via an `${ALLOW_WRITE_SETUP}` block:
 
-The guard snippet is a **module-level string constant** in `local_drgn_introspect.py`, `exec`-able against a fake program object in a unit test (drgn not required). It forwards the drgn `Program` read protocol — `__getattr__`, `__getitem__`, `__contains__`, `__call__`, `__iter__`, `__len__` — so a read-only script behaves identically with the guard present (AC#1). It intercepts the `prog.write` attribute path only; argument-position uses of the real program (e.g. `drgn.Object(prog, …)`) keep the unwrapped program (ADR 0011 §5 known limitation — the policy gate, not the guard, is the boundary).
+- `allow_write=false` → emit `class _li_GuardedProgram(drgn.Program): def write(self, *a, **k): raise _li_WriteModeDisabled(...)` and bind `_li_program_class = _li_GuardedProgram`.
+- `allow_write=true` → bind `_li_program_class = drgn.Program` (no override; writes flow to drgn, which itself fails on today's read-only targets — that is drgn's call, see §9 risk 4).
 
-`render_wrapper_skeleton` and `render_vmcore_wrapper*` are unchanged (skeleton mirrors the live caps; vmcore has no write mode). The `${ALLOW_WRITE_GUARD}` placeholder is `""` for the skeleton so the agent-visible skeleton matches a default read-only render.
+The live prologue's `prog = drgn.Program()` becomes `prog = _li_program_class()`. The sentinel `class _li_WriteModeDisabled(Exception): pass` is defined unconditionally in the shared `_WRAPPER_BODY` (before the user-script `exec`), and the `exec` wrapper gains an `except _li_WriteModeDisabled` arm *before* the generic `except BaseException`, setting `outcome.status="write_mode_disabled"`. Defining the sentinel unconditionally keeps the body shared with the vmcore path (which never raises it — vmcore has no write mode and uses the plain `drgn.Program()` in its own prologue).
+
+The guarded-subclass *factory* is a **module-level helper** in `local_drgn_introspect.py` — `def _guarded_program_class(base): class _G(base): def write(...): raise ...; return _G` — so a unit test can pass a fake base class (no drgn) and assert `_G().write()` raises while every other attribute/dunder is inherited unchanged. The rendered prologue calls this factory with `drgn.Program` as the base.
+
+**Named assumption (pinned by the env-gated integration test, ADR 0010 precedent):** `drgn.Program` is subclassable and a Python `write` override is invoked for `prog.write(...)` from user code. The live integration test fails loud if this ceases to hold.
+
+`render_wrapper_skeleton` and `render_vmcore_wrapper*` are unchanged behaviourally; the skeleton renders with `allow_write=false`'s `${ALLOW_WRITE_SETUP}` so the agent-visible skeleton matches a default read-only render. The byte-identical-template / golden-wrapper snapshot test is regenerated for the new placeholder.
 
 ## 7. Audit trail
 
-In `_finalize_introspect_call` (live path), threaded an `allow_write: bool` parameter:
+**Invariant:** for a live call, *audit log line ⟺ manifest step records `allow_write` ⟺ the call minted a call_id (i.e. actually executed)*. A call rejected at the gate (`operation_disabled` / `permission_required`) mints no call_id, runs nothing, and is visible only via its failure response — not the audit log; a call that passes the gate but fails admission/sudo likewise mints no call_id and is recorded nowhere because it never ran.
 
-- `StepResult.details["allow_write"]` recorded on every introspect call.
-- `StepResult.details["acknowledged_permissions"]` recorded (verbatim — fixed capability strings, not secrets; ADR 0011 §8) when `allow_write=true`.
-- On an admitted write-mode call, one `logging.getLogger(...).warning("audit: debug.introspect.run write-mode invocation run_id=%s call_id=%s acknowledged=%s", ...)` line. Fires after the gate passes and the call_id is minted, independent of whether the script actually wrote.
+This requires recording `allow_write` on **both** the success and failure manifest paths (finding: `_record_introspect_failure` builds its own `details` dict, so the success-path `step_details` change alone would drop `allow_write` from every failed call — including `write_mode_disabled` itself and any errored write-mode script):
 
-The vmcore finalizer call passes `allow_write=False` (vmcore never reaches finalize with write mode — it is rejected upstream).
+- Thread an `allow_write: bool` parameter into **both** `_finalize_introspect_call` (success-path `step_details`) **and** `_record_introspect_failure` (failure-path `details`). `StepResult.details["allow_write"]` is recorded on every live introspect call regardless of outcome.
+- When `allow_write=true`, also record `StepResult.details["acknowledged_permissions"]` = the **satisfied required permissions** (the intersection of the caller's ack with `INTROSPECT_DESTRUCTIVE_PERMISSIONS["debug.introspect.run"]`), **not** the raw caller list. The required strings are a fixed, server-defined allowlist (no secrets, no caller-controlled content, no newlines), so recording them verbatim is safe and is the audit signal AC#3 needs; echoing the raw `acknowledged_permissions` would persist unbounded, unvalidated, unredacted caller input into durable records and the log line (log-injection / manifest-pollution vector) — rejected, ADR 0011 §8.
+- One audit log line per executed write-mode call, emitted in `_execute_introspect_call` immediately after the call_id is minted (so it fires exactly once for every call that also gets a manifest step, independent of the later runner outcome): `logging.getLogger(...).warning("audit: debug.introspect.run write-mode invocation run_id=%s call_id=%s permissions=%s", run_id, call_id, satisfied_required)`.
+
+The vmcore finalizer call passes `allow_write=False` (vmcore never reaches finalize with write mode — it is rejected upstream), so the audit additions are inert there.
 
 ## 8. Test plan (TDD)
 
@@ -117,17 +125,18 @@ Handler-level (FakeRunner, no drgn):
 
 - `test_allow_write_requires_profile_op` — `allow_write=true` + profile without `debug.introspect.write` → `operation_disabled`.
 - `test_allow_write_requires_ack` — `allow_write=true`, op enabled, empty/partial ack → `permission_required` with `required_permissions`.
-- `test_allow_write_admitted_with_op_and_ack` — both present → reaches the runner (FakeRunner returns ok); `details.allow_write is True`, `details.acknowledged_permissions` recorded.
-- `test_allow_write_extra_ack_accepted` — acking a superset is accepted.
+- `test_allow_write_admitted_with_op_and_ack` — both present → reaches the runner (FakeRunner returns ok); `details.allow_write is True`, `details.acknowledged_permissions` == the satisfied required list. **Fixtures:** the live path proceeds past the gate to admission, so this reuses the existing `test_debug_introspect_run.py` live harness (injected `admission` + `session_registry`, a published READY snapshot, and a boot step with recorded `KernelProvenance`) — not the vmcore harness. The current pre-SSH `test_allow_write_rejected` needs none of these; the new test does.
+- `test_allow_write_extra_ack_accepted` — acking a superset is accepted, and only the satisfied required subset is recorded in `details.acknowledged_permissions` (not the extra strings).
+- `test_allow_write_failure_records_allow_write` — a write-mode call whose runner result triages to a FAILED step (e.g. a script-error outcome) still records `details.allow_write is True` via `_record_introspect_failure` (guards finding: failure path must not drop the flag).
 - `test_read_only_call_ignores_ack_and_skips_gates` — `allow_write=false` with a profile lacking `debug.introspect.write` still succeeds; no ack consulted.
-- `test_write_mode_audit_log_line` — caplog asserts the WARNING audit line on a write-mode call and its absence on a read-only call.
-- `test_vmcore_allow_write_not_applicable` — replaces `test_allow_write_rejected`; asserts code `write_mode_not_applicable`.
-- `test_run_allow_write_no_longer_unsupported` — updates the existing `test_allow_write_rejected` for the live path to the new gated behaviour.
+- `test_write_mode_audit_log_line` — caplog asserts exactly one WARNING audit line (with the satisfied required permissions, not raw caller input) on a write-mode call, and its absence on a read-only call.
+- `test_vmcore_allow_write_not_applicable` — replaces `test_allow_write_rejected` in `test_debug_introspect_from_vmcore.py`; asserts code `write_mode_not_applicable`.
+- `test_run_allow_write_no_longer_unsupported` — updates the existing live-path `test_allow_write_rejected` (`test_debug_introspect_run.py`) to the new gated behaviour (gate rejection, not `allow_write_not_supported`).
 
 Render-level (string assertions):
 
-- `test_render_wrapper_threads_allow_write_guard` — guard block present when `allow_write=false`, absent when `true`; live template recomposition byte-identical test still passes (guard placeholder default `""`).
-- `test_write_guard_blocks_write_forwards_reads` — `exec` the guard snippet against a fake program; `prog.write(...)` raises the sentinel; `prog.attr`, `prog["x"]`, `prog(...)`, `x in prog`, `iter(prog)`, `len(prog)` all forward.
+- `test_render_wrapper_threads_allow_write_setup` — `${ALLOW_WRITE_SETUP}` renders the guarded-subclass binding when `allow_write=false` and the plain `drgn.Program` binding when `true`; the regenerated golden-wrapper snapshot matches the default (`allow_write=false`) render.
+- `test_guarded_program_class_blocks_write_inherits_rest` — call `_guarded_program_class(FakeBase)` with a fake base (no drgn); the subclass's `write()` raises `_li_WriteModeDisabled`, `isinstance(instance, FakeBase)` is true, and every other attribute/method/dunder is inherited unchanged (proves AC#1 transparency without a proxy).
 
 Config:
 
@@ -140,6 +149,7 @@ Env-gated integration (drgn present, kept gated):
 
 ## 9. Risks
 
-1. **Guard transparency (AC#1).** A subtle proxy gap could break a read-only script under `allow_write=false`. Mitigation: the guard intercepts only `prog.write` and forwards the full documented protocol; `test_write_guard_blocks_write_forwards_reads` plus the env-gated live test verify transparency. The known C-constructor limitation is documented, not silently shipped.
+1. **Guard transparency (AC#1).** A read-only script must behave identically `allow_write` false-vs-true. Because the guard is a real `drgn.Program` *subclass* (not a proxy), `isinstance` passes, all reads are native, and only `.write` differs — transparency holds by construction, not by exhaustively re-forwarding a protocol. `test_guarded_program_class_blocks_write_inherits_rest` plus the env-gated live test verify it. Residual: the named subclassability assumption (§6) — pinned by the integration test.
 2. **Guard is not a sandbox.** A determined script bypasses it (full builtins). This is by design and stated in §2 and ADR 0011 §1; the policy gate is the boundary. Not over-claiming is the mitigation.
 3. **Default profiles enable the write capability.** Like `transport.inject_break`, `debug.introspect.write` is default-enabled, so the per-call ack is the always-required second factor. Operators wanting a hard read-only posture narrow `enabled_operations`. Documented in §2 / ADR 0011 §3.
+4. **AC#2's "succeeds when `allow_write=true`" half is not positively verifiable today.** No writable target exists: the live kernel is read-only (`/proc/kcore`) and vmcore is offline, so a `prog.write` under gated write mode fails at drgn regardless. The verifiable proxy for AC#2 is therefore two-sided and asymmetric: (a) `allow_write=false` ⇒ `write_mode_disabled` (the guarded subclass raises — directly tested), and (b) `allow_write=true` ⇒ the guard is *absent* (the plain `drgn.Program` is bound, so the write reaches drgn and fails there, not in our guard — asserted by the env-gated integration test). The "write actually mutates and succeeds" path becomes testable only when a writable target lands; until then it is gated + audited but not exercised. This is an accepted, explicitly-stated gap, not a silent one.
