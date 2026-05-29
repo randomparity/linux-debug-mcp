@@ -64,8 +64,7 @@ from linux_debug_mcp.domain import (
     StepStatus,
     ToolResponse,
 )
-from linux_debug_mcp.introspect_helpers import HELPER_REGISTRY
-from linux_debug_mcp.introspect_helpers.base import HelperSpec
+from linux_debug_mcp.introspect_helpers import HELPER_REGISTRY, HelperSpec
 from linux_debug_mcp.logging import configure_logging
 from linux_debug_mcp.prereqs.checks import check_prerequisites
 from linux_debug_mcp.prereqs.drgn_probe import (
@@ -2409,9 +2408,9 @@ class PostValidatorVerdict:
     extra_response_data: dict[str, Any] = field(default_factory=dict)
 
 
-def _introspect_args_json(request: object) -> str:
-    """Helper requests expose `args`; run requests do not (yet)."""
-    return json.dumps(getattr(request, "args", {}) or {})
+def _introspect_args_json(request: DebugIntrospectRunRequest) -> str:
+    """Both request types carry `args`; `run`'s tool signature leaves it unexposed."""
+    return json.dumps(request.args or {})
 
 
 def _execute_introspect_call(
@@ -3364,7 +3363,7 @@ def _make_helper_post_validator(spec: HelperSpec) -> IntrospectPostValidator:
                 failure_code="helper_schema_drift",
                 failure_message=(f"expected exactly one emit, got {0 if not isinstance(emits, list) else len(emits)}"),
                 failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                extra_step_details=details_stub,
+                extra_step_details={**details_stub},
             )
         try:
             model = spec.output_model.model_validate(emits[0])
@@ -3374,11 +3373,11 @@ def _make_helper_post_validator(spec: HelperSpec) -> IntrospectPostValidator:
                 failure_code="helper_schema_drift",
                 failure_message=_redact_and_truncate(Redactor(), str(exc), cap=512),
                 failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                extra_step_details=details_stub,
+                extra_step_details={**details_stub},
             )
         return PostValidatorVerdict(
             ok=True,
-            extra_step_details=details_stub,
+            extra_step_details={**details_stub},
             extra_response_data={
                 "helper": spec.name,
                 "version": spec.version,

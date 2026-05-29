@@ -1373,6 +1373,33 @@ def _helper_ssh_result(emit_obj: dict) -> SshCommandResult:
     return SshCommandResult(exit_status=6, stdout=json.dumps(body), stderr="")
 
 
+def _helper_script_error_ssh_result() -> SshCommandResult:
+    """Wrapper envelope for a curated drgn script that RAISED on the target:
+    outcome.status="error" carrying error_type/error_message, empty emits."""
+    body = {
+        "call_id": "0" * 32,
+        "build_id": VALID_BUILD_ID,
+        "outcome": {
+            "status": "error",
+            "error_type": "KeyError",
+            "error_message": "'__num_online_cpus'",
+            "traceback": "Traceback (most recent call last): ...",
+        },
+        "emits": [],
+        "user_stdout": "",
+        "prelude_ms": 5,
+        "truncated": {
+            "emits": False,
+            "user_stdout": False,
+            "traceback": False,
+            "total_json": False,
+            "per_emit_size": False,
+            "error_message": False,
+        },
+    }
+    return SshCommandResult(exit_status=6, stdout=json.dumps(body), stderr="")
+
+
 def test_helper_success_returns_typed_result(tmp_path: Path) -> None:
     from linux_debug_mcp.domain import DebugIntrospectHelperRequest
     from linux_debug_mcp.server import debug_introspect_helper_handler
@@ -1424,6 +1451,28 @@ def test_helper_malformed_emit_records_failed_step(tmp_path: Path) -> None:
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "helper_schema_drift"
+    steps = store.load_manifest(run_id).step_results
+    assert any(n.startswith("introspect:") and s.status.name == "FAILED" for n, s in steps.items())
+
+
+def test_helper_script_error_records_failed_step(tmp_path: Path) -> None:
+    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
+    from linux_debug_mcp.server import debug_introspect_helper_handler
+
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    resp = debug_introspect_helper_handler(
+        DebugIntrospectHelperRequest(run_id=run_id, target_ref="local-qemu", name="sysinfo"),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=FakeSshRunner(results=[_helper_script_error_ssh_result()]),
+        admission=FakeAdmissionService(snapshot=_make_snapshot(run_id)),
+        session_registry=FakeSessionRegistry(),
+    )
+    assert resp.ok is False
+    assert resp.error.details["code"] == "helper_script_error"
     steps = store.load_manifest(run_id).step_results
     assert any(n.startswith("introspect:") and s.status.name == "FAILED" for n, s in steps.items())
 
