@@ -27,11 +27,14 @@ the target is never left stopped.
 ### 1.1 In scope
 
 - A `SessionGuard` seam in `seams/guard.py` (beside `StopCapableGuard`):
-  - `Precondition` and `TeardownStep` Protocols (the #69/#70 plug-in points).
-  - A `SessionGuardContext` carrying the run-scoped facts steps need.
-  - `SessionGuard` with injected **ordered** `preconditions` and `teardown_steps`
-    lists (empty default in #66), an `enter(ctx)` method, and one idempotent
-    `teardown(ctx, *, reason)` routine.
+  - `PreAttachPrecondition`, `PostAttachPrecondition`, and `TeardownStep`
+    Protocols (the #69/#70 plug-in points).
+  - A `SessionGuardContext` carrying the run-scoped facts steps need, including a
+    `phase` discriminator (`"bounded"` vs `"force_drop"`) distinct from `reason`.
+  - `SessionGuard` with injected **ordered** `pre_attach`, `post_attach`, and
+    `teardown_steps` lists (empty default in #66), `enter(ctx)` /
+    `verify_attached(ctx, session)` methods, and one idempotent
+    `teardown(ctx, *, close, read_record)` routine returning a `TeardownReport`.
 - The **guaranteed-resume / no-orphan invariant**: every exit path (clean end,
   attach error, timeout/invalidation) runs the same `teardown` so the durable
   `execution_state` is never left `HALTED` and helper processes are reaped.
@@ -83,32 +86,74 @@ and the resume assertion need — no live handles, so it can be reconstructed on
 of the three entry points from the durable record:
 
 ```python
+TeardownReason = Literal["ended", "attach_error", "invalidated", "lease_expired"]
+TeardownPhase = Literal["bounded", "force_drop"]
+
 @dataclass(frozen=True)
 class SessionGuardContext:
     target_key: TargetKey
     generation: int
     session_id: str | None       # None before the attach commits a session
-    reason: str                  # "ended" | "attach_error" | "invalidated" | "timeout"
+    reason: TeardownReason       # why teardown is running (caller intent)
+    phase: TeardownPhase         # execution constraint: "bounded" allows blocking; "force_drop" must not block
+    halt_recorded: bool          # True iff the durable record was parked HALTED before this teardown
 ```
 
 `session_id` is `None` only during `enter`/attach-error before the transaction
-commits a session id; teardown paths always carry it. `reason` is set by the
-caller and threaded to every step so a step can branch (e.g. a watchdog-restore
-step is a no-op when `reason == "attach_error"` and no relax ran).
+commits a session id; teardown paths always carry it.
+
+`reason` is the caller's intent (clean end, a failed attach, an invalidation, or a
+lease expiry) so a step can branch on *why* it is tearing down. `phase` is the
+orthogonal **execution constraint**, set by the call site and distinct from
+`reason` (Finding 2 of the spec review): `"bounded"` is the clean-end and
+dispatcher-`invalidate` path where a step runs on a deadline-supervised worker and
+MAY block on I/O; `"force_drop"` is the dispatcher's non-blocking out-of-band path
+(§5.5) where a step MUST NOT block. A blocking step (e.g. #69's ssh
+watchdog-restore) inspects `ctx.phase` and no-ops when `phase == "force_drop"`,
+leaving its restore to the `bounded` `invalidate` worker; the same lifecycle event
+delivers a `bounded` `invalidate` and (only if that overruns the deadline) a
+`force_drop`, so the step is reachable on the path where blocking is allowed and
+skipped on the path where it is not. `halt_recorded` lets a step and the resume
+post-condition (§3.5) distinguish a session that actually parked the kernel
+`HALTED` from a failed attach that never did.
 
 ### 3.2 `Precondition` Protocol
 
+Preconditions run at **two distinct phases**, because some checks are static
+(runnable before attach) while others must read the live target (Finding 3 of the
+spec review): #70's symbol version-lock must "verify `vmlinux` build-id/`vermagic`
+matches the **running** kernel," which requires the RSP/gdb channel that only the
+attach opens. A single pre-attach phase therefore cannot host #70's core check, so
+`SessionGuard` exposes both:
+
 ```python
 @runtime_checkable
-class Precondition(Protocol):
+class PreAttachPrecondition(Protocol):
     name: str
     def check(self, ctx: SessionGuardContext) -> None: ...
+
+@runtime_checkable
+class PostAttachPrecondition(Protocol):
+    name: str
+    def check(self, ctx: SessionGuardContext, session: TransportSession) -> None: ...
 ```
 
-`check` runs **before** any resource is acquired. It raises `PreconditionError`
-(a new exception mapped to `READINESS_FAILURE`) to abort the enter; nothing has
-been acquired, so there is nothing to roll back. #70's symbol version-lock is a
-`Precondition`. #66 ships none.
+- A `PreAttachPrecondition.check` runs **before any resource is acquired** (no
+  `session` yet). It raises `PreconditionError` (a new exception mapped to
+  `READINESS_FAILURE`) to abort the enter; nothing has been acquired, so there is
+  nothing to roll back. Static symbol checks (vmlinux exists/parses) live here.
+- A `PostAttachPrecondition.check` runs **after the attach commits a session but
+  before the session is handed back to the caller** — it receives the live
+  `TransportSession` so it can read the running kernel over RSP. Raising
+  `PreconditionError` here aborts the open *after* acquisition, so the handler runs
+  the full teardown (`reason="attach_error"`, §3.5) to release the guard/lease and
+  reap the backend — the same rollback path an attach failure takes. #70's
+  build-id-vs-running-kernel match is a `PostAttachPrecondition`.
+
+#66 ships **none** of either; it defines the two slots and proves (via tests) that
+a post-attach failure tears the session down cleanly. The handler ordering is:
+pre-attach preconditions → `transaction.open()` + `_halt` → post-attach
+preconditions → return session.
 
 ### 3.3 `TeardownStep` Protocol
 
@@ -128,15 +173,38 @@ the type system):
   the failure and teardown continues to the next step (the resume + reap of the
   target can never be blocked by a misbehaving extension). `SessionGuard.teardown`
   wraps each step in `contextlib.suppress`-with-logging and aggregates errors.
-- **`force_drop`-safe** — because one entry point is the dispatcher's
-  `force_drop` (which the §5.5 contract requires be non-blocking), a teardown step
-  invoked on that path MUST be non-blocking. #69's watchdog-restore over ssh is
-  blocking, so it runs on the `invalidate` (bounded-worker) path and the clean
-  path, and is a no-op on `force_drop`; the spec records this so #69 wires it
-  correctly.
+- **Phase-aware (non-blocking under `force_drop`)** — a step inspects
+  `ctx.phase` and MUST NOT block when `phase == "force_drop"` (the dispatcher's
+  non-blocking out-of-band path, §5.5). Under `phase == "bounded"` (clean end or
+  the dispatcher's deadline-supervised `invalidate` worker) it MAY block on I/O.
+  #69's ssh watchdog-restore blocks, so it acts under `"bounded"` and no-ops under
+  `"force_drop"`. This is the explicit discriminator from §3.1 — a step never has
+  to guess its execution constraint from `reason`.
+
+A `TeardownStep` is a single object; `SessionGuard` does not run it twice for one
+event. The `bounded` `invalidate` runs the step; the `force_drop` (only on
+deadline overrun) runs it again with `phase="force_drop"` — idempotency (above)
+makes the second, non-blocking invocation safe.
 
 #69's watchdog-restore is a `TeardownStep`. #66 ships none beyond the built-in
 resume (§3.5), which is not a `TeardownStep` but a fixed core action.
+
+### 3.3a `TeardownReport`
+
+`teardown()` returns a `TeardownReport` so the handler can surface (never
+re-raise) what happened:
+
+```python
+@dataclass(frozen=True)
+class TeardownReport:
+    step_errors: dict[str, str]          # step.name -> repr(exc) for any step that raised (suppressed)
+    resume_ok: bool                      # the §3.5 resume post-condition held after close()
+    resume_detail: str                   # observational note when resume_ok is False (logged, not raised)
+```
+
+`step_errors` feeds the handler's `teardown_step_errors` response detail (§5).
+`resume_ok`/`resume_detail` record the §3.5 post-condition check; a `False`
+`resume_ok` is a logged contract-violation, not a control-flow error.
 
 ### 3.4 `SessionGuard`
 
@@ -145,21 +213,37 @@ class SessionGuard:
     def __init__(
         self,
         *,
-        preconditions: Sequence[Precondition] = (),
+        pre_attach: Sequence[PreAttachPrecondition] = (),
+        post_attach: Sequence[PostAttachPrecondition] = (),
         teardown_steps: Sequence[TeardownStep] = (),
     ) -> None: ...
 
     def enter(self, ctx: SessionGuardContext) -> None:
-        """Run preconditions in declared order; the first failure raises
+        """Run pre_attach preconditions in declared order; the first failure raises
         PreconditionError and aborts. No resource is acquired here — the caller
         performs the stop-capable attach after enter() returns."""
 
-    def teardown(self, ctx: SessionGuardContext, *, close: Callable[[], None]) -> TeardownReport:
-        """The single idempotent teardown invariant. Runs teardown_steps in
-        REVERSE declared order (LIFO unwind), then invokes the injected `close`
-        callable (the existing transaction.close path) which reaps the backend and
-        releases guard/lease/record. Resume (§3.5) is asserted as part of close's
-        record handling. Never raises; aggregates per-step errors into the report."""
+    def verify_attached(self, ctx: SessionGuardContext, session: TransportSession) -> None:
+        """Run post_attach preconditions in declared order against the live session;
+        the first failure raises PreconditionError. The caller catches it and runs
+        teardown(reason="attach_error") so the just-acquired guard/lease/backend are
+        released — a post-attach precondition failure is rolled back exactly like an
+        attach failure."""
+
+    def teardown(
+        self,
+        ctx: SessionGuardContext,
+        *,
+        close: Callable[[], None],
+        read_record: Callable[[], TransportSession | None],
+    ) -> TeardownReport:
+        """The single idempotent teardown invariant. Runs teardown_steps in REVERSE
+        declared order (LIFO unwind), each guarded by ctx.phase, then invokes the
+        injected `close` callable (the existing transaction.close path) which reaps
+        the backend and releases guard/lease/record. After close, calls `read_record`
+        to evaluate the §3.5 resume post-condition and records the result in the
+        report. Never raises; per-step exceptions are suppressed+aggregated, and a
+        violated resume post-condition is logged, not raised."""
 ```
 
 `SessionGuard` holds no per-session state — it is a stateless policy object
@@ -168,69 +252,118 @@ constructor-injection-for-tests convention). The per-session state lives where i
 already does: the durable `TransportSession` record and the transaction's
 in-memory token map.
 
-`close` is passed in rather than `SessionGuard` reaching into the transaction, so
-the guard stays decoupled from `TransportTransaction` and is unit-testable with a
-fake `close`.
+`close` and `read_record` are passed in rather than `SessionGuard` reaching into
+the transaction/registry, so the guard stays decoupled from `TransportTransaction`
+and is unit-testable with fakes. For the **dispatcher path** (§4 item 3) the same
+`teardown_steps` must reach `_SessionSubscriber`; rather than give the transaction
+a `SessionGuard` reference (which would break the decoupling in ADR 0013 decision
+1), `bind_lifecycle(dispatcher, teardown_steps=...)` passes the **step list as
+opaque data** into the transaction, which forwards it to each `_SessionSubscriber`
+it constructs. The subscriber invokes the steps directly with the correct
+`ctx.phase` (`"bounded"` in `invalidate`, `"force_drop"` in `force_drop`); the
+guard's `enter`/`verify_attached`/`teardown` methods are not on that path. The
+transaction thus holds a step list (data), never a guard object — "decoupled"
+stays honest.
 
 ### 3.5 The resume invariant
 
-"No target left stopped" is enforced inside the `close` callable's record
-handling, which `teardown` always invokes:
+The coarse admission snapshot for a local-qemu target is published `READY` at boot
+and is **not** transitioned to `DEBUGGING` while a gdbstub session is open
+(verified: there is no snapshot `DEBUGGING` writer; the snapshot stays `READY`).
+The ssh-tier `HALTED` gating is carried entirely by the **durable
+`TransportSession` record's `execution_state`**, which `_halt_debug_transport`
+parks `HALTED` before attach and which `probe_execution_state` reads (returning
+`UNKNOWN` when the record is absent — `exec_probe.py:27`). So "resume" is not a
+snapshot state change; it is the guarantee that **after teardown the durable
+record no longer advertises a live `HALTED` session that no owner will resume.**
 
-- **Clean end** (`reason="ended"`): `transaction.close(force=True)` deletes the
-  durable record. With the record gone the target returns to `READY`, where
-  ssh-tier ops are admitted normally — the kernel is resumed (QEMU auto-resumes
-  the VM when gdb disconnects in the batch controller model). Teardown asserts the
-  record no longer reports `HALTED` (it is deleted) before returning success.
-- **Attach error** (`reason="attach_error"`): `transaction.close(force=False)`.
-  The gdb attach failed, so the kernel may be running or halted; teardown reaps
-  any spawned gdb/backend and ensures the durable record is not left advertising a
-  live `HALTED` session. A `closed_while_halted` recovery tombstone is the correct
-  outcome (a future `recovery=True` reattach clears it) — the target is gated, not
-  stranded mid-halt.
-- **Timeout / invalidation** (`reason in {"timeout","invalidated"}`): the
-  dispatcher's `_SessionSubscriber` already releases guard/lease/record and reaps
-  the backend; #66 routes its teardown steps through the same `teardown` so #69's
-  restore runs, and the resume assertion holds because the record is deleted.
+The resume invariant is a **post-condition `teardown` checks observationally**
+(via `read_record`) after `close` — it is recorded in `TeardownReport.resume_ok`
+and logged on violation, never used as control flow (teardown must complete and
+never raise). The post-condition, by exit path:
 
-The resume invariant is therefore: **on every exit path, the durable record for
-the target either is deleted or carries a recovery tombstone — never a live
-`HALTED` session with no owner.** This is the testable statement of AC1.
+- **Clean end** (`reason="ended"`, `phase="bounded"`):
+  `transaction.close(force=True)` deletes the record. `read_record()` is then
+  `None` → `resume_ok=True`. The kernel is resumed (QEMU auto-resumes the VM when
+  gdb disconnects in the batch-controller model) and ssh-tier admits again because
+  the next probe reads `UNKNOWN` against a `READY` snapshot.
+- **Attach error / post-attach precondition failure** (`reason="attach_error"`):
+  the resume action depends on `ctx.halt_recorded` — the fact recorded by whether
+  `_halt_debug_transport` ran before the failure. **If the kernel was never parked
+  `HALTED`** (`halt_recorded=False` — the attach failed before/at connect, so the
+  kernel is still running), `close(force=True)` deletes the record so ssh-tier is
+  **not** gated: a failed attach that never stopped the kernel does not strand the
+  target (this resolves the AC1 tension — a running kernel is never left
+  ssh-blocked). **If the kernel was parked `HALTED`** (`halt_recorded=True`, the
+  halt landed but the controller never confirmed a clean resume), `close(force=False)`
+  leaves a `closed_while_halted` recovery tombstone, because the server cannot
+  prove the kernel resumed; the agent clears it with `transport.open(recovery=True)`
+  (the same documented clearance the transport layer already exposes). In both
+  cases the backend/gdb is reaped. `resume_ok=True` when the record is either
+  deleted or carries a current recovery tombstone.
+- **Timeout / invalidation / lease expiry** (`reason in {"invalidated",
+  "lease_expired"}`, `phase` `"bounded"` then possibly `"force_drop"`): the
+  dispatcher's `_SessionSubscriber` releases guard/lease/record and reaps the
+  backend; #66 routes the same `teardown_steps` through it (§4 item 3) so #69's
+  restore runs under `"bounded"`. The record is dropped, so `resume_ok=True`.
+
+The resume invariant is therefore the testable statement of AC1: **on every exit
+path the durable record is either deleted or, only when a halt was recorded and a
+clean resume was not confirmed, carries a current recovery tombstone — never a
+live `HALTED` record with no owner.** A failed attach that never halted the kernel
+resumes cleanly (no tombstone), so a running kernel is never left ssh-blocked.
 
 ## 4. Wiring (`server.py`)
 
-`create_app` constructs one `SessionGuard(preconditions=(), teardown_steps=())`
-and injects it into the debug handlers (additive keyword arg, default `None` →
-the seam is inert on a non-wired server, matching the existing
-transaction/admission/registry optionality).
+`create_app` constructs one `SessionGuard(pre_attach=(), post_attach=(),
+teardown_steps=())` and injects it into the debug handlers (additive keyword arg,
+default `None` → the seam is inert on a non-wired server, matching the existing
+transaction/admission/registry optionality). The same empty `teardown_steps` are
+passed to `transaction.bind_lifecycle(dispatcher, teardown_steps=())` so the
+dispatcher path (item 3) carries the identical list.
 
-1. **`debug_start_session_handler`** — build `SessionGuardContext(reason="enter")`;
-   call `guard.enter(ctx)` **before** `transaction.open()`. On any exception from
-   `open()`/`_halt`/`provider.start_session`, call
-   `guard.teardown(ctx_with(reason="attach_error"), close=lambda: transaction.close(sid, force=False))`
-   instead of today's bare `transaction.close(force=False)`.
+1. **`debug_start_session_handler`** — call `guard.enter(ctx)` (pre-attach) **before**
+   `transaction.open()`; after `open()`+`_halt`+`provider.start_session` commit,
+   call `guard.verify_attached(ctx, session)` (post-attach) before returning. On any
+   exception from `open()`/`_halt`/`provider.start_session`/`verify_attached`, call
+   `guard.teardown(ctx_with(reason="attach_error", phase="bounded", halt_recorded=<did _halt run?>),
+   close=lambda: transaction.close(sid, force=<not halt_recorded>), read_record=...)`
+   instead of today's bare `transaction.close(force=False)`. `halt_recorded` is
+   `True` iff `_halt_debug_transport` ran before the failure, and drives the
+   `force` flag per §3.5.
 2. **`debug_end_session_handler`** — on a clean provider detach, call
-   `guard.teardown(ctx_with(reason="ended"), close=lambda: transaction.close(sid, force=True))`
-   instead of today's bare `transaction.close(force=True)`.
-3. **`_SessionSubscriber`** (`transaction.py`) — its `invalidate`/`force_drop`
-   gain a `teardown_steps` hook so #69's restore runs out-of-band. Because the
-   subscriber is constructed by the transaction, `SessionGuard`'s `teardown_steps`
-   are threaded to it at `bind_lifecycle`/subscribe time. `force_drop` runs only
-   the `force_drop`-safe steps (§3.3).
+   `guard.teardown(ctx_with(reason="ended", phase="bounded", halt_recorded=True),
+   close=lambda: transaction.close(sid, force=True), read_record=...)` instead of
+   today's bare `transaction.close(force=True)`.
+3. **`_SessionSubscriber`** (`transaction.py`) — `invalidate` and `force_drop` gain
+   a `teardown_steps` list (forwarded as opaque data from `bind_lifecycle`, never a
+   `SessionGuard` reference — §3.4). `invalidate` runs them with `phase="bounded"`;
+   `force_drop` runs them with `phase="force_drop"`. The existing guard/lease/record
+   release + backend reap is unchanged; the steps run before that release so a
+   restore step acts while the line still exists.
 
 The handlers' existing manifest/redaction/`ToolResponse` behavior is unchanged;
 `SessionGuard` slots in around the attach/teardown only.
 
 ## 5. Error handling & failure contract
 
-- A failed `Precondition` → `PreconditionError` → handler maps to
+- A failed **pre-attach** `PreconditionError` → handler maps to
   `READINESS_FAILURE` with the precondition `name` in details and
   `suggested_next_actions=["artifacts.get_manifest"]`. Nothing acquired.
-- A `TeardownStep` that raises is suppressed, logged, and aggregated into the
-  `TeardownReport`; teardown always proceeds to `close`. The handler still returns
-  the underlying operation's `ToolResponse`; a teardown-step failure is surfaced
-  in details (`teardown_step_errors`) but does not flip a successful end to a
-  failure — the invariant (resume + reap) is satisfied by `close` regardless.
+- A failed **post-attach** `PreconditionError` → the handler runs
+  `teardown(reason="attach_error", halt_recorded=...)` to release the
+  just-acquired guard/lease and reap the backend, then returns
+  `READINESS_FAILURE` with the precondition `name`. The session is fully torn
+  down — a post-attach rejection never leaves an acquired session live.
+- A `TeardownStep` that raises is suppressed, logged, and aggregated into
+  `TeardownReport.step_errors`; teardown always proceeds to `close`. The handler
+  still returns the underlying operation's `ToolResponse`; a teardown-step failure
+  is surfaced in details (`teardown_step_errors`) but does not flip a successful
+  end to a failure — the invariant (resume + reap) is satisfied by `close`
+  regardless.
+- A violated resume post-condition (`resume_ok=False`) is logged as a
+  contract-violation with `resume_detail`; it does not raise (teardown must
+  complete) but it is the signal a conformance test asserts must never fire.
 - `close` itself is the existing transaction path; its errors propagate as they do
   today.
 
@@ -238,25 +371,39 @@ The handlers' existing manifest/redaction/`ToolResponse` behavior is unchanged;
 
 Handler/seam-level (no MCP, injected fakes), following the repo convention:
 
-- **`enter` ordering**: preconditions run in declared order; first failure aborts
-  and no later precondition runs; nothing acquired.
-- **Resume-on-error**: a `provider.start_session` that raises drives
-  `teardown(reason="attach_error")`; assert backend reaped, guard/lease released,
-  and the durable record is not a live `HALTED` (tombstone present).
-- **Resume-on-timeout**: a wedged invalidate worker → `force_drop` runs the
-  `force_drop`-safe teardown steps and the record is dropped; assert no orphaned
+- **`enter` ordering**: pre-attach preconditions run in declared order; first
+  failure raises `PreconditionError` and no later one runs; nothing acquired.
+- **Post-attach precondition rollback**: a `post_attach` check that raises drives
+  `teardown(reason="attach_error")`; assert the just-acquired guard/lease are
+  released and the backend reaped (a post-attach rejection never leaves a live
+  session), and the handler returns `READINESS_FAILURE` with the precondition name.
+- **Resume-on-error, halt recorded** (`halt_recorded=True`): a failure after
+  `_halt` drives `teardown` → `close(force=False)`; assert backend reaped,
+  guard/lease released, and a current `closed_while_halted` recovery tombstone
+  exists (`resume_ok=True`).
+- **Resume-on-error, no halt** (`halt_recorded=False`): a failure before `_halt`
+  drives `teardown` → `close(force=True)`; assert the record is deleted, **no**
+  recovery tombstone, and a subsequent ssh-tier admit succeeds (a never-halted
+  kernel is not left ssh-blocked — the AC1 edge).
+- **Resume-on-timeout**: a wedged `invalidate` worker → `force_drop` runs the
+  steps with `phase="force_drop"` and the record is dropped; assert no orphaned
   helper (fake proxy `stop_by_identity` called) and guard released.
-- **Clean end resume**: `teardown(reason="ended")` deletes the record; target
-  returns to `READY`; a subsequent ssh-tier admit succeeds.
-- **No-orphan**: across error/timeout/clean paths the fake backend's reap hook is
-  always invoked exactly once (idempotent on double-teardown).
+- **Clean end resume**: `teardown(reason="ended")` deletes the record
+  (`resume_ok=True`); a subsequent ssh-tier admit succeeds.
+- **No-orphan / idempotency**: across error/timeout/clean paths the fake backend's
+  reap hook is invoked, and a double `teardown` (e.g. `invalidate` then a re-fired
+  event) is a safe no-op the second time.
 - **Teardown-step ordering + isolation**: steps run in reverse; a raising step is
-  suppressed and the next step + `close` still run.
-- **`force_drop`-safety**: a blocking step is skipped on the `force_drop` path.
+  suppressed (recorded in `step_errors`) and the next step + `close` still run;
+  `resume_ok` still holds.
+- **`phase` discrimination**: a step that blocks under `phase="bounded"` is
+  invoked under `invalidate` and **skipped/no-ops** under `force_drop`; assert the
+  step observes the correct `ctx.phase` on each path.
 - **HALTED fast-reject conformance**: with a `SessionGuard`-opened session parked
   `HALTED`, an ssh-tier `target.run_tests` admit is rejected `target_halted` (not
   hung); after clean teardown the same admit succeeds. (Reject logic already in
-  `admit_ssh_tier`; this binds it to the guard lifecycle.)
+  `_admit_run_tests_ssh_tier`/`admit_ssh_tier`; this binds it to the guard
+  lifecycle.)
 - Integration tests touching real `gdb`/`virsh` stay env-gated and untouched.
 
 ## 7. Open questions
