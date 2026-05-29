@@ -88,7 +88,6 @@ from linux_debug_mcp.providers.contracts import (
 )
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from linux_debug_mcp.providers.local_drgn_introspect import (
-    _BUILD_ID_RE,
     SCRIPT_BYTE_CAP,
     TARGET_PYTHON_ARGV,
     WrapperRenderError,
@@ -140,6 +139,7 @@ from linux_debug_mcp.seams.target import (
     TargetKey,
     publish_ready_snapshot,
 )
+from linux_debug_mcp.symbols.verify import BUILD_ID_RE
 from linux_debug_mcp.transport.base import (
     EndpointExposure,
     ExecutionState,
@@ -2438,7 +2438,7 @@ def debug_introspect_run_handler(
             details={"code": "provenance_missing"},
         )
     build_id = build_step.details["build_id"]
-    if not isinstance(build_id, str) or not _BUILD_ID_RE.match(build_id):
+    if not isinstance(build_id, str) or not BUILD_ID_RE.match(build_id):
         return ToolResponse.failure(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             run_id=run_id,
