@@ -179,15 +179,22 @@ persisted into the manifest for enumerability.
 **Execution-state: HALTED for the whole window (ADR 0021 decision 2).** The
 durable record is parked HALTED at attach and stays HALTED until `end_session`.
 The interactive resume verbs (`continue`/`step`/`next`/`finish`) are
-**continue-and-wait-for-stop, bounded by the validated 1–3600s timeout**: they
-issue the MI exec verb, wait for the `*stopped` async record, and return it as a
-typed `StopRecord`; on timeout they issue `-exec-interrupt` to return to a known
-stopped state and report `timed_out=true`. The session is therefore always HALTED
-between calls, so `target.run_tests` stays gated `target_halted` for the window and
-never races a breakpoint that silently halts a "running" kernel. The kernel
-returns to EXECUTING exactly once, at `end_session`'s resume-and-detach. This
-narrows `debug.continue` to never admit ssh-tier mid-session — a deliberate Phase-C
-safety choice; a detached free-running continue is out of scope.
+**continue-and-wait-for-stop, bounded by a validated 1–`MAX_INTERACTIVE_WAIT_SEC`
+(60s) timeout** (default 10s — deliberately *not* the legacy 1–3600s, so a blocking
+call holding `debug_lock` can never outlast a client request timeout or wedge
+`end_session`): they issue the MI exec verb, wait for the `*stopped` async record,
+and return it as a typed `StopRecord`; on timeout they issue `-exec-interrupt`
+(short 10s bound) to return to a known stopped state and report `timed_out=true`.
+"Run until this breakpoint" is the agent re-polling `debug.continue`, not one long
+blocking call. A terminal `*stopped` reason (`exited*` — kernel panic / inferior
+gone) is **not** a HALTED stop: it reaps the session and reports `session_exited`
+(DEBUG_ATTACH_FAILURE) so no later verb runs against a dead inferior. The session
+is otherwise always HALTED between calls, so `target.run_tests` stays gated
+`target_halted` for the window and never races a breakpoint that silently halts a
+"running" kernel. The kernel returns to EXECUTING exactly once, at `end_session`'s
+resume-and-detach. This narrows `debug.continue` to never admit ssh-tier
+mid-session — a deliberate Phase-C safety choice; a detached free-running continue
+is out of scope.
 
 **MI eval stays internal-only behind the inspector allowlist.**
 `-data-evaluate-expression` is used **only as the internal implementation** of the
@@ -210,8 +217,13 @@ existing env-gated local-QEMU gdbstub coverage passes on the MI engine.
   `-exec-continue` `^running` return) yields a typed `StopRecord` from
   `debug.continue`.
 - A continue whose wait expires issues `-exec-interrupt`, collects the
-  `*stopped (SIGINT)`, returns `timed_out=true`, and leaves the durable
-  `execution_state` HALTED.
+  `*stopped (SIGINT)`, returns `timed_out=true`, leaves the durable
+  `execution_state` HALTED, and the whole call returns within its ≤60s ceiling
+  (+10s interrupt fallback).
+- A `*stopped, reason=exited*` arriving during a continue reaps the session and
+  returns `session_exited` (DEBUG_ATTACH_FAILURE), not a HALTED `StopRecord`.
+- `debug.interrupt` against an already-stopped engine returns success (the
+  non-raising interrupt primitive tolerates a "not running" `^error`).
 - `debug.read_memory` with `byte_count=4097` is rejected `CONFIGURATION_ERROR`
   by the engine **before** any MI command (the 4096-byte cap, re-homed off the
   deleted batch validator).
@@ -226,6 +238,10 @@ existing env-gated local-QEMU gdbstub coverage passes on the MI engine.
   no-op.
 - set/clear watchpoint issue the expected `-break-watch`/`-break-delete` MI verbs
   and are refused when the `DebugProfile` narrows them out of `enabled_operations`.
+- the shipped default `DebugProfile`s enable the new structured/watchpoint ops
+  (they ride the `ALLOWED_DEBUG_OPERATIONS` default factory); a profile that
+  supplied an explicit narrowed `enabled_operations` must opt the new names in —
+  this compatibility expectation is documented, not silently assumed.
 
 **Acceptance — static.** No batch-mode (`-batch`) gdb invocation remains anywhere
 (CI grep tripwire).
