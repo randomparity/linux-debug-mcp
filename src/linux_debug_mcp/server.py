@@ -8613,6 +8613,31 @@ def create_app(
             artifact_root=Path(artifact_root),
         ).model_dump(mode="json")
 
+    @app.tool(name="debug.postmortem.check_prereqs")
+    def debug_postmortem_check_prereqs(
+        run_id: str,
+        target_ref: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        timeout_seconds: int = 20,
+        debug_profile: str | None = None,
+        target_profile: str | None = None,
+        rootfs_profile: str | None = None,
+    ) -> dict[str, Any]:
+        request = DebugPostmortemCheckPrereqsRequest(
+            run_id=run_id,
+            target_ref=target_ref,
+            timeout_seconds=timeout_seconds,
+            debug_profile=debug_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+        )
+        return debug_postmortem_check_prereqs_handler(
+            request,
+            artifact_root=Path(artifact_root),
+            admission=admission_service,
+            session_registry=durable_registry,
+        ).model_dump(mode="json")
+
     @app.tool(name="artifacts.collect")
     def artifacts_collect(
         run_id: str,
