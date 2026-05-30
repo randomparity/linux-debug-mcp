@@ -4047,6 +4047,39 @@ def _teardown_debug_transport(
             transaction.close(sid, force=False)
 
 
+def _teardown_stalled_debug_session(
+    *,
+    run_id: str,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+    transaction: TransportTransaction | None,
+    session_guard: SessionGuard | None,
+) -> None:
+    """Full transport teardown after a `transport_stall` on an established session (ADR 0023). The
+    caller has already reaped the live attachment and `force_resume`d the guest; this writes the
+    durable record back to EXECUTING (when admission is wired — the stateful path) and closes the
+    transport, releasing the StopCapableGuard so target.run_tests is ungated and re-attach starts
+    clean. Degrades gracefully: with no transaction/record wired it is a no-op; on the read path
+    (no admission) it skips the durable-EXECUTING write and leaves the conservative
+    closed-while-halted recovery tombstone. Best-effort throughout — teardown must not raise."""
+    if transaction is None or session_registry is None:
+        return
+    tkey = TargetKey(provisioner="local-qemu", target_id=run_id)
+    record = session_registry.read_record(tkey)
+    if record is None:
+        return
+    if admission is not None:
+        with contextlib.suppress(Exception):
+            _resume_debug_transport(session=record, admission=admission, session_registry=session_registry)
+    with contextlib.suppress(Exception):
+        _teardown_debug_transport(
+            transport_session=record,
+            transaction=transaction,
+            session_registry=session_registry,
+            session_guard=session_guard,
+        )
+
+
 def _mi_probe_transcript_path(run_dir: Path) -> Path:
     """The live gdb/MI session's transcript. ADR 0021: this is the session-of-record transcript the
     persisted DebugSession references (it is the same file the attach probe writes into)."""
@@ -4784,8 +4817,10 @@ def _debug_operation_response(
     persist_manifest: bool,
     allow_ended: bool = False,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    transaction: TransportTransaction | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -4839,7 +4874,33 @@ def _debug_operation_response(
                         ref.number: ref.model_dump(mode="json") for ref in gdb_mi_engine.list_breakpoints(attachment)
                     }
                     updated_session = session.model_copy(update={"breakpoints": ledger})
-            except (GdbMiError, ProviderDebugError):
+            except GdbMiError as exc:
+                # A transport_stall means the RSP link is dead (ADR 0023): unlike a benign GdbMiError
+                # (bad symbol), the session cannot make progress, so reap + force_resume + tear the
+                # transport down here INSIDE debug_lock (no concurrent op can require() the stalled
+                # attachment), then return a structured INFRASTRUCTURE_FAILURE routing the agent to
+                # re-attach. Every other GdbMiError stays contained (re-raised, session kept).
+                if exc.details.get("code") == "transport_stall":
+                    reaped = gdb_mi_sessions.reap(session.session_id)
+                    if reaped is not None:
+                        with contextlib.suppress(Exception):
+                            gdb_mi_engine.force_resume(reaped)
+                    _teardown_stalled_debug_session(
+                        run_id=run_id,
+                        admission=admission,
+                        session_registry=session_registry,
+                        transaction=transaction,
+                        session_guard=session_guard,
+                    )
+                    return ToolResponse.failure(
+                        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                        message=redactor.redact_text(str(exc)),
+                        run_id=run_id,
+                        details={"code": "transport_stall"},
+                        suggested_next_actions=["debug.start_session", "debug.kdb", "debug.introspect.run"],
+                    )
+                raise
+            except ProviderDebugError:
                 raise
             except Exception as exc:
                 reaped = gdb_mi_sessions.reap(session.session_id)
@@ -4918,7 +4979,9 @@ def _debug_read_response(
     method_name: str,
     kwargs: dict[str, object],
     debug_profiles: dict[str, DebugProfile] | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -4927,7 +4990,9 @@ def _debug_read_response(
     preserved (the `test_debug_read_not_ssh_gated` invariant still holds). The registry presence
     drives the lighter `_assert_layer4_ownership` check, which closes the legacy-fence bypass
     where a `debug.read_*` call would silently halt the kernel via `target remote` against a run
-    target.run_tests had no durable record for."""
+    target.run_tests had no durable record for. `transaction`/`session_guard` are carried (not
+    `admission`) only so a `transport_stall` on a read still tears the dead transport down (ADR
+    0023); with no admission it leaves the conservative closed-while-halted recovery tombstone."""
     return _debug_operation_response(
         artifact_root=artifact_root,
         run_id=run_id,
@@ -4936,7 +5001,9 @@ def _debug_read_response(
         kwargs=kwargs,
         persist_manifest=False,
         debug_profiles=debug_profiles,
+        transaction=transaction,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -4949,7 +5016,9 @@ def debug_read_registers_handler(
     registers: list[str],
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -4960,7 +5029,9 @@ def debug_read_registers_handler(
         method_name="read_registers",
         kwargs={"registers": registers},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -4973,7 +5044,9 @@ def debug_read_symbol_handler(
     symbol: str,
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -4984,7 +5057,9 @@ def debug_read_symbol_handler(
         method_name="read_symbol",
         kwargs={"symbol": symbol},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -4998,7 +5073,9 @@ def debug_read_memory_handler(
     byte_count: int,
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -5009,7 +5086,9 @@ def debug_read_memory_handler(
         method_name="read_memory",
         kwargs={"address": address, "byte_count": byte_count},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -5023,7 +5102,9 @@ def debug_evaluate_handler(
     arguments: dict[str, object] | None = None,
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -5034,7 +5115,9 @@ def debug_evaluate_handler(
         method_name="evaluate",
         kwargs={"inspector": inspector, "arguments": arguments or {}},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -5049,8 +5132,10 @@ def _debug_stateful_response(
     kwargs: dict[str, object],
     allow_ended: bool = False,
     debug_profiles: dict[str, DebugProfile] | None = None,
+    transaction: TransportTransaction | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -5063,8 +5148,10 @@ def _debug_stateful_response(
         persist_manifest=True,
         allow_ended=allow_ended,
         debug_profiles=debug_profiles,
+        transaction=transaction,
         admission=admission,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -5078,7 +5165,9 @@ def debug_set_breakpoint_handler(
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -5089,8 +5178,10 @@ def debug_set_breakpoint_handler(
         method_name="set_breakpoint",
         kwargs={"symbol": symbol},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         admission=admission,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -5104,7 +5195,9 @@ def debug_set_watchpoint_handler(
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -5115,8 +5208,10 @@ def debug_set_watchpoint_handler(
         method_name="set_watchpoint",
         kwargs={"symbol": symbol},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         admission=admission,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -5130,7 +5225,9 @@ def debug_clear_breakpoint_handler(
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -5141,8 +5238,10 @@ def debug_clear_breakpoint_handler(
         method_name="clear_breakpoint",
         kwargs={"breakpoint_id": breakpoint_id},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         admission=admission,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -5156,7 +5255,9 @@ def debug_clear_watchpoint_handler(
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -5167,8 +5268,10 @@ def debug_clear_watchpoint_handler(
         method_name="clear_watchpoint",
         kwargs={"breakpoint_id": breakpoint_id},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         admission=admission,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -5181,7 +5284,9 @@ def debug_list_breakpoints_handler(
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -5192,8 +5297,10 @@ def debug_list_breakpoints_handler(
         method_name="list_breakpoints",
         kwargs={},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         admission=admission,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -5206,7 +5313,9 @@ def debug_backtrace_handler(
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -5217,8 +5326,10 @@ def debug_backtrace_handler(
         method_name="backtrace",
         kwargs={},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         admission=admission,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -5231,7 +5342,9 @@ def debug_list_variables_handler(
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -5242,8 +5355,10 @@ def debug_list_variables_handler(
         method_name="list_variables",
         kwargs={},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         admission=admission,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -5257,7 +5372,9 @@ def debug_continue_handler(
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -5268,8 +5385,10 @@ def debug_continue_handler(
         method_name="continue_execution",
         kwargs={"timeout_seconds": timeout_seconds},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         admission=admission,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -5283,7 +5402,9 @@ def debug_step_handler(
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -5294,8 +5415,10 @@ def debug_step_handler(
         method_name="step",
         kwargs={"timeout_seconds": timeout_seconds},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         admission=admission,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -5309,7 +5432,9 @@ def debug_next_handler(
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -5320,8 +5445,10 @@ def debug_next_handler(
         method_name="next",
         kwargs={"timeout_seconds": timeout_seconds},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         admission=admission,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -5335,7 +5462,9 @@ def debug_finish_handler(
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -5346,8 +5475,10 @@ def debug_finish_handler(
         method_name="finish",
         kwargs={"timeout_seconds": timeout_seconds},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         admission=admission,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -5361,7 +5492,9 @@ def debug_interrupt_handler(
     debug_session_id: str | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
+    transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
@@ -5372,8 +5505,10 @@ def debug_interrupt_handler(
         method_name="interrupt",
         kwargs={"timeout_seconds": timeout_seconds},
         debug_profiles=debug_profiles,
+        transaction=transaction,
         admission=admission,
         session_registry=session_registry,
+        session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
@@ -7246,7 +7381,9 @@ def create_app(
             run_id=run_id,
             registers=registers,
             debug_session_id=debug_session_id,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
@@ -7263,7 +7400,9 @@ def create_app(
             run_id=run_id,
             symbol=symbol,
             debug_session_id=debug_session_id,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
@@ -7282,7 +7421,9 @@ def create_app(
             address=address,
             byte_count=byte_count,
             debug_session_id=debug_session_id,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
@@ -7301,7 +7442,9 @@ def create_app(
             inspector=inspector,
             arguments=arguments,
             debug_session_id=debug_session_id,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
@@ -7319,7 +7462,9 @@ def create_app(
             symbol=symbol,
             debug_session_id=debug_session_id,
             admission=admission_service,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
@@ -7337,7 +7482,9 @@ def create_app(
             symbol=symbol,
             debug_session_id=debug_session_id,
             admission=admission_service,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
@@ -7355,7 +7502,9 @@ def create_app(
             breakpoint_id=breakpoint_id,
             debug_session_id=debug_session_id,
             admission=admission_service,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
@@ -7373,7 +7522,9 @@ def create_app(
             breakpoint_id=breakpoint_id,
             debug_session_id=debug_session_id,
             admission=admission_service,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
@@ -7389,7 +7540,9 @@ def create_app(
             run_id=run_id,
             debug_session_id=debug_session_id,
             admission=admission_service,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
@@ -7405,7 +7558,9 @@ def create_app(
             run_id=run_id,
             debug_session_id=debug_session_id,
             admission=admission_service,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
@@ -7421,7 +7576,9 @@ def create_app(
             run_id=run_id,
             debug_session_id=debug_session_id,
             admission=admission_service,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
@@ -7439,7 +7596,9 @@ def create_app(
             debug_session_id=debug_session_id,
             timeout_seconds=timeout_seconds,
             admission=admission_service,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
@@ -7457,7 +7616,9 @@ def create_app(
             debug_session_id=debug_session_id,
             timeout_seconds=timeout_seconds,
             admission=admission_service,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
@@ -7475,7 +7636,9 @@ def create_app(
             debug_session_id=debug_session_id,
             timeout_seconds=timeout_seconds,
             admission=admission_service,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
@@ -7493,7 +7656,9 @@ def create_app(
             debug_session_id=debug_session_id,
             timeout_seconds=timeout_seconds,
             admission=admission_service,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
@@ -7511,7 +7676,9 @@ def create_app(
             debug_session_id=debug_session_id,
             timeout_seconds=timeout_seconds,
             admission=admission_service,
+            transaction=transport_transaction,
             session_registry=durable_registry,
+            session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
