@@ -113,3 +113,62 @@ Every command output (typed or raw), the persisted `parsed.json`, and the redact
 `transcript.txt` pass through `Redactor()` before being returned or persisted. The
 unredacted crash stdout/stderr stays under `<run>/sensitive/…` (mode 0600) and is never
 returned.
+
+---
+
+# `debug.postmortem.triage` — composite triage report
+
+`debug.postmortem.triage` is the **one call** for an agent handed a crash, and the
+recommended first reaction to the `target.crashed` lifecycle event. It composes the
+crash and drgn offline tiers into a single typed report against one `(vmcore, vmlinux)`
+pair. It is offline and **never gated**, like the rest of this tier.
+
+Design: [spec](superpowers/specs/2026-05-30-debug-postmortem-triage-design.md) ·
+[ADR 0027](adr/0027-postmortem-triage-composition.md).
+
+## Request
+
+| Field | Type | Notes |
+|---|---|---|
+| `run_id` | str | Existing run (`kernel.create_run`). |
+| `vmcore_ref` | str | Run-relative path to the captured vmcore. |
+| `vmlinux_ref` | str | Run-relative path to the uncompressed ELF vmlinux with symbols. |
+| `modules_ref` | str \| null | Optional run-relative `*.ko[.debug]` dir; used by the crash sub-call only. |
+| `timeout_seconds` | int | Handler-bounded to `[5, 300]` (default 60), applied to **each** sub-call. |
+
+The three sub-calls run **sequentially**, so worst-case wall-clock is ≈ 3 ×
+`timeout_seconds`; `duration_ms` reports the true elapsed time.
+
+## What it composes
+
+| Report section | Source | Sub-call |
+|---|---|---|
+| `panic_reason` | crash | `debug.postmortem.crash` `log` (panic line selected from the parsed log) |
+| `faulting_task` | crash | `debug.postmortem.crash` `bt` (header pid/command) |
+| `backtrace` | crash | `debug.postmortem.crash` `bt` (frames) |
+| `recent_dmesg` | drgn | `debug.introspect.from_vmcore_helper` `dmesg` |
+| `modules` | drgn | `debug.introspect.from_vmcore_helper` `modules` |
+
+## Partial-report semantics
+
+Each section is tagged `source` (`crash`/`drgn`), `status` (`ok`/`failed`), and — when
+failed — a `reason` (the sub-call's stable error code). A failure in **one** source
+fails only its sections; the report is returned with `partial: true` as long as at least
+one section is `ok`. Only when **every** section failed does triage hard-fail with
+`triage_all_sources_failed` (whose `details` carry `sub_call_ids` so a sub-call that
+*ran* stays reachable). `sub_call_ids` also lets an agent pull a sub-call's own
+transcript/artifacts.
+
+## Build-id fail-loud
+
+Before any sub-call, triage runs the host-authoritative build-id gate **once**
+(`read_vmcore_build_id` vs `read_elf_build_id`). A mismatch / unreadable vmlinux /
+unverifiable-or-unsupported vmcore is a `configuration_error` and **no sub-call runs** —
+the whole triage fails loud, never a degraded report.
+
+## Redaction
+
+The composed report and the persisted `report.json` under
+`<run>/debug/postmortem/triage/<call-id>/` pass through `Redactor()`; the
+`triage_all_sources_failed` failure `details` are redacted too. Each sub-call's own raw
+outputs stay under its own `sensitive/` tree (the sub-tiers' contract).
