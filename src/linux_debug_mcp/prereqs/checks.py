@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import errno
 import re
 import shutil
+import socket
 import subprocess
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from importlib import util as importlib_util
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
+from linux_debug_mcp.config import BuildProfile, RootfsProfile, TargetProfile
 from linux_debug_mcp.domain import PrerequisiteCheck, PrerequisiteStatus
+from linux_debug_mcp.rootfs.sources import RootfsSourceError, resolve_rootfs_source
 from linux_debug_mcp.safety.paths import PathSafetyError, validate_artifact_root, validate_source_path
 
 
@@ -312,4 +318,177 @@ def _libvirt_check(enable_libvirt_check: bool, runner: PrerequisiteRunner) -> Pr
         message="virsh uri failed",
         details={"stderr": stderr.strip()},
         suggested_fix="Confirm libvirt is installed and your user can access the development connection.",
+    )
+
+
+def check_kernel_config(source_path: Path | None, build_profile: BuildProfile | None) -> PrerequisiteCheck:
+    """Report whether the kernel ``.config`` is present or derivable before a run exists.
+
+    Mirrors the ``kernel.build`` precedence ladder at the two rungs knowable pre-run: a non-empty
+    ``base_config`` makes the config derivable; otherwise an existing source ``.config`` is required.
+    The per-run output ``.config`` cannot exist yet, so it is not consulted.
+    """
+    if build_profile is None:
+        return PrerequisiteCheck(
+            check_id="kernel.config", status=PrerequisiteStatus.SKIPPED, message="no build profile selected"
+        )
+    if build_profile.base_config:
+        targets = " ".join(build_profile.base_config)
+        return PrerequisiteCheck(
+            check_id="kernel.config",
+            status=PrerequisiteStatus.PASSED,
+            message=f"kernel .config is derivable via `make {targets}`",
+            details={"base_config": list(build_profile.base_config)},
+        )
+    if source_path is None:
+        return PrerequisiteCheck(
+            check_id="kernel.config",
+            status=PrerequisiteStatus.SKIPPED,
+            message="no source path supplied; cannot verify .config presence",
+        )
+    if (source_path / ".config").is_file():
+        return PrerequisiteCheck(
+            check_id="kernel.config", status=PrerequisiteStatus.PASSED, message="source .config is present"
+        )
+    return PrerequisiteCheck(
+        check_id="kernel.config",
+        status=PrerequisiteStatus.FAILED,
+        message="no .config in the source tree and the build profile has an empty base_config",
+        suggested_fix=(
+            "Provide a .config in the source tree (e.g. run `make defconfig`) or select a build "
+            "profile with a base_config such as x86_64-default."
+        ),
+    )
+
+
+_ROOTFS_LOCAL_FIX = "Select a rootfs profile whose source_kind is local_path or builder, or build the image."
+
+
+def check_rootfs_image(rootfs_profile: RootfsProfile | None) -> PrerequisiteCheck:
+    """Report whether the selected rootfs profile resolves to an existing disk image.
+
+    Delegates to ``resolve_rootfs_source`` so the preflight and the boot-time gate share one policy,
+    then adds an explicit existence check (the ``local_path`` kind is returned by the resolver without
+    one, so a missing image would otherwise only surface at boot).
+    """
+    if rootfs_profile is None:
+        return PrerequisiteCheck(
+            check_id="rootfs.image", status=PrerequisiteStatus.SKIPPED, message="no rootfs profile selected"
+        )
+    try:
+        path = resolve_rootfs_source(rootfs_profile)
+    except RootfsSourceError as exc:
+        return PrerequisiteCheck(
+            check_id="rootfs.image",
+            status=PrerequisiteStatus.FAILED,
+            message=str(exc),
+            suggested_fix=exc.suggested_fix or _ROOTFS_LOCAL_FIX,
+        )
+    if not path.exists():
+        return PrerequisiteCheck(
+            check_id="rootfs.image",
+            status=PrerequisiteStatus.FAILED,
+            message=f"rootfs image not found: {path}",
+            suggested_fix=_ROOTFS_LOCAL_FIX,
+        )
+    return PrerequisiteCheck(
+        check_id="rootfs.image",
+        status=PrerequisiteStatus.PASSED,
+        message="rootfs image is present",
+        details={"path": str(path)},
+    )
+
+
+@dataclass(frozen=True)
+class PortProbeResult:
+    """Outcome of a single gdbstub-port bind probe.
+
+    ``state`` is one of ``free``/``in_use``/``error``; ``detail`` carries the OS error string for the
+    ``error`` state so the caller can report the actual failure (e.g. permission, address not local)
+    instead of misreporting every bind failure as "in use".
+    """
+
+    state: Literal["free", "in_use", "error"]
+    detail: str = ""
+
+
+def _default_port_probe(host: str, port: int) -> PortProbeResult:
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            sock.bind((host, port))
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            return PortProbeResult("in_use")
+        return PortProbeResult("error", str(exc))
+    return PortProbeResult("free")
+
+
+def _parse_gdbstub_endpoint(endpoint: str) -> tuple[str, int] | None:
+    host, sep, port_text = endpoint.rpartition(":")
+    if not sep or not host or not port_text:
+        return None
+    try:
+        port = int(port_text)
+    except ValueError:
+        return None
+    if not 1 <= port <= 65535:
+        return None
+    return host, port
+
+
+def check_gdbstub_port(
+    target_profile: TargetProfile | None,
+    *,
+    port_probe: Callable[[str, int], PortProbeResult] | None = None,
+) -> PrerequisiteCheck:
+    """Report whether a ``debug_gdbstub`` target's endpoint port is free to bind.
+
+    Advisory only (point-in-time): a PASSED endpoint can be taken before ``target.boot`` binds it, and
+    the boot path is the authoritative binder. The probe distinguishes ``EADDRINUSE`` from other bind
+    errors so a permission or non-local-address failure is not misreported as "in use".
+    """
+    if target_profile is None:
+        return PrerequisiteCheck(
+            check_id="gdbstub.port", status=PrerequisiteStatus.SKIPPED, message="no target profile selected"
+        )
+    if not target_profile.debug_gdbstub:
+        return PrerequisiteCheck(
+            check_id="gdbstub.port",
+            status=PrerequisiteStatus.SKIPPED,
+            message="target profile does not enable gdbstub",
+        )
+    parsed = _parse_gdbstub_endpoint(target_profile.gdbstub_endpoint)
+    if parsed is None:
+        return PrerequisiteCheck(
+            check_id="gdbstub.port",
+            status=PrerequisiteStatus.FAILED,
+            message=f"could not parse gdbstub_endpoint: {target_profile.gdbstub_endpoint}",
+            suggested_fix="Set gdbstub_endpoint to host:port, e.g. 127.0.0.1:1234.",
+        )
+    host, port = parsed
+    endpoint = f"{host}:{port}"
+    result = (port_probe or _default_port_probe)(host, port)
+    if result.state == "in_use":
+        return PrerequisiteCheck(
+            check_id="gdbstub.port",
+            status=PrerequisiteStatus.FAILED,
+            message=f"gdbstub endpoint {endpoint} is already in use",
+            suggested_fix="Stop the process holding it or set a different gdbstub_endpoint.",
+        )
+    if result.state == "error":
+        return PrerequisiteCheck(
+            check_id="gdbstub.port",
+            status=PrerequisiteStatus.FAILED,
+            message=f"could not bind gdbstub endpoint {endpoint}: {result.detail}",
+            suggested_fix=(
+                "For a privileged port (<1024) run with the needed capability or choose a port >=1024; "
+                "for a non-local host confirm the address is configured on this machine."
+            ),
+        )
+    return PrerequisiteCheck(
+        check_id="gdbstub.port",
+        status=PrerequisiteStatus.PASSED,
+        message=f"gdbstub endpoint {endpoint} is free",
+        details={"host": host, "port": port},
     )
