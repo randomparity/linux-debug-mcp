@@ -1,4 +1,4 @@
-# KDIVE
+# Kernel Debug, Inspect, Validate, Explore (KDIVE)
 
 KDIVE is a Python MCP server for local Linux kernel build, boot,
 smoke-test, artifact, and QEMU gdbstub debug workflows. It also ships
