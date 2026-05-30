@@ -22,7 +22,7 @@ from linux_debug_mcp.coordination.admission import AdmissionService
 from linux_debug_mcp.coordination.registry import SessionRegistry
 from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from linux_debug_mcp.providers.gdb_mi import GdbMiError, MiRecord
+from linux_debug_mcp.providers.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiError, MiRecord, ResolvedSymbol
 from linux_debug_mcp.providers.qemu_gdbstub import DebugProviderResult, DebugSession
 from linux_debug_mcp.seams.target import (
     BreakHint,
@@ -98,13 +98,14 @@ class FakeDebugProvider:
 
 
 class FakeEngine:
-    """A GdbMiEngine-shaped fake. ``fail_on`` selects which step raises (``attach``/``probe`` raise
-    GdbMiError; ``probe_crash`` raises an unwrapped RuntimeError)."""
+    """A GdbMiEngine-shaped fake. ``fail_on`` selects which step raises (``attach``/``probe``/``resolve``
+    raise GdbMiError; ``probe_crash`` raises an unwrapped RuntimeError)."""
 
     def __init__(self, *, fail_on: str | None = None, resume_confirmed: bool = True) -> None:
         self.fail_on = fail_on
         self._resume_confirmed = resume_confirmed
         self.attached = False
+        self.resolved: str | None = None
         self.resumed = False
         self.forced = False
 
@@ -120,6 +121,12 @@ class FakeEngine:
         if self.fail_on == "probe_crash":
             raise RuntimeError("unexpected non-GdbMiError engine crash")  # an unwrapped tool exception
         return MiRecord(type="result", message="connected", payload=None)  # the ^connected attach proof
+
+    def resolve_symbol(self, attachment, symbol_name: str) -> ResolvedSymbol:
+        if self.fail_on == "resolve":
+            raise GdbMiError("no such symbol", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
+        self.resolved = symbol_name
+        return ResolvedSymbol(name=symbol_name, value="0x1234 <linux_banner>")
 
     def resume_and_detach(self, attachment) -> bool:
         self.resumed = True
@@ -222,6 +229,51 @@ def test_probe_success_records_session_and_leaves_record_halted(tmp_path: Path) 
     assert resp.data["mi_probe"]["record"]["message"] == "connected"
     record = registry.read_record(KEY)
     assert record is not None and record.execution_state == ExecutionState.HALTED  # batch path owns the kernel
+
+
+def test_probe_surfaces_resolved_symbol(tmp_path: Path) -> None:
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+    engine = FakeEngine()
+    resp = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        provider=FakeDebugProvider(),
+        debug_profiles=_profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+    )
+    assert resp.ok is True
+    assert engine.resolved == CANONICAL_PROBE_SYMBOL
+    # AC2: the probe surfaced a typed name->address resolution.
+    assert resp.data["mi_probe"]["symbol"]["name"] == CANONICAL_PROBE_SYMBOL
+    assert resp.data["mi_probe"]["symbol"]["value"] == "0x1234 <linux_banner>"
+
+
+def test_resolve_fault_resumes_and_frees_guard(tmp_path: Path) -> None:
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+    engine = FakeEngine(fail_on="resolve", resume_confirmed=True)
+    resp = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        provider=FakeDebugProvider(),
+        debug_profiles=_profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+    )
+    assert resp.ok is False
+    assert resp.error.category == ErrorCategory.DEBUG_ATTACH_FAILURE
+    # guaranteed resume + teardown: a resolution fault is the same fault path as a probe fault.
+    assert engine.forced is True
+    assert registry.read_record(KEY) is None
+    assert registry.read_tombstone(KEY) is None
 
 
 def test_second_stop_capable_attach_refused_on_qemu_gdbstub(tmp_path: Path) -> None:

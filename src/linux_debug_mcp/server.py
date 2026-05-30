@@ -92,7 +92,7 @@ from linux_debug_mcp.providers.contracts import (
     ReservationRequest,
     ReserveProvisionBootRequest,
 )
-from linux_debug_mcp.providers.gdb_mi import GdbMiEngine, GdbMiError
+from linux_debug_mcp.providers.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiEngine, GdbMiError
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from linux_debug_mcp.providers.local_drgn_introspect import (
     SCRIPT_BYTE_CAP,
@@ -4080,10 +4080,15 @@ def _run_mi_attach_probe(
             rsp_endpoint=transport_session.rsp_endpoint, vmlinux_path=vmlinux_path, transcript_path=transcript_path
         )
         record = engine.probe_read(attachment)
+        symbol = engine.resolve_symbol(attachment, CANONICAL_PROBE_SYMBOL)
         engine.resume_and_detach(attachment)
         mi_probe: dict[str, object] = {
             "mi_probe": redactor.redact_value(
-                {"record": record.model_dump(mode="json"), "transcript_path": str(transcript_path)}
+                {
+                    "record": record.model_dump(mode="json"),
+                    "symbol": symbol.model_dump(mode="json"),
+                    "transcript_path": str(transcript_path),
+                }
             )
         }
         return None, mi_probe
