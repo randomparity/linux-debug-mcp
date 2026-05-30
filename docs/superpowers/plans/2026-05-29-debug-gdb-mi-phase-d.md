@@ -117,7 +117,7 @@ ADR 0022 decision 3. `-interpreter-exec console "add-symbol-file <ko> <text> -s 
 
 ADR 0022 decisions 1–3. New op end-to-end.
 
-**Files:** Modify `src/linux_debug_mcp/config.py` (allowlist), `src/linux_debug_mcp/server.py` (`DEBUG_METHOD_OPERATIONS`, helpers, handler, tool wrapper), `src/linux_debug_mcp/providers/qemu_gdbstub.py` (`DebugSession.loaded_modules`); Test `tests/test_server_load_module_symbols.py`.
+**Files:** Modify `src/linux_debug_mcp/config.py` (allowlist), `src/linux_debug_mcp/server.py` (helpers, handler, tool wrapper — gated by the literal op string, **not** `DEBUG_METHOD_OPERATIONS`), `src/linux_debug_mcp/providers/qemu_gdbstub.py` (`DebugSession.loaded_modules`); Test `tests/test_server_load_module_symbols.py`.
 
 - [ ] **Step 1 — failing tests** (inject a fake `SshRunner`, a fake `module_ko_finder`, a fake engine):
   - `test_reads_sysfs_sections_and_loads`: fake ssh returns `0x...` for `.text`/`.data`; finder returns a `.ko`; assert the engine got the parsed sections and the response is success with a `loaded_modules` ledger entry persisted.
