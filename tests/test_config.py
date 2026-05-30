@@ -154,6 +154,7 @@ def test_default_debug_profile_matches_sprint_4_policy() -> None:
         "debug.introspect.helper",
         "debug.introspect.from_vmcore",
         "debug.introspect.from_vmcore_helper",
+        "debug.postmortem.crash",
         "debug.introspect.write",
     ]
 
