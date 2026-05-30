@@ -65,7 +65,10 @@ before `provider.plan_boot`** (in the same `try` that wraps `plan_boot`), after 
 already-SUCCEEDED boot and after boot overrides are applied. Running it under the lock — rather than as a
 pre-lock fast-fail — is required so its failure can be recorded as a FAILED boot `StepResult` with the
 correct attempt number and `replace_succeeded` handling, exactly mirroring the existing
-`ProviderBootError` branch around `plan_boot`. Per kind:
+`ProviderBootError` branch around `plan_boot`. Concretely, the handler adds an explicit
+`except RootfsSourceError` arm to the `try` that wraps `plan_boot` (the existing arms catch
+`ProviderBootError` and `(ManifestStateError, OSError, ValueError)`, none of which match the new type);
+that arm records the FAILED `StepResult` and returns the failure. Per kind:
 
 | `source_kind` | Behavior |
 |---|---|
@@ -105,6 +108,12 @@ the domain. The base is never written, so every boot starts from the same known-
 systemd/sshd get a writable root.
 
 - `_validate_profiles` accepts `copy_on_write` in addition to `read_only` and `mutable`.
+- **qcow2-base precondition.** `copy_on_write` requires a qcow2 base image. The overlay create uses
+  `-F qcow2` (the backing format) and the domain XML already hardcodes `driver type="qcow2"`
+  unconditionally for the disk (`render_domain_xml`), so the provider already assumes qcow2 disks. A raw
+  base under `copy_on_write` would record a false backing format and corrupt/fail the guest. The default
+  builder produces qcow2, so the default path is safe; the constraint is documented (Host requirements)
+  and applies to any `copy_on_write` profile a caller defines.
 - `plan_boot` (pure): for `copy_on_write`, resolve the base via `_resolve_existing_path` into
   `rootfs_backing_path`, set `rootfs_path` to `<boot-attempt-dir>/rootfs-overlay.qcow2` (not yet on
   disk), and record `overlay_create_argv = ["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b",
@@ -169,6 +178,16 @@ keeps the existing `linux-debug-mcp-ready.service` that echoes the marker to `/d
 with an actionable message if `dnf`, `virt-make-fs`, or the resolved authorized-key file are missing.
 `just rootfs` invokes the script.
 
+**Guest SELinux and `authorized_keys`.** The key file is written host-side, so it will not carry the
+guest's `ssh_home_t` context. If the guest had an enforcing SELinux policy, `sshd` would reject the key
+with a non-obvious `bad ownership or modes` / AVC denial — silently defeating the SSH acceptance. The
+installroot is built with `--setopt=install_weak_deps=False` and does **not** install
+`selinux-policy-targeted`, so the guest boots with no policy loaded (SELinux inert) and host-written
+contexts are irrelevant. To make this robust rather than incidental, the script also `touch`es
+`<installroot>/.autorelabel`, so if a policy is ever pulled in transitively the first boot relabels the
+filesystem (including the key files) before `sshd` matters. This dependency — "SSH login requires the
+guest to not mislabel the key" — is called out in §5 and in the gated-acceptance note.
+
 The script is host-prep run by a human (it needs root for the installroot/chown steps), not by the server.
 The user guide §5 is updated to lead with `just rootfs` and keep the manual recipe as the fallback /
 explanation.
@@ -225,6 +244,12 @@ become machine-checkable.
   guide; the server does not relabel or chmod anything.
 - The base image directory must be writable by the invoking user for the builder (`chown` step in §5).
 - `qemu-img` must be installed for `copy_on_write` (the now-default mutability mode).
+- `copy_on_write` requires a **qcow2 base image** (the overlay records `-F qcow2` and the disk driver is
+  qcow2). The default builder image is qcow2; a caller pointing `copy_on_write` at a raw base must convert
+  it first.
+- SSH login requires the guest to not mislabel `authorized_keys`. The default image has no SELinux policy
+  and also carries `.autorelabel`, so this holds without operator action; a custom image that enables an
+  enforcing policy must ensure the key files get the `ssh_home_t` context.
 
 ## Scope / non-goals
 
@@ -252,7 +277,9 @@ become machine-checkable.
   and records a FAILED boot `StepResult` in the manifest; a `prebuilt`/`url` profile returns
   `NOT_IMPLEMENTED`.
 - Default-profile test: `minimal` is `source_kind="builder"`, `mutability="copy_on_write"`.
-- `scripts/build-rootfs.sh` passes `shellcheck` and `shfmt -d`.
+- `scripts/build-rootfs.sh` passes `shellcheck` and `shfmt -d`; it installs `openssh-server`, enables
+  `sshd`, writes the resolved key into the guest user's `~/.ssh/authorized_keys`, and `touch`es
+  `.autorelabel` in the installroot.
 - Gated acceptance (not CI, env-gated like the existing libvirt integration test): `just rootfs` on a
   Fedora host yields an image; `target.boot` with `minimal` reaches `linux-debug-mcp-ready`; with #103,
   `target.run_tests` logs in over SSH.

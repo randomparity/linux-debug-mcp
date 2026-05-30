@@ -45,7 +45,8 @@ builder dispatch will attach.
 The default flips to `copy_on_write` because `read_only` breaks systemd/sshd and `mutable` corrupts
 reproducibility by writing the base in place. `copy_on_write` creates an ephemeral qcow2 overlay
 (`qemu-img create -f qcow2 -F qcow2 -b <base> <overlay>`) at boot and attaches the overlay writable; the
-base is never modified, so every boot is fresh. Overlay creation is a side effect, so it runs in
+base is never modified, so every boot is fresh. It requires a qcow2 base (the `-F qcow2` backing format
+and the provider's unconditional `driver type="qcow2"`); the default builder produces qcow2. Overlay creation is a side effect, so it runs in
 `execute_boot` (after the pure `plan_boot` computes the paths and argv), guarded by a `qemu-img`
 dependency check.
 
@@ -76,6 +77,9 @@ tool, so it travels in `ToolResponse` `details["suggested_fix"]` and `suggested_
 The builder enables sshd and installs an authorized key, making the image able to accept SSH. Guest-IP
 discovery, lease parsing, and port forwarding stay out of scope (owned by #103). `ssh_key_ref` on the
 default profile stays unset because the matching private key is per-user; the guide documents wiring it.
+Because the key file is written host-side, the builder also `touch`es `.autorelabel` in the installroot
+and relies on no SELinux policy being installed (`install_weak_deps=False`), so the host-written context
+cannot defeat pubkey login under an enforcing guest.
 
 ## Consequences
 
