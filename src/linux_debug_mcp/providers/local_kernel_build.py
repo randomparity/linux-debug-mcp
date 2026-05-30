@@ -185,6 +185,21 @@ class BuildExecutionResult:
     diagnostic: str | None = None
 
 
+def _default_job_count() -> int:
+    """Default ``make -j`` parallelism when a build profile sets no explicit ``jobs``.
+
+    Returns at least half the CPUs usable by this process (rounded up, floor 1). The count
+    comes from the process CPU affinity so it honors ``taskset``/cpuset limits, falling back
+    to the reported CPU count on platforms without affinity support. A profile's explicit
+    ``jobs`` value overrides this default.
+    """
+    try:
+        usable = len(os.sched_getaffinity(0))
+    except AttributeError:  # pragma: no cover - non-Linux platforms lack sched_getaffinity
+        usable = os.cpu_count() or 1
+    return max(1, (usable + 1) // 2)
+
+
 class LocalKernelBuildProvider:
     name = "local-kernel-build"
     supported_architectures = ["x86_64"]
@@ -201,8 +216,8 @@ class LocalKernelBuildProvider:
         if profile.output_policy != "per_run":
             raise ValueError(f"unsupported output policy: {profile.output_policy}")
         argv = ["make", "-C", str(source_path), f"O={output_path}", "ARCH=x86_64"]
-        if profile.jobs is not None:
-            argv.append(f"-j{profile.jobs}")
+        jobs = profile.jobs if profile.jobs is not None else _default_job_count()
+        argv.append(f"-j{jobs}")
         argv.extend(f"{key}={value}" for key, value in profile.make_variables.items())
         argv.extend(profile.targets)
         return BuildPlan(
