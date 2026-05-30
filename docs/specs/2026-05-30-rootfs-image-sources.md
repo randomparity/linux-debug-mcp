@@ -171,10 +171,13 @@ home, not `/root`. The key path is resolved (and its existence checked) **before
 the script is nonetheless launched via `sudo`, it resolves the key from `${SUDO_USER:-$USER}`'s home so
 the default still finds the human's key.
 
-The script installs `openssh-server` (in addition to `systemd fedora-release passwd`), enables `sshd` via
-a `multi-user.target.wants` symlink, writes the chosen public key into the **guest** user's
-`~/.ssh/authorized_keys` inside the installroot (mode 600, `.ssh` mode 700, owned by that guest user), and
-keeps the existing `linux-debug-mcp-ready.service` that echoes the marker to `/dev/ttyS0`. It fails fast
+The script installs `openssh-server` + `shadow-utils` (in addition to `systemd fedora-release passwd`),
+enables `sshd` via a `multi-user.target.wants` symlink, and writes the chosen public key into the
+**guest** user's `~/.ssh/authorized_keys` inside the installroot (mode 600, `.ssh` mode 700, owned by that
+guest user). A non-root `SSH_USER` does not exist in a fresh installroot, so the script `useradd`s it
+first (root always exists); the final `chown` is **not** error-swallowed, so an ownership failure is loud
+rather than silently shipping an unloginable image. It keeps the existing `linux-debug-mcp-ready.service`
+that echoes the marker to `/dev/ttyS0`. It fails fast
 with an actionable message if `dnf`, `virt-make-fs`, or the resolved authorized-key file are missing.
 `just rootfs` invokes the script.
 

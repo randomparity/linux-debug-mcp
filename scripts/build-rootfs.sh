@@ -66,7 +66,7 @@ sudo dnf --installroot="${work}" \
   --releasever="${RELEASEVER}" \
   --setopt=install_weak_deps=False \
   --setopt=tsflags=nodocs \
-  install -y systemd fedora-release passwd openssh-server
+  install -y systemd fedora-release passwd shadow-utils openssh-server
 
 sudo tee "${work}/etc/fstab" >/dev/null <<'EOF'
 /dev/vda / ext4 defaults 0 1
@@ -93,11 +93,17 @@ sudo ln -sf "../${MARKER}.service" \
 sudo ln -sf /usr/lib/systemd/system/sshd.service \
   "${work}/etc/systemd/system/multi-user.target.wants/sshd.service"
 
+# A non-root SSH_USER does not exist in a fresh installroot; create it so the key
+# we install is owned by a real, loginable account (root always exists).
+if [[ "${SSH_USER}" != "root" ]]; then
+  sudo chroot "${work}" useradd --create-home --shell /bin/bash "${SSH_USER}"
+fi
+
 sudo mkdir -p "${work}${ssh_home}/.ssh"
 sudo cp "${authorized_key}" "${work}${ssh_home}/.ssh/authorized_keys"
 sudo chmod 700 "${work}${ssh_home}/.ssh"
 sudo chmod 600 "${work}${ssh_home}/.ssh/authorized_keys"
-sudo chown -R "${SSH_USER}:${SSH_USER}" "${work}${ssh_home}/.ssh" 2>/dev/null || true
+sudo chown -R "${SSH_USER}:${SSH_USER}" "${work}${ssh_home}/.ssh"
 
 # If a SELinux policy is ever pulled in transitively, relabel on first boot so the
 # host-written authorized_keys gets the correct context before sshd matters.
