@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -25,6 +26,16 @@ MIN_GDB_VERSION = (9, 1)
 # uses ASYNC continue (mi-async on), so `-exec-continue` returns `^running` immediately rather than
 # blocking until a stop that a free-running kernel never produces.
 _MI_COMMAND_TIMEOUT_SEC = 10.0
+
+# gdb's RSP read timeout (`set remotetimeout`). Generous-but-finite (ADR 0023 decision 1): every RSP
+# packet gdb waits on is bounded and gdb owns the wait, so a slow/silent serial stub yields a clean
+# gdb-reported disconnect rather than an opaque hang under the MI write timeout.
+RSP_REMOTE_TIMEOUT_SEC = 30
+# Bounded retry for the RSP connect (`-target-select remote`). The connect is idempotent until
+# `^connected` (no target state mutates), so retrying ANY connect error a fixed small number of times
+# is sound without classifying gdb's error text (ADR 0023 decision 2).
+_CONNECT_RETRY_COUNT = 3
+_CONNECT_RETRY_BACKOFF_SEC = 0.5
 
 # The literal MI prompt terminator gdb emits between command results; not a record.
 _MI_PROMPT = "(gdb)"
@@ -227,10 +238,13 @@ class GdbMiEngine:
         controller_factory: Callable[[list[str]], MiController] | None = None,
         gdb_path_finder: Callable[[str], str | None] = shutil.which,
         redactor: Redactor | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._controller_factory = controller_factory or (lambda command: PygdbmiController(command))
         self._gdb_path_finder = gdb_path_finder
         self._redactor = redactor or Redactor()
+        # Injectable backoff sleep (ADR 0023 decision 2) so the connect retry is wall-clock-free in tests.
+        self._sleep = sleep
 
     def attach(self, *, rsp_endpoint: Endpoint | None, vmlinux_path: Path, transcript_path: Path) -> GdbMiAttachment:
         host, port = self._validate_endpoint(rsp_endpoint)
@@ -260,12 +274,46 @@ class GdbMiEngine:
             # hang).
             self._run(attachment, "-gdb-set mi-async on")
             self._run(attachment, f"-file-exec-and-symbols {self._mi_path(resolved_vmlinux)}")
-            self._run(attachment, f"-target-select remote {host}:{port}")
+            # `remotetimeout` is set BEFORE the connect so the RSP wait is finite from the first packet.
+            self._run(attachment, f"-gdb-set remotetimeout {RSP_REMOTE_TIMEOUT_SEC}")
+            self._connect_with_retry(attachment, host, port)
         except GdbMiError:
             with contextlib.suppress(Exception):
                 controller.exit()
             raise
         return attachment
+
+    def _connect_with_retry(self, attachment: GdbMiAttachment, host: str, port: int) -> None:
+        """Issue `-target-select remote` with a bounded retry/backoff (ADR 0023 decision 2). The
+        connect is idempotent until `^connected`, so any connect error is retried up to
+        `_CONNECT_RETRY_COUNT` times; the last failure propagates. A connect-phase write timeout
+        surfaces as a `transport_stall` GdbMiError; attach re-tags it `DEBUG_ATTACH_FAILURE` so a
+        never-attached session is reported as an attach failure, not a mid-session stall (ADR 0023
+        "established session is structural")."""
+        command = f"-target-select remote {host}:{port}"
+        last_exc: GdbMiError | None = None
+        for attempt in range(_CONNECT_RETRY_COUNT):
+            try:
+                self._run(attachment, command)
+                return
+            except GdbMiError as exc:
+                last_exc = self._as_attach_failure(exc)
+                if attempt + 1 < _CONNECT_RETRY_COUNT:
+                    self._sleep(_CONNECT_RETRY_BACKOFF_SEC)
+        raise (
+            last_exc
+            if last_exc is not None
+            else GdbMiError("gdb/MI RSP connect failed", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
+        )
+
+    def _as_attach_failure(self, exc: GdbMiError) -> GdbMiError:
+        """Re-tag a connect-phase fault as DEBUG_ATTACH_FAILURE. A connect-phase write timeout would
+        otherwise carry `transport_stall` (the per-op tag), but a session that never reached
+        `^connected` is an attach failure, not a mid-session link stall."""
+        if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE and exc.details.get("code") != "transport_stall":
+            return exc
+        details = {key: value for key, value in exc.details.items() if key != "code"}
+        return GdbMiError(str(exc), category=ErrorCategory.DEBUG_ATTACH_FAILURE, details=details)
 
     def probe_read(self, attachment: GdbMiAttachment) -> MiRecord:
         """Return the one MI record that PROVES the RSP attach reached the target: the ``^connected``

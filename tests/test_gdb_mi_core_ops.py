@@ -50,7 +50,9 @@ class FakeController:
 _DONE: list[dict[str, object]] = [{"type": "result", "message": "done", "payload": None, "token": None}]
 _CONNECTED: list[dict[str, object]] = [{"type": "result", "message": "connected", "payload": None, "token": None}]
 _RUNNING: list[dict[str, object]] = [{"type": "result", "message": "running", "payload": None, "token": None}]
-_ATTACH_OK = [_DONE, _DONE, _DONE, _DONE, _CONNECTED]
+# attach() issues six commands: confirm off, pagination off, mi-async on, file-exec-and-symbols,
+# remotetimeout (ADR 0023), then the connect (^connected).
+_ATTACH_OK = [_DONE, _DONE, _DONE, _DONE, _DONE, _CONNECTED]
 
 
 def _stopped(reason: str) -> list[dict[str, object]]:
