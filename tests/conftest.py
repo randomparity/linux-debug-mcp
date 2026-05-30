@@ -537,3 +537,192 @@ def kernel_provenance_details(build_id_hex: str = GDB_TEST_BUILD_ID, *, release:
         "cmdline": "",
         "config_ref": None,
     }
+
+
+class _NoopMiController:
+    def write(self, command: str, *, timeout_sec: float) -> list[dict[str, object]]:
+        return []
+
+    def read(self, *, timeout_sec: float) -> list[dict[str, object]]:
+        return []
+
+    def exit(self) -> None:
+        return None
+
+
+class FakeMiEngine:
+    """A GdbMiEngine-shaped fake covering the attach probe AND the Phase C op surface (#81). Each op
+    records its call and returns a canned typed record; the live attachment is opaque. ``fail_on``
+    selects which attach step raises (``attach``/``probe``/``resolve`` raise GdbMiError;
+    ``probe_crash`` raises an unwrapped RuntimeError to exercise the broad guaranteed-resume catch)."""
+
+    def __init__(self, *, fail_on: str | None = None, resume_confirmed: bool = True) -> None:
+        from linux_debug_mcp.providers.gdb_mi import GdbMiAttachment  # noqa: PLC0415
+
+        self._attachment_cls = GdbMiAttachment
+        self.fail_on = fail_on
+        self._resume_confirmed = resume_confirmed
+        self.attached = False
+        self.resolved: str | None = None
+        self.forced = False
+        self.detached = False
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    # --- attach probe ---
+    def attach(self, *, rsp_endpoint, vmlinux_path, transcript_path):
+        from linux_debug_mcp.providers.gdb_mi import GdbMiError  # noqa: PLC0415
+
+        if self.fail_on == "attach":
+            raise GdbMiError("attach blew up", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
+        self.attached = True
+        return self._attachment_cls(
+            controller=_NoopMiController(), rsp_host="127.0.0.1", rsp_port=1234, transcript_path=transcript_path
+        )
+
+    def probe_read(self, attachment):
+        from linux_debug_mcp.providers.gdb_mi import GdbMiError, MiRecord  # noqa: PLC0415
+
+        if self.fail_on == "probe":
+            raise GdbMiError("rsp timeout", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
+        if self.fail_on == "probe_crash":
+            raise RuntimeError("unexpected non-GdbMiError engine crash")
+        return MiRecord(type="result", message="connected", payload=None)
+
+    def resolve_symbol(self, attachment, symbol_name: str):
+        from linux_debug_mcp.providers.gdb_mi import GdbMiError, ResolvedSymbol  # noqa: PLC0415
+
+        if self.fail_on == "resolve":
+            raise GdbMiError("no such symbol", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
+        self.resolved = symbol_name
+        return ResolvedSymbol(name=symbol_name, value="0x1234 <linux_banner>")
+
+    def force_resume(self, attachment) -> bool:
+        self.forced = True
+        return self._resume_confirmed
+
+    def resume_and_detach(self, attachment) -> bool:
+        self.detached = True
+        return True
+
+    # --- Phase C ops ---
+    def set_breakpoint(self, attachment, location: str):
+        from linux_debug_mcp.providers.gdb_mi import BreakpointRef  # noqa: PLC0415
+
+        self.calls.append(("set_breakpoint", (location,)))
+        return BreakpointRef(number="1", type="breakpoint", func=location, addr="0xffffffff81234560")
+
+    def set_watchpoint(self, attachment, expression: str):
+        from linux_debug_mcp.providers.gdb_mi import BreakpointRef  # noqa: PLC0415
+
+        self.calls.append(("set_watchpoint", (expression,)))
+        return BreakpointRef(number="2", type="hw watchpoint", what=expression)
+
+    def clear_breakpoint(self, attachment, number: str) -> None:
+        self.calls.append(("clear_breakpoint", (number,)))
+
+    def clear_watchpoint(self, attachment, number: str) -> None:
+        self.calls.append(("clear_watchpoint", (number,)))
+
+    def list_breakpoints(self, attachment):
+        from linux_debug_mcp.providers.gdb_mi import BreakpointRef  # noqa: PLC0415
+
+        self.calls.append(("list_breakpoints", ()))
+        return [BreakpointRef(number="1", type="breakpoint", func="do_sys_open")]
+
+    def continue_(self, attachment, *, timeout_sec):
+        return self._stop("continue_", timeout_sec, "breakpoint-hit", "do_sys_open")
+
+    def step(self, attachment, *, timeout_sec):
+        return self._stop("step", timeout_sec, "end-stepping-range", "do_sys_open")
+
+    def next(self, attachment, *, timeout_sec):
+        return self._stop("next", timeout_sec, "end-stepping-range", "do_sys_open")
+
+    def finish(self, attachment, *, timeout_sec):
+        return self._stop("finish", timeout_sec, "function-finished", "__x64_sys_open")
+
+    def interrupt(self, attachment):
+        from linux_debug_mcp.providers.gdb_mi import Frame, StopRecord  # noqa: PLC0415
+
+        self.calls.append(("interrupt", ()))
+        return StopRecord(reason="signal-received", frame=Frame(level=0, func="do_sys_open"))
+
+    def backtrace(self, attachment):
+        from linux_debug_mcp.providers.gdb_mi import Frame  # noqa: PLC0415
+
+        self.calls.append(("backtrace", ()))
+        return [Frame(level=0, func="do_sys_open"), Frame(level=1, func="__x64_sys_open")]
+
+    def list_variables(self, attachment):
+        from linux_debug_mcp.providers.gdb_mi import Variable  # noqa: PLC0415
+
+        self.calls.append(("list_variables", ()))
+        return [Variable(name="fd", value="3")]
+
+    def read_registers(self, attachment, register_names: list[str]) -> dict[str, object]:
+        self.calls.append(("read_registers", tuple(register_names)))
+        return {"registers": {name: "0x10" for name in register_names}}
+
+    def read_symbol(self, attachment, symbol: str) -> dict[str, object]:
+        self.calls.append(("read_symbol", (symbol,)))
+        return {"symbol": symbol, "value": "Linux version 6.9.0"}
+
+    def read_memory(self, attachment, *, address: int, byte_count: int) -> dict[str, object]:
+        self.calls.append(("read_memory", (address, byte_count)))
+        return {"address": f"0x{address:x}", "byte_count": byte_count, "memory": [{"contents": "deadbeef"}]}
+
+    def evaluate_inspector(self, attachment, *, inspector: str, arguments: dict[str, object]) -> dict[str, object]:
+        self.calls.append(("evaluate_inspector", (inspector,)))
+        return {"inspector": inspector, "kernel_version": "Linux version 6.9.0"}
+
+    def _stop(self, name: str, timeout_sec, reason: str, func: str):
+        from linux_debug_mcp.providers.gdb_mi import Frame, StopRecord  # noqa: PLC0415
+
+        self.calls.append((name, (timeout_sec,)))
+        return StopRecord(reason=reason, frame=Frame(level=0, func=func))
+
+
+def build_debug_transport(tmp_path: Path, run_id: str, *, generation: int = 1):
+    """Wire the Layer-4 transport machinery for ``run_id`` with a READY snapshot exposing an RSP
+    channel — the precondition debug.start_session now needs to attach the live gdb/MI engine.
+    Returns ``(registry, transaction, admission)``."""
+    from _layer4_fakes import FakeQemuTransport, build_txn  # noqa: PLC0415
+
+    registry_dir = tmp_path / f"reg-{run_id}"
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    registry = SessionRegistry(directory=registry_dir)
+    transaction, admission = build_txn(FakeQemuTransport(), registry=registry, generation=generation)
+    rsp_channel = TransportRef(
+        provider="qemu-gdbstub",
+        channel_id="rsp0",
+        line_role=LineRole.RSP,
+        caps=("rsp",),
+        target_ref={"host": "127.0.0.1", "port": 1234},
+    )
+    platform = PlatformMetadata(
+        console_kind=ConsoleKind.UART,
+        console_count=1,
+        dedicated_debug_line=False,
+        ssh_reachable=True,
+        break_hints=[BreakHint.GDBSTUB_NATIVE],
+    )
+    publish_ready_snapshot(
+        admission,
+        target_key=TargetKey(provisioner="local-qemu", target_id=run_id),
+        generation=generation,
+        transports=[rsp_channel],
+        platform=platform,
+    )
+    return registry, transaction, admission
+
+
+def seed_live_mi_session(sessions, session_id: str, transcript_path: Path):
+    """Register a noop live attachment under ``session_id`` so the per-op handlers find a live
+    session (the durable DebugSession is seeded separately on disk)."""
+    from linux_debug_mcp.providers.gdb_mi import GdbMiAttachment  # noqa: PLC0415
+
+    attachment = GdbMiAttachment(
+        controller=_NoopMiController(), rsp_host="127.0.0.1", rsp_port=1234, transcript_path=transcript_path
+    )
+    sessions.register(session_id, attachment)
+    return attachment

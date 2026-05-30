@@ -2,8 +2,8 @@
 NOT through the ssh admit_ssh_tier gate.
 
 Per ADR 0001/0002, gdb register/memory reads are valid precisely because the kernel is halted.
-The read handler path (_debug_read_response → _debug_operation_response) accepts no `admission`
-parameter and contains no call to admit_ssh_tier — ssh gating is structurally unreachable.
+The read handler path (_debug_read_response -> _debug_operation_response) accepts no `admission`
+parameter and contains no call to admit_ssh_tier -- ssh gating is structurally unreachable.
 
 These tests pin that invariant so a future refactor cannot accidentally re-route reads through
 the ssh execution gate.
@@ -12,82 +12,15 @@ the ssh execution gate.
 import inspect
 from pathlib import Path
 
-from conftest import kernel_provenance_details, write_vmlinux_with_build_id
+from conftest import FakeMiEngine, build_debug_transport, kernel_provenance_details, write_vmlinux_with_build_id
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import DebugProfile
 from linux_debug_mcp.domain import ArtifactRef, RunRequest, StepResult, StepStatus
-from linux_debug_mcp.providers.qemu_gdbstub import DebugProviderResult, DebugSession
+from linux_debug_mcp.providers.gdb_mi import GdbMiSessionRegistry
 from linux_debug_mcp.server import debug_read_registers_handler, debug_start_session_handler
 
-# ---------------------------------------------------------------------------
-# Minimal fake provider — only the methods this test exercises
-# ---------------------------------------------------------------------------
-
-
-class _FakeReadProvider:
-    """Fake gdbstub provider that supports start_session and read_registers."""
-
-    name = "local-qemu-gdbstub"
-
-    def __init__(self) -> None:
-        self.read_calls: int = 0
-
-    def start_session(self, **kwargs):  # noqa: ANN003
-        run_dir = kwargs["run_dir"]
-        session_path = run_dir / "debug" / "sessions" / "debug-1.json"
-        transcript_path = run_dir / "debug" / "attempt-001" / "transcript.txt"
-        commands_path = run_dir / "debug" / "attempt-001" / "commands.jsonl"
-        summary_path = run_dir / "debug" / "attempt-001" / "debug-summary.json"
-        for path in [session_path, transcript_path, commands_path, summary_path]:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("{}", encoding="utf-8")
-        session = DebugSession(
-            session_id="debug-1",
-            run_id=kwargs["run_id"],
-            provider_name=self.name,
-            gdbstub_endpoint=kwargs["gdbstub_endpoint"],
-            vmlinux_path=str(kwargs["vmlinux_path"]),
-            selected_debug_profile=kwargs["debug_profile"].name,
-            attach_status="attached",
-            started_at="2026-05-27T00:00:00+00:00",
-            # "stopped" is the provider-level name for HALTED (kernel is paused at gdbstub)
-            current_execution_state="stopped",
-            transcript_path=str(transcript_path),
-            command_metadata_path=str(commands_path),
-            latest_summary_path=str(summary_path),
-            symbol_identity_validation={"same_run_artifact_linkage": True, "live_banner_match": True},
-        )
-        session_path.write_text(session.model_dump_json(indent=2), encoding="utf-8")
-        return DebugProviderResult(
-            status=StepStatus.SUCCEEDED,
-            summary="debug session started",
-            session=session,
-            artifacts=[
-                ArtifactRef(path=str(session_path), kind="debug-session"),
-                ArtifactRef(path=str(transcript_path), kind="debug-transcript", sensitive=True),
-                ArtifactRef(path=str(commands_path), kind="debug-command-metadata"),
-                ArtifactRef(path=str(summary_path), kind="debug-summary"),
-            ],
-            details={"debug_session_id": "debug-1"},
-        )
-
-    def read_registers(self, **kwargs):  # noqa: ANN003
-        self.read_calls += 1
-        return DebugProviderResult(
-            status=StepStatus.SUCCEEDED,
-            summary="registers read succeeded",
-            session=kwargs["session"],
-            details={
-                "registers": {"rip": "0xffffffff81000000", "rsp": "0xffffffff82000000"},
-                "stdout_snippet": "rip 0xffffffff81000000\nrsp 0xffffffff82000000\n",
-            },
-        )
-
-
-# ---------------------------------------------------------------------------
-# Shared setup helper
-# ---------------------------------------------------------------------------
+RUN_ID = "run-halted"
 
 
 def _create_debug_ready_run(tmp_path: Path) -> tuple[Path, str]:
@@ -103,7 +36,7 @@ def _create_debug_ready_run(tmp_path: Path) -> tuple[Path, str]:
             target_profile="local-qemu",
             rootfs_profile="minimal",
             debug_profile="qemu-gdbstub-default",
-            run_id="run-halted",
+            run_id=RUN_ID,
         )
     )
     vmlinux = artifact_root / manifest.run_id / "build" / "vmlinux"
@@ -139,25 +72,29 @@ def _create_debug_ready_run(tmp_path: Path) -> tuple[Path, str]:
     return artifact_root, manifest.run_id
 
 
-# ---------------------------------------------------------------------------
-# Behavior tests
-# ---------------------------------------------------------------------------
+def _profiles() -> dict[str, DebugProfile]:
+    return {"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")}
 
 
 def test_read_registers_works_while_halted(tmp_path: Path) -> None:
-    """A register read SUCCEEDS when the debug session records execution_state=stopped (HALTED).
+    """A register read SUCCEEDS when the debug session is parked HALTED (stopped).
 
-    gdb reads are valid precisely because the kernel is stopped at the gdbstub.  This test
-    pins that the read path accepts a HALTED session and returns SUCCEEDED — not a gate error.
+    gdb reads are valid precisely because the kernel is stopped at the gdbstub.
     """
     artifact_root, run_id = _create_debug_ready_run(tmp_path)
-    provider = _FakeReadProvider()
+    registry, txn, admission = build_debug_transport(tmp_path, run_id)
+    engine = FakeMiEngine()
+    sessions = GdbMiSessionRegistry()
 
     start = debug_start_session_handler(
         artifact_root=artifact_root,
         run_id=run_id,
-        provider=provider,
-        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
+        debug_profiles=_profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
     )
     assert start.ok is True
     assert start.data["current_execution_state"] == "stopped"  # kernel is HALTED
@@ -166,21 +103,23 @@ def test_read_registers_works_while_halted(tmp_path: Path) -> None:
         artifact_root=artifact_root,
         run_id=run_id,
         registers=["rip", "rsp"],
-        provider=provider,
-        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
+        debug_profiles=_profiles(),
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
     )
 
     assert response.ok is True, f"expected SUCCEEDED but got: {response}"
-    assert provider.read_calls == 1
+    assert ("read_registers", ("rip", "rsp")) in engine.calls
 
 
 def test_debug_read_not_ssh_gated(tmp_path: Path) -> None:
     """debug_read_registers_handler must NOT be routed through the ssh admit_ssh_tier gate.
 
-    Approach: structural verification.  The handler signature accepts no `admission` parameter
-    (checked below), and _debug_read_response → _debug_operation_response likewise accept no
-    admission.  Because there is no injection point for an AdmissionService on the read path,
-    admit_ssh_tier is structurally unreachable — the test exercises the handler successfully
+    Approach: structural verification. The handler signature accepts no `admission` parameter
+    (checked below), and _debug_read_response -> _debug_operation_response likewise accept no
+    admission. Because there is no injection point for an AdmissionService on the read path,
+    admit_ssh_tier is structurally unreachable -- the test exercises the handler successfully
     without any AdmissionService being present, confirming the ssh gate is not in the call chain.
     """
     from linux_debug_mcp.server import debug_read_registers_handler as _handler
@@ -193,16 +132,22 @@ def test_debug_read_not_ssh_gated(tmp_path: Path) -> None:
         "Reads must execute under the stop-capable guard (HALTED), not the ssh tier gate."
     )
 
-    # Functional check: the handler works end-to-end with no AdmissionService present,
-    # confirming no code on the read path requires or calls admit_ssh_tier.
+    # Functional check: the read works end-to-end with no AdmissionService threaded into the read
+    # path, confirming no code on the read path requires or calls admit_ssh_tier.
     artifact_root, run_id = _create_debug_ready_run(tmp_path)
-    provider = _FakeReadProvider()
+    registry, txn, admission = build_debug_transport(tmp_path, run_id)
+    engine = FakeMiEngine()
+    sessions = GdbMiSessionRegistry()
 
     start = debug_start_session_handler(
         artifact_root=artifact_root,
         run_id=run_id,
-        provider=provider,
-        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
+        debug_profiles=_profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
     )
     assert start.ok is True
 
@@ -210,8 +155,10 @@ def test_debug_read_not_ssh_gated(tmp_path: Path) -> None:
         artifact_root=artifact_root,
         run_id=run_id,
         registers=["rip"],
-        provider=provider,
-        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
+        debug_profiles=_profiles(),
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
     )
 
     assert response.ok is True, (

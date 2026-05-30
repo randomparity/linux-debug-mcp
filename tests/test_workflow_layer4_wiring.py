@@ -20,6 +20,7 @@ from pathlib import Path
 
 from _layer4_fakes import CHANNEL, FakeQemuTransport, build_txn
 from conftest import (
+    FakeMiEngine,
     FakeTestProvider,
     kernel_provenance_details,
     make_source_tree,
@@ -39,7 +40,7 @@ from linux_debug_mcp.domain import (
     StepStatus,
     ToolResponse,
 )
-from linux_debug_mcp.providers.qemu_gdbstub import DebugProviderResult, DebugSession
+from linux_debug_mcp.providers.gdb_mi import GdbMiSessionRegistry
 from linux_debug_mcp.seams.target import (
     BreakHint,
     ConsoleKind,
@@ -192,48 +193,6 @@ def test_workflow_run_tests_rejects_when_target_halted(tmp_path: Path, monkeypat
     assert failed_inner["error"]["details"]["code"] == "target_halted"
 
 
-class _FakeDebugProvider:
-    name = "local-qemu-gdbstub"
-
-    def start_session(self, **kwargs: object) -> DebugProviderResult:
-        run_dir: Path = kwargs["run_dir"]  # type: ignore[assignment]
-        session_path = run_dir / "debug" / "sessions" / "debug-1.json"
-        transcript_path = run_dir / "debug" / "attempt-001" / "transcript.txt"
-        commands_path = run_dir / "debug" / "attempt-001" / "commands.jsonl"
-        summary_path = run_dir / "debug" / "attempt-001" / "debug-summary.json"
-        for path in [session_path, transcript_path, commands_path, summary_path]:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("{}", encoding="utf-8")
-        session = DebugSession(
-            session_id="debug-1",
-            run_id=kwargs["run_id"],  # type: ignore[arg-type]
-            provider_name=self.name,
-            gdbstub_endpoint=kwargs["gdbstub_endpoint"],  # type: ignore[arg-type]
-            vmlinux_path=str(kwargs["vmlinux_path"]),  # type: ignore[arg-type]
-            selected_debug_profile=kwargs["debug_profile"].name,  # type: ignore[union-attr]
-            attach_status="attached",
-            started_at="2026-05-23T00:00:00+00:00",
-            current_execution_state="stopped",
-            transcript_path=str(transcript_path),
-            command_metadata_path=str(commands_path),
-            latest_summary_path=str(summary_path),
-            symbol_identity_validation={"same_run_artifact_linkage": True, "live_banner_match": True},
-        )
-        session_path.write_text(session.model_dump_json(indent=2), encoding="utf-8")
-        return DebugProviderResult(
-            status=StepStatus.SUCCEEDED,
-            summary="debug session started",
-            session=session,
-            artifacts=[
-                ArtifactRef(path=str(session_path), kind="debug-session"),
-                ArtifactRef(path=str(transcript_path), kind="debug-transcript", sensitive=True),
-                ArtifactRef(path=str(commands_path), kind="debug-command-metadata"),
-                ArtifactRef(path=str(summary_path), kind="debug-summary"),
-            ],
-            details={"debug_session_id": "debug-1"},
-        )
-
-
 def _create_debug_ready_run(tmp_path: Path) -> tuple[Path, Path]:
     """Mirrors test_server_debug_session_migration._create_debug_ready_run: seed a debug-boot
     manifest with build+boot SUCCEEDED so workflow_build_boot_debug short-circuits both steps.
@@ -312,12 +271,6 @@ def test_workflow_debug_acquires_guard_and_writes_halted_record(tmp_path: Path, 
         platform=PLATFORM_WITH_SSH,
     )
 
-    # The debug.start_session handler instantiates QemuGdbstubProvider() when provider is None; swap
-    # the constructor to a fake that satisfies the artifact contract without invoking gdb.
-    monkeypatch.setattr(
-        "linux_debug_mcp.server.QemuGdbstubProvider",
-        lambda: _FakeDebugProvider(),
-    )
     # Profile registry: the workflow uses DEFAULT_DEBUG_PROFILES; the existing default already
     # contains qemu-gdbstub-default, but pin via monkeypatch for isolation.
     monkeypatch.setattr(
@@ -336,6 +289,8 @@ def test_workflow_debug_acquires_guard_and_writes_halted_record(tmp_path: Path, 
         admission=admission,
         session_registry=registry,
         transaction=txn,
+        gdb_mi_engine=FakeMiEngine(),
+        gdb_mi_sessions=GdbMiSessionRegistry(),
     )
 
     assert response.ok is True

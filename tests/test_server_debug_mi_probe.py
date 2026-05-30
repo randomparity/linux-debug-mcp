@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from _layer4_fakes import FakeQemuTransport, build_txn
-from conftest import FakeTestProvider, kernel_provenance_details, rootfs, write_vmlinux_with_build_id
+from conftest import FakeMiEngine, FakeTestProvider, kernel_provenance_details, rootfs, write_vmlinux_with_build_id
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import DebugProfile, RootfsProfile
@@ -22,8 +22,7 @@ from linux_debug_mcp.coordination.admission import AdmissionService
 from linux_debug_mcp.coordination.registry import SessionRegistry
 from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from linux_debug_mcp.providers.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiError, MiRecord, ResolvedSymbol
-from linux_debug_mcp.providers.qemu_gdbstub import DebugProviderResult, DebugSession
+from linux_debug_mcp.providers.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiSessionRegistry
 from linux_debug_mcp.seams.target import (
     BreakHint,
     ConsoleKind,
@@ -53,88 +52,7 @@ PLATFORM_WITH_SSH = PlatformMetadata(
 )
 
 
-class FakeDebugProvider:
-    """The legacy batch session-of-record provider (Phase A keeps it; Phase C migrates it)."""
-
-    name = "local-qemu-gdbstub"
-
-    def start_session(self, **kwargs):
-        run_dir = kwargs["run_dir"]
-        session_path = run_dir / "debug" / "sessions" / "debug-1.json"
-        transcript_path = run_dir / "debug" / "attempt-001" / "transcript.txt"
-        commands_path = run_dir / "debug" / "attempt-001" / "commands.jsonl"
-        summary_path = run_dir / "debug" / "attempt-001" / "debug-summary.json"
-        for path in [session_path, transcript_path, commands_path, summary_path]:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("{}", encoding="utf-8")
-        session = DebugSession(
-            session_id="debug-1",
-            run_id=kwargs["run_id"],
-            provider_name=self.name,
-            gdbstub_endpoint=kwargs["gdbstub_endpoint"],
-            vmlinux_path=str(kwargs["vmlinux_path"]),
-            selected_debug_profile=kwargs["debug_profile"].name,
-            attach_status="attached",
-            started_at="2026-05-23T00:00:00+00:00",
-            current_execution_state="stopped",
-            transcript_path=str(transcript_path),
-            command_metadata_path=str(commands_path),
-            latest_summary_path=str(summary_path),
-            symbol_identity_validation={"same_run_artifact_linkage": True, "live_banner_match": True},
-        )
-        session_path.write_text(session.model_dump_json(indent=2), encoding="utf-8")
-        return DebugProviderResult(
-            status=StepStatus.SUCCEEDED,
-            summary="debug session started",
-            session=session,
-            artifacts=[
-                ArtifactRef(path=str(session_path), kind="debug-session"),
-                ArtifactRef(path=str(transcript_path), kind="debug-transcript", sensitive=True),
-                ArtifactRef(path=str(commands_path), kind="debug-command-metadata"),
-                ArtifactRef(path=str(summary_path), kind="debug-summary"),
-            ],
-            details={"debug_session_id": "debug-1"},
-        )
-
-
-class FakeEngine:
-    """A GdbMiEngine-shaped fake. ``fail_on`` selects which step raises (``attach``/``probe``/``resolve``
-    raise GdbMiError; ``probe_crash`` raises an unwrapped RuntimeError)."""
-
-    def __init__(self, *, fail_on: str | None = None, resume_confirmed: bool = True) -> None:
-        self.fail_on = fail_on
-        self._resume_confirmed = resume_confirmed
-        self.attached = False
-        self.resolved: str | None = None
-        self.resumed = False
-        self.forced = False
-
-    def attach(self, *, rsp_endpoint, vmlinux_path, transcript_path):
-        if self.fail_on == "attach":
-            raise GdbMiError("attach blew up", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
-        self.attached = True
-        return object()  # opaque attachment handle
-
-    def probe_read(self, attachment) -> MiRecord:
-        if self.fail_on == "probe":
-            raise GdbMiError("rsp timeout", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
-        if self.fail_on == "probe_crash":
-            raise RuntimeError("unexpected non-GdbMiError engine crash")  # an unwrapped tool exception
-        return MiRecord(type="result", message="connected", payload=None)  # the ^connected attach proof
-
-    def resolve_symbol(self, attachment, symbol_name: str) -> ResolvedSymbol:
-        if self.fail_on == "resolve":
-            raise GdbMiError("no such symbol", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
-        self.resolved = symbol_name
-        return ResolvedSymbol(name=symbol_name, value="0x1234 <linux_banner>")
-
-    def resume_and_detach(self, attachment) -> bool:
-        self.resumed = True
-        return True
-
-    def force_resume(self, attachment) -> bool:
-        self.forced = True
-        return self._resume_confirmed
+FakeEngine = FakeMiEngine  # the shared GdbMiEngine-shaped fake (conftest)
 
 
 def _make_registry(directory: Path) -> SessionRegistry:
@@ -219,12 +137,12 @@ def test_provenance_mismatch_blocks_mi_attach(tmp_path: Path) -> None:
     resp = debug_start_session_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
-        provider=FakeDebugProvider(),
         debug_profiles=_profiles(),
         transaction=txn,
         admission=admission,
         session_registry=registry,
         gdb_mi_engine=engine,
+        gdb_mi_sessions=GdbMiSessionRegistry(),
         build_id_reader=lambda _p: _OTHER_BUILD_ID,
     )
     assert resp.ok is False
@@ -255,12 +173,12 @@ def test_missing_provenance_blocks_mi_attach(tmp_path: Path) -> None:
     resp = debug_start_session_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
-        provider=FakeDebugProvider(),
         debug_profiles=_profiles(),
         transaction=txn,
         admission=admission,
         session_registry=registry,
         gdb_mi_engine=engine,
+        gdb_mi_sessions=GdbMiSessionRegistry(),
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "provenance_missing"
@@ -275,15 +193,16 @@ def test_probe_success_records_session_and_leaves_record_halted(tmp_path: Path) 
     resp = debug_start_session_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
-        provider=FakeDebugProvider(),
         debug_profiles=_profiles(),
         transaction=txn,
         admission=admission,
         session_registry=registry,
         gdb_mi_engine=engine,
+        gdb_mi_sessions=GdbMiSessionRegistry(),
     )
     assert resp.ok is True
-    assert engine.attached and engine.resumed
+    # Phase C: the engine stays attached (the live session-of-record); it is NOT detached on success.
+    assert engine.attached and not engine.detached
     # AC#1: the typed MI probe record (the ^connected attach proof) is surfaced in the response data.
     assert resp.data["mi_probe"]["record"]["message"] == "connected"
     record = registry.read_record(KEY)
@@ -298,12 +217,12 @@ def test_probe_surfaces_resolved_symbol(tmp_path: Path) -> None:
     resp = debug_start_session_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
-        provider=FakeDebugProvider(),
         debug_profiles=_profiles(),
         transaction=txn,
         admission=admission,
         session_registry=registry,
         gdb_mi_engine=engine,
+        gdb_mi_sessions=GdbMiSessionRegistry(),
     )
     assert resp.ok is True
     assert engine.resolved == CANONICAL_PROBE_SYMBOL
@@ -320,12 +239,12 @@ def test_resolve_fault_resumes_and_frees_guard(tmp_path: Path) -> None:
     resp = debug_start_session_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
-        provider=FakeDebugProvider(),
         debug_profiles=_profiles(),
         transaction=txn,
         admission=admission,
         session_registry=registry,
         gdb_mi_engine=engine,
+        gdb_mi_sessions=GdbMiSessionRegistry(),
     )
     assert resp.ok is False
     assert resp.error.category == ErrorCategory.DEBUG_ATTACH_FAILURE
@@ -342,12 +261,12 @@ def test_second_stop_capable_attach_refused_on_qemu_gdbstub(tmp_path: Path) -> N
     common = dict(
         artifact_root=artifact_root,
         run_id=RUN_ID,
-        provider=FakeDebugProvider(),
         debug_profiles=_profiles(),
         transaction=txn,
         admission=admission,
         session_registry=registry,
         gdb_mi_engine=FakeEngine(),
+        gdb_mi_sessions=GdbMiSessionRegistry(),
     )
     first = debug_start_session_handler(**common)
     assert first.ok is True
@@ -369,12 +288,12 @@ def test_probe_fault_resumes_and_frees_guard(tmp_path: Path, fail_on: str) -> No
     resp = debug_start_session_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
-        provider=FakeDebugProvider(),
         debug_profiles=_profiles(),
         transaction=txn,
         admission=admission,
         session_registry=registry,
         gdb_mi_engine=engine,
+        gdb_mi_sessions=GdbMiSessionRegistry(),
     )
     assert resp.ok is False
     assert resp.error.category == ErrorCategory.DEBUG_ATTACH_FAILURE
@@ -396,12 +315,12 @@ def test_non_gdbmi_engine_exception_still_resumes_and_frees_guard(tmp_path: Path
     resp = debug_start_session_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
-        provider=FakeDebugProvider(),
         debug_profiles=_profiles(),
         transaction=txn,
         admission=admission,
         session_registry=registry,
         gdb_mi_engine=engine,
+        gdb_mi_sessions=GdbMiSessionRegistry(),
     )
     assert resp.ok is False
     assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -429,12 +348,12 @@ def test_probe_fault_releases_guard_even_if_unhalt_write_raises(
     resp = debug_start_session_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
-        provider=FakeDebugProvider(),
         debug_profiles=_profiles(),
         transaction=txn,
         admission=admission,
         session_registry=registry,
         gdb_mi_engine=FakeEngine(fail_on="probe", resume_confirmed=True),
+        gdb_mi_sessions=GdbMiSessionRegistry(),
     )
     assert resp.ok is False  # the exception did not escape the handler
     assert registry.read_record(KEY) is None  # teardown released the guard / deleted the record
@@ -444,12 +363,12 @@ def test_probe_fault_releases_guard_even_if_unhalt_write_raises(
         artifact_root=artifact_root,
         run_id=RUN_ID,
         new_session=True,
-        provider=FakeDebugProvider(),
         debug_profiles=_profiles(),
         transaction=txn,
         admission=admission,
         session_registry=registry,
         gdb_mi_engine=FakeEngine(),
+        gdb_mi_sessions=GdbMiSessionRegistry(),
         recovery=True,
     )
     assert reattach.ok is True
@@ -464,12 +383,12 @@ def test_run_tests_rejected_while_target_halted(tmp_path: Path) -> None:
     ok = debug_start_session_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
-        provider=FakeDebugProvider(),
         debug_profiles=_profiles(),
         transaction=txn,
         admission=admission,
         session_registry=registry,
         gdb_mi_engine=FakeEngine(),
+        gdb_mi_sessions=GdbMiSessionRegistry(),
     )
     assert ok.ok is True
     assert registry.read_record(KEY).execution_state == ExecutionState.HALTED
@@ -495,12 +414,12 @@ def test_probe_fault_with_confirmed_resume_unblocks_ssh_tier(tmp_path: Path) -> 
     faulted = debug_start_session_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
-        provider=FakeDebugProvider(),
         debug_profiles=_profiles(),
         transaction=txn,
         admission=admission,
         session_registry=registry,
         gdb_mi_engine=FakeEngine(fail_on="probe", resume_confirmed=True),
+        gdb_mi_sessions=GdbMiSessionRegistry(),
     )
     assert faulted.ok is False
     # guaranteed-resume teardown: record deleted, no tombstone -> ssh-tier is no longer gated.

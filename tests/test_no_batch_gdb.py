@@ -2,12 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 SRC = Path(__file__).resolve().parent.parent / "src" / "linux_debug_mcp"
 
 
-@pytest.mark.xfail(strict=True, reason="batch gdb paths deleted in Phase C Task 14; flip to a plain test then")
 def test_no_batch_gdb_invocation_remains() -> None:
     """ADR 0021 decision 4 / acceptance: one engine, no batch. No source file may
     construct a `-batch` gdb argv or keep the batch runner after Phase C."""
