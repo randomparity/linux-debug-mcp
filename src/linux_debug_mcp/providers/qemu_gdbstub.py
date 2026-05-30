@@ -67,6 +67,9 @@ class DebugSession(BaseModel):
     ended_at: str | None = None
     current_execution_state: Literal["unknown", "running", "stopped", "ended"] = "unknown"
     breakpoints: dict[str, dict[str, object]] = Field(default_factory=dict)
+    # Phase D (#82): module name -> {".text": "0x...", ...} loaded at runtime addresses via
+    # add-symbol-file. Keyed by module name; the .text address is the idempotency key.
+    loaded_modules: dict[str, dict[str, str]] = Field(default_factory=dict)
     controller_mode: Literal["batch", "attached"] = "batch"
     active_controller_pid: int | None = None
     controller_last_observed_state: str = "not_started"
