@@ -1314,6 +1314,106 @@ def test_build_id_mismatch_fails_loud_no_run(tmp_path) -> None:
     assert runner.calls == 0
 
 
+def _raising_reader(exc: Exception):
+    def _reader(_path):
+        raise exc
+
+    return _reader
+
+
+@pytest.mark.parametrize(
+    "exc_name, expected_code",
+    [
+        ("VmcoreFormatUnsupported", "vmcore_format_unsupported"),
+        ("VmcoreBuildIdAbsent", "provenance_unverifiable"),
+        ("VmcoreBuildIdError", "vmcore_build_id_unreadable"),
+    ],
+)
+def test_vmcore_reader_failures_fail_loud(tmp_path, exc_name, expected_code) -> None:
+    import linux_debug_mcp.symbols as symbols
+
+    _run(tmp_path)
+    runner = _FakeRunner(outputs={})
+    exc = getattr(symbols, exc_name)("crafted")
+    resp = debug_postmortem_crash_handler(
+        DebugPostmortemCrashRequest(
+            run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux", commands=["bt"],
+        ),
+        artifact_root=tmp_path,
+        runner=runner,
+        vmcore_build_id_reader=_raising_reader(exc),
+        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+    )
+    assert resp.ok is False
+    assert resp.error.details["code"] == expected_code
+    assert runner.calls == 0
+
+
+def test_vmlinux_build_id_unreadable_fails_loud(tmp_path) -> None:
+    from linux_debug_mcp.symbols import BuildIdReadError
+
+    _run(tmp_path)
+    runner = _FakeRunner(outputs={})
+
+    def _raise(_p):
+        raise BuildIdReadError("not an ELF")
+
+    resp = debug_postmortem_crash_handler(
+        DebugPostmortemCrashRequest(
+            run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux", commands=["bt"],
+        ),
+        artifact_root=tmp_path,
+        runner=runner,
+        vmcore_build_id_reader=lambda _p: GOOD_ID,
+        vmlinux_build_id_reader=_raise,
+    )
+    assert resp.ok is False
+    assert resp.error.details["code"] == "vmlinux_build_id_unreadable"
+    assert runner.calls == 0
+
+
+def test_crash_open_failure_no_output_nonzero_exit(tmp_path) -> None:
+    _run(tmp_path)
+    runner = _FakeRunner(outputs={}, exit_status=1)  # no cmd-*.out written, clean nonzero exit
+    resp = debug_postmortem_crash_handler(
+        DebugPostmortemCrashRequest(
+            run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux", commands=["bt"],
+        ),
+        artifact_root=tmp_path,
+        runner=runner,
+        vmcore_build_id_reader=lambda _p: GOOD_ID,
+        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+    )
+    assert resp.ok is False
+    assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert resp.error.details["code"] == "crash_open_failure"
+
+
+@pytest.mark.parametrize(
+    "kwargs, code",
+    [
+        ({"commands": ["bt"], "timeout_seconds": 4}, "invalid_timeout"),
+        ({"commands": ["bt", "bt"]}, "invalid_commands"),
+        ({"commands": []}, "invalid_commands"),
+    ],
+)
+def test_input_validation_codes(tmp_path, kwargs, code) -> None:
+    _run(tmp_path)
+    runner = _FakeRunner(outputs={})
+    resp = debug_postmortem_crash_handler(
+        DebugPostmortemCrashRequest(
+            run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux", **kwargs,
+        ),
+        artifact_root=tmp_path,
+        runner=runner,
+        vmcore_build_id_reader=lambda _p: GOOD_ID,
+        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+    )
+    assert resp.ok is False
+    assert resp.error.details["code"] == code
+    assert runner.calls == 0
+
+
 def test_disallowed_command_rejected_no_run(tmp_path) -> None:
     _run(tmp_path)
     runner = _FakeRunner(outputs={})
@@ -1493,6 +1593,44 @@ def test_module_symbols_status_reported(tmp_path, monkeypatch) -> None:
     )
     assert resp.ok is True
     assert resp.data["module_symbols"]["status"] == "loaded"
+
+
+def test_module_symbols_load_failed(tmp_path, monkeypatch) -> None:
+    import linux_debug_mcp.server as server
+    from linux_debug_mcp.symbols import ResolvedSymbols
+
+    store = _run(tmp_path)
+    rd = store.run_dir("r1")
+    (rd / "build" / "mods").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        server, "resolve_symbols",
+        lambda _prov, *, run_dir: ResolvedSymbols(
+            vmlinux_path=run_dir / "build" / "vmlinux",
+            modules_path=run_dir / "build" / "mods", warnings=[],
+        ),
+    )
+
+    class _BadModRunner(_FakeRunner):
+        def run(self, argv, *, stdin=None, **kwargs):  # type: ignore[override]
+            for line in (stdin or "").splitlines():
+                if " > " in line and line.split(" > ", 1)[1].endswith("mod-load.out"):
+                    __import__("pathlib").Path(line.split(" > ", 1)[1]).write_text(
+                        "mod: cannot find module debuginfo\n", encoding="utf-8"
+                    )
+            return super().run(argv, stdin=stdin, **kwargs)
+
+    resp = debug_postmortem_crash_handler(
+        DebugPostmortemCrashRequest(
+            run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux",
+            modules_ref="build/mods", commands=["bt"],
+        ),
+        artifact_root=tmp_path,
+        runner=_BadModRunner(outputs={0: "PID: 0\n"}),
+        vmcore_build_id_reader=lambda _p: GOOD_ID,
+        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+    )
+    assert resp.ok is True
+    assert resp.data["module_symbols"]["status"] == "load_failed"
 ```
 
 Note: the default `Redactor` masks registry-registered secret values and `key=value` pairs whose **key** matches `password|passwd|token|api[_-]?key|secret` — confirmed in `src/linux_debug_mcp/safety/redaction.py:30-37`. A bare token (e.g. `AKIA…`) is NOT masked, so the redaction fixture must use such a key. The `modules_path_unsafe`/`module_symbols` tests inject a `ResolvedSymbols` with a hostile/known `modules_path` directly (a real `confine_run_relative` path cannot easily contain a space), per the spec §11 next-step.
@@ -1978,7 +2116,8 @@ Expected: exit 124 (server started and was killed by timeout) — proves tool re
 
 - AC "batch ⇒ JSON keyed by command, typed `bt`/`ps`/`log`/`kmem -i`/`sys`, transcript by `ArtifactRef`" → Tasks 3,4,9 (`results`, `transcript.txt`/`parsed.json` artifacts).
 - AC "unknown/unparseable ⇒ raw, never dropped" → Task 4 (`parse_command` raw passthrough) + Task 3 (`not_captured`) + Task 9 test.
-- AC "build_id mismatch fails loud, no crash run" → Task 1 + Task 9 `_crash_buildid_failloud` + `runner.calls == 0` test.
+- AC "build_id mismatch fails loud, no crash run" → Task 1 + Task 9 `_crash_buildid_failloud` + `test_build_id_mismatch_fails_loud_no_run`, `test_vmcore_reader_failures_fail_loud` (3 codes), `test_vmlinux_build_id_unreadable_fails_loud` (all assert `runner.calls == 0`).
+- §4.1 boundary + input validation → Task 9 `test_crash_open_failure_no_output_nonzero_exit`, `test_input_validation_codes` (invalid_timeout / duplicate / empty).
 - AC "timeout cuts cleanly; oversize truncated with indicator" → Task 9 (`prlimit`+`timeout`, `crash_timeout`, `truncated` flag) + Task 3 caps.
 - AC "unaffected by target lifecycle (no gate)" → Task 9 (no admission parameter) + lifecycle test.
 - AC "all persisted + response through `Redactor()`" → Task 9 `_finalize_crash_call` (redact every value + transcript) + `test_redaction_masks_secret_in_output` (response + persisted `parsed.json`).
