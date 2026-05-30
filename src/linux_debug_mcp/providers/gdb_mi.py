@@ -612,11 +612,15 @@ class GdbMiEngine:
         stack = stack_value if isinstance(stack_value, list) else []
         frames: list[Frame] = []
         for row in stack:
-            frame_payload = row.get("frame") if isinstance(row, dict) else None
-            if isinstance(frame_payload, dict):
-                redacted = self._redactor.redact_value(frame_payload)
-                if isinstance(redacted, dict):
-                    frames.append(self._frame_from(redacted))
+            if not isinstance(row, dict):
+                continue
+            # pygdbmi flattens `stack=[frame={...},frame={...}]` to the frame dicts directly, so the
+            # row IS the frame; tolerate a `{"frame": {...}}` wrapper too in case a variant preserves it.
+            wrapped = row.get("frame")
+            frame_payload = wrapped if isinstance(wrapped, dict) else row
+            redacted = self._redactor.redact_value(frame_payload)
+            if isinstance(redacted, dict):
+                frames.append(self._frame_from(redacted))
         return frames
 
     def list_variables(self, attachment: GdbMiAttachment) -> list[Variable]:
