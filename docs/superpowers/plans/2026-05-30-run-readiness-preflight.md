@@ -384,16 +384,13 @@ def test_prerequisites_handler_names_missing_rootfs_and_passes_config(tmp_path: 
         build_profile="x86_64-debug",
         target_profile="local-qemu-debug",
         rootfs_profile="minimal",
-        target_profiles={
-            "local-qemu-debug": TargetProfile(
-                name="local-qemu-debug", architecture="x86_64", debug_gdbstub=True
-            )
-        },
+        port_probe=lambda h, p: PortProbeResult("free"),  # never bind a real port in a unit test
     )
     by_id = {c["check_id"]: c for c in response.data["checks"]}
     assert by_id["kernel.config"]["status"] == "passed"
     assert by_id["rootfs.image"]["status"] == "failed"
     assert "just rootfs" in by_id["rootfs.image"]["suggested_fix"]
+    assert by_id["gdbstub.port"]["status"] == "passed"
 
 
 def test_prerequisites_handler_unknown_profile_is_failed_check(tmp_path: Path) -> None:
@@ -407,7 +404,9 @@ def test_prerequisites_handler_unknown_profile_is_failed_check(tmp_path: Path) -
     assert by_id["rootfs.image"]["status"] == "skipped"
 ```
 
-(Add `from linux_debug_mcp.config import TargetProfile` to the test imports if absent; the real `local-qemu-debug` would bind `127.0.0.1:1234` via the default probe, so the test injects a target registry to keep the port check deterministic — its endpoint defaults to `127.0.0.1:1234` and the real default probe runs once; to fully avoid a real bind, the injected `target_profiles` entry can also be paired with a deterministic outcome by asserting only on `kernel.config`/`rootfs.image`. Keep the gdbstub assertion out of this test to avoid a real-bind flake, or assert it is one of `{"passed","failed"}`.)
+Import `PortProbeResult` from `linux_debug_mcp.prereqs.checks` in the test module. The handler exposes a
+`port_probe` injection seam (Task 2 Step 3) so handler-level tests of the port path never bind a real
+socket — consistent with the repo's "handlers are tested with injected dependencies" rule.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -420,12 +419,16 @@ Extend the `check_prerequisites` import line to also import the three readiness 
 
 ```python
 from linux_debug_mcp.prereqs.checks import (
+    PortProbeResult,
     check_gdbstub_port,
     check_kernel_config,
     check_prerequisites,
     check_rootfs_image,
 )
 ```
+
+Ensure `Callable` is importable in `server.py` (it already imports from `collections.abc`/`typing`; add
+`Callable` to the existing `collections.abc` import if absent).
 
 Add helpers above `prerequisites_handler`:
 
@@ -463,6 +466,7 @@ def prerequisites_handler(
     build_profiles: dict[str, BuildProfile] | None = None,
     target_profiles: dict[str, TargetProfile] | None = None,
     rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    port_probe: Callable[[str, int], PortProbeResult] | None = None,
 ) -> ToolResponse:
     build_profiles = build_profiles if build_profiles is not None else DEFAULT_BUILD_PROFILES
     target_profiles = target_profiles if target_profiles is not None else DEFAULT_TARGET_PROFILES
@@ -476,7 +480,7 @@ def prerequisites_handler(
     target_obj, target_err = _resolve_readiness_profile("target", target_profile, target_profiles)
     checks.append(build_err or check_kernel_config(source, build_obj))
     checks.append(rootfs_err or check_rootfs_image(rootfs_obj))
-    checks.append(target_err or check_gdbstub_port(target_obj))
+    checks.append(target_err or check_gdbstub_port(target_obj, port_probe=port_probe))
     failed = [check for check in checks if check.status == "failed"]
     return ToolResponse.success(
         summary=f"{len(failed)} prerequisite checks failed",
