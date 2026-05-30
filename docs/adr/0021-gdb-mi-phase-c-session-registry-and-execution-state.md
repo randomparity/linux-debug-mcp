@@ -1,0 +1,50 @@
+# ADR 0021 — gdb/MI Phase C: an in-process live-session registry and a HALTED-for-the-window execution-state model
+
+**Status:** Proposed (2026-05-29) · **Issue:** #81 (Phase C of #13; epic #9) · **ADR:** extends [0019](0019-debug-gdb-mi-tier-decomposition.md) (phase decomposition, persistent engine, in-place migration) and [0020](0020-gdb-mi-symbol-resolution-mechanism.md) (name-shape-gated `-data-evaluate-expression`) · **Affects:** `providers/gdb_mi.py` (new core MI operations on the persistent engine), a new in-process live-session holder, the `debug.*` handlers in `server.py` (re-pointed off the batch provider onto the engine), `config.py` (`ALLOWED_DEBUG_OPERATIONS` gains the new structured ops), `domain.py` (typed stop/frame/variable wire records), and the deletion of the `-batch` paths in `providers/qemu_gdbstub.py`.
+
+## Context
+
+ADR 0019 decided the gdb/MI tier replaces the per-operation `-batch` text-scraper with one persistent `gdb --interpreter=mi3` engine, migrating the existing `debug.*` surface in place. Phases A and B built the engine's attach/detach lifecycle, the RSP connect over the guard-protected `TransportSession.rsp_endpoint`, the pre-attach provenance gate, and name-by-symbol resolution — but the engine is still used only as a **probe**: `_run_mi_attach_probe` attaches, reads one record, resolves `linux_banner`, and **immediately resumes-and-detaches inside `debug.start_session`** (`server.py:4084`). The legacy batch `QemuGdbstubProvider` remains the session-of-record, re-spawning a fresh `gdb -nx -batch` per operation (`providers/qemu_gdbstub.py:305,786`).
+
+Phase C must satisfy the acceptance "set a breakpoint by symbol, **continue, hit it, backtrace, read a local**" — operations that span **separate MCP tool calls** (`debug.set_breakpoint`, then `debug.continue`, then `debug.backtrace`, then `debug.list_variables`). A breakpoint armed in one gdb process is gone when that process exits, so the batch model — and any re-attach-per-call variant — structurally cannot hit a breakpoint set by a prior call. This is the failure mode #13 exists to remove. Phase C therefore has to keep one gdb engine **alive across tool calls** and drive the EXECUTING↔HALTED execution-state gate (§5.6) from the handlers around it.
+
+Two design points are left open by ADR 0019 and must be decided here:
+
+1. **Where the live engine lives across calls, and who reaps it.** The handlers are module-level functions invoked once per tool call; the durable session state is a `DebugSession` JSON in the manifest. Nothing today holds a live subprocess between calls.
+2. **What execution-state the durable record carries while an interactive session is open** — in particular whether `debug.continue` leaves the target EXECUTING (so ssh-tier tests admit) or HALTED, given a breakpoint can stop the kernel asynchronously after an async continue returns `^running`.
+
+## Decision
+
+### 1. Hold the live attachment in an in-process, lock-guarded session registry keyed by the durable debug session id.
+
+A new `GdbMiSessionRegistry` (in `providers/gdb_mi.py`) owns the live `GdbMiAttachment` objects in a dict guarded by a `threading.Lock`, keyed by the `DebugSession.session_id` the handler already mints. `debug.start_session` attaches the engine and **registers** the attachment (it no longer resumes-and-detaches); each per-operation handler **looks up** the live attachment by session id and issues MI verbs against it; `debug.end_session` (and every guaranteed-resume teardown) **reaps** it (`force_resume` + remove). A lookup miss is a `CONFIGURATION_ERROR` (`code="no_live_session"`) telling the agent to `debug.start_session` — the honest report when the engine is gone (server restarted, or the session was reaped by a prior fault). The registry is created once in `create_app()` alongside the existing single `GdbMiEngine` and injected into the handlers exactly like the other Layer-4 collaborators.
+
+gdb's own MI breakpoint numbers (`-break-insert` → `^done,bkpt={number="N",...}`) are the breakpoint identity; the handler persists the typed `{number, func, addr, ...}` set into the manifest `DebugSession` for enumerability and `debug.list_breakpoints`, but **gdb is the source of truth** — `debug.list_breakpoints` reads `-break-list` from the live engine, not the JSON ledger.
+
+### 2. The durable record stays HALTED for the whole interactive window; resume happens only at `end_session`.
+
+`debug.start_session` persists HALTED before the attach (unchanged, `_halt_debug_transport`). Every interactive resume verb — `debug.continue`, `debug.step`, `debug.next`, `debug.finish` — is **continue-and-wait-for-stop, bounded by a timeout**: it issues the MI exec verb, then waits up to the (validated 1–3600s) timeout for the `*stopped` async record, and returns it as a typed `StopRecord`. If the wait **times out** (the kernel is free-running with no breakpoint hit), the handler issues an MI interrupt (`-exec-interrupt`) to drive the engine back to a known stopped state and returns `timed_out=true` with the partial records. The session therefore returns to **HALTED** after every interactive verb, so the durable `execution_state` stays HALTED for the entire window and `target.run_tests` stays gated `target_halted` — never the racy "durable says EXECUTING while a breakpoint silently halted the kernel and ssh hangs" window. The kernel returns to EXECUTING exactly once, at `debug.end_session`'s resume-and-detach (the existing `_resume_debug_transport` + `transaction.close(force=True)` path). `debug.interrupt` against an already-stopped engine is idempotent (re-asserts HALTED).
+
+### 3. `-data-evaluate-expression` stays internal, behind the unchanged two-inspector allowlist.
+
+`debug.evaluate` continues to accept only `kernel_version` and `symbol_address`; both are implemented by routing to the engine's existing name-shape-gated `resolve_symbol` / a `linux_banner` read (ADR 0020), never a raw expression. Any other `inspector` value, and any attempt to pass a raw expression string, returns `CONFIGURATION_ERROR` **before** the engine is touched — the constrained-debug-surface invariant (CLAUDE.md, `ALLOWED_DEBUG_OPERATIONS`) is preserved exactly, and a new acceptance test asserts the rejection.
+
+### 4. Delete the batch paths; keep the capability advertisement.
+
+The `-batch` argv construction, `run_batch`, `SubprocessGdbRunner`, and the per-op batch handlers in `providers/qemu_gdbstub.py` are removed (replace, don't deprecate). The `local-qemu-gdbstub` `ProviderCapability` and its `operations` list are retained (re-pointed to the engine-backed surface plus the new ops), so `providers.list` keeps advertising the tier.
+
+## Consequences
+
+- One engine, no batch: after this lands, no `-batch` gdb invocation remains anywhere; a CI grep tripwire asserts it.
+- The agent gains structured `step`/`next`/`finish`, `backtrace` (frames), `list_variables`, and watchpoint ops, all MI-typed JSON; `read_memory` keeps its 4096-byte cap.
+- **Live state is server-process-scoped, not durable.** A server restart strands the in-memory attachment; the next mutating `debug.*` call finds no live session (`no_live_session`) and the existing legacy-fence / `recovery_required` tombstone path (Finding F8, ADR 0013) governs cleanup of the orphaned transport record. The durable record being HALTED across the window is what keeps `run_tests` safe even across such a restart.
+- The interactive verbs block up to their timeout. With `mi-async on` the wait is on the `*stopped` notification, and the timeout + interrupt fallback bounds the call so a free-running kernel never hangs the tool.
+- `debug.continue` no longer admits ssh-tier tests mid-session (the target is HALTED for the window). That is a deliberate narrowing for Phase C safety; a future "detached continue" that genuinely frees the target to EXECUTING is out of scope (Phase D / a later tier).
+
+## Considered & rejected
+
+- **Re-attach a fresh MI engine per operation, replaying the persisted breakpoint ledger each time.** Rejected: it keeps the engine stateless and the `DebugSession` JSON durable, but it structurally cannot satisfy "continue, hit it, backtrace" — the process that continues and stops must still be alive for the next call's backtrace, and a breakpoint set in a prior, now-exited process never fires. It is the batch model with an MI parser bolted on, not the persistent engine #13/ADR 0019 decided.
+- **Leave `debug.continue` fire-and-forget (async `^running`) and mark the durable record EXECUTING.** Rejected: a breakpoint that fires after the async continue returns halts the kernel with no synchronous observation point, so the durable record would advertise EXECUTING while the kernel is actually HALTED and ssh-tier tests would hang against a stopped kernel — exactly the §5.6 hazard the execution-state gate exists to prevent. Continue-and-wait-for-stop with a HALTED-for-the-window invariant removes the racy state.
+- **Persist breakpoints only in the manifest JSON and treat that as authoritative (don't re-read `-break-list`).** Rejected: gdb may reject, relocate, or pend a breakpoint (`-break-insert` on an unresolved symbol), so the JSON ledger can drift from gdb's actual breakpoint table; reading `-break-list` from the live engine keeps `debug.list_breakpoints` honest. The JSON ledger is a convenience cache for enumerability, not the source of truth.
+- **A second `GdbMiEngine` instance per session instead of a registry of attachments around the one engine.** Rejected: `GdbMiEngine` is stateless (it holds only factories); the per-session state is the `GdbMiAttachment` (its controller + transcript + records). A registry of attachments keyed by session id is the minimal holder; duplicating the engine adds nothing.
+- **Expose an arbitrary `-data-evaluate-expression` op now that the engine has the verb internally.** Rejected again (as in ADR 0019/0020): it regresses the constrained-debug-surface invariant. The verb stays behind the two-inspector allowlist.

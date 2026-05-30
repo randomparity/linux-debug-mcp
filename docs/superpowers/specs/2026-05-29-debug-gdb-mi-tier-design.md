@@ -1,6 +1,6 @@
 # `debug.gdb` KGDB/RSP tier (gdb/MI) — design & decomposition
 
-**Type:** Design spec · **Issue:** #13 (epic #9) · **ADR:** [0019](../../adr/0019-debug-gdb-mi-tier-decomposition.md), [0020](../../adr/0020-gdb-mi-symbol-resolution-mechanism.md) · **Status:** Phases A–B implemented (2026-05-29); C/D proposed
+**Type:** Design spec · **Issue:** #13 (epic #9) · **ADR:** [0019](../../adr/0019-debug-gdb-mi-tier-decomposition.md), [0020](../../adr/0020-gdb-mi-symbol-resolution-mechanism.md), [0021](../../adr/0021-gdb-mi-phase-c-session-registry-and-execution-state.md) · **Status:** Phases A–B implemented (2026-05-29); C designed (2026-05-29), D proposed
 
 ## Summary
 
@@ -155,12 +155,40 @@ fails `provenance_missing` rather than attaching against unverified symbols; a
 matching image attaches and resolves a symbol by name (the probe surfaces the
 typed `linux_banner` resolution).
 
-### Phase C — core operations, MI-typed
+### Phase C — core operations, MI-typed *(design 2026-05-29, #81; ADR [0021](../../adr/0021-gdb-mi-phase-c-session-registry-and-execution-state.md))*
 **Scope.** Migrate onto MI typed JSON: set/clear breakpoints & watchpoints,
 `continue`, `step`/`next`/`finish`, `-stack-list-frames`,
 `-stack-list-variables`, register/memory reads (preserve the 4096-byte
 `read_memory` cap). **Delete** the corresponding `-batch` paths in
 `qemu_gdbstub.py`.
+
+**Live session held across calls (ADR 0021 decision 1).** The acceptance spans
+separate MCP tool calls (set a breakpoint, *then* continue, *then* backtrace), so
+the `gdb -i=mi3` engine must stay alive between calls — a breakpoint set in a
+prior, exited process never fires. A new in-process `GdbMiSessionRegistry`
+(lock-guarded dict in `providers/gdb_mi.py`) holds the live `GdbMiAttachment`
+keyed by the `DebugSession.session_id`. `debug.start_session` registers it (and no
+longer resumes-and-detaches as the Phase-A probe did); each per-op handler looks
+it up; `debug.end_session` and every guaranteed-resume teardown reap it. A lookup
+miss is `CONFIGURATION_ERROR` / `no_live_session` (server restarted or session
+already reaped) routing the agent back to `debug.start_session`. gdb's own MI
+breakpoint numbers are the breakpoint identity; `debug.list_breakpoints` reads
+`-break-list` from the live engine (source of truth), with a typed JSON ledger
+persisted into the manifest for enumerability.
+
+**Execution-state: HALTED for the whole window (ADR 0021 decision 2).** The
+durable record is parked HALTED at attach and stays HALTED until `end_session`.
+The interactive resume verbs (`continue`/`step`/`next`/`finish`) are
+**continue-and-wait-for-stop, bounded by the validated 1–3600s timeout**: they
+issue the MI exec verb, wait for the `*stopped` async record, and return it as a
+typed `StopRecord`; on timeout they issue `-exec-interrupt` to return to a known
+stopped state and report `timed_out=true`. The session is therefore always HALTED
+between calls, so `target.run_tests` stays gated `target_halted` for the window and
+never races a breakpoint that silently halts a "running" kernel. The kernel
+returns to EXECUTING exactly once, at `end_session`'s resume-and-detach. This
+narrows `debug.continue` to never admit ssh-tier mid-session — a deliberate Phase-C
+safety choice; a detached free-running continue is out of scope.
+
 **MI eval stays internal-only behind the inspector allowlist.**
 `-data-evaluate-expression` is used **only as the internal implementation** of the
 existing named inspectors — today `debug.evaluate` accepts `kernel_version` and
@@ -171,11 +199,16 @@ text-scrape for an MI `-data-evaluate-expression` call is an implementation
 detail behind the same allowlist; this keeps the constrained-debug-surface
 invariant (CLAUDE.md, `ALLOWED_DEBUG_OPERATIONS`) intact.
 **Acceptance.** Set a breakpoint by symbol, continue, hit it, backtrace, read a
-local — all returned as structured JSON via MI. No batch-mode gdb invocation
-remains. `debug.evaluate` with `kernel_version` / `symbol_address` returns
-MI-typed JSON; an **arbitrary expression (any unknown inspector / raw expression
-string) is rejected** with a `CONFIGURATION_ERROR`-class response — no MI
-`-data-evaluate-expression` is reachable without going through a named inspector.
+local — all returned as structured JSON via MI. `step`/`next`/`finish` return typed
+`StopRecord`/frame records. No batch-mode (`-batch`) gdb invocation remains (CI
+grep tripwire). `debug.read_memory` is still capped at 4096 bytes per call.
+`debug.evaluate` with `kernel_version` / `symbol_address` returns MI-typed JSON; an
+**arbitrary expression (any unknown inspector / raw expression string) is
+rejected** with a `CONFIGURATION_ERROR`-class response — no MI
+`-data-evaluate-expression` is reachable without going through a named inspector. A
+mutating `debug.*` op against a session whose live engine is gone (server restart /
+prior reap) returns `CONFIGURATION_ERROR` / `no_live_session`, never a silent
+no-op. The existing env-gated local-QEMU gdbstub coverage passes on the MI engine.
 
 ### Phase D — module symbols, robustness, serial transport
 **Scope.** Per-module section-address discovery + `add-symbol-file` at runtime
