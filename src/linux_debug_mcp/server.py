@@ -4856,8 +4856,13 @@ def _interrupt_op_data(
     else:
         transaction.inject_break_for_session(transport_session.session_id, method.value)
         stop = engine.wait_for_stop(attachment, timeout_sec=_INJECT_BREAK_STOP_TIMEOUT_SEC)
-    stop_payload = stop.model_dump(mode="json") if stop is not None else None
-    return {"stop": stop_payload, "current_execution_state": "stopped"}
+    # No stop within the window means the break is unconfirmed — report `unknown`, never an
+    # optimistic `stopped`. An out-of-band break over a lossy console can be silently dropped, so
+    # claiming HALTED would mislead the agent (matching the fail-closed posture of the dedicated
+    # transport.inject_break tool, which post-probes and reports UNKNOWN when unconfirmed).
+    if stop is None:
+        return {"stop": None, "current_execution_state": "unknown"}
+    return {"stop": stop.model_dump(mode="json"), "current_execution_state": "stopped"}
 
 
 def _mi_session_artifacts(*, store: ArtifactStore, run_id: str, session: DebugSession) -> list[ArtifactRef]:

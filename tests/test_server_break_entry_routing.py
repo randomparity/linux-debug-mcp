@@ -45,6 +45,17 @@ class _RecordingEngine:
         return StopRecord(reason="signal-received")
 
 
+class _NoStopEngine:
+    """Models a break that produced no MI stop within the window (interrupt / wait_for_stop time out
+    and return None) — the lossy out-of-band case this whole tier warns about."""
+
+    def interrupt(self, attachment) -> StopRecord | None:
+        return None
+
+    def wait_for_stop(self, attachment, *, timeout_sec: float) -> StopRecord | None:
+        return None
+
+
 class _RecordingTransaction:
     def __init__(self) -> None:
         self.injected: list[tuple[str, str]] = []
@@ -80,6 +91,28 @@ def test_router_inject_for_serial_method_calls_inject_break_for_session() -> Non
     assert engine.interrupted is False
     assert engine.waited is True
     assert data["current_execution_state"] == "stopped"
+
+
+def test_router_inject_no_stop_reports_unknown_not_stopped() -> None:
+    # The break was injected but no MI stop arrived within the window — report unknown, never an
+    # optimistic "stopped" (the lossy-console fail-open the dedicated inject_break tool guards too).
+    txn = _RecordingTransaction()
+    record = _record(BreakMethod.AGENT_PROXY_BREAK)
+    data = _interrupt_op_data(engine=_NoStopEngine(), attachment=object(), transport_session=record, transaction=txn)
+    assert data["stop"] is None
+    assert data["current_execution_state"] == "unknown"
+
+
+def test_router_native_no_stop_reports_unknown_not_stopped() -> None:
+    txn = _RecordingTransaction()
+    data = _interrupt_op_data(
+        engine=_NoStopEngine(),
+        attachment=object(),
+        transport_session=_record(BreakMethod.GDBSTUB_NATIVE),
+        transaction=txn,
+    )
+    assert data["stop"] is None
+    assert data["current_execution_state"] == "unknown"
 
 
 class _NoHandleTransport:

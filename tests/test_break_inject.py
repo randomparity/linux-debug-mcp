@@ -74,6 +74,22 @@ def test_sysrq_g_writes_g_to_sysrq_trigger_over_ssh(tmp_path):
     assert "g" in ssh.argv
 
 
+def test_sysrq_g_without_ssh_runner_raises_unavailable_not_attributeerror():
+    # A sysrq_g plan whose transport handed no ssh_runner (e.g. serial-local break_resources) must
+    # fail with a structured break_inject_unavailable, never dereference None and raise AttributeError.
+    with pytest.raises(InjectBreakError) as exc:
+        inject_break(
+            method="sysrq_g",
+            break_plan=_plan(BreakMethod.SYSRQ_G),
+            proxy=None,
+            proxy_handle=None,
+            ssh_runner=None,
+            ssh_argv_prefix=[],
+        )
+    assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details.get("code") == "break_inject_unavailable"
+
+
 def test_requested_method_not_in_admitted_plan_is_rejected():
     with pytest.raises(InjectBreakError) as exc:
         inject_break(
