@@ -1,6 +1,6 @@
 # `debug.gdb` KGDB/RSP tier (gdb/MI) — design & decomposition
 
-**Type:** Design spec · **Issue:** #13 (epic #9) · **ADR:** [0019](../../adr/0019-debug-gdb-mi-tier-decomposition.md) · **Status:** Phase A implemented (2026-05-29); B/C/D proposed
+**Type:** Design spec · **Issue:** #13 (epic #9) · **ADR:** [0019](../../adr/0019-debug-gdb-mi-tier-decomposition.md), [0020](../../adr/0020-gdb-mi-symbol-resolution-mechanism.md) · **Status:** Phases A–B implemented (2026-05-29); C/D proposed
 
 ## Summary
 
@@ -123,13 +123,34 @@ operation is **fast-rejected** (not blocked behind the stop), and **after the
 guaranteed resume** a fresh ssh-tier operation **succeeds** with the target back
 in `EXECUTING`.
 
-### Phase B — symbols & provenance
+### Phase B — symbols & provenance *(implemented 2026-05-29, #80; ADR [0020](../../adr/0020-gdb-mi-symbol-resolution-mechanism.md))*
 **Scope.** Load `vmlinux` symbols; verify `KernelProvenance` `build_id`
 **pre-attach in the handler, not over RSP** (consumes ADR 0017 / #70); fail loud
 on mismatch rather than emitting garbage.
+
+**What was already in place vs the Phase B delta.** Two pieces landed before #80
+and are consumed unchanged: (1) the pre-attach provenance gate is ADR 0017 / #70's
+`_verify_gdb_symbol_version_lock`, called in `debug_start_session_handler` before
+any acquisition or attach (`provenance_mismatch` / `provenance_missing` /
+`vmlinux_build_id_unreadable`, plus `provenance_corrupt` for a malformed recorded
+id); (2) symbol *load* is Phase A's `attach()` running `-file-exec-and-symbols`
+before `-target-select remote`. The Phase B delta (ADR 0020) is **symbol
+resolution by name**: `GdbMiEngine.resolve_symbol` issues
+`-data-evaluate-expression "&<name>"` for a name validated to a bare C identifier,
+parses the address from the `^done` value, and the attach probe resolves the fixed
+canonical symbol `linux_banner` after `^connected` and before resume/detach,
+surfacing the typed result under `mi_probe.symbol`. A resolution fault rides the
+same guaranteed-resume teardown. No new agent-facing operation and no
+`ALLOWED_DEBUG_OPERATIONS` change — `-data-evaluate-expression` is internal and
+single-purpose, gated by the name-shape check (not the raw-expression hatch ADR
+0019 rejected).
+
 **Acceptance.** A `vmlinux` whose `build_id` does not match the booted image is
-rejected before attach with a `configuration_error`-class response; a matching
-image attaches and resolves a symbol by name.
+rejected before attach with a `configuration_error`-class response (the MI
+engine's `attach()` is never reached); a boot with no recorded `KernelProvenance`
+fails `provenance_missing` rather than attaching against unverified symbols; a
+matching image attaches and resolves a symbol by name (the probe surfaces the
+typed `linux_banner` resolution).
 
 ### Phase C — core operations, MI-typed
 **Scope.** Migrate onto MI typed JSON: set/clear breakpoints & watchpoints,
