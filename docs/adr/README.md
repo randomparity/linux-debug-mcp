@@ -23,5 +23,6 @@ Each ADR captures one non-trivial design decision — especially decisions the s
 | [0017](0017-symbol-version-lock-gdb-tier.md) | Symbol version-lock for the gdb tier: a shared build-id primitive verified pre-attach in the handler, not over RSP | Accepted |
 | [0018](0018-break-injection-policy-mapping.md) | Break-injection policy: an injectable `BreakPolicy` seam mapping the selected channel's topology + platform facts to a break method | Accepted |
 | [0019](0019-debug-gdb-mi-tier-decomposition.md) | `debug.gdb` KGDB/RSP tier: a persistent gdb/MI engine (replacing the batch text-scraper), delivered as a phased sub-issue series | Accepted |
+| [0020](0020-gdb-mi-symbol-resolution-mechanism.md) | gdb/MI Phase B symbol resolution: address-of a validated symbol name via `-data-evaluate-expression`, provenance reused from ADR 0017 | Accepted |
 
 **Layer-4 plan amendments (2026-05-27, addressing the `/challenge` review findings):** ADR 0002 amended with the in-process fenced guard token + post-restart `revoke()` soundness (Finding #4); ADR 0005 amended with the `on_partial` `backend_pid` write-through invariant (Finding #1) and the `recovery_required` single-source-of-truth / write-through-cache rule (Finding #5); ADR 0006 amended with the halt→runner cancel-bridge delivery mechanism + RUNNING-step terminalization (Finding #2).

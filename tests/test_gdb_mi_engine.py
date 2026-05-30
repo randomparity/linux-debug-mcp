@@ -5,7 +5,14 @@ from pathlib import Path
 import pytest
 
 from linux_debug_mcp.domain import ErrorCategory
-from linux_debug_mcp.providers.gdb_mi import GdbMiEngine, GdbMiError, MiController, MiRecord
+from linux_debug_mcp.providers.gdb_mi import (
+    CANONICAL_PROBE_SYMBOL,
+    GdbMiEngine,
+    GdbMiError,
+    MiController,
+    MiRecord,
+    ResolvedSymbol,
+)
 from linux_debug_mcp.transport.base import TcpEndpoint
 
 
@@ -151,6 +158,63 @@ def test_resume_and_detach_continues_disconnects_then_exits(tmp_path: Path) -> N
     # CI-checkable anti-hang proxy: mi-async MUST be set before the continue, else a real sync
     # `-exec-continue` would block until a stop a free-running kernel never emits.
     assert controller.commands.index("-gdb-set mi-async on") < controller.commands.index("-exec-continue")
+
+
+# A -data-evaluate-expression "&linux_banner" success: ^done with a value field.
+_EVAL_OK: list[dict[str, object]] = [
+    {"type": "result", "message": "done", "payload": {"value": "0x1234 <linux_banner>"}, "token": None}
+]
+
+
+def test_resolve_symbol_returns_typed_value(tmp_path: Path) -> None:
+    vmlinux = tmp_path / "vmlinux"
+    vmlinux.write_text("elf", encoding="utf-8")
+    controller = FakeController([*_ATTACH_OK, _EVAL_OK])
+    engine = _engine(controller)
+    attachment = engine.attach(rsp_endpoint=_endpoint(), vmlinux_path=vmlinux, transcript_path=tmp_path / "mi.log")
+    resolved = engine.resolve_symbol(attachment, CANONICAL_PROBE_SYMBOL)
+    assert isinstance(resolved, ResolvedSymbol)
+    assert resolved.name == CANONICAL_PROBE_SYMBOL
+    assert resolved.value == "0x1234 <linux_banner>"
+    # the address-of a bare identifier is sent, quoted, as a single MI argument
+    assert controller.commands[-1] == '-data-evaluate-expression "&linux_banner"'
+
+
+def test_resolve_symbol_rejects_non_identifier_name_without_touching_gdb(tmp_path: Path) -> None:
+    vmlinux = tmp_path / "vmlinux"
+    vmlinux.write_text("elf", encoding="utf-8")
+    controller = FakeController(list(_ATTACH_OK))  # no eval response scripted
+    engine = _engine(controller)
+    attachment = engine.attach(rsp_endpoint=_endpoint(), vmlinux_path=vmlinux, transcript_path=tmp_path / "mi.log")
+    commands_before = list(controller.commands)
+    with pytest.raises(GdbMiError) as exc:
+        engine.resolve_symbol(attachment, "linux_banner; call system")
+    assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
+    assert controller.commands == commands_before  # gdb was never asked
+
+
+def test_resolve_symbol_raises_debug_attach_failure_on_error_record(tmp_path: Path) -> None:
+    vmlinux = tmp_path / "vmlinux"
+    vmlinux.write_text("elf", encoding="utf-8")
+    error = [{"type": "result", "message": "error", "payload": {"msg": 'No symbol "linux_banner"'}, "token": None}]
+    controller = FakeController([*_ATTACH_OK, error])
+    engine = _engine(controller)
+    attachment = engine.attach(rsp_endpoint=_endpoint(), vmlinux_path=vmlinux, transcript_path=tmp_path / "mi.log")
+    with pytest.raises(GdbMiError) as exc:
+        engine.resolve_symbol(attachment, CANONICAL_PROBE_SYMBOL)
+    assert exc.value.category == ErrorCategory.DEBUG_ATTACH_FAILURE
+
+
+def test_resolve_symbol_raises_when_done_has_no_value(tmp_path: Path) -> None:
+    vmlinux = tmp_path / "vmlinux"
+    vmlinux.write_text("elf", encoding="utf-8")
+    no_value = [{"type": "result", "message": "done", "payload": None, "token": None}]
+    controller = FakeController([*_ATTACH_OK, no_value])
+    engine = _engine(controller)
+    attachment = engine.attach(rsp_endpoint=_endpoint(), vmlinux_path=vmlinux, transcript_path=tmp_path / "mi.log")
+    with pytest.raises(GdbMiError) as exc:
+        engine.resolve_symbol(attachment, CANONICAL_PROBE_SYMBOL)
+    assert exc.value.category == ErrorCategory.DEBUG_ATTACH_FAILURE
 
 
 def test_force_resume_swallows_errors_and_kills(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import json
+import re
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -30,6 +31,13 @@ _MI_PROMPT = "(gdb)"
 # rather than tripping the extra="forbid" model boundary.
 _KNOWN_KEYS = ("type", "message", "payload", "token", "stream")
 
+# A bare C identifier. The name-shape gate (ADR 0020 decision 2) keeps resolve_symbol's
+# `-data-evaluate-expression "&<name>"` an address-of-a-name, never an arbitrary expression.
+_SYMBOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# The fixed canonical symbol the Phase-B attach probe resolves: present in every kernel image
+# (the /proc/version string), so it needs no kernel-config gating (ADR 0020 decision 3).
+CANONICAL_PROBE_SYMBOL = "linux_banner"
+
 
 class MiRecord(Model):
     """One parsed gdb/MI record (gdb manual "GDB/MI Output Syntax"). ``type`` is the MI record
@@ -51,6 +59,16 @@ class MiRecord(Model):
     def first_result(records: list[MiRecord]) -> MiRecord | None:
         """The first ``result``-class record (``^done``/``^running``/``^error``/...), or None."""
         return next((record for record in records if record.type == "result"), None)
+
+
+class ResolvedSymbol(Model):
+    """One name->address resolution via gdb/MI ``-data-evaluate-expression "&<name>"``. ``value`` is
+    the gdb-rendered link-time address string (e.g. ``"0x... <linux_banner>"``) stored verbatim --
+    proof the symbol resolves in the loaded symbol table, NOT the relocated runtime address
+    (ADR 0020). Frozen wire shape (``Model`` => extra="forbid")."""
+
+    name: str
+    value: str
 
 
 def parse_mi_records(text: str) -> list[MiRecord]:
@@ -189,6 +207,30 @@ class GdbMiEngine:
             )
         return connected
 
+    def resolve_symbol(self, attachment: GdbMiAttachment, symbol_name: str) -> ResolvedSymbol:
+        """Resolve *symbol_name* to its address via ``-data-evaluate-expression "&<name>"`` and return
+        the typed result (ADR 0020). *symbol_name* must be a bare C identifier; anything else is a
+        CONFIGURATION_ERROR raised before gdb is touched. An MI ``^error`` (symbol absent / not loaded)
+        or a ``^done`` with no ``value`` is a DEBUG_ATTACH_FAILURE -- symbols were supposed to be
+        loaded, so an unresolvable canonical symbol is an attach-level failure, not a soft miss."""
+        if not _SYMBOL_NAME_RE.match(symbol_name):
+            raise GdbMiError(
+                f"symbol name must be a bare C identifier, got {symbol_name!r}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"symbol": symbol_name},
+            )
+        records = self._run(attachment, f'-data-evaluate-expression "&{symbol_name}"')
+        result = MiRecord.first_result(records)
+        payload = result.payload if result is not None else None
+        value = payload.get("value") if isinstance(payload, dict) else None
+        if not isinstance(value, str):
+            raise GdbMiError(
+                f"gdb/MI returned no value resolving symbol {symbol_name!r}",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={"symbol": symbol_name},
+            )
+        return ResolvedSymbol(name=symbol_name, value=value)
+
     def resume_and_detach(self, attachment: GdbMiAttachment) -> bool:
         """Clean teardown: async continue, ``-target-disconnect``, exit the engine. Returns whether
         resume is confirmed (the exit() kill disconnects RSP, which resumes QEMU even if the MI
@@ -216,7 +258,7 @@ class GdbMiEngine:
             attachment.controller.exit()
         return True
 
-    def _run(self, attachment: GdbMiAttachment, command: str) -> None:
+    def _run(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]:
         records = self._records_from(attachment.controller.write(command, timeout_sec=_MI_COMMAND_TIMEOUT_SEC))
         attachment.records.extend(records)
         self._append_transcript(attachment.transcript_path, command, records)
@@ -227,6 +269,7 @@ class GdbMiEngine:
                 category=ErrorCategory.DEBUG_ATTACH_FAILURE,
                 details={"command": command, "payload": self._redactor.redact_value(result.payload)},
             )
+        return records
 
     def _records_from(self, raw: list[dict[str, object]]) -> list[MiRecord]:
         return [MiRecord.from_raw(item) for item in raw]
