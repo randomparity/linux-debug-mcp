@@ -45,7 +45,13 @@ agent-facing operation.
    `name` and the observed `value` string (e.g. `"0x... <linux_banner>"`).
    A `^error` (symbol absent / not yet loaded) raises `GdbMiError` with
    `DEBUG_ATTACH_FAILURE` — symbols were supposed to be loaded, so an unresolvable
-   canonical symbol is an attach-level failure, not a soft miss.
+   canonical symbol is an attach-level failure, not a soft miss. The observed
+   `value` is the **link-time** address from the loaded ELF symbol table
+   (`&<name>` reads the symbol table, not target memory), so it proves
+   symbol-table presence and resolvability — **not** the relocated running
+   address, which on a KASLR kernel differs. Runtime/module relocation addressing
+   is a Phase D concern; Phase B's `ResolvedSymbol` is proof-of-resolution only and
+   the value is stored as the raw gdb string (no fragile address re-parse).
 
 2. **Validate the symbol name to a bare C identifier before interpolation.**
    `symbol_name` must match `^[A-Za-z_][A-Za-z0-9_]*$`; anything else raises

@@ -139,8 +139,11 @@ resolution by name**: `GdbMiEngine.resolve_symbol` issues
 `-data-evaluate-expression "&<name>"` for a name validated to a bare C identifier,
 parses the address from the `^done` value, and the attach probe resolves the fixed
 canonical symbol `linux_banner` after `^connected` and before resume/detach,
-surfacing the typed result under `mi_probe.symbol`. A resolution fault rides the
-same guaranteed-resume teardown. No new agent-facing operation and no
+surfacing the typed result under `mi_probe.symbol`. The surfaced value is the
+link-time symbol-table address (`&<name>` reads the table, not target memory): it
+proves the symbol resolves, not its relocated runtime address (KASLR/module
+relocation is a Phase D concern). A resolution fault rides the same
+guaranteed-resume teardown. No new agent-facing operation and no
 `ALLOWED_DEBUG_OPERATIONS` change — `-data-evaluate-expression` is internal and
 single-purpose, gated by the name-shape check (not the raw-expression hatch ADR
 0019 rejected).
