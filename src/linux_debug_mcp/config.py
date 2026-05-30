@@ -127,6 +127,9 @@ ALLOWED_DEBUG_OPERATIONS = [
     # DebugProfile in the request) — it is never gated (§5.6 rule 3).
     "debug.introspect.from_vmcore",
     "debug.introspect.from_vmcore_helper",
+    # Host-side crash-utility postmortem (#92). Listed for enumerability; never
+    # gated (no DebugProfile in the request) — §5.6 rule 3 / ADR 0010 item 7.
+    "debug.postmortem.crash",
     # ADR 0011 / #56: capability token (NOT an MCP tool) gating allow_write=true on the live
     # introspect path. Only ever passed to `_ensure_debug_operation_enabled`, never registered
     # as a tool. A read-only profile narrows `enabled_operations` to exclude it to refuse writes.
@@ -136,6 +139,44 @@ ALLOWED_DEBUG_OPERATIONS = [
 # Spec §5.2 step 4a: soft cap on introspect step records per run. The handler enforces this
 # once, without holding the manifest lock — see spec §5.3 "Soft-cap semantics".
 MAX_INTROSPECT_CALLS_PER_RUN = 1000
+
+# debug.postmortem.crash bounds (#92 / spec §10).
+MAX_POSTMORTEM_CRASH_CALLS_PER_RUN = 1000
+MAX_CRASH_COMMANDS = 64
+CRASH_SCRIPT_BYTE_CAP = 64 * 1024
+CRASH_PER_CMD_CAP = 1 * 1024 * 1024
+CRASH_STDOUT_CAP = 8 * 1024 * 1024
+CRASH_COMMAND_ALLOWLIST: set[str] = {
+    "bt",
+    "ps",
+    "log",
+    "kmem",
+    "sys",
+    "mod",
+    "struct",
+    "union",
+    "p",
+    "rd",
+    "vtop",
+    "task",
+    "files",
+    "vm",
+    "net",
+    "dev",
+    "irq",
+    "mach",
+    "runq",
+    "mount",
+    "swap",
+    "timer",
+    "dis",
+    "sym",
+    "list",
+    "tree",
+    "search",
+    "foreach",
+    "help",
+}
 
 # Spec §11 open risk 4a: integer-percent threshold for the host-side prelude-cost warning;
 # fires when `prelude_ms * 100 >= PRELUDE_WARNING_FRACTION_PCT * timeout_seconds * 1000`.
