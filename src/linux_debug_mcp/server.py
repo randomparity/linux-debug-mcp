@@ -69,6 +69,7 @@ from linux_debug_mcp.domain import (
     DebugIntrospectFromVmcoreRequest,
     DebugIntrospectHelperRequest,
     DebugIntrospectRunRequest,
+    DebugPostmortemCheckPrereqsRequest,
     DebugPostmortemCrashRequest,
     DebugPostmortemTriageRequest,
     ErrorCategory,
@@ -98,6 +99,7 @@ from linux_debug_mcp.prereqs.drgn_probe import (
     build_probe_checks,
     python_missing_checks,
 )
+from linux_debug_mcp.prereqs.kdump_probe import build_kdump_checks, render_kdump_probe_script
 from linux_debug_mcp.providers.contracts import (
     ConsoleReadRequest,
     ConsoleSessionRequest,
@@ -2518,6 +2520,170 @@ def _probe_success(
         },
         artifacts=artifacts,
         suggested_next_actions=next_actions,
+    )
+
+
+def debug_postmortem_check_prereqs_handler(
+    request: DebugPostmortemCheckPrereqsRequest,
+    *,
+    artifact_root: Path,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    ssh_runner: SshRunner | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+) -> ToolResponse:
+    """#94 / ADR 0028: live-target kdump readiness probe over SSH."""
+    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    _ctx, failure = _resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
+    if failure is not None:
+        return failure
+    assert _ctx is not None
+    ctx = _ctx
+    run_id = ctx.run_id
+
+    try:
+        halted = _reject_if_target_halted(run_id=run_id, admission=admission, session_registry=session_registry)
+    except AdmissionError as exc:
+        return ToolResponse.failure(category=exc.category, run_id=run_id, message=str(exc), details={"code": exc.code})
+    if halted is not None:
+        return halted
+
+    runner: SshRunner = ssh_runner or SubprocessSshRunner()
+    probe_id = uuid.uuid4().hex
+    agent_dir, sensitive_dir = _prepare_probe_dirs(
+        ctx.store, run_id, probe_id, category=("debug", "postmortem", "check_prereqs")
+    )
+
+    use_sudo = ctx.rootfs.ssh_user != "root"
+    remote_argv = _target_python_remote_argv(timeout_seconds=request.timeout_seconds, use_sudo=use_sudo)
+    script = render_kdump_probe_script(systemctl_timeout=max(2, request.timeout_seconds // 2))
+    try:
+        ssh_argv = build_ssh_argv(
+            rootfs_profile=ctx.rootfs,
+            known_hosts_path=ctx.store.run_dir(run_id) / "sensitive" / "known_hosts",
+            command=remote_argv,
+            command_timeout=request.timeout_seconds + 10,
+        )
+    except ValueError as exc:
+        return _configuration_failure(
+            run_id=run_id,
+            message=_redact_and_truncate(ctx.redactor, str(exc), cap=256),
+            details={"code": "invalid_ssh_options"},
+        )
+
+    stdout_path = sensitive_dir / "stdout.raw"
+    stderr_path = sensitive_dir / "stderr.raw"
+    try:
+        ssh_result = runner.run(
+            ssh_argv,
+            timeout=request.timeout_seconds + 10,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            stdin=script,
+            max_stdout_bytes=PROBE_STDOUT_CAP,
+        )
+    except Exception as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=_redact_and_truncate(ctx.redactor, f"ssh probe raised: {exc}", cap=256),
+            details={"code": "ssh_failure"},
+        )
+    for _path in (stdout_path, stderr_path):
+        with contextlib.suppress(FileNotFoundError):
+            _path.chmod(0o600)
+
+    return _assemble_kdump_response(
+        ctx,
+        ssh_result=ssh_result,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        agent_dir=agent_dir,
+        probe_id=probe_id,
+    )
+
+
+def _assemble_kdump_response(
+    ctx: _ProbeContext,
+    *,
+    ssh_result: SshCommandResult,
+    stdout_path: Path,
+    stderr_path: Path,
+    agent_dir: Path,
+    probe_id: str,
+) -> ToolResponse:
+    run_id = ctx.run_id
+    if ssh_result.oversized_output:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"probe stdout exceeded {PROBE_STDOUT_CAP} bytes",
+            details={"code": "oversized_output"},
+        )
+    raw_stdout = _read_capped(stdout_path, PROBE_STDOUT_CAP)
+    if raw_stdout is None:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"probe stdout exceeded {PROBE_STDOUT_CAP} bytes",
+            details={"code": "oversized_output"},
+        )
+    if ssh_result.cancelled or ssh_result.timed_out or ssh_result.stdin_failed:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="probe ssh round trip failed",
+            details={"code": "ssh_failure"},
+        )
+    if ssh_result.exit_status == 255:
+        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="probe ssh transport failed before the target ran",
+            details={"code": "ssh_connect_failure", "stderr": snippet},
+        )
+    if ssh_result.exit_status == 127:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="python3 is not available on the target; cannot probe kdump readiness",
+            details={"code": "probe_no_python"},
+        )
+    try:
+        parsed = json.loads(raw_stdout) if raw_stdout else None
+    except json.JSONDecodeError:
+        parsed = None
+    if not isinstance(parsed, dict):
+        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"probe did not return parseable JSON (exit {ssh_result.exit_status})",
+            details={"code": "probe_unparseable", "stderr": snippet},
+        )
+
+    checks, mechanism = build_kdump_checks(parsed)
+    kdump_ready = not any(c.status == PrerequisiteStatus.FAILED for c in checks)
+    report_path = agent_dir / "probe.json"
+    report_path.write_text(json.dumps(ctx.redactor.redact_value(parsed)), encoding="utf-8")
+    artifacts = [
+        ArtifactRef(path=str(stdout_path), kind="probe-stdout", sensitive=True),
+        ArtifactRef(path=str(stderr_path), kind="probe-stderr", sensitive=True),
+        ArtifactRef(path=str(report_path), kind="probe-report", sensitive=False),
+    ]
+    failed = sum(1 for c in checks if c.status == PrerequisiteStatus.FAILED)
+    return ToolResponse.success(
+        summary=f"kdump prerequisites: {'ready' if kdump_ready else 'not ready'} ({mechanism}, {failed} failed)",
+        run_id=run_id,
+        data={
+            "kdump_ready": kdump_ready,
+            "mechanism": mechanism,
+            "probe_id": probe_id,
+            "checks": ctx.redactor.redact_value([c.model_dump(mode="json") for c in checks]),
+        },
+        artifacts=artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
     )
 
 
