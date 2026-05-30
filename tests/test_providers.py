@@ -256,6 +256,10 @@ def test_registry_advertises_local_qemu_gdbstub_and_removes_sprint_4_stubs() -> 
     debug_provider = providers["local-qemu-gdbstub"]
     assert "debug.start_session" in debug_provider.operations
     assert "workflow.build_boot_debug" in debug_provider.operations
+    # Phase D (#82): the runtime module-symbol op is advertised so providers.list surfaces it;
+    # the drgn-only introspect op stays excluded (it is served by local-drgn-introspect).
+    assert "debug.load_module_symbols" in debug_provider.operations
+    assert "debug.introspect.run" not in debug_provider.operations
     assert debug_provider.semantics.destructive is True
     assert debug_provider.semantics.cancelable is True
     assert debug_provider.semantics.concurrent_safe is False
