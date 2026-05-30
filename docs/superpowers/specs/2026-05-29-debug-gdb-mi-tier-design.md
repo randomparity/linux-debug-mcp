@@ -19,19 +19,40 @@ decisions (persistent MI engine replacing the batch text-scraper; in-place
 migration of the existing `debug.*` surface; the `pygdbmi` dependency; the phase
 boundaries) and their rejected alternatives.
 
-## Why this is a migration, not a greenfield add
+## Why this is a migration *and* a net-new build
 
 A `debug.*` surface already exists from the Phase-4 live-debug MVP (#5):
 `debug.start_session`, `debug.set_breakpoint`, `debug.continue`,
 `debug.read_memory`, `debug.read_registers`, `debug.evaluate`,
-`debug.interrupt`, `debug.end_session` (`server.py:6621–6781`). It drives gdb in
-**one-shot batch mode** — `argv = [gdb_path, "-nx", "-batch", "-q"]`
-(`providers/qemu_gdbstub.py:305,786`) — a fresh gdb per call, parsing
-human-formatted output, unable to hold breakpoint/stepping state across calls.
-#13 replaces that engine with a persistent `gdb -i=mi3` process and re-points the
-existing tools at it (gaining the missing `step`/`next`/`finish`, frames, and
-variable listing). Per "replace, don't deprecate," the batch paths are removed,
-not kept alongside.
+`debug.interrupt`, `debug.end_session` (`server.py:6621–6781`). But "migration"
+describes only part of that surface, and the split is load-bearing for scoping
+Phase C — so it is drawn explicitly here. Only two MVP call sites ever drive gdb;
+the breakpoint/continue/interrupt verbs are in-memory no-ops with no gdb behind
+them.
+
+- **Genuinely migrated (a batch path exists to delete).** The attach in
+  `start_session` (`providers/qemu_gdbstub.py:311`) and the read path behind
+  `read_memory` / `read_registers` / `evaluate` (`providers/qemu_gdbstub.py:793`)
+  drive gdb in **one-shot batch mode** — `argv = [gdb_path, "-nx", "-batch",
+  "-q"]` — a fresh gdb per call, parsing human-formatted output, unable to hold
+  breakpoint/stepping state across calls. For these, #13 replaces the batch
+  engine with a persistent `gdb -i=mi3` process and re-points the tools at it; per
+  "replace, don't deprecate," the batch paths are removed, not kept alongside.
+- **Net-new RSP implementations (no batch path exists).**
+  `debug.set_breakpoint` (`providers/qemu_gdbstub.py:575`), `debug.continue`
+  (`:662`), and `debug.interrupt` (`:685`) never talked to gdb in the MVP — each
+  returned `_record_stateful_operation(...)`, mutating an in-memory `breakpoints`
+  / `current_execution_state` field with **no breakpoint inserted on the target
+  and no actual resume/halt**. There is no `-batch` path to delete for these;
+  Phase C implements them on RSP for the first time (real breakpoint insertion,
+  real continue, real break/halt), each carrying first-time failure modes
+  (insertion at the wrong PC, missed stops, break-injection topology). Real halt
+  semantics for `interrupt` over a **non-native** transport depend on
+  `transport.inject_break` / `BreakPolicy` and are a **Phase D** concern (ADR
+  0024); Phase C's `interrupt` covers the `gdbstub_native` `-exec-interrupt` path.
+
+On top of both, #13 gains the entirely new `step`/`next`/`finish`, frames, and
+variable listing on the same persistent engine.
 
 ## Dependencies — all satisfied
 
@@ -156,15 +177,22 @@ matching image attaches and resolves a symbol by name (the probe surfaces the
 typed `linux_banner` resolution).
 
 ### Phase C — core operations, MI-typed *(design 2026-05-29, #81; ADR [0021](../../adr/0021-gdb-mi-phase-c-session-registry-and-execution-state.md))*
-**Scope.** Migrate the **complete** `DEBUG_METHOD_OPERATIONS` set
-(`server.py:248-259`) onto MI typed JSON — `read_registers`, `read_symbol`
+**Scope.** Bring the **complete** `DEBUG_METHOD_OPERATIONS` set
+(`server.py:248-259`) onto MI typed JSON. This is **two kinds of work** (see "Why
+this is a migration *and* a net-new build"): a true **migration** of the ops that
+already had a batch path — `read_registers`, `read_symbol`
 (`-data-evaluate-expression "<validated_symbol>"`, a name-shape-gated value read),
-`read_memory` (4096-byte cap), `evaluate`, set/clear/list breakpoints, `continue`,
-`interrupt`, `end_session` — and add the new structured ops: `step`/`next`/`finish`,
-`-stack-list-frames` (`backtrace`), `-stack-list-variables` (`list_variables`),
-set/clear **watchpoints**. **Delete** the corresponding `-batch` paths in
-`qemu_gdbstub.py`; no `DEBUG_METHOD_OPERATIONS` entry is left calling a deleted
-method. `start_session`'s legacy live-banner identity scrape
+`read_memory` (4096-byte cap), `evaluate`, and the `start_session` attach — and a
+**net-new RSP implementation** of the ops that were in-memory
+`_record_stateful_operation` no-ops in the MVP: set/clear/list breakpoints,
+`continue`, and `interrupt` (real halt over a non-native transport deferred to
+Phase D's `inject_break`). On top of both, add the new structured ops:
+`step`/`next`/`finish`, `-stack-list-frames` (`backtrace`),
+`-stack-list-variables` (`list_variables`), set/clear **watchpoints**. **Delete
+the `-batch` paths that exist** — the attach batch call (`qemu_gdbstub.py:311`)
+and the read batch call (`:793`); there is **no `-batch` path to delete** for
+set_breakpoint/continue/interrupt, which were never gdb-backed. No
+`DEBUG_METHOD_OPERATIONS` entry is left calling a deleted method. `start_session`'s legacy live-banner identity scrape
 (`live_banner_match`/`symbol_identity_required`) is **subsumed by** the pre-attach
 build_id provenance gate (ADR 0017 / #70) and removed; the migrated `start_session`
 keeps the engine attached and retains the typed `mi_probe` connect record +
