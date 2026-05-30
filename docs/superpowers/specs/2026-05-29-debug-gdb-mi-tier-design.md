@@ -139,13 +139,18 @@ documented `9.1` minimum is recorded as advisory context (`details["version"]`,
 **Pass:** `gdb` present, the probe runs without a host-level error, and it
 returns `mi_code == 0` with a `^done` record. When the host passes behaviorally
 but its version is below — or could not be parsed against — the documented `9.1`
-minimum, the check still PASSES with a message noting it was admitted on the
-behavioral signal. **Fail:** gdb absent, the probe cannot run, or no valid mi3
-`^done` record (older/`mi3`-less gdb may accept the `mi3` *name* without yielding
-usable records) → `host.check_prerequisites` reports the probe failed and the
-tier **hard-fails with a clear, actionable message** naming the detected version
-(or "unknown") and the documented minimum. `mi3` is required — there is no `mi2`
-fallback.
+minimum, the check still PASSES, sets `details["version_below_documented_minimum"]
+= True` (a machine-readable flag, not just prose; `False` on a clean ≥-minimum
+pass), and notes in the message that it was admitted on the behavioral signal.
+`details["version"]` is always present on a pass (`"unknown"` when unparseable),
+alongside `details["mi3_documented_minimum"]`. **Fail:** gdb absent, the probe
+cannot run, or no valid mi3 `^done` record (older/`mi3`-less gdb may accept the
+`mi3` *name* without yielding usable records) → `host.check_prerequisites`
+reports the probe failed and the tier **hard-fails with a clear, actionable
+message** naming the detected version (or `"unknown"` — this path is now
+reachable with an unparseable version, so the version is formatted defensively
+and never indexed when `None`) and the documented minimum. `mi3` is required —
+there is no `mi2` fallback.
 
 **Acceptance.** Against local QEMU gdbstub: attach over `rsp_endpoint`, read one
 MI record as typed JSON, detach cleanly; a second concurrent stop-capable attach
