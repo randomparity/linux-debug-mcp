@@ -14,6 +14,7 @@ from linux_debug_mcp.providers.libvirt_qemu import (
     LibvirtQemuProvider,
     ProviderBootError,
     SubprocessLibvirtRunner,
+    parse_domifaddr_ipv4,
 )
 
 MCP_METADATA_NS = "urn:linux-debug-mcp:domain"
@@ -1219,3 +1220,63 @@ def test_capability_advertises_qemu_img() -> None:
 
     capability = local_libvirt_qemu_capability()
     assert "qemu-img" in capability.required_host_tools
+
+
+_DOMIFADDR_SINGLE = """\
+ Name       MAC address          Protocol     Address
+-------------------------------------------------------------------------------
+ vnet0      52:54:00:1a:2b:3c    ipv4         192.168.122.45/24
+"""
+
+_DOMIFADDR_IPV6_THEN_IPV4 = """\
+ Name       MAC address          Protocol     Address
+-------------------------------------------------------------------------------
+ vnet0      52:54:00:1a:2b:3c    ipv6         fe80::5054:ff:fe1a:2b3c/64
+ vnet0      52:54:00:1a:2b:3c    ipv4         192.168.122.50/24
+"""
+
+_DOMIFADDR_HEADERS_ONLY = """\
+ Name       MAC address          Protocol     Address
+-------------------------------------------------------------------------------
+"""
+
+_DOMIFADDR_LOOPBACK_ONLY = """\
+ Name       MAC address          Protocol     Address
+-------------------------------------------------------------------------------
+ lo         00:00:00:00:00:00    ipv4         127.0.0.1/8
+"""
+
+_DOMIFADDR_LINKLOCAL_THEN_ROUTABLE = """\
+ Name       MAC address          Protocol     Address
+-------------------------------------------------------------------------------
+ vnet0      52:54:00:1a:2b:3c    ipv4         169.254.3.4/16
+ vnet1      52:54:00:1a:2b:3d    ipv4         192.168.122.77/24
+"""
+
+
+def test_parse_domifaddr_single_ipv4() -> None:
+    assert parse_domifaddr_ipv4(_DOMIFADDR_SINGLE) == "192.168.122.45"
+
+
+def test_parse_domifaddr_prefers_ipv4_over_ipv6() -> None:
+    assert parse_domifaddr_ipv4(_DOMIFADDR_IPV6_THEN_IPV4) == "192.168.122.50"
+
+
+def test_parse_domifaddr_headers_only_returns_none() -> None:
+    assert parse_domifaddr_ipv4(_DOMIFADDR_HEADERS_ONLY) is None
+
+
+def test_parse_domifaddr_empty_returns_none() -> None:
+    assert parse_domifaddr_ipv4("") is None
+
+
+def test_parse_domifaddr_skips_loopback() -> None:
+    assert parse_domifaddr_ipv4(_DOMIFADDR_LOOPBACK_ONLY) is None
+
+
+def test_parse_domifaddr_skips_linklocal_takes_routable() -> None:
+    assert parse_domifaddr_ipv4(_DOMIFADDR_LINKLOCAL_THEN_ROUTABLE) == "192.168.122.77"
+
+
+def test_parse_domifaddr_malformed_rows_are_skipped() -> None:
+    assert parse_domifaddr_ipv4("garbage\nipv4 not-an-ip\n   \n") is None

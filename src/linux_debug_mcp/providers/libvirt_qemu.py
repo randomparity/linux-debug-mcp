@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import selectors
@@ -26,6 +27,32 @@ MCP_METADATA_NS = "urn:linux-debug-mcp:domain"
 QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 ElementTree.register_namespace("ldmcp", MCP_METADATA_NS)
 ElementTree.register_namespace("qemu", QEMU_NS)
+
+
+def parse_domifaddr_ipv4(output: str) -> str | None:
+    """Return the first routable IPv4 address from ``virsh domifaddr`` output.
+
+    Scans the tabular rows, keeps rows whose protocol column is ``ipv4``, strips the
+    ``/prefix`` from the address, and returns the first address that is not loopback,
+    link-local, or unspecified. Total: malformed/short rows are skipped, never raised.
+    Returns ``None`` when no routable IPv4 row is present.
+    """
+    for line in output.splitlines():
+        columns = line.split()
+        if len(columns) < 4:
+            continue
+        protocol, address_field = columns[2], columns[3]
+        if protocol != "ipv4":
+            continue
+        candidate = address_field.split("/", maxsplit=1)[0]
+        try:
+            parsed = ipaddress.IPv4Address(candidate)
+        except ipaddress.AddressValueError:
+            continue
+        if parsed.is_loopback or parsed.is_link_local or parsed.is_unspecified:
+            continue
+        return str(parsed)
+    return None
 
 
 @dataclass(frozen=True)
