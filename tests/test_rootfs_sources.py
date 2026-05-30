@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from linux_debug_mcp.config import RootfsProfile
-from linux_debug_mcp.domain import ErrorCategory
-from linux_debug_mcp.rootfs.sources import RootfsSourceError, resolve_rootfs_source
+from kdive.config import RootfsProfile
+from kdive.domain import ErrorCategory
+from kdive.rootfs.sources import RootfsSourceError, resolve_rootfs_source
 
 
 def _profile(tmp_path: Path, *, source_kind: str, exists: bool = True) -> RootfsProfile:

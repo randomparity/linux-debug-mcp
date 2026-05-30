@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from linux_debug_mcp.domain import ErrorCategory
-from linux_debug_mcp.providers.gdb_mi import (
+from kdive.domain import ErrorCategory
+from kdive.providers.gdb_mi import (
     BreakpointRef,
     Frame,
     GdbMiEngine,
@@ -15,7 +15,7 @@ from linux_debug_mcp.providers.gdb_mi import (
     StopRecord,
     Variable,
 )
-from linux_debug_mcp.transport.base import TcpEndpoint
+from kdive.transport.base import TcpEndpoint
 
 
 class FakeController:

@@ -5,8 +5,8 @@ import subprocess
 import sys
 from typing import Any
 
-from linux_debug_mcp.domain import PrerequisiteCheck, PrerequisiteStatus
-from linux_debug_mcp.prereqs.drgn_probe import (
+from kdive.domain import PrerequisiteCheck, PrerequisiteStatus
+from kdive.prereqs.drgn_probe import (
     PROBE_SCRIPT,
     UNKNOWN,
     UNUSABLE,
@@ -16,7 +16,7 @@ from linux_debug_mcp.prereqs.drgn_probe import (
     normalize_build_id,
     python_missing_checks,
 )
-from linux_debug_mcp.providers.local_drgn_introspect import TARGET_PYTHON_ARGV, local_drgn_introspect_capability
+from kdive.providers.local_drgn_introspect import TARGET_PYTHON_ARGV, local_drgn_introspect_capability
 
 
 def test_target_python_argv_is_shared_constant() -> None:

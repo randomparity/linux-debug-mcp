@@ -3,9 +3,9 @@ import threading
 
 import pytest
 
-from linux_debug_mcp.domain import ErrorCategory
-from linux_debug_mcp.seams.target import ConsoleKind, PlatformMetadata, TargetKey
-from linux_debug_mcp.transport.base import (
+from kdive.domain import ErrorCategory
+from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetKey
+from kdive.transport.base import (
     BackendAttachment,
     EndpointExposure,
     LineRole,
@@ -14,8 +14,8 @@ from linux_debug_mcp.transport.base import (
     TransportLocality,
     TransportRef,
 )
-from linux_debug_mcp.transport.bounded import Deadline
-from linux_debug_mcp.transport.qemu_gdbstub import QemuGdbstubAttachError, QemuGdbstubTransport
+from kdive.transport.bounded import Deadline
+from kdive.transport.qemu_gdbstub import QemuGdbstubAttachError, QemuGdbstubTransport
 
 
 def _request(port: int) -> OpenRequest:
@@ -113,7 +113,7 @@ def test_attach_rejects_a_non_loopback_host_without_any_network_io(monkeypatch):
     (round-3 review F2): loopback is enforced before rsp_reachable is ever called."""
     called = []
     monkeypatch.setattr(
-        "linux_debug_mcp.transport.qemu_gdbstub.rsp_reachable",
+        "kdive.transport.qemu_gdbstub.rsp_reachable",
         lambda *a, **k: (called.append(True), True)[1],
     )
     for host in ("10.0.0.5", "192.168.1.10", "8.8.8.8", "evil.example.com"):

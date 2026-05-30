@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from linux_debug_mcp.domain import ErrorCategory
-from linux_debug_mcp.providers.gdb_mi import GdbMiEngine, GdbMiError, LoadedModule
-from linux_debug_mcp.transport.base import TcpEndpoint
+from kdive.domain import ErrorCategory
+from kdive.providers.gdb_mi import GdbMiEngine, GdbMiError, LoadedModule
+from kdive.transport.base import TcpEndpoint
 
 _DONE: list[dict[str, object]] = [{"type": "result", "message": "done", "payload": None, "token": None}]
 _CONNECTED: list[dict[str, object]] = [{"type": "result", "message": "connected", "payload": None, "token": None}]

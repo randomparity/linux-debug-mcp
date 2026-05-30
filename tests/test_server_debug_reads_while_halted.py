@@ -14,11 +14,11 @@ from pathlib import Path
 
 from conftest import FakeMiEngine, build_debug_transport, kernel_provenance_details, write_vmlinux_with_build_id
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import DebugProfile
-from linux_debug_mcp.domain import ArtifactRef, RunRequest, StepResult, StepStatus
-from linux_debug_mcp.providers.gdb_mi import GdbMiSessionRegistry
-from linux_debug_mcp.server import debug_read_registers_handler, debug_start_session_handler
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import DebugProfile
+from kdive.domain import ArtifactRef, RunRequest, StepResult, StepStatus
+from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.server import debug_read_registers_handler, debug_start_session_handler
 
 RUN_ID = "run-halted"
 
@@ -122,7 +122,7 @@ def test_debug_read_not_ssh_gated(tmp_path: Path) -> None:
     admit_ssh_tier is structurally unreachable -- the test exercises the handler successfully
     without any AdmissionService being present, confirming the ssh gate is not in the call chain.
     """
-    from linux_debug_mcp.server import debug_read_registers_handler as _handler
+    from kdive.server import debug_read_registers_handler as _handler
 
     # Structural check: the read handler must not accept an admission parameter.
     sig = inspect.signature(_handler)

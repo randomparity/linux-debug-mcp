@@ -3,9 +3,9 @@ from datetime import UTC, datetime
 
 import pytest
 
-from linux_debug_mcp.coordination.registry import InstanceLockError, RecoveryTombstone, SessionRegistry
-from linux_debug_mcp.seams.target import TargetKey
-from linux_debug_mcp.transport.base import ExecutionState, RecordState, TransportSession, new_session_id
+from kdive.coordination.registry import InstanceLockError, RecoveryTombstone, SessionRegistry
+from kdive.seams.target import TargetKey
+from kdive.transport.base import ExecutionState, RecordState, TransportSession, new_session_id
 
 
 def _key() -> TargetKey:
@@ -192,7 +192,7 @@ def test_reconcile_logs_callback_exceptions(tmp_path, caplog):
     record = _session(key, backend_pid=4321, backend_start_time="ABC", execution_state=ExecutionState.EXECUTING)
     reg.write_record(record)
 
-    with caplog.at_level(logging.ERROR, logger="linux_debug_mcp.coordination.registry"):
+    with caplog.at_level(logging.ERROR, logger="kdive.coordination.registry"):
         report = reg.reconcile(proxy=_FakeProxy(), admission=_RecordingAdmission())
 
     # The callback ran exactly once …

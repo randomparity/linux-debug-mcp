@@ -1,8 +1,8 @@
 import pytest
 
-from linux_debug_mcp.domain import ErrorCategory
-from linux_debug_mcp.transport.base import BreakMethod, BreakPlan
-from linux_debug_mcp.transport.break_inject import InjectBreakError, inject_break
+from kdive.domain import ErrorCategory
+from kdive.transport.base import BreakMethod, BreakPlan
+from kdive.transport.break_inject import InjectBreakError, inject_break
 
 
 class _RecordingProxy:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from linux_debug_mcp.config import (
+from kdive.config import (
     ALLOWED_DEBUG_OPERATIONS,
     CRASH_COMMAND_ALLOWLIST,
     CRASH_PER_CMD_CAP,

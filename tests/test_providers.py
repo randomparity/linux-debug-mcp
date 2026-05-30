@@ -1,14 +1,14 @@
 import pytest
 
-from linux_debug_mcp.domain import (
+from kdive.domain import (
     ImplementationState,
     OperationSemantics,
     ProviderCapability,
     ProviderOperationCapability,
     TargetKind,
 )
-from linux_debug_mcp.providers.plugins import ProviderPluginSpec, local_provider_plugin_specs
-from linux_debug_mcp.providers.registry import ProviderRegistry
+from kdive.providers.plugins import ProviderPluginSpec, local_provider_plugin_specs
+from kdive.providers.registry import ProviderRegistry
 
 
 def capability(name: str) -> ProviderCapability:

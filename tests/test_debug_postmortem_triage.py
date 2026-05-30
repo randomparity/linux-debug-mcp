@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.domain import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.domain import (
     DebugPostmortemTriageRequest,
     ErrorCategory,
     RunRequest,
     ToolResponse,
 )
-from linux_debug_mcp.server import debug_postmortem_triage_handler
+from kdive.server import debug_postmortem_triage_handler
 
 GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
@@ -265,7 +265,7 @@ def test_redaction_masks_secret_in_report(tmp_path) -> None:
 def test_tool_is_registered() -> None:
     import asyncio
 
-    from linux_debug_mcp.server import create_app
+    from kdive.server import create_app
 
     app = create_app()
     tools = asyncio.run(app.list_tools())

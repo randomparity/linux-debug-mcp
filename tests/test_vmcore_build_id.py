@@ -4,7 +4,7 @@ import struct
 
 import pytest
 
-from linux_debug_mcp.symbols.vmcore_build_id import (
+from kdive.symbols.vmcore_build_id import (
     VmcoreBuildIdAbsent,
     VmcoreBuildIdError,
     VmcoreFormatUnsupported,

@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from linux_debug_mcp.domain import ErrorCategory
-from linux_debug_mcp.providers.gdb_mi import GdbMiAttachment, GdbMiError, GdbMiSessionRegistry
+from kdive.domain import ErrorCategory
+from kdive.providers.gdb_mi import GdbMiAttachment, GdbMiError, GdbMiSessionRegistry
 
 
 class _Ctrl:

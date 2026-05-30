@@ -19,11 +19,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from linux_debug_mcp.coordination.registry import SessionRegistry
-from linux_debug_mcp.coordination.transaction import TransportTransaction
-from linux_debug_mcp.seams.process_identity import ProcProcessIdentityProbe
-from linux_debug_mcp.seams.target import ConsoleKind, PlatformMetadata, TargetKey
-from linux_debug_mcp.transport.base import (
+from kdive.coordination.registry import SessionRegistry
+from kdive.coordination.transaction import TransportTransaction
+from kdive.seams.process_identity import ProcProcessIdentityProbe
+from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetKey
+from kdive.transport.base import (
     BreakMethod,
     BreakPlan,
     LineRole,
@@ -33,17 +33,17 @@ from linux_debug_mcp.transport.base import (
     TransportSession,
     new_session_id,
 )
-from linux_debug_mcp.transport.bounded import Deadline
-from linux_debug_mcp.transport.proxy import _S003_TARGET_ALTERNATE, AgentProxyBackend
-from linux_debug_mcp.transport.serial_local import SerialLocalTransport
+from kdive.transport.bounded import Deadline
+from kdive.transport.proxy import _S003_TARGET_ALTERNATE, AgentProxyBackend
+from kdive.transport.serial_local import SerialLocalTransport
 
-# Require agent-proxy in CI (LDM_REQUIRE_AGENT_PROXY=1) so the serial-KGDB break/continue
+# Require agent-proxy in CI (KDIVE_REQUIRE_AGENT_PROXY=1) so the serial-KGDB break/continue
 # prerequisite is a real merge gate; skip only on a dev host that did NOT opt in. The skip reason
 # names the missing prerequisite so a local-only run shows it skipped, never passing.
 pytestmark = pytest.mark.skipif(
-    shutil.which("agent-proxy") is None and os.environ.get("LDM_REQUIRE_AGENT_PROXY") != "1",
+    shutil.which("agent-proxy") is None and os.environ.get("KDIVE_REQUIRE_AGENT_PROXY") != "1",
     reason=(
-        "agent-proxy not installed (set LDM_REQUIRE_AGENT_PROXY=1 to require it in CI) "
+        "agent-proxy not installed (set KDIVE_REQUIRE_AGENT_PROXY=1 to require it in CI) "
         "— serial-KGDB break/continue prerequisite"
     ),
 )

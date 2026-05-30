@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
-from linux_debug_mcp.seams.target import (
+from kdive.seams.target import (
     Arch,
     BreakHint,
     ConsoleKind,

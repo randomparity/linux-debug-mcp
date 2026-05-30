@@ -1,8 +1,8 @@
 # ADR 0034 — run-readiness preflight for selected profiles
 
 **Status:** Accepted (2026-05-30) · **Issue:** #105 · **Epic:** #100 · **Affects:**
-`src/linux_debug_mcp/prereqs/checks.py` (new: `check_kernel_config`, `check_rootfs_image`,
-`check_gdbstub_port`; `check_prerequisites` unchanged), `src/linux_debug_mcp/server.py`
+`src/kdive/prereqs/checks.py` (new: `check_kernel_config`, `check_rootfs_image`,
+`check_gdbstub_port`; `check_prerequisites` unchanged), `src/kdive/server.py`
 (`prerequisites_handler` resolves profile names + assembles readiness checks; `host.check_prerequisites`
 tool gains `build_profile`/`target_profile`/`rootfs_profile` params).
 Spec: [2026-05-30-run-readiness-preflight.md](../specs/2026-05-30-run-readiness-preflight.md).

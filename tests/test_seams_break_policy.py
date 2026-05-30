@@ -1,8 +1,8 @@
 import pytest
 
-from linux_debug_mcp.seams.break_policy import BreakPlanError, ReferenceBreakPolicy
-from linux_debug_mcp.seams.target import ConsoleKind, PlatformMetadata
-from linux_debug_mcp.transport.base import BreakMethod, LineRole, TransportRef
+from kdive.seams.break_policy import BreakPlanError, ReferenceBreakPolicy
+from kdive.seams.target import ConsoleKind, PlatformMetadata
+from kdive.transport.base import BreakMethod, LineRole, TransportRef
 
 
 def _platform(*, ssh: bool, console: ConsoleKind = ConsoleKind.UART) -> PlatformMetadata:

@@ -2,8 +2,8 @@
 
 Env-gated, skipped in CI like the libvirt/gdb suites. Requires:
   - ``drgn`` importable on the host
-  - ``LDM_VMCORE``  — path to a captured vmcore file
-  - ``LDM_VMLINUX`` — path to the matching uncompressed ELF vmlinux+DWARF
+  - ``KDIVE_VMCORE``  — path to a captured vmcore file
+  - ``KDIVE_VMLINUX`` — path to the matching uncompressed ELF vmlinux+DWARF
 
 The vmcore + vmlinux are staged into a fresh run directory (the handler confines
 both refs to the run dir), then a fixed drgn script is run via the real local
@@ -25,17 +25,17 @@ from pathlib import Path
 
 import pytest
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.domain import RunRequest, StepStatus
-from linux_debug_mcp.server import debug_introspect_from_vmcore_handler
+from kdive.artifacts.store import ArtifactStore
+from kdive.domain import RunRequest, StepStatus
+from kdive.server import debug_introspect_from_vmcore_handler
 
 pytest.importorskip("drgn")
-VMCORE = os.environ.get("LDM_VMCORE")
-VMLINUX = os.environ.get("LDM_VMLINUX")
+VMCORE = os.environ.get("KDIVE_VMCORE")
+VMLINUX = os.environ.get("KDIVE_VMLINUX")
 
 pytestmark = pytest.mark.skipif(
     not (VMCORE and VMLINUX),
-    reason="set LDM_VMCORE and LDM_VMLINUX (and install host drgn) to run the vmcore integration test",
+    reason="set KDIVE_VMCORE and KDIVE_VMLINUX (and install host drgn) to run the vmcore integration test",
 )
 
 
@@ -60,7 +60,7 @@ def _staged_run(tmp_path: Path) -> tuple[ArtifactStore, str, str]:
 
 
 def test_from_vmcore_runs_script_against_real_core(tmp_path: Path) -> None:
-    from linux_debug_mcp.domain import DebugIntrospectFromVmcoreRequest
+    from kdive.domain import DebugIntrospectFromVmcoreRequest
 
     _store, vmcore_ref, vmlinux_ref = _staged_run(tmp_path)
     request = DebugIntrospectFromVmcoreRequest(

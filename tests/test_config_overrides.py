@@ -1,6 +1,6 @@
 import pytest
 
-from linux_debug_mcp.config import (
+from kdive.config import (
     BootOverrides,
     BuildOverrides,
     BuildProfile,
@@ -10,7 +10,7 @@ from linux_debug_mcp.config import (
     merge_kernel_args,
     validate_config_line_tokens,
 )
-from linux_debug_mcp.safety.redaction import Redactor
+from kdive.safety.redaction import Redactor
 
 
 def test_kernel_args_accepts_safe_tokens():

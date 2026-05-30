@@ -15,12 +15,12 @@ from conftest import (
     write_vmlinux_with_build_id,
 )
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import DebugProfile
-from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from linux_debug_mcp.providers.gdb_mi import GdbMiSessionRegistry
-from linux_debug_mcp.server import debug_start_session_handler
-from linux_debug_mcp.symbols.build_id import BuildIdReadError
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import DebugProfile
+from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
+from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.server import debug_start_session_handler
+from kdive.symbols.build_id import BuildIdReadError
 
 _OTHER_BUILD_ID = "ffffffffffffffffffffffffffffffffffffffff"  # pragma: allowlist secret
 RUN_ID = "run-vlock"

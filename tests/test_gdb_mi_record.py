@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from linux_debug_mcp.providers.gdb_mi import MiRecord, parse_mi_records
+from kdive.providers.gdb_mi import MiRecord, parse_mi_records
 
 
 def test_parse_result_done_record() -> None:

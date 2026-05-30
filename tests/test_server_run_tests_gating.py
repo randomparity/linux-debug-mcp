@@ -4,20 +4,20 @@ from datetime import UTC, datetime
 
 from conftest import FakeTestProvider, create_booted_run, rootfs
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore
-from linux_debug_mcp.coordination.registry import SessionRegistry
-from linux_debug_mcp.domain import ErrorCategory, StepResult, StepStatus
-from linux_debug_mcp.providers.local_ssh_tests import TestExecutionResult
-from linux_debug_mcp.seams.target import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.coordination.admission import AdmissionService, SnapshotStore
+from kdive.coordination.registry import SessionRegistry
+from kdive.domain import ErrorCategory, StepResult, StepStatus
+from kdive.providers.local_ssh_tests import TestExecutionResult
+from kdive.seams.target import (
     BreakHint,
     ConsoleKind,
     PlatformMetadata,
     TargetKey,
     publish_ready_snapshot,
 )
-from linux_debug_mcp.server import target_run_tests_handler
-from linux_debug_mcp.transport.base import (
+from kdive.server import target_run_tests_handler
+from kdive.transport.base import (
     ExecutionState,
     LineRole,
     RecordState,

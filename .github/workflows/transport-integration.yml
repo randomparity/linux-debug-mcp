@@ -9,7 +9,7 @@ jobs:
   serial-local-integration:
     # Runs test_serial_local_transport_integration.py + the agent-proxy gate in
     # test_transport_open_close_integration.py (Test 1: inject_break PTY path).
-    # LDM_REQUIRE_AGENT_PROXY=1 makes the skipif condition False so a missing
+    # KDIVE_REQUIRE_AGENT_PROXY=1 makes the skipif condition False so a missing
     # agent-proxy binary fails the job instead of silently skipping the test.
     runs-on: ubuntu-24.04
     steps:
@@ -30,7 +30,7 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
       - name: Run the gated integration tests (must not skip)
         env:
-          LDM_REQUIRE_AGENT_PROXY: "1"
+          KDIVE_REQUIRE_AGENT_PROXY: "1"
         run: |
           set -euo pipefail
           uv venv --allow-existing
@@ -44,7 +44,7 @@ jobs:
     # Runs test_qemu_gdbstub_integration.py + the gdbstub gate in
     # test_transport_open_close_integration.py (Test 2: migrated transaction wiring).
     # Requires a self-hosted runner with a live kgdb-enabled QEMU guest managed by libvirt.
-    # LINUX_DEBUG_MCP_LIVE_GDBSTUB=1 + all companion envs must be set as repository secrets
+    # KDIVE_LIVE_GDBSTUB=1 + all companion envs must be set as repository secrets
     # for this job to run the tests rather than skip them.  On a shared GitHub-hosted runner
     # the secrets are absent so the job is skipped via the `if:` condition below — set
     # GDBSTUB_RUNNER_AVAILABLE=true in repository variables to enable it on a self-hosted runner.
@@ -57,12 +57,12 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
       - name: Run the live gdbstub integration tests (must not skip)
         env:
-          LINUX_DEBUG_MCP_LIVE_GDBSTUB: "1"
-          LINUX_DEBUG_MCP_SOURCE: ${{ secrets.LINUX_DEBUG_MCP_SOURCE }}
-          LINUX_DEBUG_MCP_ROOTFS: ${{ secrets.LINUX_DEBUG_MCP_ROOTFS }}
-          LINUX_DEBUG_MCP_DOMAIN: ${{ secrets.LINUX_DEBUG_MCP_DOMAIN }}
-          LINUX_DEBUG_MCP_LIBVIRT_URI: ${{ secrets.LINUX_DEBUG_MCP_LIBVIRT_URI }}
-          LINUX_DEBUG_MCP_READINESS_MARKER: ${{ secrets.LINUX_DEBUG_MCP_READINESS_MARKER }}
+          KDIVE_LIVE_GDBSTUB: "1"
+          KDIVE_SOURCE: ${{ secrets.KDIVE_SOURCE }}
+          KDIVE_ROOTFS: ${{ secrets.KDIVE_ROOTFS }}
+          KDIVE_DOMAIN: ${{ secrets.KDIVE_DOMAIN }}
+          KDIVE_LIBVIRT_URI: ${{ secrets.KDIVE_LIBVIRT_URI }}
+          KDIVE_READINESS_MARKER: ${{ secrets.KDIVE_READINESS_MARKER }}
         run: |
           set -euo pipefail
           uv venv --allow-existing

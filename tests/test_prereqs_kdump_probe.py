@@ -4,8 +4,8 @@ import json
 import subprocess
 import sys
 
-from linux_debug_mcp.domain import PrerequisiteStatus
-from linux_debug_mcp.prereqs.kdump_probe import build_kdump_checks, render_kdump_probe_script
+from kdive.domain import PrerequisiteStatus
+from kdive.prereqs.kdump_probe import build_kdump_checks, render_kdump_probe_script
 
 
 def _by_id(checks):

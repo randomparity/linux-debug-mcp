@@ -8,24 +8,24 @@ from unittest.mock import patch
 
 import pytest
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import DebugProfile, RootfsProfile, TargetProfile
-from linux_debug_mcp.coordination.admission import AdmissionService
-from linux_debug_mcp.coordination.registry import SessionRegistry
-from linux_debug_mcp.coordination.transaction import TransportTransaction
-from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from linux_debug_mcp.providers.libvirt_qemu import BootExecutionResult, ProviderBootError
-from linux_debug_mcp.providers.local_ssh_tests import TestExecutionResult
-from linux_debug_mcp.providers.qemu_gdbstub import DebugSession
-from linux_debug_mcp.seams.target import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import DebugProfile, RootfsProfile, TargetProfile
+from kdive.coordination.admission import AdmissionService
+from kdive.coordination.registry import SessionRegistry
+from kdive.coordination.transaction import TransportTransaction
+from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
+from kdive.providers.libvirt_qemu import BootExecutionResult, ProviderBootError
+from kdive.providers.local_ssh_tests import TestExecutionResult
+from kdive.providers.qemu_gdbstub import DebugSession
+from kdive.seams.target import (
     BreakHint,
     ConsoleKind,
     PlatformMetadata,
     TargetKey,
     publish_ready_snapshot,
 )
-from linux_debug_mcp.server import create_run_handler
-from linux_debug_mcp.transport.base import LineRole, TransportRef
+from kdive.server import create_run_handler
+from kdive.transport.base import LineRole, TransportRef
 
 
 @pytest.fixture(autouse=True)
@@ -38,7 +38,7 @@ def _stub_extract_build_id():
     ``subprocess.run`` deeper to drive readelf behaviour.
     """
     with patch(
-        "linux_debug_mcp.providers.local_kernel_build._extract_build_id",
+        "kdive.providers.local_kernel_build._extract_build_id",
         return_value="0123456789abcdef0123456789abcdef01234567",  # pragma: allowlist secret
     ):
         yield
@@ -212,14 +212,14 @@ def target_profile(
     *,
     name: str = "local-qemu",
     architecture: str = "x86_64",
-    target_ref: str = "mcp-linux-debug-dev",
+    target_ref: str = "kdive-dev",
 ) -> TargetProfile:
     return TargetProfile(
         name=name,
         architecture=architecture,
         target_ref=target_ref,
         managed_domain=True,
-        managed_domain_prefix="mcp-linux-debug-",
+        managed_domain_prefix="kdive-",
         libvirt_uri="qemu:///system",
     )
 
@@ -560,7 +560,7 @@ class FakeMiEngine:
     ``probe_crash`` raises an unwrapped RuntimeError to exercise the broad guaranteed-resume catch)."""
 
     def __init__(self, *, fail_on: str | None = None, resume_confirmed: bool = True) -> None:
-        from linux_debug_mcp.providers.gdb_mi import GdbMiAttachment  # noqa: PLC0415
+        from kdive.providers.gdb_mi import GdbMiAttachment  # noqa: PLC0415
 
         self._attachment_cls = GdbMiAttachment
         self.fail_on = fail_on
@@ -573,7 +573,7 @@ class FakeMiEngine:
 
     # --- attach probe ---
     def attach(self, *, rsp_endpoint, vmlinux_path, transcript_path):
-        from linux_debug_mcp.providers.gdb_mi import GdbMiError  # noqa: PLC0415
+        from kdive.providers.gdb_mi import GdbMiError  # noqa: PLC0415
 
         if self.fail_on == "attach":
             raise GdbMiError("attach blew up", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
@@ -583,7 +583,7 @@ class FakeMiEngine:
         )
 
     def probe_read(self, attachment):
-        from linux_debug_mcp.providers.gdb_mi import GdbMiError, MiRecord  # noqa: PLC0415
+        from kdive.providers.gdb_mi import GdbMiError, MiRecord  # noqa: PLC0415
 
         if self.fail_on == "probe":
             raise GdbMiError("rsp timeout", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
@@ -592,7 +592,7 @@ class FakeMiEngine:
         return MiRecord(type="result", message="connected", payload=None)
 
     def resolve_symbol(self, attachment, symbol_name: str):
-        from linux_debug_mcp.providers.gdb_mi import GdbMiError, ResolvedSymbol  # noqa: PLC0415
+        from kdive.providers.gdb_mi import GdbMiError, ResolvedSymbol  # noqa: PLC0415
 
         if self.fail_on == "resolve":
             raise GdbMiError("no such symbol", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
@@ -609,13 +609,13 @@ class FakeMiEngine:
 
     # --- Phase C ops ---
     def set_breakpoint(self, attachment, location: str):
-        from linux_debug_mcp.providers.gdb_mi import BreakpointRef  # noqa: PLC0415
+        from kdive.providers.gdb_mi import BreakpointRef  # noqa: PLC0415
 
         self.calls.append(("set_breakpoint", (location,)))
         return BreakpointRef(number="1", type="breakpoint", func=location, addr="0xffffffff81234560")
 
     def set_watchpoint(self, attachment, expression: str):
-        from linux_debug_mcp.providers.gdb_mi import BreakpointRef  # noqa: PLC0415
+        from kdive.providers.gdb_mi import BreakpointRef  # noqa: PLC0415
 
         self.calls.append(("set_watchpoint", (expression,)))
         return BreakpointRef(number="2", type="hw watchpoint", what=expression)
@@ -627,7 +627,7 @@ class FakeMiEngine:
         self.calls.append(("clear_watchpoint", (number,)))
 
     def list_breakpoints(self, attachment):
-        from linux_debug_mcp.providers.gdb_mi import BreakpointRef  # noqa: PLC0415
+        from kdive.providers.gdb_mi import BreakpointRef  # noqa: PLC0415
 
         self.calls.append(("list_breakpoints", ()))
         return [BreakpointRef(number="1", type="breakpoint", func="do_sys_open")]
@@ -645,19 +645,19 @@ class FakeMiEngine:
         return self._stop("finish", timeout_sec, "function-finished", "__x64_sys_open")
 
     def interrupt(self, attachment):
-        from linux_debug_mcp.providers.gdb_mi import Frame, StopRecord  # noqa: PLC0415
+        from kdive.providers.gdb_mi import Frame, StopRecord  # noqa: PLC0415
 
         self.calls.append(("interrupt", ()))
         return StopRecord(reason="signal-received", frame=Frame(level=0, func="do_sys_open"))
 
     def backtrace(self, attachment):
-        from linux_debug_mcp.providers.gdb_mi import Frame  # noqa: PLC0415
+        from kdive.providers.gdb_mi import Frame  # noqa: PLC0415
 
         self.calls.append(("backtrace", ()))
         return [Frame(level=0, func="do_sys_open"), Frame(level=1, func="__x64_sys_open")]
 
     def list_variables(self, attachment):
-        from linux_debug_mcp.providers.gdb_mi import Variable  # noqa: PLC0415
+        from kdive.providers.gdb_mi import Variable  # noqa: PLC0415
 
         self.calls.append(("list_variables", ()))
         return [Variable(name="fd", value="3")]
@@ -679,7 +679,7 @@ class FakeMiEngine:
         return {"inspector": inspector, "kernel_version": "Linux version 6.9.0"}
 
     def _stop(self, name: str, timeout_sec, reason: str, func: str):
-        from linux_debug_mcp.providers.gdb_mi import Frame, StopRecord  # noqa: PLC0415
+        from kdive.providers.gdb_mi import Frame, StopRecord  # noqa: PLC0415
 
         self.calls.append((name, (timeout_sec,)))
         return StopRecord(reason=reason, frame=Frame(level=0, func=func))
@@ -722,7 +722,7 @@ def build_debug_transport(tmp_path: Path, run_id: str, *, generation: int = 1):
 def seed_live_mi_session(sessions, session_id: str, transcript_path: Path):
     """Register a noop live attachment under ``session_id`` so the per-op handlers find a live
     session (the durable DebugSession is seeded separately on disk)."""
-    from linux_debug_mcp.providers.gdb_mi import GdbMiAttachment  # noqa: PLC0415
+    from kdive.providers.gdb_mi import GdbMiAttachment  # noqa: PLC0415
 
     attachment = GdbMiAttachment(
         controller=_NoopMiController(), rsp_host="127.0.0.1", rsp_port=1234, transcript_path=transcript_path

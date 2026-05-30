@@ -1,11 +1,11 @@
 import pytest
 
-from linux_debug_mcp.coordination.endpoint_safety import (
+from kdive.coordination.endpoint_safety import (
     EndpointSafetyError,
     assert_loopback_endpoint,
     refuse_unsafe_exposure,
 )
-from linux_debug_mcp.transport.base import (
+from kdive.transport.base import (
     EndpointExposure,
     TcpEndpoint,
     TransportCapability,

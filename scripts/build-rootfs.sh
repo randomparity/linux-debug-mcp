@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a minimal, bootable Fedora rootfs qcow2 for linux-debug-mcp.
+# Build a minimal, bootable Fedora rootfs qcow2 for kdive.
 #
 # Produces a whole-disk ext4 qcow2 that boots as /dev/vda, prints the readiness
 # marker on ttyS0, runs sshd, and carries an authorized public key. This is a
@@ -8,11 +8,11 @@
 # Run unprivileged; the script elevates only the commands that need root.
 set -euo pipefail
 
-ROOTFS_PATH="${LINUX_DEBUG_MCP_ROOTFS:-/var/lib/linux-debug-mcp/rootfs/minimal.qcow2}"
-RELEASEVER="${LINUX_DEBUG_MCP_ROOTFS_RELEASEVER:-43}"
-IMAGE_SIZE="${LINUX_DEBUG_MCP_ROOTFS_SIZE:-2G}"
-SSH_USER="${LINUX_DEBUG_MCP_ROOTFS_SSH_USER:-root}"
-MARKER="linux-debug-mcp-ready"
+ROOTFS_PATH="${KDIVE_ROOTFS:-/var/lib/kdive/rootfs/minimal.qcow2}"
+RELEASEVER="${KDIVE_ROOTFS_RELEASEVER:-43}"
+IMAGE_SIZE="${KDIVE_ROOTFS_SIZE:-2G}"
+SSH_USER="${KDIVE_ROOTFS_SSH_USER:-root}"
+MARKER="kdive-ready"
 
 # Resolve the invoking user's home even when launched via sudo, so the default
 # authorized key is the human's, not root's.
@@ -21,8 +21,8 @@ invoking_home="$(getent passwd "${invoking_user}" | cut -d: -f6)"
 : "${invoking_home:=${HOME:-}}"
 
 resolve_authorized_key() {
-  if [[ -n "${LINUX_DEBUG_MCP_ROOTFS_AUTHORIZED_KEY:-}" ]]; then
-    printf '%s\n' "${LINUX_DEBUG_MCP_ROOTFS_AUTHORIZED_KEY}"
+  if [[ -n "${KDIVE_ROOTFS_AUTHORIZED_KEY:-}" ]]; then
+    printf '%s\n' "${KDIVE_ROOTFS_AUTHORIZED_KEY}"
     return
   fi
   local candidate
@@ -46,7 +46,7 @@ require virt-make-fs
 
 authorized_key="$(resolve_authorized_key)"
 if [[ -z "${authorized_key}" || ! -f "${authorized_key}" ]]; then
-  echo "error: no SSH public key found. Set LINUX_DEBUG_MCP_ROOTFS_AUTHORIZED_KEY" >&2
+  echo "error: no SSH public key found. Set KDIVE_ROOTFS_AUTHORIZED_KEY" >&2
   echo "       to a .pub file, or create ${invoking_home}/.ssh/id_ed25519.pub" >&2
   exit 1
 fi
@@ -78,7 +78,7 @@ EOF
 
 sudo tee "${work}/etc/systemd/system/${MARKER}.service" >/dev/null <<EOF
 [Unit]
-Description=Signal linux-debug-mcp serial readiness
+Description=Signal kdive serial readiness
 After=dev-ttyS0.device
 Wants=dev-ttyS0.device
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from linux_debug_mcp.domain import (
+from kdive.domain import (
     DebugPostmortemFetchRequest,
     DebugPostmortemListDumpsRequest,
     DumpEntry,
@@ -47,7 +47,7 @@ def test_dump_entry_and_fetched_file_shape() -> None:
 
 
 def test_ops_and_bounds_registered() -> None:
-    from linux_debug_mcp.config import (
+    from kdive.config import (
         ALLOWED_DEBUG_OPERATIONS,
         DEFAULT_FETCH_MAX_BYTES,
         FETCH_DISK_HEADROOM_BYTES,
@@ -62,13 +62,13 @@ def test_ops_and_bounds_registered() -> None:
 
 
 def test_parse_dump_listing_empty() -> None:
-    from linux_debug_mcp.postmortem.dumps import parse_dump_listing
+    from kdive.postmortem.dumps import parse_dump_listing
 
     assert parse_dump_listing({"dump_dir": "/var/crash", "exists": False, "dumps": []}) == []
 
 
 def test_parse_dump_listing_one() -> None:
-    from linux_debug_mcp.postmortem.dumps import parse_dump_listing
+    from kdive.postmortem.dumps import parse_dump_listing
 
     probe = {
         "dump_dir": "/var/crash",
@@ -98,7 +98,7 @@ def test_parse_dump_listing_one() -> None:
 
 
 def test_parse_dump_listing_sort_and_missing_mtime() -> None:
-    from linux_debug_mcp.postmortem.dumps import parse_dump_listing
+    from kdive.postmortem.dumps import parse_dump_listing
 
     probe = {
         "dump_dir": "/var/crash",
@@ -144,7 +144,7 @@ def test_parse_dump_listing_sort_and_missing_mtime() -> None:
 
 
 def test_derive_dump_id_stable_and_slugged() -> None:
-    from linux_debug_mcp.postmortem.dumps import derive_dump_id
+    from kdive.postmortem.dumps import derive_dump_id
 
     a = derive_dump_id("/var/crash/127.0.0.1-2026-05-30-12:00:00")
     b = derive_dump_id("/var/crash/127.0.0.1-2026-05-30-12:00:00")
@@ -154,15 +154,15 @@ def test_derive_dump_id_stable_and_slugged() -> None:
 
 
 def test_derive_dump_id_disambiguates_collision() -> None:
-    from linux_debug_mcp.postmortem.dumps import derive_dump_id
+    from kdive.postmortem.dumps import derive_dump_id
 
     # basenames slug identically but full paths differ -> different ids
     assert derive_dump_id("/var/crash/a:b") != derive_dump_id("/other/a:b")
 
 
 def test_plan_fetch_maps_files_to_refs() -> None:
-    from linux_debug_mcp.domain import DumpEntry
-    from linux_debug_mcp.postmortem.dumps import plan_fetch
+    from kdive.domain import DumpEntry
+    from kdive.postmortem.dumps import plan_fetch
 
     entry = DumpEntry(
         path="/var/crash/d1",
@@ -185,7 +185,7 @@ def test_plan_fetch_maps_files_to_refs() -> None:
 
 
 def test_render_dump_list_script_substitutes_dir() -> None:
-    from linux_debug_mcp.postmortem.dumps import render_dump_list_script
+    from kdive.postmortem.dumps import render_dump_list_script
 
     script = render_dump_list_script(dump_dir="/var/crash")
     assert "/var/crash" in script

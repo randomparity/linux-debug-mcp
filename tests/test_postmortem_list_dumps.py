@@ -3,16 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import RootfsProfile
-from linux_debug_mcp.domain import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import RootfsProfile
+from kdive.domain import (
     DebugPostmortemListDumpsRequest,
     RunRequest,
     StepResult,
     StepStatus,
 )
-from linux_debug_mcp.providers.local_ssh_tests import SshCommandResult
-from linux_debug_mcp.server import build_scp_argv, debug_postmortem_list_dumps_handler
+from kdive.providers.local_ssh_tests import SshCommandResult
+from kdive.server import build_scp_argv, debug_postmortem_list_dumps_handler
 
 SECRET_KEY_REF = "s3cr3t-key"  # pragma: allowlist secret
 
@@ -151,7 +151,7 @@ def test_build_scp_argv_quotes_remote_path() -> None:
 
 
 def test_tools_registered() -> None:
-    from linux_debug_mcp.server import create_app
+    from kdive.server import create_app
 
     # access pattern verified against tests/test_server.py — the registry is the
     # `_tool_manager._tools` dict keyed by tool name.

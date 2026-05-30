@@ -40,10 +40,10 @@ from conftest import (
     seed_legacy_debug_session as _seed_legacy_debug_session,
 )
 
-from linux_debug_mcp.config import RootfsProfile
-from linux_debug_mcp.domain import ErrorCategory
-from linux_debug_mcp.providers.gdb_mi import GdbMiSessionRegistry
-from linux_debug_mcp.server import debug_continue_handler, debug_end_session_handler
+from kdive.config import RootfsProfile
+from kdive.domain import ErrorCategory
+from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.server import debug_continue_handler, debug_end_session_handler
 
 
 def test_legacy_session_without_ownership_record_is_refused(tmp_path: Path) -> None:
@@ -95,7 +95,7 @@ def test_legacy_session_converted_to_tombstone_when_not_executing(tmp_path: Path
     # End-to-end: target.run_tests is now blind-fenced (recovery_required), not silently runnable.
     from conftest import FakeTestProvider
 
-    from linux_debug_mcp.server import target_run_tests_handler
+    from kdive.server import target_run_tests_handler
 
     rootfs_profile: RootfsProfile = rootfs(tmp_path)
     tests = target_run_tests_handler(
@@ -159,7 +159,7 @@ def test_legacy_session_end_session_writes_tombstone_after_detach(tmp_path: Path
     # (c) target.run_tests is now gated, not blind to the just-detached unmanaged stop.
     from conftest import FakeTestProvider
 
-    from linux_debug_mcp.server import target_run_tests_handler
+    from kdive.server import target_run_tests_handler
 
     rootfs_profile: RootfsProfile = rootfs(tmp_path)
     tests = target_run_tests_handler(
@@ -185,7 +185,7 @@ def test_legacy_session_refused_in_debug_read_when_session_registry_wired(tmp_pa
     """F8: when `session_registry` is threaded into a `debug.read_*` handler and no durable
     record exists for the run, the handler refuses with `legacy_session_no_ownership` BEFORE the
     live-attachment lookup."""
-    from linux_debug_mcp.server import debug_read_registers_handler
+    from kdive.server import debug_read_registers_handler
 
     artifact_root = _seed_legacy_debug_session(tmp_path)
     registry = _make_registry(tmp_path)

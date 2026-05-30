@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from linux_debug_mcp.providers.local_vmcore_retrieval import local_vmcore_retrieval_capability
-from linux_debug_mcp.providers.plugins import built_in_provider_plugin_specs
+from kdive.providers.local_vmcore_retrieval import local_vmcore_retrieval_capability
+from kdive.providers.plugins import built_in_provider_plugin_specs
 
 
 def test_capability_shape() -> None:

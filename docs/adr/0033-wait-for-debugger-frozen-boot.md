@@ -2,10 +2,10 @@
 
 **Status:** Accepted (2026-05-30) · **Issue:** #104 · **Epic:** #100 (first-run readiness) ·
 **Depends on:** the debug gdbstub boot path (`debug_gdbstub` / `gdbstub_endpoint`) ·
-**Affects:** `src/linux_debug_mcp/config.py` (`TargetProfile.wait_for_debugger`,
-`BootOverrides.wait_for_debugger`), `src/linux_debug_mcp/providers/libvirt_qemu.py`
+**Affects:** `src/kdive/config.py` (`TargetProfile.wait_for_debugger`,
+`BootOverrides.wait_for_debugger`), `src/kdive/providers/libvirt_qemu.py`
 (`BootPlan.wait_for_debugger`, `plan_boot` validation, `render_domain_xml` `wait=` selection,
-`execute_boot` frozen branch), `src/linux_debug_mcp/server.py` (`target_boot_handler` override
+`execute_boot` frozen branch), `src/kdive/server.py` (`target_boot_handler` override
 resolution).
 Spec: [2026-05-30-wait-for-debugger.md](../specs/2026-05-30-wait-for-debugger.md).
 

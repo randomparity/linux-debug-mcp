@@ -33,22 +33,38 @@ single-token distribution name is viable.
 
 ## Transformation rules
 
-Three token forms, mutually non-overlapping, each collapsing to `kdive`:
+Seven token classes, mutually non-overlapping (different case, separator, or token
+order), each collapsing to `kdive`/`KDIVE`:
 
 | Form  | From               | To       | Surfaces |
 |-------|--------------------|----------|----------|
 | snake | `linux_debug_mcp`  | `kdive`  | import package, `python -m …` invocations, coverage source path |
 | kebab | `linux-debug-mcp`  | `kdive`  | dist name, CLI, `FastMCP("…")`, on-disk paths, `urn:…:domain`, readiness marker, libvirt metadata tag |
 | upper | `LINUX_DEBUG_MCP_*` | `KDIVE_*` | environment variables (see list) |
+| domain | `mcp-linux-debug-` | `kdive-` | default libvirt domain names (`mcp-linux-debug-dev[-debug]`) and `managed_domain_prefix` in `server.py` profile defaults — token order `mcp-linux-debug` means neither kebab nor the gate regex touches it |
+| initialism | `ldm-serial-`, `.ldm-writecheck-`, `ldm-sections`, `/run/ldm/` | `kdive-serial-`, `.kdive-writecheck-`, `kdive-sections`, `/run/kdive/` | tempfile/script prefixes and runtime-path remnants of the old initialism — gate-invisible |
+| upper-initialism | `LDM_*` | `KDIVE_*` | uppercase env vars from the old short name (`LDM_REQUIRE_AGENT_PROXY`, `LDM_VMCORE`, `LDM_VMLINUX`, `LDM_VMCORE_MODULAR`, `LDM_SECRETS_EXTERNAL_CMD` — a runtime read in `server.py` — and `LDM_CONFORMANCE_SECRET_VALUE`); 31 sites |
+| prose | `Linux Debug MCP`  | `KDIVE`  | human-readable display name in headings/sentences |
 
-Because the three forms differ in case and separators, the order of
-search-and-replace does not matter for correctness; scope is what matters.
+The **display name is `KDIVE`** (prose/headings); `kdive` is used in all
+code, paths, CLI, and identifiers. Because the classes differ in case,
+separator, or token order, the order of search-and-replace does not matter for
+correctness; scope is what matters.
 
-Environment variables (14, all `LINUX_DEBUG_MCP_*` → `KDIVE_*`):
-`_CONFIG`, `_DOMAIN`, `_EARLY_SYMBOL`, `_GDBSTUB_ENDPOINT`, `_LIBVIRT_TEST`,
-`_LIBVIRT_URI`, `_LIVE_GDBSTUB`, `_READINESS_MARKER`, `_ROOTFS`,
+Prose/display sites: `README.md:3` and its H1 (was `# Linux Development MCP
+Server`, a stale descriptive title → `# KDIVE`), `docs/tool-reference.md:3`,
+`docs/installation.md:3`, `docs/client-setup.md:3`,
+`src/linux_debug_mcp/__init__.py:1`, the architecture spec heading at
+`docs/specs/2026-05-22-linux-debug-mcp-architecture-design.md:1`, and one
+`Linux-debug MCP` prose variant in `docs/test-cases/README.md`.
+
+Environment variables fall in two classes. The 14 `LINUX_DEBUG_MCP_*` → `KDIVE_*`
+(upper): `_CONFIG`, `_DOMAIN`, `_EARLY_SYMBOL`, `_GDBSTUB_ENDPOINT`,
+`_LIBVIRT_TEST`, `_LIBVIRT_URI`, `_LIVE_GDBSTUB`, `_READINESS_MARKER`, `_ROOTFS`,
 `_ROOTFS_AUTHORIZED_KEY`, `_ROOTFS_RELEASEVER`, `_ROOTFS_SIZE`,
-`_ROOTFS_SSH_USER`, `_SOURCE`.
+`_ROOTFS_SSH_USER`, `_SOURCE`. The 6 `LDM_*` → `KDIVE_*` (upper-initialism):
+`LDM_REQUIRE_AGENT_PROXY`, `LDM_VMCORE`, `LDM_VMLINUX`, `LDM_VMCORE_MODULAR`,
+`LDM_SECRETS_EXTERNAL_CMD`, `LDM_CONFORMANCE_SECRET_VALUE`.
 
 ## Scope
 
@@ -69,6 +85,14 @@ Environment variables (14, all `LINUX_DEBUG_MCP_*` → `KDIVE_*`):
   and `linux-debug-mcp-<uid>` fallback → `kdive` equivalents.
 - Tempfile prefix `linux-debug-mcp-registry-` → `kdive-registry-`.
 - Registry instance-lock error message string.
+- Default libvirt domain names `mcp-linux-debug-dev[-debug]` and the
+  `managed_domain_prefix` `mcp-linux-debug-` (`server.py:278-288`, ~31 refs incl.
+  tests) → `kdive-dev[-debug]` / `kdive-` via the single replace
+  `mcp-linux-debug-` → `kdive-`.
+- Initialism remnants of the old `ldm` short name: tempfile/script prefixes and
+  runtime paths `ldm-serial-`, `.ldm-writecheck-`, `ldm-sections`, `/run/ldm/`
+  (7 sites) → `kdive-serial-`, `.kdive-writecheck-`, `kdive-sections`,
+  `/run/kdive/`.
 - `scripts/build-rootfs.sh`: header comment, `LINUX_DEBUG_MCP_ROOTFS` env var,
   default path, `MARKER`, and the systemd unit `Description`.
 
@@ -96,12 +120,25 @@ and `docs/specs/*.md` (~28 files).
 This is a behavior-preserving rename, so the existing test suite is the
 regression guard; no new tests are added. The branch is complete when:
 
-1. `rg -i 'linux.debug.mcp'` returns matches **only** under `docs/superpowers/**`.
-2. Editable install produces a working `kdive` console script:
+All `rg` checks run from repo root and must be **empty**; `docs/superpowers/**`
+is excluded because it is the frozen historical record (and includes this spec,
+which legitimately names the old project).
+
+1. `rg -i 'linux.debug.mcp' --glob '!docs/superpowers/**'` → **empty** (catches
+   snake, kebab, upper, and the space-prose form in one shot — `.` matches the
+   separating space in `Linux Debug MCP`).
+2. `rg 'mcp-linux-debug' --glob '!docs/superpowers/**'` → **empty** (reordered
+   `mcp-…` branding, invisible to check 1).
+3. `rg --glob '!docs/superpowers/**' 'ldm-serial-|\.ldm-writecheck-|ldm-sections|/run/ldm/'`
+   → **empty** (initialism prefixes, scoped so unrelated `ldm` substrings can't
+   false-positive).
+4. `rg --glob '!docs/superpowers/**' 'LDM_'` → **empty** (uppercase
+   short-name env vars; invisible to checks 1–3).
+5. Editable install produces a working `kdive` console script:
    `timeout 2 uv run kdive || test $? -eq 124`.
-3. `just lint`, `ty check src`, and the full `just test` are all green.
-4. `just check-host` runs via `kdive.dev_setup`.
-5. pre-commit / `detect-secrets` run clean against `.secrets.baseline`.
+6. `just lint`, `ty check src`, and the full `just test` are all green.
+7. `just check-host` runs via `kdive.dev_setup`.
+8. pre-commit / `detect-secrets` run clean against `.secrets.baseline`.
 
 ## Post-merge manual checklist (out of branch scope)
 

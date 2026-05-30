@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from linux_debug_mcp.safety.ipmi import (
+from kdive.safety.ipmi import (
     IPMI_ALLOWED_CIPHER_SUITES,
     IPMI_DEFAULT_CIPHER_SUITE,
     IPMI_FORBIDDEN_CIPHER_SUITE,

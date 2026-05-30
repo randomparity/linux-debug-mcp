@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from linux_debug_mcp.domain import ErrorCategory
-from linux_debug_mcp.providers.gdb_mi import (
+from kdive.domain import ErrorCategory
+from kdive.providers.gdb_mi import (
     CANONICAL_PROBE_SYMBOL,
     GdbMiEngine,
     GdbMiError,
@@ -13,7 +13,7 @@ from linux_debug_mcp.providers.gdb_mi import (
     MiRecord,
     ResolvedSymbol,
 )
-from linux_debug_mcp.transport.base import TcpEndpoint
+from kdive.transport.base import TcpEndpoint
 
 
 class FakeController:

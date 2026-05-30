@@ -1,8 +1,8 @@
 import io
 import logging
 
-from linux_debug_mcp.logging import SECRET_REGISTRY, attach_redaction_filter, configure_logging
-from linux_debug_mcp.safety.redaction import REDACTION, SecretRedactionFilter
+from kdive.logging import SECRET_REGISTRY, attach_redaction_filter, configure_logging
+from kdive.safety.redaction import REDACTION, SecretRedactionFilter
 
 
 def test_configure_logging_attaches_filter_to_root_handlers():

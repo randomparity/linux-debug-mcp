@@ -5,7 +5,7 @@ This directory contains individual Linux kernel bug case files for evaluating wh
 Each case is intended to be run as an A/B experiment:
 
 - **Baseline**: Give the agent the public bug report or symptom and normal terminal access.
-- **MCP-assisted**: Give the agent the same starting information plus the Linux-debug MCP environment setup, VM provisioning tools, debug-kernel configuration, log capture, repro execution, and kernel-source navigation helpers.
+- **MCP-assisted**: Give the agent the same starting information plus the KDIVE environment setup, VM provisioning tools, debug-kernel configuration, log capture, repro execution, and kernel-source navigation helpers.
 - **Scoring**: Compare time to first useful hypothesis, ability to reproduce, correct subsystem identification, quality of root-cause explanation, and whether the agent can identify the relevant fix or minimal patch direction.
 
 ## Recommended order

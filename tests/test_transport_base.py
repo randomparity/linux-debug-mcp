@@ -6,8 +6,8 @@ from types import MappingProxyType
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from linux_debug_mcp.seams.target import Arch, ConsoleKind, PlatformMetadata, TargetKey
-from linux_debug_mcp.transport.base import (
+from kdive.seams.target import Arch, ConsoleKind, PlatformMetadata, TargetKey
+from kdive.transport.base import (
     DEFAULT_MIN_LEASE_TTL_SECONDS,
     BackendAttachment,
     BreakMethod,
@@ -120,7 +120,7 @@ def test_unix_socket_rejects_unsafe_paths(path):
 
 
 def test_unix_socket_accepts_absolute_safe_path():
-    assert UnixSocketEndpoint(path="/run/ldm/transports/s.sock").path == "/run/ldm/transports/s.sock"
+    assert UnixSocketEndpoint(path="/run/kdive/transports/s.sock").path == "/run/kdive/transports/s.sock"
 
 
 def test_open_request_default_ttl_and_optional_lease():
@@ -380,7 +380,7 @@ def test_transport_session_carries_brokered_unix_rsp_endpoint():
         generation=0,
         provider="ipmi-sol",
         channel_id="rsp-0",
-        rsp_endpoint=UnixSocketEndpoint(path="/run/ldm/rsp.sock"),
+        rsp_endpoint=UnixSocketEndpoint(path="/run/kdive/rsp.sock"),
         created_at=datetime.now(UTC),
     )
     assert isinstance(session.rsp_endpoint, UnixSocketEndpoint)

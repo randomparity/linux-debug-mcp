@@ -3,18 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import RootfsProfile
-from linux_debug_mcp.domain import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import RootfsProfile
+from kdive.domain import (
     DebugPostmortemFetchRequest,
     ErrorCategory,
     RunRequest,
     StepResult,
     StepStatus,
 )
-from linux_debug_mcp.providers.local_ssh_tests import SshCommandResult
-from linux_debug_mcp.server import debug_postmortem_fetch_handler
-from linux_debug_mcp.transport.base import ExecutionState
+from kdive.providers.local_ssh_tests import SshCommandResult
+from kdive.server import debug_postmortem_fetch_handler
+from kdive.transport.base import ExecutionState
 
 SECRET_KEY_REF = "s3cr3t-key"  # pragma: allowlist secret
 _LISTING = (

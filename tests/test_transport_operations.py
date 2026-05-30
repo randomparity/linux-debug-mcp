@@ -1,6 +1,6 @@
 import pytest
 
-from linux_debug_mcp.config import (
+from kdive.config import (
     TRANSPORT_DESTRUCTIVE_PERMISSIONS,
     TRANSPORT_OPERATIONS,
     validate_transport_operation,

@@ -1,6 +1,6 @@
 """Env-gated live-SSH/scp vmcore retrieval against a managed libvirt guest.
 
-Skipped unless ``LINUX_DEBUG_MCP_LIBVIRT_TEST=1`` (plus the source/rootfs/domain env)
+Skipped unless ``KDIVE_LIBVIRT_TEST=1`` (plus the source/rootfs/domain env)
 is set and virsh/qemu are present — identical gating to
 ``tests/test_kdump_prereqs_integration.py``, whose bootstrap helpers this reuses.
 Never un-gated in CI. The CI-runnable pure-function cross-checks live in
@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from linux_debug_mcp.domain import DebugPostmortemFetchRequest, DebugPostmortemListDumpsRequest
-from linux_debug_mcp.providers.local_ssh_tests import SubprocessSshRunner
-from linux_debug_mcp.server import (
+from kdive.domain import DebugPostmortemFetchRequest, DebugPostmortemListDumpsRequest
+from kdive.providers.local_ssh_tests import SubprocessSshRunner
+from kdive.server import (
     debug_postmortem_fetch_handler,
     debug_postmortem_list_dumps_handler,
 )

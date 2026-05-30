@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from linux_debug_mcp.symbols import BuildIdReadError, read_elf_build_id
+from kdive.symbols import BuildIdReadError, read_elf_build_id
 
 BUILD_ID = bytes.fromhex("0123456789abcdef0123456789abcdef01234567")
 

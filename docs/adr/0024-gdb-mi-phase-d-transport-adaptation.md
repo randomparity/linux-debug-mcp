@@ -32,7 +32,7 @@ The decision of *which* method is entirely the recorded plan's; the tier only di
 
 ### 3. The serial break/continue criterion ships gated, never as a false green.
 
-Per the issue's challenge-review refinement, Phase D takes path (b): a new `tests/test_gdb_mi_serial_kgdb_integration.py` drives an actual RSP break/continue over the serial-local PTY `rsp_endpoint`, gated **exactly** like `test_serial_local_transport_integration.py` (skipped when `agent-proxy`/the PTY fixture is unavailable, requirable with `LDM_REQUIRE_AGENT_PROXY=1`). In local-only CI without the fixture the test is reported **skipped with the missing prerequisite named** — it is never counted as a passing gate. The QEMU-gdbstub criteria (module symbols, RSP-stall, the warning) ship as the unit-testable core and gate CI; the serial criterion holds only when the fixture is present.
+Per the issue's challenge-review refinement, Phase D takes path (b): a new `tests/test_gdb_mi_serial_kgdb_integration.py` drives an actual RSP break/continue over the serial-local PTY `rsp_endpoint`, gated **exactly** like `test_serial_local_transport_integration.py` (skipped when `agent-proxy`/the PTY fixture is unavailable, requirable with `KDIVE_REQUIRE_AGENT_PROXY=1`). In local-only CI without the fixture the test is reported **skipped with the missing prerequisite named** — it is never counted as a passing gate. The QEMU-gdbstub criteria (module symbols, RSP-stall, the warning) ship as the unit-testable core and gate CI; the serial criterion holds only when the fixture is present.
 
 ## Consequences
 

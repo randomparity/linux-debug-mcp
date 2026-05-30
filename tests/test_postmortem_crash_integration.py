@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.domain import DebugPostmortemCrashRequest, RunRequest
-from linux_debug_mcp.server import debug_postmortem_crash_handler
+from kdive.artifacts.store import ArtifactStore
+from kdive.domain import DebugPostmortemCrashRequest, RunRequest
+from kdive.server import debug_postmortem_crash_handler
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("crash") is None or not os.environ.get("LDM_VMCORE") or not os.environ.get("LDM_VMLINUX"),
-    reason="requires crash + LDM_VMCORE + LDM_VMLINUX",
+    shutil.which("crash") is None or not os.environ.get("KDIVE_VMCORE") or not os.environ.get("KDIVE_VMLINUX"),
+    reason="requires crash + KDIVE_VMCORE + KDIVE_VMLINUX",
 )
 
 
@@ -30,8 +30,8 @@ def test_real_crash_batch(tmp_path: Path) -> None:
     rd = store.run_dir("r1")
     (rd / "inputs").mkdir(exist_ok=True)
     (rd / "build").mkdir(exist_ok=True)
-    shutil.copy(os.environ["LDM_VMCORE"], rd / "inputs" / "vmcore")
-    shutil.copy(os.environ["LDM_VMLINUX"], rd / "build" / "vmlinux")
+    shutil.copy(os.environ["KDIVE_VMCORE"], rd / "inputs" / "vmcore")
+    shutil.copy(os.environ["KDIVE_VMLINUX"], rd / "build" / "vmlinux")
     resp = debug_postmortem_crash_handler(
         DebugPostmortemCrashRequest(
             run_id="r1",

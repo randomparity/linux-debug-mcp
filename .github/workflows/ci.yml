@@ -49,7 +49,7 @@ jobs:
           uv venv --allow-existing --python ${{ matrix.python-version }}
           uv pip install -e '.[dev,test]'
           uv run python -m pytest \
-            --cov=src/linux_debug_mcp \
+            --cov=src/kdive \
             --cov-report=xml \
             --cov-report=term \
             --cov-fail-under=77
@@ -152,4 +152,4 @@ jobs:
           uv venv
           uv pip install dist/*.whl
           # stdio server: succeeds, then we kill it on the 2s timeout.
-          timeout 2 .venv/bin/linux-debug-mcp || test $? -eq 124
+          timeout 2 .venv/bin/kdive || test $? -eq 124

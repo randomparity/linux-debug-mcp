@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from linux_debug_mcp.postmortem.crash_commands import (
+from kdive.postmortem.crash_commands import (
     validate_crash_command,
     validate_modules_path,
 )

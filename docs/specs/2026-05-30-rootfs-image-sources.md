@@ -7,7 +7,7 @@
 ## Problem
 
 An agent cannot boot anything out of the box. The default `minimal` rootfs profile
-(`src/linux_debug_mcp/server.py`) points at `/var/lib/linux-debug-mcp/rootfs/minimal.qcow2`, a path the
+(`src/kdive/server.py`) points at `/var/lib/kdive/rootfs/minimal.qcow2`, a path the
 server intentionally does not create and that does not exist on a fresh machine. Only a prose recipe
 exists (`docs/fedora-libvirt-user-guide.md` §5), and it omits sshd and authorized-key setup, so even a
 hand-built image cannot satisfy the SSH test tier. The profile is also `mutability="read_only"`, which
@@ -19,7 +19,7 @@ support a writable-but-pristine-preserving mode: `_validate_profiles` rejects ev
 
 A clean machine reaches a bootable rootfs through one documented command (`just rootfs`) **plus the
 already-required libvirt host access** (see §"Host requirements"). After that one-time host-prep,
-`target.boot` with the default `minimal` profile reaches the `linux-debug-mcp-ready` marker on `ttyS0`,
+`target.boot` with the default `minimal` profile reaches the `kdive-ready` marker on `ttyS0`,
 the base image stays pristine across boots, and the image is SSH-capable (sshd enabled + an authorized
 key installed) so that — once guest-IP discovery lands (#103) — `target.run_tests` can log in.
 
@@ -52,7 +52,7 @@ name / URL for their kinds.
 
 ### Resolution: a pre-boot gate, not a tool-call provisioner
 
-A new pure module `src/linux_debug_mcp/rootfs/sources.py` exposes:
+A new pure module `src/kdive/rootfs/sources.py` exposes:
 
 ```python
 def resolve_rootfs_source(profile: RootfsProfile) -> Path: ...
@@ -157,11 +157,11 @@ documented defaults:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LINUX_DEBUG_MCP_ROOTFS` | `/var/lib/linux-debug-mcp/rootfs/minimal.qcow2` | output image path |
-| `LINUX_DEBUG_MCP_ROOTFS_RELEASEVER` | `43` | Fedora release to install |
-| `LINUX_DEBUG_MCP_ROOTFS_SIZE` | `2G` | image size |
-| `LINUX_DEBUG_MCP_ROOTFS_SSH_USER` | `root` | guest user that receives the authorized key |
-| `LINUX_DEBUG_MCP_ROOTFS_AUTHORIZED_KEY` | first existing of the **invoking** user's `~/.ssh/id_ed25519.pub`, `~/.ssh/id_rsa.pub` | public key to install |
+| `KDIVE_ROOTFS` | `/var/lib/kdive/rootfs/minimal.qcow2` | output image path |
+| `KDIVE_ROOTFS_RELEASEVER` | `43` | Fedora release to install |
+| `KDIVE_ROOTFS_SIZE` | `2G` | image size |
+| `KDIVE_ROOTFS_SSH_USER` | `root` | guest user that receives the authorized key |
+| `KDIVE_ROOTFS_AUTHORIZED_KEY` | first existing of the **invoking** user's `~/.ssh/id_ed25519.pub`, `~/.ssh/id_rsa.pub` | public key to install |
 
 **Privilege model.** The script is run **unprivileged** by the human; it elevates only the specific
 commands that need root (`dnf --installroot`, the in-installroot `tee`/`mkdir`/`ln`/`chown`,
@@ -176,7 +176,7 @@ enables `sshd` via a `multi-user.target.wants` symlink, and writes the chosen pu
 **guest** user's `~/.ssh/authorized_keys` inside the installroot (mode 600, `.ssh` mode 700, owned by that
 guest user). A non-root `SSH_USER` does not exist in a fresh installroot, so the script `useradd`s it
 first (root always exists); the final `chown` is **not** error-swallowed, so an ownership failure is loud
-rather than silently shipping an unloginable image. It keeps the existing `linux-debug-mcp-ready.service`
+rather than silently shipping an unloginable image. It keeps the existing `kdive-ready.service`
 that echoes the marker to `/dev/ttyS0`. It fails fast
 with an actionable message if `dnf`, `virt-make-fs`, or the resolved authorized-key file are missing.
 `just rootfs` invokes the script.
@@ -200,10 +200,10 @@ explanation.
 ```python
 "minimal": RootfsProfile(
     name="minimal",
-    source="/var/lib/linux-debug-mcp/rootfs/minimal.qcow2",
+    source="/var/lib/kdive/rootfs/minimal.qcow2",
     source_kind="builder",          # was implicit local_path
     mutability="copy_on_write",     # was read_only
-    readiness_marker="linux-debug-mcp-ready",
+    readiness_marker="kdive-ready",
     ssh_host="127.0.0.1",
     ssh_port=22,
     ssh_user="root",
@@ -240,7 +240,7 @@ become machine-checkable.
 - **libvirt read access to server-supplied paths under `qemu:///system`** (pre-existing, restated). The
   boot provider already attaches the kernel image by host path, so the libvirt qemu user must be able to
   read the kernel image, the rootfs backing image, and — for `copy_on_write` — the per-run overlay. On a
-  default install the overlay sits under the artifact root (`.linux-debug-mcp/runs`, typically beneath a
+  default install the overlay sits under the artifact root (`.kdive/runs`, typically beneath a
   `0700 $HOME`), which the system qemu user cannot traverse; the same constraint already applies to a
   kernel image built under `$HOME`. Resolve it once by placing the artifact root (and kernel/source tree)
   on a libvirt-readable, correctly-labeled path, or by using `qemu:///session`. Documented in the user
@@ -284,5 +284,5 @@ become machine-checkable.
   `sshd`, writes the resolved key into the guest user's `~/.ssh/authorized_keys`, and `touch`es
   `.autorelabel` in the installroot.
 - Gated acceptance (not CI, env-gated like the existing libvirt integration test): `just rootfs` on a
-  Fedora host yields an image; `target.boot` with `minimal` reaches `linux-debug-mcp-ready`; with #103,
+  Fedora host yields an image; `target.boot` with `minimal` reaches `kdive-ready`; with #103,
   `target.run_tests` logs in over SSH.

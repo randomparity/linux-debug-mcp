@@ -1,8 +1,8 @@
 import asyncio
 
-from linux_debug_mcp.config import ALLOWED_DEBUG_OPERATIONS
-from linux_debug_mcp.providers.local_drgn_introspect import local_drgn_introspect_capability
-from linux_debug_mcp.server import create_app
+from kdive.config import ALLOWED_DEBUG_OPERATIONS
+from kdive.providers.local_drgn_introspect import local_drgn_introspect_capability
+from kdive.server import create_app
 
 
 def test_op_in_allowed_debug_operations() -> None:

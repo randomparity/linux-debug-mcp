@@ -1,9 +1,9 @@
 import pytest
 
-from linux_debug_mcp.artifacts.manifest import BootAttempt
-from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
-from linux_debug_mcp.config import BuildProfile, RootfsProfile, TargetProfile
-from linux_debug_mcp.domain import RunRequest, StepResult, StepStatus
+from kdive.artifacts.manifest import BootAttempt
+from kdive.artifacts.store import ArtifactStore, ManifestStateError
+from kdive.config import BuildProfile, RootfsProfile, TargetProfile
+from kdive.domain import RunRequest, StepResult, StepStatus
 
 
 def _store(tmp_path) -> ArtifactStore:

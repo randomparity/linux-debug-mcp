@@ -1,6 +1,6 @@
-# Linux Development MCP Server
+# KDIVE
 
-Linux Debug MCP is a Python MCP server for local Linux kernel build, boot,
+KDIVE is a Python MCP server for local Linux kernel build, boot,
 smoke-test, artifact, and QEMU gdbstub debug workflows. It also ships
 discovery-only stubs for future remote, reservation, provisioning, hardware,
 console, and real-boot providers.
@@ -132,8 +132,8 @@ document is in progress; the sections above are the current orientation.
 ## Quick Start
 
 ```bash
-git clone git@github.com:randomparity/linux-debug-mcp.git linux-debug-mcp
-cd linux-debug-mcp
+git clone git@github.com:randomparity/kdive.git kdive
+cd kdive
 just setup
 uv run python -m pytest
 ```
@@ -164,7 +164,7 @@ just lint
 
 `.github/workflows/transport-integration.yml` builds `agent-proxy` from a pinned
 commit and runs the serial-local transport integration test un-skipped
-(`LDM_REQUIRE_AGENT_PROXY=1`). The unit suite gates most behavior, but the UART
+(`KDIVE_REQUIRE_AGENT_PROXY=1`). The unit suite gates most behavior, but the UART
 BREAK escape and the console/gdb demux are only proven end-to-end against a real
 `agent-proxy`. That job must therefore be configured as a required status check on
 `main` so the transport cannot regress unnoticed. Enabling the required check is a

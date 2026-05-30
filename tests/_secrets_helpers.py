@@ -6,9 +6,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from linux_debug_mcp.safety.secret_registry import SecretRegistry
-from linux_debug_mcp.safety.secrets import SecretReference, SecretReferenceKind
-from linux_debug_mcp.seams.secrets import EnvSecretsBackend, SecretsStore
+from kdive.safety.secret_registry import SecretRegistry
+from kdive.safety.secrets import SecretReference, SecretReferenceKind
+from kdive.seams.secrets import EnvSecretsBackend, SecretsStore
 
 
 def make_env_secrets(definitions: Iterable[SecretReference] = ()) -> SecretsStore:

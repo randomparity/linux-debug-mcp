@@ -1,5 +1,5 @@
 .superpowers/
-.linux-debug-mcp/
+.kdive/
 .venv/
 __pycache__/
 *.py[cod]

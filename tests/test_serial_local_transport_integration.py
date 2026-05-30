@@ -8,19 +8,19 @@ import threading
 
 import pytest
 
-from linux_debug_mcp.seams.process_identity import ProcProcessIdentityProbe
-from linux_debug_mcp.seams.target import ConsoleKind, PlatformMetadata, TargetKey
-from linux_debug_mcp.transport.base import LineRole, OpenRequest, TcpEndpoint, TransportRef
-from linux_debug_mcp.transport.bounded import Deadline
-from linux_debug_mcp.transport.proxy import _S003_TARGET_ALTERNATE, AgentProxyBackend
-from linux_debug_mcp.transport.serial_local import SerialLocalTransport
+from kdive.seams.process_identity import ProcProcessIdentityProbe
+from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetKey
+from kdive.transport.base import LineRole, OpenRequest, TcpEndpoint, TransportRef
+from kdive.transport.bounded import Deadline
+from kdive.transport.proxy import _S003_TARGET_ALTERNATE, AgentProxyBackend
+from kdive.transport.serial_local import SerialLocalTransport
 
-# Require agent-proxy in CI (LDM_REQUIRE_AGENT_PROXY=1) so the break path is a real merge
+# Require agent-proxy in CI (KDIVE_REQUIRE_AGENT_PROXY=1) so the break path is a real merge
 # gate; skip only on a dev host that did NOT opt in. When required-but-absent the test runs
 # and fails (it does not skip), which is what makes CI enforce it (Task 12).
 pytestmark = pytest.mark.skipif(
-    shutil.which("agent-proxy") is None and os.environ.get("LDM_REQUIRE_AGENT_PROXY") != "1",
-    reason="agent-proxy not installed (set LDM_REQUIRE_AGENT_PROXY=1 to require it in CI)",
+    shutil.which("agent-proxy") is None and os.environ.get("KDIVE_REQUIRE_AGENT_PROXY") != "1",
+    reason="agent-proxy not installed (set KDIVE_REQUIRE_AGENT_PROXY=1 to require it in CI)",
 )
 
 

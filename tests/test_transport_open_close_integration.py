@@ -2,13 +2,13 @@
 """Gated end-to-end transport integration tests (Task C3).
 
 Test 1 — inject_break over a PTY+agent-proxy channel
-    Gate: agent-proxy binary present OR LDM_REQUIRE_AGENT_PROXY=1.
+    Gate: agent-proxy binary present OR KDIVE_REQUIRE_AGENT_PROXY=1.
     Reuses the PTY + SerialLocalTransport fixture from the sibling integration module.
     Drives attach, calls send_break, and asserts the -s003 alternate reaches the controller fd.
     No kgdb-enabled guest needed; the PTY simulates the serial line.
 
 Test 2 — migrated debug.start_session transaction wiring against a live QEMU gdbstub
-    Gate: LINUX_DEBUG_MCP_LIVE_GDBSTUB=1 + companion envs + virsh + gdb.
+    Gate: KDIVE_LIVE_GDBSTUB=1 + companion envs + virsh + gdb.
     Runs the complete build→boot→debug.start_session flow with transaction/admission/
     session_registry explicitly injected from _build_transport_machinery, then reads
     registers and verifies ok=True.  Proves the B3 migration is behaviour-preserving
@@ -30,23 +30,23 @@ import pytest
 # Gate helpers
 # ---------------------------------------------------------------------------
 
-_AGENT_PROXY_REQUIRED = os.environ.get("LDM_REQUIRE_AGENT_PROXY") == "1"
+_AGENT_PROXY_REQUIRED = os.environ.get("KDIVE_REQUIRE_AGENT_PROXY") == "1"
 _AGENT_PROXY_PRESENT = shutil.which("agent-proxy") is not None
 
 _GDBSTUB_REQUIRED_ENV = [
-    "LINUX_DEBUG_MCP_LIVE_GDBSTUB",
-    "LINUX_DEBUG_MCP_SOURCE",
-    "LINUX_DEBUG_MCP_ROOTFS",
-    "LINUX_DEBUG_MCP_DOMAIN",
-    "LINUX_DEBUG_MCP_LIBVIRT_URI",
-    "LINUX_DEBUG_MCP_READINESS_MARKER",
+    "KDIVE_LIVE_GDBSTUB",
+    "KDIVE_SOURCE",
+    "KDIVE_ROOTFS",
+    "KDIVE_DOMAIN",
+    "KDIVE_LIBVIRT_URI",
+    "KDIVE_READINESS_MARKER",
 ]
-_MANAGED_DOMAIN_PREFIX = "mcp-linux-debug-"
+_MANAGED_DOMAIN_PREFIX = "kdive-"
 
 
 def _live_gdbstub_active() -> bool:
     """Return True only when every required env var is set and LIVE_GDBSTUB==1."""
-    if os.environ.get("LINUX_DEBUG_MCP_LIVE_GDBSTUB") != "1":
+    if os.environ.get("KDIVE_LIVE_GDBSTUB") != "1":
         return False
     return all(os.environ.get(name) for name in _GDBSTUB_REQUIRED_ENV)
 
@@ -55,13 +55,13 @@ def _gdbstub_skip_reason() -> str:
     missing = [name for name in _GDBSTUB_REQUIRED_ENV if not os.environ.get(name)]
     return (
         "live gdbstub integration test skipped; set "
-        f"{', '.join(missing) if missing else 'LINUX_DEBUG_MCP_LIVE_GDBSTUB=1'} to run it. "
-        "Example: LINUX_DEBUG_MCP_LIVE_GDBSTUB=1 "
-        "LINUX_DEBUG_MCP_SOURCE=/path/to/linux "
-        "LINUX_DEBUG_MCP_ROOTFS=/var/lib/linux-debug-mcp/rootfs/minimal.qcow2 "
-        "LINUX_DEBUG_MCP_DOMAIN=mcp-linux-debug-dev-debug "
-        "LINUX_DEBUG_MCP_LIBVIRT_URI=qemu:///system "
-        "LINUX_DEBUG_MCP_READINESS_MARKER=linux-debug-mcp-ready "
+        f"{', '.join(missing) if missing else 'KDIVE_LIVE_GDBSTUB=1'} to run it. "
+        "Example: KDIVE_LIVE_GDBSTUB=1 "
+        "KDIVE_SOURCE=/path/to/linux "
+        "KDIVE_ROOTFS=/var/lib/kdive/rootfs/minimal.qcow2 "
+        "KDIVE_DOMAIN=kdive-dev-debug "
+        "KDIVE_LIBVIRT_URI=qemu:///system "
+        "KDIVE_READINESS_MARKER=kdive-ready "
         "pytest tests/test_transport_open_close_integration.py -q"
     )
 
@@ -78,18 +78,18 @@ def _gdbstub_env() -> dict[str, str]:
 
 @pytest.mark.skipif(
     not _AGENT_PROXY_PRESENT and not _AGENT_PROXY_REQUIRED,
-    reason="agent-proxy not installed (set LDM_REQUIRE_AGENT_PROXY=1 to require it in CI)",
+    reason="agent-proxy not installed (set KDIVE_REQUIRE_AGENT_PROXY=1 to require it in CI)",
 )
 def test_inject_break_drops_kgdb_target_into_debugger(tmp_path: Path) -> None:
     """Drive SerialLocalTransport.attach over a PTY + real agent-proxy, call send_break,
     and assert the -s003 KGDB alternate reaches the controller fd.  The PTY plays the
     role of the serial line; no kgdb-enabled guest is required."""
-    from linux_debug_mcp.seams.process_identity import ProcProcessIdentityProbe
-    from linux_debug_mcp.seams.target import ConsoleKind, PlatformMetadata, TargetKey
-    from linux_debug_mcp.transport.base import LineRole, OpenRequest, TcpEndpoint, TransportRef
-    from linux_debug_mcp.transport.bounded import Deadline
-    from linux_debug_mcp.transport.proxy import _S003_TARGET_ALTERNATE, AgentProxyBackend
-    from linux_debug_mcp.transport.serial_local import SerialLocalTransport
+    from kdive.seams.process_identity import ProcProcessIdentityProbe
+    from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetKey
+    from kdive.transport.base import LineRole, OpenRequest, TcpEndpoint, TransportRef
+    from kdive.transport.bounded import Deadline
+    from kdive.transport.proxy import _S003_TARGET_ALTERNATE, AgentProxyBackend
+    from kdive.transport.serial_local import SerialLocalTransport
 
     controller_fd, peripheral_fd = pty.openpty()
     peripheral_name = os.ttyname(peripheral_fd)
@@ -176,24 +176,24 @@ def test_qemu_gdbstub_flow_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyP
     debug.read_registers must return non-empty register data.
     """
     env = _gdbstub_env()
-    source = Path(env["LINUX_DEBUG_MCP_SOURCE"]).expanduser()
-    rootfs_path = Path(env["LINUX_DEBUG_MCP_ROOTFS"]).expanduser()
+    source = Path(env["KDIVE_SOURCE"]).expanduser()
+    rootfs_path = Path(env["KDIVE_ROOTFS"]).expanduser()
     kernel_image = source / "arch" / "x86" / "boot" / "bzImage"
     vmlinux = source / "vmlinux"
-    gdbstub_endpoint = os.environ.get("LINUX_DEBUG_MCP_GDBSTUB_ENDPOINT", "127.0.0.1:1234")
+    gdbstub_endpoint = os.environ.get("KDIVE_GDBSTUB_ENDPOINT", "127.0.0.1:1234")
 
-    assert source.is_dir(), f"LINUX_DEBUG_MCP_SOURCE must be a Linux source directory: {source}"
-    assert rootfs_path.is_file(), f"LINUX_DEBUG_MCP_ROOTFS must be a disk image file: {rootfs_path}"
+    assert source.is_dir(), f"KDIVE_SOURCE must be a Linux source directory: {source}"
+    assert rootfs_path.is_file(), f"KDIVE_ROOTFS must be a disk image file: {rootfs_path}"
     assert kernel_image.is_file(), f"built kernel image is required at {kernel_image}"
     assert vmlinux.is_file(), f"unstripped vmlinux is required at {vmlinux}"
-    assert env["LINUX_DEBUG_MCP_DOMAIN"].startswith(_MANAGED_DOMAIN_PREFIX), (
-        "LINUX_DEBUG_MCP_DOMAIN must be a dedicated managed domain starting with "
-        f"{_MANAGED_DOMAIN_PREFIX!r}: {env['LINUX_DEBUG_MCP_DOMAIN']}"
+    assert env["KDIVE_DOMAIN"].startswith(_MANAGED_DOMAIN_PREFIX), (
+        "KDIVE_DOMAIN must be a dedicated managed domain starting with "
+        f"{_MANAGED_DOMAIN_PREFIX!r}: {env['KDIVE_DOMAIN']}"
     )
 
-    from linux_debug_mcp import server
-    from linux_debug_mcp.config import RootfsProfile, TargetProfile
-    from linux_debug_mcp.server import (
+    from kdive import server
+    from kdive.config import RootfsProfile, TargetProfile
+    from kdive.server import (
         _build_transport_machinery,
         create_run_handler,
         debug_read_registers_handler,
@@ -201,7 +201,7 @@ def test_qemu_gdbstub_flow_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyP
         kernel_build_handler,
         target_boot_handler,
     )
-    from linux_debug_mcp.transport.base import ExecutionState
+    from kdive.transport.base import ExecutionState
 
     # Register the live profiles into the server's DEFAULT_* dicts so the handlers can resolve them.
     monkeypatch.setitem(
@@ -210,10 +210,10 @@ def test_qemu_gdbstub_flow_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyP
         TargetProfile(
             name="live-qemu-debug",
             architecture="x86_64",
-            target_ref=env["LINUX_DEBUG_MCP_DOMAIN"],
+            target_ref=env["KDIVE_DOMAIN"],
             managed_domain=True,
             managed_domain_prefix=_MANAGED_DOMAIN_PREFIX,
-            libvirt_uri=env["LINUX_DEBUG_MCP_LIBVIRT_URI"],
+            libvirt_uri=env["KDIVE_LIBVIRT_URI"],
             timeout_seconds=300,
             debug_gdbstub=True,
             gdbstub_endpoint=gdbstub_endpoint,
@@ -227,7 +227,7 @@ def test_qemu_gdbstub_flow_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyP
             source=str(rootfs_path),
             source_type="disk_image",
             mutability="read_only",
-            readiness_marker=env["LINUX_DEBUG_MCP_READINESS_MARKER"],
+            readiness_marker=env["KDIVE_READINESS_MARKER"],
         ),
     )
 
@@ -286,7 +286,7 @@ def test_qemu_gdbstub_flow_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert debug_session_id, "debug.start_session must return a debug_session_id"
 
     # The durable registry must carry a HALTED record for this target (write-before-attach invariant).
-    from linux_debug_mcp.seams.target import TargetKey
+    from kdive.seams.target import TargetKey
 
     target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
     record = machinery.session_registry.read_record(target_key)

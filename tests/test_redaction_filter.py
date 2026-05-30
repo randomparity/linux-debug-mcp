@@ -1,7 +1,7 @@
 import logging
 
-from linux_debug_mcp.safety.redaction import REDACTION, SecretRedactionFilter
-from linux_debug_mcp.safety.secret_registry import SecretRegistry
+from kdive.safety.redaction import REDACTION, SecretRedactionFilter
+from kdive.safety.secret_registry import SecretRegistry
 
 
 def _buffer_logger(name: str, registry: SecretRegistry) -> tuple[logging.Logger, list[str]]:

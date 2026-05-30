@@ -12,7 +12,7 @@ Provisioning epic (TBD)
 
 ## 1. Purpose & scope
 
-`linux-debug-mcp` has two independent provider registries that must compose:
+`kdive` has two independent provider registries that must compose:
 
 - **Provisioning providers** — "give me a target booted on my kernel"
   (local/remote KVM, Proxmox, bare-metal x86_64, PowerVM LPAR, cross-arch QEMU).

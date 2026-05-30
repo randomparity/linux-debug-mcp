@@ -1,6 +1,6 @@
 """Tests for the provider plugin registry."""
 
-from linux_debug_mcp.providers.plugins import local_provider_plugin_specs
+from kdive.providers.plugins import local_provider_plugin_specs
 
 
 def test_local_drgn_introspect_capability_is_registered() -> None:

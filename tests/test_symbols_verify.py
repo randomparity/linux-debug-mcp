@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from linux_debug_mcp.symbols.build_id import BuildIdReadError
-from linux_debug_mcp.symbols.verify import (
+from kdive.symbols.build_id import BuildIdReadError
+from kdive.symbols.verify import (
     BUILD_ID_RE,
     ProvenanceMismatch,
     verify_build_id,

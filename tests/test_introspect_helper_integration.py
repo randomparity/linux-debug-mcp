@@ -4,7 +4,7 @@ Gated identically to ``tests/test_drgn_introspect_integration.py``:
   - ``drgn`` installed target-side (the rootfs must include it)
   - ``qemu-system-x86_64`` on the host
   - ``virsh`` on the host
-  - ``LINUX_DEBUG_MCP_LIBVIRT_TEST=1`` environment variable
+  - ``KDIVE_LIBVIRT_TEST=1`` environment variable
 
 Runs require a configured libvirt VM host with the env vars set; they SKIP
 cleanly without them.  Every test asserts ``resp.ok is True`` first so any
@@ -30,8 +30,8 @@ from test_drgn_introspect_integration import (
     _require_integration_env,
 )
 
-from linux_debug_mcp.domain import DebugIntrospectHelperRequest
-from linux_debug_mcp.server import debug_introspect_helper_handler
+from kdive.domain import DebugIntrospectHelperRequest
+from kdive.server import debug_introspect_helper_handler
 
 
 def _call_helper(

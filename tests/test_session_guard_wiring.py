@@ -15,23 +15,23 @@ import pytest
 from _layer4_fakes import KEY, PLATFORM, FakeQemuTransport, build_txn
 from conftest import FakeMiEngine, kernel_provenance_details, write_vmlinux_with_build_id
 
-from linux_debug_mcp.config import DebugProfile
-from linux_debug_mcp.coordination.admission import AdmissionError, AdmissionService
-from linux_debug_mcp.coordination.registry import SessionRegistry
-from linux_debug_mcp.coordination.transaction import TransportTransaction
-from linux_debug_mcp.domain import ArtifactRef, RunRequest, StepResult, StepStatus
-from linux_debug_mcp.providers.gdb_mi import GdbMiSessionRegistry
-from linux_debug_mcp.seams.guard import SessionGuard, SessionGuardContext
-from linux_debug_mcp.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleEvent, LifecycleKind
-from linux_debug_mcp.seams.target import publish_ready_snapshot
-from linux_debug_mcp.server import (
+from kdive.config import DebugProfile
+from kdive.coordination.admission import AdmissionError, AdmissionService
+from kdive.coordination.registry import SessionRegistry
+from kdive.coordination.transaction import TransportTransaction
+from kdive.domain import ArtifactRef, RunRequest, StepResult, StepStatus
+from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.seams.guard import SessionGuard, SessionGuardContext
+from kdive.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleEvent, LifecycleKind
+from kdive.seams.target import publish_ready_snapshot
+from kdive.server import (
     _admit_run_tests_ssh_tier,
     debug_end_session_handler,
     debug_start_session_handler,
 )
-from linux_debug_mcp.transport.base import LineRole, TransportRef
+from kdive.transport.base import LineRole, TransportRef
 
-from linux_debug_mcp.artifacts.store import ArtifactStore  # isort: skip
+from kdive.artifacts.store import ArtifactStore  # isort: skip
 
 RUN_ID = "run-1"
 GDBSTUB_ENDPOINT = {"host": "127.0.0.1", "port": 1234}

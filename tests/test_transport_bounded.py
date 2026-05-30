@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from linux_debug_mcp.transport.bounded import (
+from kdive.transport.bounded import (
     BoundedIOCancelled,
     BoundedIOTimeout,
     Deadline,

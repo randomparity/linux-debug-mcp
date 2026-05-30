@@ -6,13 +6,13 @@ from unittest.mock import patch
 from conftest import NoopBuildRunner as NoopRunner
 from conftest import add_merge_config_script, make_source_tree
 
-from linux_debug_mcp.providers.local_kernel_build import (
+from kdive.providers.local_kernel_build import (
     LocalKernelBuildProvider,
 )
-from linux_debug_mcp.providers.local_kernel_build import (
+from kdive.providers.local_kernel_build import (
     _extract_build_id as _REAL_EXTRACT_BUILD_ID,
 )
-from linux_debug_mcp.server import create_run_handler, kernel_build_handler
+from kdive.server import create_run_handler, kernel_build_handler
 
 # Task 4 R2-F6: the build success path now extracts and records build_id by
 # running readelf against vmlinux. Most handler/workflow tests in this suite
@@ -140,8 +140,8 @@ def test_kernel_build_rejects_missing_manifest_profile(tmp_path: Path) -> None:
     # test_create_run_rejects_unknown_base_profile). The build-time guard still
     # protects a legacy/v1 manifest whose recorded build profile is unknown and
     # carries no resolved_build_profile, so build that scenario via the store.
-    from linux_debug_mcp.artifacts.store import ArtifactStore
-    from linux_debug_mcp.domain import RunRequest
+    from kdive.artifacts.store import ArtifactStore
+    from kdive.domain import RunRequest
 
     source = make_source_tree(tmp_path, with_config=True)
     artifact_root = tmp_path / "runs"
@@ -177,13 +177,13 @@ def test_kernel_build_missing_run_is_configuration_error(tmp_path: Path) -> None
 
 
 def test_default_build_profile_uses_defconfig_base_config() -> None:
-    from linux_debug_mcp.server import DEFAULT_BUILD_PROFILES
+    from kdive.server import DEFAULT_BUILD_PROFILES
 
     assert DEFAULT_BUILD_PROFILES["x86_64-default"].base_config == ["defconfig"]
 
 
 def test_default_build_profiles_include_x86_64_debug() -> None:
-    from linux_debug_mcp.server import DEFAULT_BUILD_PROFILES
+    from kdive.server import DEFAULT_BUILD_PROFILES
 
     profile = DEFAULT_BUILD_PROFILES["x86_64-debug"]
     assert profile.base_config == ["defconfig"]
@@ -201,8 +201,8 @@ def test_default_build_profiles_include_x86_64_debug() -> None:
 
 
 def test_build_overrides_base_config_replaces_profile_value(tmp_path: Path) -> None:
-    from linux_debug_mcp.artifacts.store import ArtifactStore
-    from linux_debug_mcp.config import BuildOverrides
+    from kdive.artifacts.store import ArtifactStore
+    from kdive.config import BuildOverrides
 
     source = make_source_tree(tmp_path, with_config=True)
     artifact_root = tmp_path / "runs"
@@ -224,8 +224,8 @@ def test_build_overrides_base_config_replaces_profile_value(tmp_path: Path) -> N
 
 
 def test_kernel_build_without_config_or_base_config_returns_suggested_fix(tmp_path: Path) -> None:
-    from linux_debug_mcp.artifacts.store import ArtifactStore
-    from linux_debug_mcp.domain import StepStatus
+    from kdive.artifacts.store import ArtifactStore
+    from kdive.domain import StepStatus
 
     source = make_source_tree(tmp_path)  # no developer .config
     artifact_root = tmp_path / "runs"
@@ -261,7 +261,7 @@ def test_kernel_build_failure_response_includes_artifacts(tmp_path: Path) -> Non
 
 
 def test_kernel_build_response_redacts_secret_make_variable(tmp_path: Path) -> None:
-    from linux_debug_mcp.config import BuildOverrides
+    from kdive.config import BuildOverrides
 
     source = make_source_tree(tmp_path, with_config=True)
     artifact_root = tmp_path / "runs"
@@ -321,8 +321,8 @@ def test_kernel_build_repeat_success_returns_recorded_result(tmp_path: Path) -> 
 
 def test_kernel_build_existing_running_state_fails_without_rerun(tmp_path: Path) -> None:
     _, artifact_root = create_run(tmp_path)
-    from linux_debug_mcp.artifacts.store import ArtifactStore
-    from linux_debug_mcp.domain import StepResult, StepStatus
+    from kdive.artifacts.store import ArtifactStore
+    from kdive.domain import StepResult, StepStatus
 
     runner = NoopRunner()
     store = ArtifactStore(artifact_root, create_root=False)
@@ -346,8 +346,8 @@ def test_kernel_build_existing_running_state_fails_without_rerun(tmp_path: Path)
 
 def test_kernel_build_existing_running_state_takes_precedence_over_missing_source(tmp_path: Path) -> None:
     source, artifact_root = create_run(tmp_path)
-    from linux_debug_mcp.artifacts.store import ArtifactStore
-    from linux_debug_mcp.domain import StepResult, StepStatus
+    from kdive.artifacts.store import ArtifactStore
+    from kdive.domain import StepResult, StepStatus
 
     store = ArtifactStore(artifact_root, create_root=False)
     store.record_step_result(
@@ -366,7 +366,7 @@ def test_kernel_build_existing_running_state_takes_precedence_over_missing_sourc
 
 def test_kernel_build_existing_build_lock_returns_failure(tmp_path: Path) -> None:
     _, artifact_root = create_run(tmp_path)
-    from linux_debug_mcp.artifacts.store import ArtifactStore
+    from kdive.artifacts.store import ArtifactStore
 
     store = ArtifactStore(artifact_root, create_root=False)
     with store.build_lock("run-abc123"):
@@ -380,8 +380,8 @@ def test_kernel_build_existing_build_lock_returns_failure(tmp_path: Path) -> Non
 
 def test_kernel_build_unexpected_provider_exception_records_failed_result(tmp_path: Path) -> None:
     _, artifact_root = create_run(tmp_path)
-    from linux_debug_mcp.artifacts.store import ArtifactStore
-    from linux_debug_mcp.domain import StepStatus
+    from kdive.artifacts.store import ArtifactStore
+    from kdive.domain import StepStatus
 
     runner = RaisingRunner()
     provider = LocalKernelBuildProvider(runner=runner)
@@ -399,8 +399,8 @@ def test_kernel_build_unexpected_provider_exception_records_failed_result(tmp_pa
 
 def test_kernel_build_retries_terminal_result_write_after_transient_manifest_lock(tmp_path: Path) -> None:
     _, artifact_root = create_run(tmp_path)
-    from linux_debug_mcp.artifacts.store import ArtifactStore
-    from linux_debug_mcp.domain import StepStatus
+    from kdive.artifacts.store import ArtifactStore
+    from kdive.domain import StepStatus
 
     build_dir = artifact_root / "run-abc123" / "build"
     (build_dir / "arch" / "x86" / "boot").mkdir(parents=True)
@@ -415,7 +415,7 @@ def test_kernel_build_retries_terminal_result_write_after_transient_manifest_loc
 
 
 def test_build_applies_config_lines_before_main_make(tmp_path: Path) -> None:
-    from linux_debug_mcp.config import BuildOverrides
+    from kdive.config import BuildOverrides
 
     source = make_source_tree(tmp_path, with_config=True)
     add_merge_config_script(source)
@@ -483,9 +483,9 @@ def test_kernel_build_concurrent_calls_only_start_one_subprocess(tmp_path: Path)
 def test_readelf_unavailable_fails_build(tmp_path: Path) -> None:
     # Spec §9.1 / §7 R2-F6: ReadelfUnavailable -> step FAILED;
     # ErrorCategory.INFRASTRUCTURE_FAILURE; code=readelf_unavailable.
-    from linux_debug_mcp.artifacts.store import ArtifactStore
-    from linux_debug_mcp.domain import StepStatus
-    from linux_debug_mcp.providers.local_kernel_build import ReadelfUnavailable
+    from kdive.artifacts.store import ArtifactStore
+    from kdive.domain import StepStatus
+    from kdive.providers.local_kernel_build import ReadelfUnavailable
 
     _, artifact_root = create_run(tmp_path)
     build_dir = artifact_root / "run-abc123" / "build"
@@ -493,7 +493,7 @@ def test_readelf_unavailable_fails_build(tmp_path: Path) -> None:
     (build_dir / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
 
     with patch(
-        "linux_debug_mcp.providers.local_kernel_build._extract_build_id",
+        "kdive.providers.local_kernel_build._extract_build_id",
         side_effect=ReadelfUnavailable("readelf not found"),
     ):
         response = kernel_build_handler(
@@ -513,9 +513,9 @@ def test_readelf_unavailable_fails_build(tmp_path: Path) -> None:
 def test_build_id_missing_fails_build(tmp_path: Path) -> None:
     # Spec §9.1 / §7 R2-F6: BuildIdMissing -> step FAILED;
     # ErrorCategory.BUILD_FAILURE; code=build_id_missing.
-    from linux_debug_mcp.artifacts.store import ArtifactStore
-    from linux_debug_mcp.domain import StepStatus
-    from linux_debug_mcp.providers.local_kernel_build import BuildIdMissing
+    from kdive.artifacts.store import ArtifactStore
+    from kdive.domain import StepStatus
+    from kdive.providers.local_kernel_build import BuildIdMissing
 
     _, artifact_root = create_run(tmp_path)
     build_dir = artifact_root / "run-abc123" / "build"
@@ -523,7 +523,7 @@ def test_build_id_missing_fails_build(tmp_path: Path) -> None:
     (build_dir / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
 
     with patch(
-        "linux_debug_mcp.providers.local_kernel_build._extract_build_id",
+        "kdive.providers.local_kernel_build._extract_build_id",
         side_effect=BuildIdMissing("no Build ID note"),
     ):
         response = kernel_build_handler(
@@ -554,7 +554,7 @@ def test_build_id_missing_failure_preserves_vmlinux_artifact(tmp_path: Path) -> 
     # stub), mock at the deepest seam (`subprocess.run`) so readelf returns
     # cleanly with no Build ID note, and pre-create the artifacts that
     # `_detect_artifacts` discovers on disk (paths per local_kernel_build.py).
-    from linux_debug_mcp.artifacts.store import ArtifactStore
+    from kdive.artifacts.store import ArtifactStore
 
     _, artifact_root = create_run(tmp_path)
     build_dir = artifact_root / "run-abc123" / "build"
@@ -569,11 +569,11 @@ def test_build_id_missing_failure_preserves_vmlinux_artifact(tmp_path: Path) -> 
     # `subprocess.run` seam underneath so readelf returns "no Build ID note".
     with (
         patch(
-            "linux_debug_mcp.providers.local_kernel_build._extract_build_id",
+            "kdive.providers.local_kernel_build._extract_build_id",
             _REAL_EXTRACT_BUILD_ID,
         ),
         patch(
-            "linux_debug_mcp.providers.local_kernel_build.subprocess.run",
+            "kdive.providers.local_kernel_build.subprocess.run",
             return_value=fake,
         ),
     ):

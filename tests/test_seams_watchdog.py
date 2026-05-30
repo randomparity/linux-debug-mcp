@@ -7,10 +7,10 @@ See docs/superpowers/specs/2026-05-29-watchdog-relax-restore-design.md / docs/ad
 
 import pytest
 
-from linux_debug_mcp.seams.guard import SessionGuard, SessionGuardContext, TeardownStep
-from linux_debug_mcp.seams.lifecycle import LifecycleSubscriber
-from linux_debug_mcp.seams.target import TargetKey
-from linux_debug_mcp.seams.watchdog import (
+from kdive.seams.guard import SessionGuard, SessionGuardContext, TeardownStep
+from kdive.seams.lifecycle import LifecycleSubscriber
+from kdive.seams.target import TargetKey
+from kdive.seams.watchdog import (
     KnobOutcome,
     RelaxReport,
     RestoreReport,

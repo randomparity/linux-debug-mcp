@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 from conftest import make_source_tree
 
-from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
-from linux_debug_mcp.domain import RunRequest, StepResult, StepStatus
+from kdive.artifacts.store import ArtifactStore, ManifestStateError
+from kdive.domain import RunRequest, StepResult, StepStatus
 
 
 def request(run_id: str | None = None) -> RunRequest:
@@ -267,9 +267,9 @@ def test_target_lock_excludes_concurrent_domain_mutation(tmp_path: Path, monkeyp
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
 
     with (
-        store_a.target_lock("mcp-linux-debug-dev"),
+        store_a.target_lock("kdive-dev"),
         pytest.raises(ManifestStateError, match="target domain is locked"),
-        store_b.target_lock("mcp-linux-debug-dev"),
+        store_b.target_lock("kdive-dev"),
     ):
         pass
 
@@ -278,12 +278,12 @@ def test_target_lock_fallback_creates_private_lock_dir(tmp_path: Path, monkeypat
     source = make_source_tree(tmp_path)
     store = ArtifactStore(tmp_path / "runs", source_paths=[source])
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-    monkeypatch.setattr("linux_debug_mcp.artifacts.store.tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr("kdive.artifacts.store.tempfile.gettempdir", lambda: str(tmp_path))
 
-    with store.target_lock("mcp-linux-debug-dev"):
+    with store.target_lock("kdive-dev"):
         pass
 
-    lock_dir = next(tmp_path.glob("linux-debug-mcp-*/locks"))
+    lock_dir = next(tmp_path.glob("kdive-*/locks"))
     assert lock_dir.stat().st_mode & 0o777 == 0o700
 
 
@@ -291,14 +291,14 @@ def test_target_lock_rejects_unsafe_fallback_lock_dir(tmp_path: Path, monkeypatc
     source = make_source_tree(tmp_path)
     store = ArtifactStore(tmp_path / "runs", source_paths=[source])
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-    monkeypatch.setattr("linux_debug_mcp.artifacts.store.tempfile.gettempdir", lambda: str(tmp_path))
-    lock_dir = tmp_path / f"linux-debug-mcp-{os.getuid()}" / "locks"
+    monkeypatch.setattr("kdive.artifacts.store.tempfile.gettempdir", lambda: str(tmp_path))
+    lock_dir = tmp_path / f"kdive-{os.getuid()}" / "locks"
     lock_dir.mkdir(parents=True)
     lock_dir.chmod(0o777)
 
     with (
         pytest.raises(ManifestStateError, match="unsafe target lock directory"),
-        store.target_lock("mcp-linux-debug-dev"),
+        store.target_lock("kdive-dev"),
     ):
         pass
 
@@ -307,13 +307,13 @@ def test_target_lock_rejects_symlink_fallback_lock_dir(tmp_path: Path, monkeypat
     source = make_source_tree(tmp_path)
     store = ArtifactStore(tmp_path / "runs", source_paths=[source])
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-    monkeypatch.setattr("linux_debug_mcp.artifacts.store.tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr("kdive.artifacts.store.tempfile.gettempdir", lambda: str(tmp_path))
     symlink_target = tmp_path / "symlink-target"
     symlink_target.mkdir()
-    (tmp_path / f"linux-debug-mcp-{os.getuid()}").symlink_to(symlink_target, target_is_directory=True)
+    (tmp_path / f"kdive-{os.getuid()}").symlink_to(symlink_target, target_is_directory=True)
 
     with (
         pytest.raises(ManifestStateError, match="unsafe target lock directory"),
-        store.target_lock("mcp-linux-debug-dev"),
+        store.target_lock("kdive-dev"),
     ):
         pass

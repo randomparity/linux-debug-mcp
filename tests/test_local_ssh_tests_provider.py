@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from linux_debug_mcp.config import RootfsProfile, TestCommand, TestSuiteProfile
-from linux_debug_mcp.domain import ErrorCategory, StepStatus
-from linux_debug_mcp.providers.local_ssh_tests import (
+from kdive.config import RootfsProfile, TestCommand, TestSuiteProfile
+from kdive.domain import ErrorCategory, StepStatus
+from kdive.providers.local_ssh_tests import (
     _SNIPPET_LIMIT,
     LocalSshTestProvider,
     SshCommandResult,

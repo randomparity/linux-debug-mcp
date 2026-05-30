@@ -1,11 +1,11 @@
 # ADR 0031 — rootfs image-source abstraction (Phase 1: local builder)
 
 **Status:** Accepted (2026-05-30) · **Issue:** #102 · **Epic:** #100 · **Affects:**
-`src/linux_debug_mcp/config.py` (`RootfsProfile.source_kind`),
-`src/linux_debug_mcp/rootfs/sources.py` (new: `resolve_rootfs_source`, `RootfsSourceError`),
-`src/linux_debug_mcp/providers/libvirt_qemu.py` (`copy_on_write` validation, `BootPlan.rootfs_backing_path`
+`src/kdive/config.py` (`RootfsProfile.source_kind`),
+`src/kdive/rootfs/sources.py` (new: `resolve_rootfs_source`, `RootfsSourceError`),
+`src/kdive/providers/libvirt_qemu.py` (`copy_on_write` validation, `BootPlan.rootfs_backing_path`
 + `BootPlan.overlay_create_argv`, `plan_boot`, `execute_boot`, `render_domain_xml`),
-`src/linux_debug_mcp/server.py` (`target_boot_handler` resolver call; `DEFAULT_ROOTFS_PROFILES["minimal"]`
+`src/kdive/server.py` (`target_boot_handler` resolver call; `DEFAULT_ROOTFS_PROFILES["minimal"]`
 flips to `source_kind="builder"` + `mutability="copy_on_write"`), `scripts/build-rootfs.sh` (new),
 `justfile` (`rootfs` recipe), `docs/fedora-libvirt-user-guide.md` §5.
 Spec: [2026-05-30-rootfs-image-sources.md](../specs/2026-05-30-rootfs-image-sources.md).

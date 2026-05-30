@@ -12,13 +12,13 @@ from conftest import (
     target_profile,
 )
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import BootOverrides, RootfsOverrides, RootfsProfile, TargetProfile
-from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore
-from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
-from linux_debug_mcp.providers.libvirt_qemu import BootExecutionResult, ProviderBootError
-from linux_debug_mcp.seams.target import TargetKey
-from linux_debug_mcp.server import target_boot_handler
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import BootOverrides, RootfsOverrides, RootfsProfile, TargetProfile
+from kdive.coordination.admission import AdmissionService, SnapshotStore
+from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
+from kdive.providers.libvirt_qemu import BootExecutionResult, ProviderBootError
+from kdive.seams.target import TargetKey
+from kdive.server import target_boot_handler
 
 
 def boot(
@@ -190,7 +190,7 @@ def test_target_boot_running_state_returns_failure_while_lock_active(tmp_path: P
             step_name="boot",
             status=StepStatus.RUNNING,
             summary="target boot running",
-            details={"domain": "mcp-linux-debug-dev"},
+            details={"domain": "kdive-dev"},
         ),
     )
 
@@ -200,7 +200,7 @@ def test_target_boot_running_state_returns_failure_while_lock_active(tmp_path: P
     assert response.ok is False
     assert response.error is not None
     assert response.error.category == "infrastructure_failure"
-    assert response.error.details["domain"] == "mcp-linux-debug-dev"
+    assert response.error.details["domain"] == "kdive-dev"
     assert provider.plans == []
 
 
@@ -444,7 +444,7 @@ def test_target_boot_stale_running_is_not_marked_failed_when_target_lock_unavail
     )
     store.record_step_result("run-abc123", old_running)
 
-    with store.target_lock("mcp-linux-debug-dev"):
+    with store.target_lock("kdive-dev"):
         response = boot(artifact_root, tmp_path)
 
     manifest = store.load_manifest("run-abc123")

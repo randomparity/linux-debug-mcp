@@ -4,24 +4,24 @@ from pathlib import Path
 from conftest import NoopBuildRunner as _NoopBuildRunner
 from conftest import make_source_tree
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import (
     BootOverrides,
     BuildOverrides,
     RootfsProfile,
     TargetProfile,
 )
-from linux_debug_mcp.config import (
+from kdive.config import (
     TestCommand as _TestCommand,
 )
-from linux_debug_mcp.config import (
+from kdive.config import (
     TestSuiteProfile as _TestSuiteProfile,
 )
-from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, StepStatus, ToolResponse
-from linux_debug_mcp.providers.libvirt_qemu import BootExecutionResult
-from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
-from linux_debug_mcp.providers.local_ssh_tests import TestExecutionResult as _TestExecutionResult
-from linux_debug_mcp.server import (
+from kdive.domain import ArtifactRef, ErrorCategory, StepStatus, ToolResponse
+from kdive.providers.libvirt_qemu import BootExecutionResult
+from kdive.providers.local_kernel_build import LocalKernelBuildProvider
+from kdive.providers.local_ssh_tests import TestExecutionResult as _TestExecutionResult
+from kdive.server import (
     create_run_handler,
     kernel_build_handler,
     target_boot_handler,
@@ -41,21 +41,21 @@ def failure(category: ErrorCategory, message: str, *, run_id: str = "run-abc123"
 def test_workflow_runs_build_boot_tests_and_collects(tmp_path: Path, monkeypatch) -> None:
     calls: list[str] = []
 
-    monkeypatch.setattr("linux_debug_mcp.server.create_run_handler", lambda **kwargs: success("created"))
+    monkeypatch.setattr("kdive.server.create_run_handler", lambda **kwargs: success("created"))
     monkeypatch.setattr(
-        "linux_debug_mcp.server.kernel_build_handler",
+        "kdive.server.kernel_build_handler",
         lambda **kwargs: calls.append("build") or success("built"),
     )
     monkeypatch.setattr(
-        "linux_debug_mcp.server.target_boot_handler",
+        "kdive.server.target_boot_handler",
         lambda **kwargs: calls.append("boot") or success("booted"),
     )
     monkeypatch.setattr(
-        "linux_debug_mcp.server.target_run_tests_handler",
+        "kdive.server.target_run_tests_handler",
         lambda **kwargs: calls.append("tests") or success("tested"),
     )
     monkeypatch.setattr(
-        "linux_debug_mcp.server.artifacts_collect_handler",
+        "kdive.server.artifacts_collect_handler",
         lambda **kwargs: calls.append("collect") or success("collected"),
     )
 
@@ -75,13 +75,13 @@ def test_workflow_runs_build_boot_tests_and_collects(tmp_path: Path, monkeypatch
 def test_workflow_collects_and_returns_build_failure(tmp_path: Path, monkeypatch) -> None:
     calls: list[str] = []
 
-    monkeypatch.setattr("linux_debug_mcp.server.create_run_handler", lambda **kwargs: success("created"))
+    monkeypatch.setattr("kdive.server.create_run_handler", lambda **kwargs: success("created"))
     monkeypatch.setattr(
-        "linux_debug_mcp.server.kernel_build_handler",
+        "kdive.server.kernel_build_handler",
         lambda **kwargs: calls.append("build") or failure(ErrorCategory.BUILD_FAILURE, "build failed"),
     )
     monkeypatch.setattr(
-        "linux_debug_mcp.server.artifacts_collect_handler",
+        "kdive.server.artifacts_collect_handler",
         lambda **kwargs: calls.append("collect") or success("collected"),
     )
 
@@ -103,21 +103,21 @@ def test_workflow_collects_and_returns_build_failure(tmp_path: Path, monkeypatch
 def test_workflow_collects_after_test_failure(tmp_path: Path, monkeypatch) -> None:
     calls: list[str] = []
 
-    monkeypatch.setattr("linux_debug_mcp.server.create_run_handler", lambda **kwargs: success("created"))
+    monkeypatch.setattr("kdive.server.create_run_handler", lambda **kwargs: success("created"))
     monkeypatch.setattr(
-        "linux_debug_mcp.server.kernel_build_handler",
+        "kdive.server.kernel_build_handler",
         lambda **kwargs: calls.append("build") or success("built"),
     )
     monkeypatch.setattr(
-        "linux_debug_mcp.server.target_boot_handler",
+        "kdive.server.target_boot_handler",
         lambda **kwargs: calls.append("boot") or success("booted"),
     )
     monkeypatch.setattr(
-        "linux_debug_mcp.server.target_run_tests_handler",
+        "kdive.server.target_run_tests_handler",
         lambda **kwargs: calls.append("tests") or failure(ErrorCategory.TEST_FAILURE, "tests failed"),
     )
     monkeypatch.setattr(
-        "linux_debug_mcp.server.artifacts_collect_handler",
+        "kdive.server.artifacts_collect_handler",
         lambda **kwargs: calls.append("collect") or success("collected"),
     )
 
@@ -186,15 +186,15 @@ def test_workflow_existing_run_uses_manifest_test_suite_when_omitted(tmp_path: P
     assert created.ok is True
 
     captured_tests: dict[str, object] = {}
-    monkeypatch.setattr("linux_debug_mcp.server.kernel_build_handler", lambda **kwargs: success("built"))
-    monkeypatch.setattr("linux_debug_mcp.server.target_boot_handler", lambda **kwargs: success("booted"))
+    monkeypatch.setattr("kdive.server.kernel_build_handler", lambda **kwargs: success("built"))
+    monkeypatch.setattr("kdive.server.target_boot_handler", lambda **kwargs: success("booted"))
 
     def fake_run_tests(**kwargs: object) -> ToolResponse:
         captured_tests.update(kwargs)
         return success("tested")
 
-    monkeypatch.setattr("linux_debug_mcp.server.target_run_tests_handler", fake_run_tests)
-    monkeypatch.setattr("linux_debug_mcp.server.artifacts_collect_handler", lambda **kwargs: success("collected"))
+    monkeypatch.setattr("kdive.server.target_run_tests_handler", fake_run_tests)
+    monkeypatch.setattr("kdive.server.artifacts_collect_handler", lambda **kwargs: success("collected"))
 
     response = workflow_build_boot_test_handler(
         artifact_root=artifact_root,
@@ -217,21 +217,21 @@ def test_workflow_creates_missing_supplied_run_id_exactly(tmp_path: Path, monkey
         captured.update(kwargs)
         return success("created", run_id=str(kwargs["run_id"]))
 
-    monkeypatch.setattr("linux_debug_mcp.server.create_run_handler", fake_create_run)
+    monkeypatch.setattr("kdive.server.create_run_handler", fake_create_run)
     monkeypatch.setattr(
-        "linux_debug_mcp.server.kernel_build_handler",
+        "kdive.server.kernel_build_handler",
         lambda **kwargs: calls.append("build") or success("built", run_id="run-explicit"),
     )
     monkeypatch.setattr(
-        "linux_debug_mcp.server.target_boot_handler",
+        "kdive.server.target_boot_handler",
         lambda **kwargs: calls.append("boot") or success("booted", run_id="run-explicit"),
     )
     monkeypatch.setattr(
-        "linux_debug_mcp.server.target_run_tests_handler",
+        "kdive.server.target_run_tests_handler",
         lambda **kwargs: calls.append("tests") or success("tested", run_id="run-explicit"),
     )
     monkeypatch.setattr(
-        "linux_debug_mcp.server.artifacts_collect_handler",
+        "kdive.server.artifacts_collect_handler",
         lambda **kwargs: calls.append("collect") or success("collected", run_id="run-explicit"),
     )
 
@@ -350,9 +350,9 @@ def _make_e2e_profiles(
     target = TargetProfile(
         name="local-qemu",
         architecture="x86_64",
-        target_ref="mcp-linux-debug-dev",
+        target_ref="kdive-dev",
         managed_domain=True,
-        managed_domain_prefix="mcp-linux-debug-",
+        managed_domain_prefix="kdive-",
         libvirt_uri="qemu:///system",
     )
     rootfs = RootfsProfile(

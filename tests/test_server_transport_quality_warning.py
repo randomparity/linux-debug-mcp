@@ -14,9 +14,9 @@ from test_server_debug_core_ops import (
     _start,
 )
 
-from linux_debug_mcp.providers.gdb_mi import GdbMiSessionRegistry
-from linux_debug_mcp.seams.target import BreakHint, ConsoleKind, PlatformMetadata
-from linux_debug_mcp.server import is_lossy_out_of_band
+from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.seams.target import BreakHint, ConsoleKind, PlatformMetadata
+from kdive.server import is_lossy_out_of_band
 
 PLATFORM_HVC = PlatformMetadata(
     console_kind=ConsoleKind.HVC,

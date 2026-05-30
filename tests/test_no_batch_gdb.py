@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parent.parent / "src" / "linux_debug_mcp"
+SRC = Path(__file__).resolve().parent.parent / "src" / "kdive"
 
 
 def test_no_batch_gdb_invocation_remains() -> None:

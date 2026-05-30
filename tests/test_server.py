@@ -2,12 +2,12 @@ from pathlib import Path
 
 from conftest import make_source_tree
 
-from linux_debug_mcp import server
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import BootOverrides, BuildOverrides, RootfsProfile, TargetProfile
-from linux_debug_mcp.domain import ArtifactRef, StepResult, StepStatus
-from linux_debug_mcp.prereqs.checks import PortProbeResult
-from linux_debug_mcp.server import (
+from kdive import server
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import BootOverrides, BuildOverrides, RootfsProfile, TargetProfile
+from kdive.domain import ArtifactRef, StepResult, StepStatus
+from kdive.prereqs.checks import PortProbeResult
+from kdive.server import (
     DEFAULT_TEST_SUITES,
     create_app,
     create_run_handler,
@@ -491,8 +491,8 @@ def test_build_reads_resolved_profile_not_global(tmp_path):
 
 
 def test_build_profile_from_manifest_v1_fallback():
-    from linux_debug_mcp.artifacts.manifest import RunManifest
-    from linux_debug_mcp.domain import RunRequest
+    from kdive.artifacts.manifest import RunManifest
+    from kdive.domain import RunRequest
 
     manifest = RunManifest.create(
         run_id="r",
@@ -508,7 +508,7 @@ def test_build_profile_from_manifest_v1_fallback():
 
 
 def test_overrides_from_tool_args_builds_models():
-    from linux_debug_mcp.config import BootOverrides, BuildOverrides
+    from kdive.config import BootOverrides, BuildOverrides
 
     build, boot = server._overrides_from_tool_args(
         kernel_args=["dhash_entries=1"], rootfs_source=None, make_variables={"CC": "clang"}, config_lines=None
@@ -583,7 +583,7 @@ def test_introspect_tool_is_registered() -> None:
 
 
 def test_default_minimal_rootfs_is_builder_copy_on_write() -> None:
-    from linux_debug_mcp.server import DEFAULT_ROOTFS_PROFILES
+    from kdive.server import DEFAULT_ROOTFS_PROFILES
 
     minimal = DEFAULT_ROOTFS_PROFILES["minimal"]
     assert minimal.source_kind == "builder"

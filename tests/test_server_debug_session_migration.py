@@ -13,26 +13,26 @@ from pathlib import Path
 from _layer4_fakes import FakeQemuTransport, build_txn
 from conftest import FakeMiEngine, FakeTestProvider, kernel_provenance_details, rootfs, write_vmlinux_with_build_id
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import DebugProfile, RootfsProfile
-from linux_debug_mcp.coordination.admission import AdmissionService
-from linux_debug_mcp.coordination.registry import RecoveryTombstone, SessionRegistry
-from linux_debug_mcp.coordination.transaction import TransportTransaction
-from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from linux_debug_mcp.providers.gdb_mi import GdbMiSessionRegistry
-from linux_debug_mcp.seams.target import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import DebugProfile, RootfsProfile
+from kdive.coordination.admission import AdmissionService
+from kdive.coordination.registry import RecoveryTombstone, SessionRegistry
+from kdive.coordination.transaction import TransportTransaction
+from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
+from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.seams.target import (
     BreakHint,
     ConsoleKind,
     PlatformMetadata,
     TargetKey,
     publish_ready_snapshot,
 )
-from linux_debug_mcp.server import (
+from kdive.server import (
     debug_end_session_handler,
     debug_start_session_handler,
     target_run_tests_handler,
 )
-from linux_debug_mcp.transport.base import ExecutionState, LineRole, TransportRef
+from kdive.transport.base import ExecutionState, LineRole, TransportRef
 
 # build_txn seeds the snapshot for TargetKey("local-qemu", "run-1"); use that run_id so the
 # handler's target_key = TargetKey("local-qemu", run_id) matches.
@@ -323,8 +323,8 @@ def test_debug_open_request_carries_gdbstub_endpoint_in_transport_opts() -> None
     # The qemu-gdbstub transport reads host/port from transport_ref.opts (see its unit test), so the
     # open-request builder must populate opts — not only target_ref — or a real attach raises
     # KeyError: 'port'. This guards the live debug-attach path the gated integration test cannot in CI.
-    from linux_debug_mcp.coordination.admission import SnapshotStore
-    from linux_debug_mcp.server import _debug_open_request
+    from kdive.coordination.admission import SnapshotStore
+    from kdive.server import _debug_open_request
 
     admission = AdmissionService(SnapshotStore())
     publish_ready_snapshot(

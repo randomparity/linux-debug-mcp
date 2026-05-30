@@ -6,20 +6,20 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.domain import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.domain import (
     DebugIntrospectFromVmcoreHelperRequest,
     DebugIntrospectFromVmcoreRequest,
     ErrorCategory,
     RunRequest,
     StepStatus,
 )
-from linux_debug_mcp.providers.local_ssh_tests import SshCommandResult
-from linux_debug_mcp.server import (
+from kdive.providers.local_ssh_tests import SshCommandResult
+from kdive.server import (
     debug_introspect_from_vmcore_handler,
     debug_introspect_from_vmcore_helper_handler,
 )
-from linux_debug_mcp.symbols import BuildIdReadError
+from kdive.symbols import BuildIdReadError
 
 VALID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
@@ -346,14 +346,14 @@ def test_helper_happy_path(tmp_path: Path) -> None:
 
 
 def test_operations_in_allowlist() -> None:
-    from linux_debug_mcp.config import ALLOWED_DEBUG_OPERATIONS
+    from kdive.config import ALLOWED_DEBUG_OPERATIONS
 
     assert "debug.introspect.from_vmcore" in ALLOWED_DEBUG_OPERATIONS
     assert "debug.introspect.from_vmcore_helper" in ALLOWED_DEBUG_OPERATIONS
 
 
 def test_capability_advertises_vmcore_ops_concurrent_safe() -> None:
-    from linux_debug_mcp.providers.local_drgn_introspect import local_drgn_introspect_capability
+    from kdive.providers.local_drgn_introspect import local_drgn_introspect_capability
 
     cap = local_drgn_introspect_capability()
     assert "debug.introspect.from_vmcore" in cap.operations
@@ -370,7 +370,7 @@ def test_capability_advertises_vmcore_ops_concurrent_safe() -> None:
 
 
 def test_tools_registered() -> None:
-    from linux_debug_mcp.server import create_app
+    from kdive.server import create_app
 
     names = set(create_app()._tool_manager._tools)
     assert "debug.introspect.from_vmcore" in names

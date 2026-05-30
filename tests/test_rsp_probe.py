@@ -1,8 +1,8 @@
 import socket
 import threading
 
-from linux_debug_mcp.transport.bounded import Deadline
-from linux_debug_mcp.transport.rsp_probe import rsp_frame, rsp_reachable
+from kdive.transport.bounded import Deadline
+from kdive.transport.rsp_probe import rsp_frame, rsp_reachable
 
 
 def _serve_once(handler) -> tuple[socket.socket, int]:
@@ -26,7 +26,7 @@ def test_rsp_frame_computes_checksum():
 
 
 def test_valid_rsp_frame_accepts_well_formed_and_rejects_malformed():
-    from linux_debug_mcp.transport.rsp_probe import valid_rsp_frame
+    from kdive.transport.rsp_probe import valid_rsp_frame
 
     assert valid_rsp_frame(b"+" + rsp_frame("T05")) is True
     assert valid_rsp_frame(b"+") is False  # bare ack, no packet

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from linux_debug_mcp.domain import PrerequisiteStatus
-from linux_debug_mcp.prereqs.checks import check_prerequisites
+from kdive.domain import PrerequisiteStatus
+from kdive.prereqs.checks import check_prerequisites
 
 
 class _FakeRunner:

@@ -1,6 +1,6 @@
 # ADR 0026 — `debug.postmortem.crash`: host-side build-id reader, per-command output-redirection framing, raw-passthrough parsers
 
-**Status:** Accepted (2026-05-30) · **Issue:** #92 · **Epic:** #9 · **Affects:** `src/linux_debug_mcp/symbols/vmcore_build_id.py` (new), `src/linux_debug_mcp/postmortem/` (new package: `crash_batch.py`, `crash_parsers.py`), `src/linux_debug_mcp/providers/local_crash_postmortem.py` (new), `src/linux_debug_mcp/server.py` (`_execute_postmortem_crash_call`, `debug_postmortem_crash_handler`, tool registration), `src/linux_debug_mcp/config.py` (`ALLOWED_DEBUG_OPERATIONS` + caps), `src/linux_debug_mcp/prereqs/checks.py` (`crash` check)
+**Status:** Accepted (2026-05-30) · **Issue:** #92 · **Epic:** #9 · **Affects:** `src/kdive/symbols/vmcore_build_id.py` (new), `src/kdive/postmortem/` (new package: `crash_batch.py`, `crash_parsers.py`), `src/kdive/providers/local_crash_postmortem.py` (new), `src/kdive/server.py` (`_execute_postmortem_crash_call`, `debug_postmortem_crash_handler`, tool registration), `src/kdive/config.py` (`ALLOWED_DEBUG_OPERATIONS` + caps), `src/kdive/prereqs/checks.py` (`crash` check)
 
 ## Context
 
@@ -116,7 +116,7 @@ uniformly before returning/persisting, keeping redaction a single responsibility
 
 `crash_batch.py` (command-script build + transcript split) and `crash_parsers.py`
 (parsers + dispatch) are pure, side-effect-free modules in a new
-`src/linux_debug_mcp/postmortem/` package — the home for this and the sibling
+`src/kdive/postmortem/` package — the home for this and the sibling
 postmortem tools (#93–#95). The build-id reader lives in `symbols/` beside
 `build_id.py` because ADR 0008 keeps all symbol/provenance logic in that one leaf. The
 `server.py` orchestrator (`_execute_postmortem_crash_call`) and the capability factory
@@ -229,5 +229,5 @@ spec `docs/superpowers/specs/2026-05-30-debug-postmortem-crash-design.md`;
 interface contract `docs/specs/interface-contracts.md` §4.2, §5.6 rule 3, §3.3;
 ADR 0010 (offline execution model, host-authoritative build-id, never-gated),
 ADR 0008 (symbols package leaf), ADR 0011 (write-mode N/A to a core);
-`src/linux_debug_mcp/symbols/build_id.py` (`read_elf_build_id`),
-`src/linux_debug_mcp/server.py` (`_execute_vmcore_introspect_call`).
+`src/kdive/symbols/build_id.py` (`read_elf_build_id`),
+`src/kdive/server.py` (`_execute_vmcore_introspect_call`).

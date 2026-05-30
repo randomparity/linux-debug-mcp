@@ -13,13 +13,13 @@ from _layer4_fakes import (
     make_request,
 )
 
-from linux_debug_mcp.coordination.admission import AdmissionError, TargetSnapshot
-from linux_debug_mcp.coordination.endpoint_safety import EndpointSafetyError
-from linux_debug_mcp.coordination.lease import ConsoleLeaseManager, LeaseOwner
-from linux_debug_mcp.coordination.registry import RecoveryTombstone, SessionRegistry
-from linux_debug_mcp.seams.guard import GuardConflict, InProcessStopCapableGuard
-from linux_debug_mcp.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleEvent, LifecycleKind
-from linux_debug_mcp.transport.base import RecordState, TcpEndpoint
+from kdive.coordination.admission import AdmissionError, TargetSnapshot
+from kdive.coordination.endpoint_safety import EndpointSafetyError
+from kdive.coordination.lease import ConsoleLeaseManager, LeaseOwner
+from kdive.coordination.registry import RecoveryTombstone, SessionRegistry
+from kdive.seams.guard import GuardConflict, InProcessStopCapableGuard
+from kdive.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleEvent, LifecycleKind
+from kdive.transport.base import RecordState, TcpEndpoint
 
 
 def test_open_happy_path_returns_loopback_session(tmp_path):
@@ -367,9 +367,9 @@ def test_delete_record_session_id_fence_skips_on_mismatch(tmp_path):
     path."""
     from datetime import UTC, datetime
 
-    from linux_debug_mcp.transport.base import ExecutionState as ES
-    from linux_debug_mcp.transport.base import TransportSession as TS
-    from linux_debug_mcp.transport.base import new_session_id
+    from kdive.transport.base import ExecutionState as ES
+    from kdive.transport.base import TransportSession as TS
+    from kdive.transport.base import new_session_id
 
     fresh_id = new_session_id()
     stale_id = new_session_id()

@@ -32,4 +32,4 @@ The existing technique, `QemuGdbstubProvider._controller_identity` (qemu_gdbstub
 
 ## References
 
-design §6.1 (reap-safety + listener-identity verification), §4.7 (start-time fingerprint reuse); the existing `_controller_identity` in `src/linux_debug_mcp/providers/qemu_gdbstub.py`; the two failing tests in `tests/test_qemu_gdbstub_provider.py`.
+design §6.1 (reap-safety + listener-identity verification), §4.7 (start-time fingerprint reuse); the existing `_controller_identity` in `src/kdive/providers/qemu_gdbstub.py`; the two failing tests in `tests/test_qemu_gdbstub_provider.py`.

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from linux_debug_mcp.domain import ArtifactRef, StepResult, StepStatus
-from linux_debug_mcp.server import _capture_kernel_provenance
+from kdive.domain import ArtifactRef, StepResult, StepStatus
+from kdive.server import _capture_kernel_provenance
 
 FULL = "a" * 40
 

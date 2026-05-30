@@ -2,12 +2,12 @@ import threading
 
 import pytest
 
-from linux_debug_mcp.seams.guard import (
+from kdive.seams.guard import (
     GuardConflict,
     InProcessStopCapableGuard,
     StopCapableGuard,
 )
-from linux_debug_mcp.seams.target import TargetKey
+from kdive.seams.target import TargetKey
 
 
 def _key(target_id: str = "run-1", provisioner: str = "local-qemu") -> TargetKey:

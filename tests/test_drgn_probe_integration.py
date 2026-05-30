@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from linux_debug_mcp.prereqs.drgn_probe import (
+from kdive.prereqs.drgn_probe import (
     PROBE_SCRIPT,
     USABLE,
     build_probe_checks,

@@ -1,8 +1,8 @@
 # Tool Reference
 
-Linux Debug MCP exposes local kernel build, boot, smoke-test, artifact, and
+KDIVE exposes local kernel build, boot, smoke-test, artifact, and
 QEMU gdbstub debug tools over stdio MCP. The default artifact root is
-`.linux-debug-mcp/runs`.
+`.kdive/runs`.
 
 Use `providers.list` and `host.check_prerequisites` before choosing a workflow.
 Client setup is covered in [Client Setup](client-setup.md), and Fedora
@@ -41,7 +41,7 @@ remaining checks still run.
 {
   "tool": "host.check_prerequisites",
   "arguments": {
-    "artifact_root": ".linux-debug-mcp/runs",
+    "artifact_root": ".kdive/runs",
     "source_path": "/home/dave/src/linux",
     "enable_libvirt_check": true,
     "build_profile": "x86_64-debug",
@@ -168,7 +168,7 @@ separately when guest command coverage is needed.
 ## Artifact Layout
 
 Each run is stored under `<artifact-root>/<run-id>/`. With the default artifact
-root, that is `.linux-debug-mcp/runs/<run-id>/`.
+root, that is `.kdive/runs/<run-id>/`.
 
 Important paths include:
 

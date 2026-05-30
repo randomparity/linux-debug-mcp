@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from linux_debug_mcp.seams.process_identity import (
+from kdive.seams.process_identity import (
     ProcessIdentity,
     ProcessIdentityProbe,
     ProcProcessIdentityProbe,

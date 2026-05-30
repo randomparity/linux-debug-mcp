@@ -28,11 +28,11 @@ from conftest import (
     write_vmlinux_with_build_id,
 )
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import DebugProfile
-from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore
-from linux_debug_mcp.coordination.registry import SessionRegistry
-from linux_debug_mcp.domain import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import DebugProfile
+from kdive.coordination.admission import AdmissionService, SnapshotStore
+from kdive.coordination.registry import SessionRegistry
+from kdive.domain import (
     ArtifactRef,
     ErrorCategory,
     RunRequest,
@@ -40,19 +40,19 @@ from linux_debug_mcp.domain import (
     StepStatus,
     ToolResponse,
 )
-from linux_debug_mcp.providers.gdb_mi import GdbMiSessionRegistry
-from linux_debug_mcp.seams.target import (
+from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.seams.target import (
     BreakHint,
     ConsoleKind,
     PlatformMetadata,
     TargetKey,
     publish_ready_snapshot,
 )
-from linux_debug_mcp.server import (
+from kdive.server import (
     workflow_build_boot_debug_handler,
     workflow_build_boot_test_handler,
 )
-from linux_debug_mcp.transport.base import (
+from kdive.transport.base import (
     ExecutionState,
     LineRole,
     RecordState,
@@ -160,14 +160,14 @@ def test_workflow_run_tests_rejects_when_target_halted(tmp_path: Path, monkeypat
     # Provide a default rootfs profile via the run_tests handler's monkey-patched DEFAULT registry so
     # the real handler can resolve the manifest's "minimal" profile to something testable.
     monkeypatch.setattr(
-        "linux_debug_mcp.server.DEFAULT_ROOTFS_PROFILES",
+        "kdive.server.DEFAULT_ROOTFS_PROFILES",
         {"minimal": rootfs(tmp_path)},
     )
     # The real test provider would actually attempt SSH; replace its plan_tests/execute_tests with a
     # passing FakeTestProvider so the gate is the only thing that can reject. The handler instantiates
     # LocalSshTestProvider() when provider is None, so swap the constructor.
     monkeypatch.setattr(
-        "linux_debug_mcp.server.LocalSshTestProvider",
+        "kdive.server.LocalSshTestProvider",
         lambda: FakeTestProvider(),
     )
 
@@ -274,7 +274,7 @@ def test_workflow_debug_acquires_guard_and_writes_halted_record(tmp_path: Path, 
     # Profile registry: the workflow uses DEFAULT_DEBUG_PROFILES; the existing default already
     # contains qemu-gdbstub-default, but pin via monkeypatch for isolation.
     monkeypatch.setattr(
-        "linux_debug_mcp.server.DEFAULT_DEBUG_PROFILES",
+        "kdive.server.DEFAULT_DEBUG_PROFILES",
         {"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
     )
 

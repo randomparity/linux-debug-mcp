@@ -1,6 +1,6 @@
 import pytest
 
-from linux_debug_mcp.server import _ssh_host_is_unset_or_loopback, _validated_guest_ip
+from kdive.server import _ssh_host_is_unset_or_loopback, _validated_guest_ip
 
 
 @pytest.mark.parametrize(

@@ -48,7 +48,7 @@ from hypothesis import HealthCheck, assume, note, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 
-from linux_debug_mcp.coordination.admission import (
+from kdive.coordination.admission import (
     AdmissionError,
     AdmissionHandle,
     AdmissionOp,
@@ -58,19 +58,19 @@ from linux_debug_mcp.coordination.admission import (
     SnapshotStore,
     TargetSnapshot,
 )
-from linux_debug_mcp.seams.guard import GuardConflict, InProcessStopCapableGuard
-from linux_debug_mcp.seams.lifecycle import (
+from kdive.seams.guard import GuardConflict, InProcessStopCapableGuard
+from kdive.seams.lifecycle import (
     InProcessLifecycleDispatcher,
     LifecycleEvent,
     LifecycleKind,
 )
-from linux_debug_mcp.seams.target import (
+from kdive.seams.target import (
     ConsoleKind,
     PlatformMetadata,
     TargetKey,
     TargetState,
 )
-from linux_debug_mcp.transport.base import ExecutionState, LineRole, OpenRequest, TransportRef
+from kdive.transport.base import ExecutionState, LineRole, OpenRequest, TransportRef
 
 KEY = TargetKey(provisioner="local-qemu", target_id="exec-state-machine")
 PLATFORM = PlatformMetadata(

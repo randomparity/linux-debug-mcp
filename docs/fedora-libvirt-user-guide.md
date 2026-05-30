@@ -4,10 +4,10 @@ This guide walks through preparing a Fedora host and running the current
 `target.boot` libvirt pilot. It assumes:
 
 - Fedora 43 Workstation or a current Fedora release with modular libvirt daemons.
-- The repository is checked out at `~/src/linux-debug-mcp`.
+- The repository is checked out at `~/src/kdive`.
 - A Linux source tree already exists at `~/src/linux`.
 - The libvirt boot domain is dedicated to this project and starts with
-  `mcp-linux-debug-`.
+  `kdive-`.
 
 The current pilot boots an x86_64 kernel with direct kernel boot, attaches a
 disk-image rootfs as `/dev/vda`, waits for a serial readiness marker on
@@ -91,7 +91,7 @@ For a single-user development host, create this rule after replacing `dave` with
 the account that will run the MCP server:
 
 ```bash
-sudo tee /etc/polkit-1/rules.d/80-linux-debug-mcp-libvirt.rules >/dev/null <<'EOF'
+sudo tee /etc/polkit-1/rules.d/80-kdive-libvirt.rules >/dev/null <<'EOF'
 polkit.addRule(function(action, subject) {
   if (action.id == "org.libvirt.unix.manage" &&
       subject.user == "dave") {
@@ -109,21 +109,21 @@ virsh -c qemu:///system list --all
 ```
 
 If system access is not needed, prefer `qemu:///session` and set
-`LINUX_DEBUG_MCP_LIBVIRT_URI` to `qemu:///session`.
+`KDIVE_LIBVIRT_URI` to `qemu:///session`.
 
 ## 3. Prepare The Python Development Environment
 
 From the MCP server checkout:
 
 ```bash
-cd ~/src/linux-debug-mcp
+cd ~/src/kdive
 just setup
 ```
 
 If `just` is not installed, use the direct editable install:
 
 ```bash
-cd ~/src/linux-debug-mcp
+cd ~/src/kdive
 uv venv --allow-existing
 uv pip install -e '.[test,dev]'
 ```
@@ -133,10 +133,10 @@ Run the prerequisite check with libvirt enabled:
 ```bash
 uv run python - <<'PY'
 from pathlib import Path
-from linux_debug_mcp.server import prerequisites_handler
+from kdive.server import prerequisites_handler
 
 response = prerequisites_handler(
-    artifact_root=Path.home() / ".local/state/linux-debug-mcp/runs",
+    artifact_root=Path.home() / ".local/state/kdive/runs",
     source_path=str(Path.home() / "src/linux"),
     enable_libvirt_check=True,
 )
@@ -208,9 +208,9 @@ Provide a qcow2 disk image that can boot as `/dev/vda` and print a readiness
 marker on the serial console. The guide uses this example path:
 
 ```bash
-sudo mkdir -p /var/lib/linux-debug-mcp/rootfs
-sudo chown "$USER":"$USER" /var/lib/linux-debug-mcp/rootfs
-export LINUX_DEBUG_MCP_ROOTFS=/var/lib/linux-debug-mcp/rootfs/minimal.qcow2
+sudo mkdir -p /var/lib/kdive/rootfs
+sudo chown "$USER":"$USER" /var/lib/kdive/rootfs
+export KDIVE_ROOTFS=/var/lib/kdive/rootfs/minimal.qcow2
 ```
 
 ### One command: `just rootfs`
@@ -219,14 +219,14 @@ The fastest path is the bundled builder, which produces the marker + sshd +
 authorized-key image at the default path:
 
 ```bash
-sudo mkdir -p /var/lib/linux-debug-mcp/rootfs
-sudo chown "$USER":"$USER" /var/lib/linux-debug-mcp/rootfs
+sudo mkdir -p /var/lib/kdive/rootfs
+sudo chown "$USER":"$USER" /var/lib/kdive/rootfs
 just rootfs
 ```
 
-Override defaults via environment: `LINUX_DEBUG_MCP_ROOTFS` (output path),
-`LINUX_DEBUG_MCP_ROOTFS_RELEASEVER`, `LINUX_DEBUG_MCP_ROOTFS_SIZE`,
-`LINUX_DEBUG_MCP_ROOTFS_SSH_USER`, `LINUX_DEBUG_MCP_ROOTFS_AUTHORIZED_KEY`.
+Override defaults via environment: `KDIVE_ROOTFS` (output path),
+`KDIVE_ROOTFS_RELEASEVER`, `KDIVE_ROOTFS_SIZE`,
+`KDIVE_ROOTFS_SSH_USER`, `KDIVE_ROOTFS_AUTHORIZED_KEY`.
 
 The default `minimal` rootfs profile is `source_kind="builder"` and
 `mutability="copy_on_write"`: a missing image makes `target.boot` fail with a
@@ -247,7 +247,7 @@ If you already have a compatible rootfs image, copy it to that path and make
 sure it writes this exact marker to `ttyS0`:
 
 ```text
-linux-debug-mcp-ready
+kdive-ready
 ```
 
 To create a representative Fedora rootfs for the pilot, build a minimal
@@ -267,15 +267,15 @@ sudo tee "${ROOTFS_WORK}/etc/fstab" >/dev/null <<'EOF'
 /dev/vda / ext4 defaults 0 1
 EOF
 
-sudo tee "${ROOTFS_WORK}/etc/systemd/system/linux-debug-mcp-ready.service" >/dev/null <<'EOF'
+sudo tee "${ROOTFS_WORK}/etc/systemd/system/kdive-ready.service" >/dev/null <<'EOF'
 [Unit]
-Description=Signal linux-debug-mcp serial readiness
+Description=Signal kdive serial readiness
 After=dev-ttyS0.device
 Wants=dev-ttyS0.device
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'echo linux-debug-mcp-ready > /dev/ttyS0'
+ExecStart=/bin/sh -c 'echo kdive-ready > /dev/ttyS0'
 RemainAfterExit=yes
 
 [Install]
@@ -283,38 +283,38 @@ WantedBy=multi-user.target
 EOF
 
 sudo mkdir -p "${ROOTFS_WORK}/etc/systemd/system/multi-user.target.wants"
-sudo ln -sf ../linux-debug-mcp-ready.service \
-  "${ROOTFS_WORK}/etc/systemd/system/multi-user.target.wants/linux-debug-mcp-ready.service"
+sudo ln -sf ../kdive-ready.service \
+  "${ROOTFS_WORK}/etc/systemd/system/multi-user.target.wants/kdive-ready.service"
 
 sudo virt-make-fs \
   --format=qcow2 \
   --type=ext4 \
   --size=2G \
   "${ROOTFS_WORK}" \
-  "${LINUX_DEBUG_MCP_ROOTFS}"
-sudo chown "$USER":"$USER" "${LINUX_DEBUG_MCP_ROOTFS}"
+  "${KDIVE_ROOTFS}"
+sudo chown "$USER":"$USER" "${KDIVE_ROOTFS}"
 sudo rm -rf "${ROOTFS_WORK}"
 ```
 
 Verify the image exists before running the integration test:
 
 ```bash
-qemu-img info "${LINUX_DEBUG_MCP_ROOTFS}"
+qemu-img info "${KDIVE_ROOTFS}"
 ```
 
 If you use `qemu:///system` with SELinux enforcing, label the rootfs directory
 for libvirt image access:
 
 ```bash
-sudo semanage fcontext -a -t virt_image_t '/var/lib/linux-debug-mcp/rootfs(/.*)?'
-sudo restorecon -Rv /var/lib/linux-debug-mcp/rootfs
+sudo semanage fcontext -a -t virt_image_t '/var/lib/kdive/rootfs(/.*)?'
+sudo restorecon -Rv /var/lib/kdive/rootfs
 ```
 
 If `semanage` reports that the rule already exists, update it instead:
 
 ```bash
-sudo semanage fcontext -m -t virt_image_t '/var/lib/linux-debug-mcp/rootfs(/.*)?'
-sudo restorecon -Rv /var/lib/linux-debug-mcp/rootfs
+sudo semanage fcontext -m -t virt_image_t '/var/lib/kdive/rootfs(/.*)?'
+sudo restorecon -Rv /var/lib/kdive/rootfs
 ```
 
 This rootfs recipe is a development smoke image, not a production guest. The
@@ -338,13 +338,13 @@ and the allowed SSH options before running `target.run_tests` or
 Use a dedicated domain name with the required prefix:
 
 ```bash
-export LINUX_DEBUG_MCP_DOMAIN=mcp-linux-debug-dev
+export KDIVE_DOMAIN=kdive-dev
 ```
 
 Choose the libvirt URI that works on your host:
 
 ```bash
-export LINUX_DEBUG_MCP_LIBVIRT_URI=qemu:///session
+export KDIVE_LIBVIRT_URI=qemu:///session
 ```
 
 Use `qemu:///system` only after `virsh -c qemu:///system list --all` works from
@@ -353,13 +353,13 @@ the same shell without prompting.
 Run the integration test:
 
 ```bash
-cd ~/src/linux-debug-mcp
-LINUX_DEBUG_MCP_LIBVIRT_TEST=1 \
-LINUX_DEBUG_MCP_ROOTFS="${LINUX_DEBUG_MCP_ROOTFS}" \
-LINUX_DEBUG_MCP_SOURCE=~/src/linux \
-LINUX_DEBUG_MCP_DOMAIN="${LINUX_DEBUG_MCP_DOMAIN}" \
-LINUX_DEBUG_MCP_LIBVIRT_URI="${LINUX_DEBUG_MCP_LIBVIRT_URI}" \
-LINUX_DEBUG_MCP_READINESS_MARKER=linux-debug-mcp-ready \
+cd ~/src/kdive
+KDIVE_LIBVIRT_TEST=1 \
+KDIVE_ROOTFS="${KDIVE_ROOTFS}" \
+KDIVE_SOURCE=~/src/linux \
+KDIVE_DOMAIN="${KDIVE_DOMAIN}" \
+KDIVE_LIBVIRT_URI="${KDIVE_LIBVIRT_URI}" \
+KDIVE_READINESS_MARKER=kdive-ready \
 uv run pytest tests/test_libvirt_boot_integration.py -q
 ```
 
@@ -393,21 +393,21 @@ boot can own `127.0.0.1:1234` at a time. If another process already listens on
 that port, the boot fails before mutating the domain and reports the collision
 as an infrastructure failure. Stop the other debug run or choose a different
 local endpoint for a custom target profile. For the integration test, set
-`LINUX_DEBUG_MCP_GDBSTUB_ENDPOINT=127.0.0.1:<port>` to use a different local
+`KDIVE_GDBSTUB_ENDPOINT=127.0.0.1:<port>` to use a different local
 port. Keep the host as `127.0.0.1`.
 
 Run the live gdbstub integration test with a dedicated debug domain:
 
 ```bash
-cd ~/src/linux-debug-mcp
-export LINUX_DEBUG_MCP_DEBUG_DOMAIN=mcp-linux-debug-dev-debug
-LINUX_DEBUG_MCP_LIVE_GDBSTUB=1 \
-LINUX_DEBUG_MCP_SOURCE=~/src/linux \
-LINUX_DEBUG_MCP_ROOTFS="${LINUX_DEBUG_MCP_ROOTFS}" \
-LINUX_DEBUG_MCP_DOMAIN="${LINUX_DEBUG_MCP_DEBUG_DOMAIN}" \
-LINUX_DEBUG_MCP_LIBVIRT_URI="${LINUX_DEBUG_MCP_LIBVIRT_URI}" \
-LINUX_DEBUG_MCP_GDBSTUB_ENDPOINT=127.0.0.1:1234 \
-LINUX_DEBUG_MCP_READINESS_MARKER=linux-debug-mcp-ready \
+cd ~/src/kdive
+export KDIVE_DEBUG_DOMAIN=kdive-dev-debug
+KDIVE_LIVE_GDBSTUB=1 \
+KDIVE_SOURCE=~/src/linux \
+KDIVE_ROOTFS="${KDIVE_ROOTFS}" \
+KDIVE_DOMAIN="${KDIVE_DEBUG_DOMAIN}" \
+KDIVE_LIBVIRT_URI="${KDIVE_LIBVIRT_URI}" \
+KDIVE_GDBSTUB_ENDPOINT=127.0.0.1:1234 \
+KDIVE_READINESS_MARKER=kdive-ready \
 uv run pytest tests/test_qemu_gdbstub_integration.py -q
 ```
 
@@ -438,19 +438,19 @@ manually when needed. Use the same domain variable you passed to the specific
 integration test:
 
 ```bash
-virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" destroy "${LINUX_DEBUG_MCP_DEBUG_DOMAIN:-$LINUX_DEBUG_MCP_DOMAIN}"
+virsh -c "${KDIVE_LIBVIRT_URI}" destroy "${KDIVE_DEBUG_DOMAIN:-$KDIVE_DOMAIN}"
 ```
 
 Inspect the domain XML if a run fails ownership validation:
 
 ```bash
-virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" dumpxml "${LINUX_DEBUG_MCP_DEBUG_DOMAIN:-$LINUX_DEBUG_MCP_DOMAIN}"
+virsh -c "${KDIVE_LIBVIRT_URI}" dumpxml "${KDIVE_DEBUG_DOMAIN:-$KDIVE_DOMAIN}"
 ```
 
 Remove the domain definition only if it is dedicated to this project:
 
 ```bash
-virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" undefine "${LINUX_DEBUG_MCP_DEBUG_DOMAIN:-$LINUX_DEBUG_MCP_DOMAIN}"
+virsh -c "${KDIVE_LIBVIRT_URI}" undefine "${KDIVE_DEBUG_DOMAIN:-$KDIVE_DOMAIN}"
 ```
 
 ## Troubleshooting
@@ -469,7 +469,7 @@ virsh -c qemu:///system list --all
 Check that the rootfs prints the exact marker to `ttyS0`:
 
 ```text
-linux-debug-mcp-ready
+kdive-ready
 ```
 
 Also check `logs/console.log` in the run artifacts.
@@ -478,9 +478,9 @@ Also check `logs/console.log` in the run artifacts.
 
 The provider will not mutate an existing domain unless its XML metadata matches
 the MCP provider, domain, and target profile. Use a fresh dedicated domain name
-starting with `mcp-linux-debug-`, or manually remove the old dedicated test
+starting with `kdive-`, or manually remove the old dedicated test
 domain after confirming it is safe:
 
 ```bash
-virsh -c "${LINUX_DEBUG_MCP_LIBVIRT_URI}" undefine "${LINUX_DEBUG_MCP_DOMAIN}"
+virsh -c "${KDIVE_LIBVIRT_URI}" undefine "${KDIVE_DOMAIN}"
 ```

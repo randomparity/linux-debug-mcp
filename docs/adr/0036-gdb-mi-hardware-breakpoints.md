@@ -1,7 +1,7 @@
 # ADR 0036 — gdb/MI kernel breakpoints are hardware breakpoints
 
 **Status:** Accepted (2026-05-30) · **Issue:** #119 · **Epic:** #100 · **Amends:** [0033](0033-wait-for-debugger-frozen-boot.md) · **Affects:**
-`src/linux_debug_mcp/providers/gdb_mi.py` (`GdbMiEngine.set_breakpoint` issues `-break-insert -h`).
+`src/kdive/providers/gdb_mi.py` (`GdbMiEngine.set_breakpoint` issues `-break-insert -h`).
 
 ## Context
 

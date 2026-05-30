@@ -7,7 +7,7 @@
 ## Problem
 
 Debug boot hardcodes `wait=off` on the QEMU gdbstub
-(`src/linux_debug_mcp/providers/libvirt_qemu.py`, `render_domain_xml`:
+(`src/kdive/providers/libvirt_qemu.py`, `render_domain_xml`:
 `tcp:<host>:<port>,server=on,wait=off`). With `wait=off` the guest CPU free-runs the instant QEMU
 launches, so the kernel has already executed `start_kernel` → `vfs_caches_init` → `dcache_init` long
 before `debug.start_session` connects gdb. A breakpoint set after attach can never fire on those
@@ -205,12 +205,12 @@ the guest to readiness through a debug session.
 
 ## Affected code
 
-- `src/linux_debug_mcp/config.py`: `TargetProfile.wait_for_debugger` (new field + model-level
+- `src/kdive/config.py`: `TargetProfile.wait_for_debugger` (new field + model-level
   `debug_gdbstub`-required validator), `BootOverrides.wait_for_debugger` (new tri-state field).
-- `src/linux_debug_mcp/providers/libvirt_qemu.py`: `BootPlan.wait_for_debugger` (new field set in
+- `src/kdive/providers/libvirt_qemu.py`: `BootPlan.wait_for_debugger` (new field set in
   `plan_boot`), `plan_boot` cross-field validation, `render_domain_xml` `wait=` token selection,
   `execute_boot` frozen branch (skip `stream_console`, skip discovery, return `SUCCEEDED`-frozen).
-- `src/linux_debug_mcp/server.py`: `target_boot_handler` effective-`wait_for_debugger` merge from
+- `src/kdive/server.py`: `target_boot_handler` effective-`wait_for_debugger` merge from
   `BootOverrides`, `has_new_boot_overrides` to include `wait_for_debugger`, frozen-boot
   `suggested_next_actions`.
 - No `domain.py` wire-model change and no JSON-schema snapshot regeneration (frozen facts ride
