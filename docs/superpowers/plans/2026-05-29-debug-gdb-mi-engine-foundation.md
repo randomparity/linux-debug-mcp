@@ -4,7 +4,9 @@
 
 **Goal:** Stand up a persistent `gdb --interpreter=mi3` engine (parsed by `pygdbmi`) that attaches to a target over the gdb Remote Serial Protocol via `TransportSession.rsp_endpoint`, reads one MI record as typed JSON, and detaches cleanly — with a guaranteed-resume invariant that never leaves the kernel `HALTED` on error — plus a gdb-MI capability prerequisite probe.
 
-**Architecture:** A new `providers/gdb_mi.py` holds the engine (`GdbMiEngine`), an injectable `MiController` seam (real impl wraps `pygdbmi.GdbController`; fakes used in unit tests), and typed `MiRecord` records. The engine is wired into the **transport-enabled** branch of `debug_start_session_handler` as an additive attach-probe that runs against `TransportSession.rsp_endpoint` *before* the legacy batch `provider.start_session`. The probe is gated on a new injected `gdb_mi_engine` argument — `None` (every existing test) preserves current behavior exactly; `create_app()` wires a real engine; the new Phase-A tests inject fakes. On any probe fault the engine performs a best-effort `-exec-continue` + detach/kill (RSP disconnect resumes QEMU), and the handler tears the transaction down — un-halting the durable record when resume is confirmed so a fresh ssh-tier op succeeds. The batch read-ops paths and the batch `start_session` remain the session-of-record until Phase C (per ADR 0019, "replace, don't deprecate": the batch paths are deleted in Phase C, not Phase A).
+**Architecture:** A new `providers/gdb_mi.py` holds the engine (`GdbMiEngine`), an injectable `MiController` seam (real impl wraps `pygdbmi.GdbController`; fakes used in unit tests), and typed `MiRecord` records. The engine is wired into the **transport-enabled** branch of `debug_start_session_handler` as an additive attach-probe that runs against `TransportSession.rsp_endpoint` *before* the legacy batch `provider.start_session`. The probe is gated on a new injected `gdb_mi_engine` argument — `None` (every existing test) preserves current behavior exactly; `create_app()` wires a real engine; the new Phase-A tests inject fakes. On any probe fault the engine performs a best-effort **async** `-exec-continue` + `-target-disconnect` + `exit()` (the `exit()` kill is the guaranteed backstop — an RSP TCP disconnect resumes the QEMU guest even if the MI commands fail), and the handler tears the transaction down — un-halting the durable record when resume is confirmed so a fresh ssh-tier op succeeds. The batch read-ops paths and the batch `start_session` remain the session-of-record until Phase C (per ADR 0019, "replace, don't deprecate": the batch paths are deleted in Phase C, not Phase A).
+
+**Known Phase-A cost (documented, accepted):** because QEMU's gdbstub takes one connection at a time and a separate gdb connection cannot hand off a *halted* target (disconnecting resumes the guest), the probe and the legacy batch attach are two sequential connections, so each transport-enabled `start_session` does **halt → (probe reads, resumes) → halt** (batch). This brief extra attach + free-run window is the coexistence cost ADR 0019 anticipates; Phase C collapses the two by moving the session-of-record onto the engine. The probe is still wired into production (not test-only) so the guaranteed-resume invariant is a real code path, not a phantom feature. The batch reconnect after the probe's `exit()` is immediate (QEMU keeps listening; no client-side TIME_WAIT on the listening socket), so no reconnect backoff is needed in Phase A.
 
 **Tech Stack:** Python 3.11+, `pygdbmi==0.11.0.0` (new pinned runtime dep), Pydantic v2 (`Model`/`ConfigModel`, `extra="forbid"`), pytest with injected fakes, ruff + ty.
 
@@ -280,8 +282,9 @@ from linux_debug_mcp.domain import ErrorCategory
 
 # Minimum gdb release that documents the mi3 interpreter (GDB manual "GDB/MI" chapter).
 MIN_GDB_VERSION = (9, 1)
-# Per-command MI write timeout. The attach `-target-select remote` and the probe read are the only
-# Phase-A commands; 10s comfortably bounds a healthy localhost RSP connect without hanging the tool.
+# Per-command MI write timeout. 10s bounds a healthy localhost RSP connect/read. The resume path
+# uses ASYNC continue (mi-async on), so `-exec-continue` returns `^running` immediately rather than
+# blocking until a stop that a free-running kernel never produces.
 _MI_COMMAND_TIMEOUT_SEC = 10.0
 
 
@@ -367,46 +370,47 @@ from linux_debug_mcp.transport.base import TcpEndpoint
 
 _DONE: list[dict[str, object]] = [{"type": "result", "message": "done", "payload": None, "token": None}]
 _CONNECTED: list[dict[str, object]] = [{"type": "result", "message": "connected", "payload": None, "token": None}]
+# With mi-async on, `-exec-continue` returns `^running` immediately (no terminal stop follows).
 _RUNNING: list[dict[str, object]] = [{"type": "result", "message": "running", "payload": None, "token": None}]
-_BANNER: list[dict[str, object]] = [
-    {"type": "result", "message": "done", "payload": {"value": "Linux version 6.9.0-test"}, "token": None}
+_THREAD_GROUPS: list[dict[str, object]] = [
+    {"type": "result", "message": "done", "payload": {"groups": [{"id": "i1"}]}, "token": None}
 ]
-
-
-def _engine(controller: FakeController, tmp_path: Path) -> tuple[GdbMiEngine, object]:
-    engine = GdbMiEngine(controller_factory=lambda command: controller, gdb_path_finder=lambda _: "/usr/bin/gdb")
-    return engine, engine
+# The attach sequence is 4 setup commands (confirm/pagination/mi-async/file) + target-select.
+_ATTACH_OK = [_DONE, _DONE, _DONE, _DONE, _CONNECTED]
 
 
 def _endpoint() -> TcpEndpoint:
     return TcpEndpoint(host="127.0.0.1", port=5551)
 
 
-def test_attach_loads_symbols_and_selects_remote(tmp_path: Path) -> None:
+def _engine(controller: FakeController) -> GdbMiEngine:
+    return GdbMiEngine(controller_factory=lambda command: controller, gdb_path_finder=lambda _: "/usr/bin/gdb")
+
+
+def test_attach_loads_symbols_selects_remote_and_sets_async(tmp_path: Path) -> None:
     vmlinux = tmp_path / "vmlinux"
     vmlinux.write_text("elf", encoding="utf-8")
-    controller = FakeController([_DONE, _DONE, _DONE, _CONNECTED])  # set confirm/pagination, file, target-select
-    engine = GdbMiEngine(controller_factory=lambda command: controller, gdb_path_finder=lambda _: "/usr/bin/gdb")
+    controller = FakeController(list(_ATTACH_OK))
+    engine = _engine(controller)
     attachment = engine.attach(
         rsp_endpoint=_endpoint(), vmlinux_path=vmlinux, transcript_path=tmp_path / "debug" / "mi.log"
     )
+    assert "-gdb-set mi-async on" in controller.commands
     assert any(cmd.startswith("-file-exec-and-symbols") for cmd in controller.commands)
-    assert any(cmd == "-target-select remote 127.0.0.1:5551" for cmd in controller.commands)
+    assert "-target-select remote 127.0.0.1:5551" in controller.commands
     assert MiRecord.first_result(attachment.records).message == "connected"
     assert (tmp_path / "debug" / "mi.log").is_file()  # transcript persisted
 
 
-def test_attach_rejects_non_loopback_endpoint(tmp_path: Path) -> None:
+def test_attach_rejects_endpoint_that_is_not_a_tcp_endpoint(tmp_path: Path) -> None:
     vmlinux = tmp_path / "vmlinux"
     vmlinux.write_text("elf", encoding="utf-8")
-    controller = FakeController([])
-    engine = GdbMiEngine(controller_factory=lambda command: controller, gdb_path_finder=lambda _: "/usr/bin/gdb")
+    engine = _engine(FakeController([]))
+    # A None rsp_endpoint (transport never produced a TCP RSP path) is a CONFIGURATION_ERROR via the
+    # public attach() boundary — no need to reach into private helpers (TcpEndpoint already pins
+    # loopback at its own schema, so a non-loopback TcpEndpoint cannot be constructed to test).
     with pytest.raises(GdbMiError) as exc:
-        engine.attach(
-            rsp_endpoint=TcpEndpoint(host="127.0.0.1", port=5551),  # patched below to non-loopback via monkeypatch
-            vmlinux_path=vmlinux,
-            transcript_path=tmp_path / "mi.log",
-        ) if False else engine._validate_rsp_host("10.0.0.5")
+        engine.attach(rsp_endpoint=None, vmlinux_path=vmlinux, transcript_path=tmp_path / "mi.log")
     assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
 
 
@@ -422,37 +426,39 @@ def test_attach_missing_gdb_raises_missing_dependency(tmp_path: Path) -> None:
 def test_probe_read_returns_one_typed_record(tmp_path: Path) -> None:
     vmlinux = tmp_path / "vmlinux"
     vmlinux.write_text("elf", encoding="utf-8")
-    controller = FakeController([_DONE, _DONE, _DONE, _CONNECTED, _BANNER])
-    engine = GdbMiEngine(controller_factory=lambda command: controller, gdb_path_finder=lambda _: "/usr/bin/gdb")
+    controller = FakeController([*_ATTACH_OK, _THREAD_GROUPS])
+    engine = _engine(controller)
     attachment = engine.attach(rsp_endpoint=_endpoint(), vmlinux_path=vmlinux, transcript_path=tmp_path / "mi.log")
     record = engine.probe_read(attachment)
     assert isinstance(record, MiRecord)
-    assert record.message == "done"
-    assert record.payload == {"value": "Linux version 6.9.0-test"}
+    assert record.type == "result" and record.message == "done"
+    assert record.payload == {"groups": [{"id": "i1"}]}
+    assert controller.commands[-1] == "-list-thread-groups"
 
 
-def test_resume_and_detach_continues_then_exits(tmp_path: Path) -> None:
+def test_resume_and_detach_continues_disconnects_then_exits(tmp_path: Path) -> None:
     vmlinux = tmp_path / "vmlinux"
     vmlinux.write_text("elf", encoding="utf-8")
-    controller = FakeController([_DONE, _DONE, _DONE, _CONNECTED, _RUNNING, _DONE])
-    engine = GdbMiEngine(controller_factory=lambda command: controller, gdb_path_finder=lambda _: "/usr/bin/gdb")
+    # async continue returns ^running immediately; disconnect returns ^done.
+    controller = FakeController([*_ATTACH_OK, _RUNNING, _DONE])
+    engine = _engine(controller)
     attachment = engine.attach(rsp_endpoint=_endpoint(), vmlinux_path=vmlinux, transcript_path=tmp_path / "mi.log")
     confirmed = engine.resume_and_detach(attachment)
     assert confirmed is True
     assert controller.exited is True
     assert "-exec-continue" in controller.commands
-    assert any(cmd.startswith("-target-detach") for cmd in controller.commands)
+    assert "-target-disconnect" in controller.commands
 
 
 def test_force_resume_swallows_errors_and_kills(tmp_path: Path) -> None:
     vmlinux = tmp_path / "vmlinux"
     vmlinux.write_text("elf", encoding="utf-8")
-    # continue raises, detach raises — force_resume must still exit() and report resume confirmed
+    # continue raises, disconnect raises — force_resume must still exit() and report resume confirmed
     # because killing the controller disconnects RSP, which resumes QEMU.
     controller = FakeController(
-        [_DONE, _DONE, _DONE, _CONNECTED, RuntimeError("continue failed"), RuntimeError("detach failed")]
+        [*_ATTACH_OK, RuntimeError("continue failed"), RuntimeError("disconnect failed")]
     )
-    engine = GdbMiEngine(controller_factory=lambda command: controller, gdb_path_finder=lambda _: "/usr/bin/gdb")
+    engine = _engine(controller)
     attachment = engine.attach(rsp_endpoint=_endpoint(), vmlinux_path=vmlinux, transcript_path=tmp_path / "mi.log")
     confirmed = engine.force_resume(attachment)
     assert confirmed is True
@@ -483,11 +489,12 @@ from linux_debug_mcp.transport.base import Endpoint, TcpEndpoint
 
 @dataclass
 class GdbMiAttachment:
-    """A live attach: the controller plus the typed records produced by the connect sequence."""
+    """A live attach: the controller, its transcript path, and the typed records produced so far."""
 
     controller: MiController
     rsp_host: str
     rsp_port: int
+    transcript_path: Path
     records: list[MiRecord] = field(default_factory=list)
 
 
@@ -521,23 +528,30 @@ class GdbMiEngine:
                 details={"vmlinux_path": str(vmlinux_path)},
             )
         controller = self._controller_factory([gdb_path, "--nx", "--quiet", "--interpreter=mi3"])
-        attachment = GdbMiAttachment(controller=controller, rsp_host=host, rsp_port=port)
+        attachment = GdbMiAttachment(controller=controller, rsp_host=host, rsp_port=port, transcript_path=transcript_path)
         try:
-            self._run(attachment, "-gdb-set confirm off", transcript_path)
-            self._run(attachment, "-gdb-set pagination off", transcript_path)
-            self._run(attachment, f"-file-exec-and-symbols {self._mi_path(resolved_vmlinux)}", transcript_path)
-            self._run(attachment, f"-target-select remote {host}:{port}", transcript_path)
+            self._run(attachment, "-gdb-set confirm off")
+            self._run(attachment, "-gdb-set pagination off")
+            # mi-async makes the resume-path `-exec-continue` return `^running` immediately instead of
+            # blocking until a stop a free-running kernel never emits (guaranteed-resume must not hang).
+            self._run(attachment, "-gdb-set mi-async on")
+            self._run(attachment, f"-file-exec-and-symbols {self._mi_path(resolved_vmlinux)}")
+            self._run(attachment, f"-target-select remote {host}:{port}")
         except GdbMiError:
             with contextlib.suppress(Exception):
                 controller.exit()
             raise
         return attachment
 
-    def probe_read(self, attachment: GdbMiAttachment, *, command: str = '-data-evaluate-expression "linux_banner"') -> MiRecord:
-        """Read one MI record as typed JSON (Phase-A foundation read). Returns the result record."""
-        # transcript is reused from attach(); resolve it from the controller-independent path on the
-        # attachment is not stored, so callers pass the same transcript_path they used for attach.
+    def probe_read(self, attachment: GdbMiAttachment, *, command: str = "-list-thread-groups") -> MiRecord:
+        """Read one MI record as typed JSON proving the RSP attach reached the target (Phase-A
+        foundation read). Defaults to `-list-thread-groups` — a target-state query that needs NO
+        symbol resolution, so it proves connectivity without coupling to symbol provenance (Phase B)
+        or target-memory readability. (The `-target-select remote` `^connected` record in
+        `attachment.records` is itself an attach proof; this is a second, target-state read.)"""
         records = self._records_from(attachment.controller.write(command, timeout_sec=_MI_COMMAND_TIMEOUT_SEC))
+        attachment.records.extend(records)
+        self._append_transcript(attachment.transcript_path, command, records)
         result = MiRecord.first_result(records)
         if result is None:
             raise GdbMiError(
@@ -554,8 +568,9 @@ class GdbMiEngine:
         return result
 
     def resume_and_detach(self, attachment: GdbMiAttachment) -> bool:
-        """Clean teardown: continue the target, detach, exit the engine. Returns whether resume is
-        confirmed (RSP disconnect via exit() resumes QEMU even if MI commands fail)."""
+        """Clean teardown: async continue, `-target-disconnect`, exit the engine. Returns whether
+        resume is confirmed (the exit() kill disconnects RSP, which resumes QEMU even if the MI
+        commands failed)."""
         return self._resume(attachment)
 
     def force_resume(self, attachment: GdbMiAttachment) -> bool:
@@ -563,20 +578,26 @@ class GdbMiEngine:
         return self._resume(attachment)
 
     def _resume(self, attachment: GdbMiAttachment) -> bool:
+        # Best-effort async continue: with mi-async on (set at attach) this returns `^running`
+        # immediately and does NOT block waiting for a stop a free-running kernel never emits.
         with contextlib.suppress(Exception):
             attachment.controller.write("-exec-continue", timeout_sec=_MI_COMMAND_TIMEOUT_SEC)
+        # `-target-disconnect` is the documented MI verb to leave a plain `target remote` running
+        # and disconnect (`-target-detach` is the extended-remote/local-process verb and can error
+        # against a plain remote stub).
         with contextlib.suppress(Exception):
-            attachment.controller.write("-target-detach", timeout_sec=_MI_COMMAND_TIMEOUT_SEC)
-        # exit() kills gdb → RSP TCP disconnect → QEMU resumes the guest. This is the backstop that
-        # makes resume guaranteed even when continue/detach failed (e.g. a crashed engine).
+            attachment.controller.write("-target-disconnect", timeout_sec=_MI_COMMAND_TIMEOUT_SEC)
+        # exit() kills gdb → RSP TCP disconnect → QEMU resumes the guest. This is the guaranteed
+        # backstop that resumes the target even when continue/disconnect failed (e.g. a crashed
+        # engine), which is why _resume can honestly return True.
         with contextlib.suppress(Exception):
             attachment.controller.exit()
         return True
 
-    def _run(self, attachment: GdbMiAttachment, command: str, transcript_path: Path) -> None:
+    def _run(self, attachment: GdbMiAttachment, command: str) -> None:
         records = self._records_from(attachment.controller.write(command, timeout_sec=_MI_COMMAND_TIMEOUT_SEC))
         attachment.records.extend(records)
-        self._append_transcript(transcript_path, command, records)
+        self._append_transcript(attachment.transcript_path, command, records)
         result = MiRecord.first_result(records)
         if result is not None and result.message == "error":
             raise GdbMiError(
@@ -627,7 +648,7 @@ class GdbMiEngine:
             handle.write("\n")
 ```
 
-> The probe_read transcript: keep it simple — `probe_read` does not append to the transcript in Phase A (the attach sequence already wrote the connect records). If a reviewer wants the probe recorded, add a `transcript_path` parameter to `probe_read` mirroring `attach`. Do **not** leave a TODO; either omit or implement. (This plan omits it — the probe record is returned to the handler, which persists it via the debug step details.)
+> Transcript: the `GdbMiAttachment` carries its `transcript_path`, so both the attach sequence and `probe_read` append redacted MI records to `<run>/debug/mi-probe.log`. The handler also surfaces the typed probe record into the debug step `details["mi_probe"]` (Task 6), so AC#1's "one MI record returned as typed JSON" is observable in the response, not just on disk.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -717,6 +738,15 @@ def test_gdb_mi_probe_fails_when_gdb_absent(tmp_path: Path) -> None:
     check = _check(runner, tmp_path)
     assert check.status == "failed"
     assert "9.1" in check.message
+
+
+def test_gdb_mi_probe_uses_gdb_version_not_distro_packaging_token(tmp_path: Path) -> None:
+    # gdb's own version (12.1) is the last token; the parenthetical packaging token (8.0.1) must not
+    # be mistaken for it.
+    runner = FakeRunner(present=True, version_out="GNU gdb (Ubuntu 8.0.1-1ubuntu1) 12.1\n", mi_out='^done\n(gdb)\n')
+    check = _check(runner, tmp_path)
+    assert check.status == "passed"
+    assert "12.1" in check.message
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -741,14 +771,21 @@ Append `_gdb_mi_capability_check` and register it. First add the call inside `ch
 Then add the function and helpers at module scope:
 
 ```python
-_GDB_VERSION_RE = re.compile(r"\b(\d+)\.(\d+)(?:\.\d+)?\b")
+_GDB_VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.\d+)?")
 _MI_MIN_VERSION = (9, 1)
 
 
 def _parse_gdb_version(text: str) -> tuple[int, int] | None:
-    match = _GDB_VERSION_RE.search(text)
-    if match is None:
+    """Parse gdb's OWN version from `gdb --version`. gdb prints it as the last whitespace-delimited
+    token of the first line — `GNU gdb (Ubuntu 8.0.1-1ubuntu1) 12.1` — so take the LAST version-shaped
+    match on the first line, not the first (which may be a distro/package version in the parenthetical)."""
+    lines = text.splitlines()
+    if not lines:
         return None
+    matches = list(_GDB_VERSION_RE.finditer(lines[0]))
+    if not matches:
+        return None
+    match = matches[-1]
     return (int(match.group(1)), int(match.group(2)))
 
 
@@ -863,11 +900,17 @@ from linux_debug_mcp.providers.gdb_mi import GdbMiEngine, GdbMiError
 
 - [ ] **Step 3: Insert the MI attach-probe after `_halt_debug_transport`**
 
-In the `transport_enabled` branch, immediately after the `_halt_debug_transport(...)` call (server.py:4227), add:
+First, initialize a carrier for the probe's typed record **before** the `if transport_enabled:` block (so it is in scope where the terminal `details` are assembled):
+
+```python
+            mi_probe_details: dict[str, object] = {}
+```
+
+Then in the `transport_enabled` branch, immediately after the `_halt_debug_transport(...)` call (server.py:4227), add:
 
 ```python
                 if gdb_mi_engine is not None:
-                    probe_failure = _run_mi_attach_probe(
+                    probe_failure, mi_probe_details = _run_mi_attach_probe(
                         engine=gdb_mi_engine,
                         transport_session=transport_session,
                         vmlinux_path=Path(vmlinux.path),
@@ -882,6 +925,15 @@ In the `transport_enabled` branch, immediately after the `_halt_debug_transport(
                     if probe_failure is not None:
                         return probe_failure
 ```
+
+Finally, surface the typed probe record by merging it into the terminal details. Right after `details = _debug_session_manifest_details(...)` (server.py:4285), add:
+
+```python
+            if mi_probe_details:
+                details.update(mi_probe_details)
+```
+
+This makes AC#1 ("reads one MI record returned as typed JSON") observable: the typed record reaches the `debug` step `details` and the tool response `data`.
 
 - [ ] **Step 4: Add the `_run_mi_attach_probe` helper**
 
@@ -900,25 +952,34 @@ def _run_mi_attach_probe(
     session_registry: SessionRegistry,
     session_guard: SessionGuard | None,
     redactor: Redactor,
-) -> ToolResponse | None:
+) -> tuple[ToolResponse | None, dict[str, object]]:
     """Phase-A gdb/MI foundation probe: attach over the guard-protected TransportSession.rsp_endpoint,
-    read one MI record as typed JSON, detach cleanly. Returns None on success (the legacy batch
-    start_session then runs as the session-of-record), or a failure ToolResponse after a
+    read one MI record as typed JSON, detach cleanly. Returns `(None, {"mi_probe": <typed record>})`
+    on success (the typed record is merged into the debug step details; the legacy batch
+    start_session then runs as the session-of-record), or `(failure_response, {})` after a
     guaranteed-resume teardown that never leaves the kernel HALTED. The probe and the batch attach
     are sequential (QEMU's gdbstub takes one connection at a time); Phase C collapses them by moving
     the session-of-record onto the engine."""
     transcript_path = run_dir / "debug" / "mi-probe.log"
+    attachment = None
     try:
         attachment = engine.attach(
             rsp_endpoint=transport_session.rsp_endpoint, vmlinux_path=vmlinux_path, transcript_path=transcript_path
         )
         record = engine.probe_read(attachment)
         engine.resume_and_detach(attachment)
-        return None
+        mi_probe = {
+            "mi_probe": redactor.redact_value(
+                {"record": record.model_dump(mode="json"), "transcript_path": str(transcript_path)}
+            )
+        }
+        return None, mi_probe
     except GdbMiError as exc:
-        resume_confirmed = False
-        with contextlib.suppress(Exception):
-            resume_confirmed = engine.force_resume(attachment)  # type: ignore[possibly-undefined]
+        # If attach failed before connecting (bad endpoint / missing gdb / missing vmlinux), no RSP
+        # connection was made, so the engine never halted the target — treat resume as confirmed so
+        # the durable record is un-halted and no recovery tombstone is left. Otherwise run the
+        # guaranteed-resume (best-effort continue + disconnect + kill).
+        resume_confirmed = engine.force_resume(attachment) if attachment is not None else True
         if resume_confirmed:
             _resume_debug_transport(
                 session=transport_session, admission=admission, session_registry=session_registry
@@ -930,30 +991,22 @@ def _run_mi_attach_probe(
             session_guard=session_guard,
         )
         details = redactor.redact_value({**exc.details, "transport_session_id": transport_session.session_id})
-        return ToolResponse.failure(
+        failure = ToolResponse.failure(
             category=exc.category,
             message=redactor.redact_text(str(exc)),
             run_id=run_id,
             details=details,
             suggested_next_actions=["host.check_prerequisites", "artifacts.get_manifest"],
         )
+        return failure, {}
 ```
 
-> `attachment` may be undefined if `engine.attach` raised before binding it. Guard with the `contextlib.suppress` + `# type: ignore[possibly-undefined]` as shown, or restructure to bind `attachment = None` before the `try` and `if attachment is not None: resume_confirmed = engine.force_resume(attachment)`. Prefer the explicit `attachment = None` form — it is clearer and needs no ignore. Use:
->
-> ```python
->     attachment = None
->     try:
->         attachment = engine.attach(...)
->         engine.probe_read(attachment)
->         engine.resume_and_detach(attachment)
->         return None
->     except GdbMiError as exc:
->         resume_confirmed = engine.force_resume(attachment) if attachment is not None else True
->         ...
-> ```
->
-> When `attach` fails before connecting (bad endpoint / missing gdb / missing vmlinux), no RSP connection was made, so the target was never halted by the engine — treat resume as confirmed (`True`) so the durable record is un-halted and no tombstone is left.
+> **Probe-failure step recording:** the probe runs *before* the batch `provider.start_session`
+> creates the session-of-record, and `_teardown_debug_transport` has already released the guard and
+> deleted the durable record, so a probe failure deliberately returns its failure response **without**
+> recording a `debug` `StepResult` — there is no SUCCEEDED step to replace and a re-invocation
+> (`new_session=True`) re-runs cleanly. This differs from the batch `ProviderDebugError` path, which
+> records a FAILED step because the batch attach *is* the session creation.
 
 - [ ] **Step 5: Extract `_teardown_debug_transport`**
 
