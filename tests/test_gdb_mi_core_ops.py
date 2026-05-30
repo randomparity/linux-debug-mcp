@@ -188,7 +188,9 @@ def test_set_breakpoint_returns_typed_ref(tmp_path: Path) -> None:
     bp = engine.set_breakpoint(attachment, "do_sys_open")
     assert isinstance(bp, BreakpointRef)
     assert bp.number == "1" and bp.func == "do_sys_open"
-    assert controller.commands[-1] == "-break-insert do_sys_open"
+    # Hardware breakpoint (-h): a software breakpoint does not survive a frozen boot's reset-vector
+    # insertion and can fail on read-only kernel .text (ADR 0036).
+    assert controller.commands[-1] == "-break-insert -h do_sys_open"
 
 
 def test_set_breakpoint_rejects_non_identifier(tmp_path: Path) -> None:

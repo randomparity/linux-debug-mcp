@@ -535,7 +535,10 @@ class GdbMiEngine:
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"location": location},
             )
-        return self._breakpoint_ref(self._run(attachment, f"-break-insert {location}"), key="bkpt")
+        # Hardware breakpoint (-h): a software breakpoint's 0xCC write does not survive a frozen
+        # boot's reset-vector insertion (the byte lands outside the not-yet-relocated kernel text) and
+        # can fail on read-only kernel .text (CONFIG_STRICT_KERNEL_RWX). See ADR 0036.
+        return self._breakpoint_ref(self._run(attachment, f"-break-insert -h {location}"), key="bkpt")
 
     def set_watchpoint(self, attachment: GdbMiAttachment, expression: str) -> BreakpointRef:
         if not _BREAK_LOCATION_RE.match(expression):
