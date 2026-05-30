@@ -230,7 +230,23 @@ def test_clear_watchpoint_uses_break_delete(tmp_path: Path) -> None:
 
 # --- Task 8: backtrace / list_variables -----------------------------------------------------------
 
-_FRAMES = [
+# pygdbmi flattens `stack=[frame={...},frame={...}]` to a list of the frame dicts directly (no
+# "frame" wrapper) — this is the real shape gdb/MI emits (verified against pygdbmi).
+_FRAMES_FLAT = [
+    {
+        "type": "result",
+        "message": "done",
+        "payload": {
+            "stack": [
+                {"level": "0", "func": "do_sys_open", "addr": "0x1"},
+                {"level": "1", "func": "__x64_sys_open", "addr": "0x2"},
+            ]
+        },
+        "token": None,
+    }
+]
+# Defensive: a pygdbmi variant that preserves the `{"frame": {...}}` wrapper must still parse.
+_FRAMES_WRAPPED = [
     {
         "type": "result",
         "message": "done",
@@ -270,10 +286,12 @@ class _StubRedactor:
         return "[REDACTED]"
 
 
-def test_backtrace_returns_typed_frames(tmp_path: Path) -> None:
-    engine, controller, attachment = _attached(tmp_path, writes=[_FRAMES])
+@pytest.mark.parametrize("frames_response", [_FRAMES_FLAT, _FRAMES_WRAPPED])
+def test_backtrace_returns_typed_frames(tmp_path: Path, frames_response: list[object]) -> None:
+    engine, controller, attachment = _attached(tmp_path, writes=[frames_response])
     frames = engine.backtrace(attachment)
     assert [frame.func for frame in frames] == ["do_sys_open", "__x64_sys_open"]
+    assert [frame.level for frame in frames] == [0, 1]
     assert controller.commands[-1] == "-stack-list-frames"
 
 
