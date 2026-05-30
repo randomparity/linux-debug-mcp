@@ -1503,3 +1503,23 @@ def test_execute_boot_timeout_skips_discovery(tmp_path: Path) -> None:
     assert result.status == StepStatus.FAILED
     assert "guest_ip" not in result.details
     assert runner.domifaddr_calls == []
+
+
+def test_plan_boot_sets_wait_for_debugger_when_enabled(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider()
+
+    plan = provider.plan_boot(
+        run_id="run-abc123",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(debug_gdbstub=True, gdbstub_endpoint="127.0.0.1:1234", wait_for_debugger=True),
+        rootfs_profile=rootfs_profile(rootfs),
+    )
+
+    assert plan.wait_for_debugger is True
+
+
+def test_plan_boot_wait_for_debugger_defaults_false(tmp_path: Path) -> None:
+    plan = make_plan(tmp_path)
+    assert plan.wait_for_debugger is False

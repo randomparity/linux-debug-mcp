@@ -102,6 +102,7 @@ class BootPlan:
     nokaslr_source: Literal["not_applicable", "profile_supplied", "provider_added"]
     domifaddr_argv: list[str]
     discover_guest_ip: bool
+    wait_for_debugger: bool
 
 
 @dataclass(frozen=True)
@@ -375,6 +376,8 @@ class LibvirtQemuProvider:
             target_profile.kernel_args,
             target_profile.debug_gdbstub,
         )
+        if target_profile.wait_for_debugger and not target_profile.debug_gdbstub:
+            raise self._configuration_error("wait_for_debugger requires debug_gdbstub")
         gdbstub_endpoint = None
         if target_profile.debug_gdbstub:
             gdbstub_endpoint = self._parse_gdbstub_endpoint(target_profile.gdbstub_endpoint)
@@ -453,6 +456,7 @@ class LibvirtQemuProvider:
             nokaslr_source=nokaslr_source,
             domifaddr_argv=[*virsh_prefix, "domifaddr", domain_name, "--source", "lease"],
             discover_guest_ip=rootfs_profile.access_method in {"ssh", "ssh_and_serial"},
+            wait_for_debugger=target_profile.wait_for_debugger,
         )
 
     def execute_boot(
