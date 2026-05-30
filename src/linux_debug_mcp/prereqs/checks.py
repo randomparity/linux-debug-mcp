@@ -346,7 +346,17 @@ def check_kernel_config(source_path: Path | None, build_profile: BuildProfile | 
             status=PrerequisiteStatus.SKIPPED,
             message="no source path supplied; cannot verify .config presence",
         )
-    if (source_path / ".config").is_file():
+    try:
+        resolved_source = validate_source_path(source_path)
+    except PathSafetyError:
+        # The source path is not a usable Linux tree; defer to the source.linux_tree check rather
+        # than stat an unvalidated path or emit a misleading "no .config" verdict.
+        return PrerequisiteCheck(
+            check_id="kernel.config",
+            status=PrerequisiteStatus.SKIPPED,
+            message="source path is not a usable Linux tree; see the source.linux_tree check",
+        )
+    if (resolved_source / ".config").is_file():
         return PrerequisiteCheck(
             check_id="kernel.config", status=PrerequisiteStatus.PASSED, message="source .config is present"
         )

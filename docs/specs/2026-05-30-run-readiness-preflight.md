@@ -62,8 +62,13 @@ owns the registries; `checks.py` stays free of the default-profile constants.
 | `build_profile is None` | `SKIPPED` | "no build profile selected" |
 | `build_profile.base_config` non-empty | `PASSED` | ".config derivable via `make <targets>`" |
 | empty `base_config`, `source_path is None` | `SKIPPED` | "no source path supplied; cannot verify .config" |
+| empty `base_config`, `source_path` not a valid Linux tree | `SKIPPED` | "source path is not a usable Linux tree; see the source.linux_tree check" |
 | empty `base_config`, `<source>/.config` is a file | `PASSED` | "source .config present" |
 | empty `base_config`, no `<source>/.config` | `FAILED` | fix: provide a `.config` (`make defconfig`) or select a build profile with a `base_config` such as `x86_64-default` |
+
+The `.config` stat runs only on a path that passes `validate_source_path` (the project's path-safety
+gate for user source paths); a rejected path defers to the `source.linux_tree` check rather than emitting
+a second, misleading "no .config" verdict.
 
 Rationale: this mirrors the `kernel.build` precedence ladder (#101) at its first two rungs that are
 knowable *before a run exists* — a per-run output `.config` cannot exist yet, so the preflight checks

@@ -114,20 +114,38 @@ def test_kernel_config_skipped_when_empty_base_config_and_no_source() -> None:
     assert check.status == "skipped"
 
 
+def _make_linux_tree(root: Path) -> Path:
+    root.mkdir(exist_ok=True)
+    (root / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
+    (root / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    return root
+
+
 def test_kernel_config_passes_when_source_config_present(tmp_path: Path) -> None:
-    (tmp_path / ".config").write_text("CONFIG_X=y\n", encoding="utf-8")
+    source = _make_linux_tree(tmp_path / "linux")
+    (source / ".config").write_text("CONFIG_X=y\n", encoding="utf-8")
     build = BuildProfile(name="b", architecture="x86_64")
-    check = check_kernel_config(tmp_path, build)
+    check = check_kernel_config(source, build)
     assert check.status == "passed"
     assert "present" in check.message
 
 
 def test_kernel_config_fails_when_no_config_and_no_base_config(tmp_path: Path) -> None:
+    source = _make_linux_tree(tmp_path / "linux")
     build = BuildProfile(name="b", architecture="x86_64")
-    check = check_kernel_config(tmp_path, build)
+    check = check_kernel_config(source, build)
     assert check.status == "failed"
     assert check.suggested_fix is not None
     assert "base_config" in check.suggested_fix
+
+
+def test_kernel_config_skipped_when_source_is_not_a_linux_tree(tmp_path: Path) -> None:
+    not_a_tree = tmp_path / "empty"
+    not_a_tree.mkdir()
+    build = BuildProfile(name="b", architecture="x86_64")
+    check = check_kernel_config(not_a_tree, build)
+    assert check.status == "skipped"
+    assert "source.linux_tree" in check.message
 
 
 def test_rootfs_image_skipped_without_profile() -> None:
