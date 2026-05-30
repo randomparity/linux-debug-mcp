@@ -111,20 +111,29 @@ read over RSP at attach. `_run_mi_attach_probe` resolves the canonical probe sym
 vmlinux ELF symbol table (`-data-evaluate-expression &symbol`, ADR 0020), which is independent of guest
 execution. So gdb attaches to the CPU stopped at the reset vector and the MI handshake completes.
 
-#### `kernel_provenance` must be captured on the frozen path (version-lock dependency)
+#### Success-path dependencies the frozen boot must preserve (version-lock + admission snapshot)
 
-`debug.start_session` runs `_verify_gdb_symbol_version_lock` (`server.py:5679`) *before* attaching, and
-that gate **hard-requires** `boot_result.details["kernel_provenance"]`; when it is absent the handler
-returns `CONFIGURATION_ERROR` ("boot did not record a KernelProvenance") and never attaches. The
-provenance is captured in `target_boot_handler` on the `execution.status == StepStatus.SUCCEEDED` branch
-(`server.py:1884`), gated **only on status, not on `console_status`**, and is entirely host-side (it
-reads the build step's recorded `build_id` and the on-disk vmlinux/config artifacts — no guest
-execution). Therefore the frozen branch satisfies the version-lock gate **provided it returns
-`SUCCEEDED` and stays on the handler's success path**: the implementer MUST NOT gate the frozen branch
-(or the handler's provenance capture) on `console_status == "ready"` or on the guest-IP discovery path,
-or `debug.start_session` will reject every frozen boot before any breakpoint is set. `kernel_provenance`
-is one of the recorded boot details on the frozen branch, set by the handler's existing capture, not by
-the provider.
+`debug.start_session` has **two** prerequisites that `target_boot_handler` produces on the boot-success
+path, both keyed on `execution.status == StepStatus.SUCCEEDED` and **not** on `console_status`. A frozen
+boot must satisfy both by returning `SUCCEEDED` and staying on the handler's success path; the implementer
+MUST NOT gate the frozen branch (or these two handler steps) on `console_status == "ready"` or on the
+guest-IP discovery path, or `debug.start_session` rejects every frozen boot before any breakpoint is set.
+
+1. **`kernel_provenance` (version-lock).** `debug.start_session` runs `_verify_gdb_symbol_version_lock`
+   (`server.py:5679`) *before* attaching, which **hard-requires** `boot_result.details["kernel_provenance"]`;
+   when absent the handler returns `CONFIGURATION_ERROR` ("boot did not record a KernelProvenance"). It is
+   captured in `target_boot_handler` on the `SUCCEEDED` branch (`server.py:1884`), entirely host-side
+   (reads the build step's recorded `build_id` and the on-disk vmlinux/config artifacts — no guest
+   execution). It is therefore one of the recorded frozen-boot details, set by the handler's existing
+   capture, not by the provider.
+2. **The admission `TargetSnapshot`.** `target_boot_handler` calls `_publish_boot_ready_snapshot`
+   (`server.py:1916`) on the `SUCCEEDED` branch, publishing a `TargetSnapshot` carrying the gdbstub
+   endpoint + rootfs/target identity. `debug.start_session` (and `target.run_tests`) require it via
+   `_require_snapshot` (`server.py:655,692`) and fail without it. It needs no guest execution (it reads
+   the recorded `gdbstub_endpoint` + the resolved rootfs profile), so a frozen `SUCCEEDED` boot publishes
+   it unchanged — including the short-circuit republish path (`_short_circuit_boot_success`,
+   `server.py:1617`) after a server restart. The snapshot's "READY" name is a label: for a frozen boot it
+   provides the attach target identity, not a claim that the guest's userspace is up.
 
 #### Breakpoint mechanism for the early-init target
 
@@ -170,9 +179,15 @@ blocked rather than running while the domain is alive.
 | `wait_for_debugger`, `virsh start` fails | `FAILED` | — | command-failure (cleanup per `cleanup_policy`) | n/a |
 | `wait_for_debugger=False` (default), boot reaches marker | `SUCCEEDED` | `ready` | guest-IP discovery runs as today | `["target.run_tests", ...]` |
 | Static `TargetProfile` with `wait_for_debugger` but no `debug_gdbstub` | n/a | n/a | rejected at config load (model validator) | n/a |
+| `target.run_tests` called against a frozen boot (wrong next action) | n/a | — | SSH connect fails (vCPU frozen, `guest_ip=null`) — same observable as the ADR 0032 `no_lease` case | n/a |
 
 A frozen boot never streams the console and never discovers the IP, so it spends none of the
-readiness-timeout or lease-poll budget; it returns as soon as `virsh start` succeeds.
+readiness-timeout or lease-poll budget; it returns as soon as `virsh start` succeeds. The admission
+snapshot a frozen boot publishes means `target.run_tests` is *admitted* (the snapshot exists) but then
+fails to SSH because the vCPU has not run — a degraded connect failure, not a clean rejection. The
+frozen boot's `suggested_next_actions=["debug.start_session"]` steers the agent to the correct action;
+`run_tests` is not blocked because the boot step cannot know the caller will not first `debug.continue`
+the guest to readiness through a debug session.
 
 ## Affected code
 
@@ -209,6 +224,9 @@ readiness-timeout or lease-poll budget; it returns as soon as `virsh start` succ
   success-branch capture runs because the branch returns `SUCCEEDED`), so `_verify_gdb_symbol_version_lock`
   passes against it — i.e. `debug.start_session`'s version-lock gate is satisfied by a frozen boot. This
   is the regression guard for the §4 version-lock dependency.
+- Unit: a frozen `SUCCEEDED` boot publishes the admission `TargetSnapshot` (inject an `AdmissionService`,
+  assert `_require_snapshot` resolves the target after the frozen boot), the regression guard for the §4
+  admission-snapshot dependency.
 - Unit: the frozen branch returns the same `artifacts` shape as the normal success branch (console/boot
   log artifacts present), so the artifact list is invariant across frozen/normal success.
 - Integration (env-gated, **skipped in CI**, new test in `test_qemu_gdbstub_integration.py`): the
