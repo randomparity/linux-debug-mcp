@@ -372,9 +372,6 @@ _DONE: list[dict[str, object]] = [{"type": "result", "message": "done", "payload
 _CONNECTED: list[dict[str, object]] = [{"type": "result", "message": "connected", "payload": None, "token": None}]
 # With mi-async on, `-exec-continue` returns `^running` immediately (no terminal stop follows).
 _RUNNING: list[dict[str, object]] = [{"type": "result", "message": "running", "payload": None, "token": None}]
-_THREAD_GROUPS: list[dict[str, object]] = [
-    {"type": "result", "message": "done", "payload": {"groups": [{"id": "i1"}]}, "token": None}
-]
 # The attach sequence is 4 setup commands (confirm/pagination/mi-async/file) + target-select.
 _ATTACH_OK = [_DONE, _DONE, _DONE, _DONE, _CONNECTED]
 
@@ -423,17 +420,29 @@ def test_attach_missing_gdb_raises_missing_dependency(tmp_path: Path) -> None:
     assert exc.value.category == ErrorCategory.MISSING_DEPENDENCY
 
 
-def test_probe_read_returns_one_typed_record(tmp_path: Path) -> None:
+def test_probe_read_returns_the_connected_attach_proof(tmp_path: Path) -> None:
     vmlinux = tmp_path / "vmlinux"
     vmlinux.write_text("elf", encoding="utf-8")
-    controller = FakeController([*_ATTACH_OK, _THREAD_GROUPS])
+    controller = FakeController(list(_ATTACH_OK))
     engine = _engine(controller)
     attachment = engine.attach(rsp_endpoint=_endpoint(), vmlinux_path=vmlinux, transcript_path=tmp_path / "mi.log")
     record = engine.probe_read(attachment)
     assert isinstance(record, MiRecord)
-    assert record.type == "result" and record.message == "done"
-    assert record.payload == {"groups": [{"id": "i1"}]}
-    assert controller.commands[-1] == "-list-thread-groups"
+    assert record.type == "result" and record.message == "connected"
+    # probe_read issues NO new MI command — it returns the connect proof already captured at attach.
+    assert controller.commands[-1] == "-target-select remote 127.0.0.1:5551"
+
+
+def test_probe_read_without_connected_record_raises(tmp_path: Path) -> None:
+    vmlinux = tmp_path / "vmlinux"
+    vmlinux.write_text("elf", encoding="utf-8")
+    # target-select returns ^done instead of ^connected (stub answered but did not connect).
+    controller = FakeController([_DONE, _DONE, _DONE, _DONE, _DONE])
+    engine = _engine(controller)
+    attachment = engine.attach(rsp_endpoint=_endpoint(), vmlinux_path=vmlinux, transcript_path=tmp_path / "mi.log")
+    with pytest.raises(GdbMiError) as exc:
+        engine.probe_read(attachment)
+    assert exc.value.category == ErrorCategory.DEBUG_ATTACH_FAILURE
 
 
 def test_resume_and_detach_continues_disconnects_then_exits(tmp_path: Path) -> None:
@@ -448,6 +457,10 @@ def test_resume_and_detach_continues_disconnects_then_exits(tmp_path: Path) -> N
     assert controller.exited is True
     assert "-exec-continue" in controller.commands
     assert "-target-disconnect" in controller.commands
+    # CI-checkable anti-hang proxy: mi-async MUST be set before the continue, else a real sync
+    # `-exec-continue` would block until a stop a free-running kernel never emits. (The actual
+    # non-blocking behavior is only observable live; the gated integration test bounds resume latency.)
+    assert controller.commands.index("-gdb-set mi-async on") < controller.commands.index("-exec-continue")
 
 
 def test_force_resume_swallows_errors_and_kills(tmp_path: Path) -> None:
@@ -543,29 +556,23 @@ class GdbMiEngine:
             raise
         return attachment
 
-    def probe_read(self, attachment: GdbMiAttachment, *, command: str = "-list-thread-groups") -> MiRecord:
-        """Read one MI record as typed JSON proving the RSP attach reached the target (Phase-A
-        foundation read). Defaults to `-list-thread-groups` — a target-state query that needs NO
-        symbol resolution, so it proves connectivity without coupling to symbol provenance (Phase B)
-        or target-memory readability. (The `-target-select remote` `^connected` record in
-        `attachment.records` is itself an attach proof; this is a second, target-state read.)"""
-        records = self._records_from(attachment.controller.write(command, timeout_sec=_MI_COMMAND_TIMEOUT_SEC))
-        attachment.records.extend(records)
-        self._append_transcript(attachment.transcript_path, command, records)
-        result = MiRecord.first_result(records)
-        if result is None:
+    def probe_read(self, attachment: GdbMiAttachment) -> MiRecord:
+        """Return the one MI record that PROVES the RSP attach reached the target: the `^connected`
+        result `-target-select remote` produced during `attach()`. This is the canonical Phase-A
+        "one MI record returned as typed JSON" — it is unambiguous attach evidence, needs no symbol
+        resolution (Phase B) and no extra target round-trip (a separate query like
+        `-list-thread-groups` can return `^done` even without a live remote, so it is NOT used as the
+        proof)."""
+        connected = next(
+            (r for r in attachment.records if r.type == "result" and r.message == "connected"), None
+        )
+        if connected is None:
             raise GdbMiError(
-                "gdb/MI probe read returned no result record",
+                "gdb/MI attach produced no ^connected record; RSP attach did not complete",
                 category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={"command": command},
+                details={"rsp_endpoint": f"{attachment.rsp_host}:{attachment.rsp_port}"},
             )
-        if result.message == "error":
-            raise GdbMiError(
-                "gdb/MI probe read returned an error record",
-                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={"command": command, "payload": self._redactor.redact_value(result.payload)},
-            )
-        return result
+        return connected
 
     def resume_and_detach(self, attachment: GdbMiAttachment) -> bool:
         """Clean teardown: async continue, `-target-disconnect`, exit the engine. Returns whether
@@ -648,7 +655,7 @@ class GdbMiEngine:
             handle.write("\n")
 ```
 
-> Transcript: the `GdbMiAttachment` carries its `transcript_path`, so both the attach sequence and `probe_read` append redacted MI records to `<run>/debug/mi-probe.log`. The handler also surfaces the typed probe record into the debug step `details["mi_probe"]` (Task 6), so AC#1's "one MI record returned as typed JSON" is observable in the response, not just on disk.
+> Transcript: the `GdbMiAttachment` carries its `transcript_path`; the attach sequence appends every redacted MI record (including the `^connected` proof) to `<run>/debug/mi-probe.log`. `probe_read` issues no new command — it returns the already-captured `^connected` record — so it does not write the transcript. The handler surfaces that typed record into the debug step `details["mi_probe"]` (Task 6), so AC#1's "one MI record returned as typed JSON" is observable in the response, not just on disk.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -974,7 +981,15 @@ def _run_mi_attach_probe(
             )
         }
         return None, mi_probe
-    except GdbMiError as exc:
+    except Exception as exc:  # noqa: BLE001 — the guaranteed-resume invariant is unconditional
+        # The invariant is "the target is NEVER left HALTED on a tool error" (issue AC: engine crash,
+        # RSP timeout, AND a raised tool exception). So this catch is intentionally broad — a
+        # non-GdbMiError (e.g. an unwrapped pygdbmi error) must still trigger resume + teardown, not
+        # escape and strand the kernel HALTED with the guard held. KeyboardInterrupt/SystemExit
+        # (BaseException, not Exception) still propagate. The error is re-reported as a failure
+        # response, never silently swallowed.
+        category = exc.category if isinstance(exc, GdbMiError) else ErrorCategory.INFRASTRUCTURE_FAILURE
+        base_details = exc.details if isinstance(exc, GdbMiError) else {}
         # If attach failed before connecting (bad endpoint / missing gdb / missing vmlinux), no RSP
         # connection was made, so the engine never halted the target — treat resume as confirmed so
         # the durable record is un-halted and no recovery tombstone is left. Otherwise run the
@@ -990,9 +1005,9 @@ def _run_mi_attach_probe(
             session_registry=session_registry,
             session_guard=session_guard,
         )
-        details = redactor.redact_value({**exc.details, "transport_session_id": transport_session.session_id})
+        details = redactor.redact_value({**base_details, "transport_session_id": transport_session.session_id})
         failure = ToolResponse.failure(
-            category=exc.category,
+            category=category,
             message=redactor.redact_text(str(exc)),
             run_id=run_id,
             details=details,
@@ -1000,6 +1015,8 @@ def _run_mi_attach_probe(
         )
         return failure, {}
 ```
+
+> The `# noqa: BLE001` is harmless (ruff's configured rule set — `E,F,I,UP,B,SIM` — does not include `BLE`), but keep it as documentation of the deliberate broad catch. `force_resume` itself never raises (it suppresses everything internally), so the resume cannot re-raise inside the handler.
 
 > **Probe-failure step recording:** the probe runs *before* the batch `provider.start_session`
 > creates the session-of-record, and `_teardown_debug_transport` has already released the guard and
@@ -1109,10 +1126,13 @@ class FakeEngine:
         self.attached = True
         return object()  # opaque attachment handle
 
-    def probe_read(self, attachment, **_):
+    def probe_read(self, attachment) -> MiRecord:
         if self.fail_on == "probe":
             raise GdbMiError("rsp timeout", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
-        return MiRecord(type="result", message="done", payload={"value": "Linux version 6.9.0-test"})
+        if self.fail_on == "probe_crash":
+            raise RuntimeError("unexpected non-GdbMiError engine crash")  # an unwrapped tool exception
+        # the real engine returns the `^connected` attach proof
+        return MiRecord(type="result", message="connected", payload=None)
 
     def resume_and_detach(self, attachment) -> bool:
         self.resumed = True
@@ -1134,6 +1154,8 @@ def test_probe_success_records_session_and_leaves_record_halted(tmp_path: Path) 
     )
     assert resp.ok is True
     assert engine.attached and engine.resumed
+    # AC#1: the typed MI probe record (the ^connected attach proof) is surfaced in the response data.
+    assert resp.data["mi_probe"]["record"]["message"] == "connected"
     record = registry.read_record(KEY)
     assert record is not None and record.execution_state == ExecutionState.HALTED  # batch path owns the kernel
 ```
@@ -1182,19 +1204,37 @@ def test_probe_fault_resumes_and_frees_guard(tmp_path: Path, fail_on: str) -> No
         assert engine.forced is True
 
 
-def test_ssh_tier_rejected_during_halt_then_succeeds_after_resume(tmp_path: Path) -> None:
+def test_non_gdbmi_engine_exception_still_resumes_and_frees_guard(tmp_path: Path) -> None:
+    """The 'raised tool exception' fault case: an UNWRAPPED, non-GdbMiError exception from the engine
+    must still trigger the guaranteed-resume + teardown (never strand the kernel HALTED) and report
+    INFRASTRUCTURE_FAILURE rather than escaping the handler."""
     artifact_root = _create_debug_ready_run(tmp_path)
     registry = _make_registry(tmp_path)
     txn, admission = _build_transaction(registry=registry)
+    engine = FakeEngine(fail_on="probe_crash", resume_confirmed=True)
+    resp = debug_start_session_handler(
+        artifact_root=artifact_root, run_id=RUN_ID, provider=FakeDebugProvider(), debug_profiles=_profiles(),
+        transaction=txn, admission=admission, session_registry=registry, gdb_mi_engine=engine,
+    )
+    assert resp.ok is False
+    assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert engine.forced is True
+    assert registry.read_record(KEY) is None
+    assert registry.read_tombstone(KEY) is None
 
-    # During the fault window the durable record is HALTED -> a concurrently-issued ssh-tier op is
-    # fast-rejected. Simulate "during" by asserting target_run_tests rejects while a HALTED record is
-    # present (a successful probe leaves the batch session HALTED).
+
+def test_run_tests_rejected_while_target_halted(tmp_path: Path) -> None:
+    """The 'during the stop' half of the §5.6 contract: while a debug session holds the kernel
+    (durable record HALTED), a concurrently-issued ssh-tier op is fast-rejected with target_halted."""
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path)
+    txn, admission = _build_transaction(registry=registry)
     ok = debug_start_session_handler(
         artifact_root=artifact_root, run_id=RUN_ID, provider=FakeDebugProvider(), debug_profiles=_profiles(),
         transaction=txn, admission=admission, session_registry=registry, gdb_mi_engine=FakeEngine(),
     )
     assert ok.ok is True
+    assert registry.read_record(KEY).execution_state == ExecutionState.HALTED
     rootfs_profile: RootfsProfile = rootfs(tmp_path)
     during = target_run_tests_handler(
         artifact_root=artifact_root, run_id=RUN_ID, provider=FakeTestProvider(),
@@ -1202,24 +1242,32 @@ def test_ssh_tier_rejected_during_halt_then_succeeds_after_resume(tmp_path: Path
     )
     assert during.ok is False and during.error.details["code"] == "target_halted"
 
-    # A probe FAULT with confirmed resume un-halts the target; a fresh ssh-tier op then succeeds.
-    txn2, admission2 = _build_transaction(registry=_make_registry(tmp_path / "r2"))
-    reg2 = _make_registry(tmp_path / "r2b")
-    txn3, admission3 = _build_transaction(registry=reg2)
+
+def test_probe_fault_with_confirmed_resume_unblocks_ssh_tier(tmp_path: Path) -> None:
+    """The 'after the guaranteed resume' half, on ONE target/registry timeline: a probe fault with
+    confirmed resume un-halts the durable record and leaves no recovery tombstone, so a fresh
+    ssh-tier op on the SAME target then succeeds (target back in EXECUTING)."""
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path)
+    txn, admission = _build_transaction(registry=registry)
     faulted = debug_start_session_handler(
-        artifact_root=artifact_root, run_id=RUN_ID, new_session=True, provider=FakeDebugProvider(),
-        debug_profiles=_profiles(), transaction=txn3, admission=admission3, session_registry=reg2,
+        artifact_root=artifact_root, run_id=RUN_ID, provider=FakeDebugProvider(), debug_profiles=_profiles(),
+        transaction=txn, admission=admission, session_registry=registry,
         gdb_mi_engine=FakeEngine(fail_on="probe", resume_confirmed=True),
     )
     assert faulted.ok is False
+    # guaranteed-resume teardown: record deleted, no tombstone -> ssh-tier is no longer gated.
+    assert registry.read_record(KEY) is None
+    assert registry.read_tombstone(KEY) is None
+    rootfs_profile: RootfsProfile = rootfs(tmp_path)
     after = target_run_tests_handler(
         artifact_root=artifact_root, run_id=RUN_ID, provider=FakeTestProvider(),
-        rootfs_profiles={"minimal": rootfs_profile}, admission=admission3, session_registry=reg2,
+        rootfs_profiles={"minimal": rootfs_profile}, admission=admission, session_registry=registry,
     )
     assert after.ok is True
 ```
 
-> The "during vs after" test is fiddly because `run-1`'s snapshot is seeded per transaction. Keep it focused: the load-bearing assertions are (a) `target_halted` while a HALTED record exists, and (b) `ok` after a confirmed-resume fault leaves the record un-halted with no tombstone. If wiring two registries proves awkward, split into two tests — one for each side — rather than forcing one scenario. Do not leave a flaky test.
+> These two tests model the two halves of the §5.6 contract on a single target/registry each — they do NOT stitch unrelated transactions into a fake "timeline." The fault test exercises the real guaranteed-resume + teardown path; the halt test exercises the gating a held session imposes.
 
 - [ ] **Step 4: Run the tests**
 
@@ -1267,6 +1315,8 @@ def _live() -> bool:
 def test_engine_attaches_reads_one_record_and_detaches(tmp_path: Path) -> None:
     """Drive the real GdbMiEngine against the rsp_endpoint a real transaction.open() returns: attach
     over RSP, read one MI record as typed JSON, detach cleanly; assert resume confirmed."""
+    import time
+
     from linux_debug_mcp.providers.gdb_mi import GdbMiEngine, MiRecord
     # Build through to a READY transport session exactly as test_transport_open_close_integration
     # does (build->boot->_build_transport_machinery->transaction.open via debug.start_session), then
@@ -1275,8 +1325,14 @@ def test_engine_attaches_reads_one_record_and_detaches(tmp_path: Path) -> None:
     # engine = GdbMiEngine()
     # attachment = engine.attach(rsp_endpoint=record.rsp_endpoint, vmlinux_path=vmlinux, transcript_path=...)
     # mi_record = engine.probe_read(attachment)
-    # assert isinstance(mi_record, MiRecord) and mi_record.message in {"done", "connected"}
+    # assert isinstance(mi_record, MiRecord) and mi_record.message == "connected"
+    #
+    # Anti-hang regression guard (the live counterpart to the unit-test ordering proxy): the async
+    # continue must NOT block on a free-running kernel, so resume must return promptly. A sync
+    # `-exec-continue` regression would blow past this bound (~10s/command).
+    # started = time.monotonic()
     # assert engine.resume_and_detach(attachment) is True
+    # assert time.monotonic() - started < 5.0, "resume must not block on a free-running kernel"
     pytest.skip("fill in the build/boot/open sequence from the sibling integration module when running live")
 ```
 
