@@ -650,6 +650,7 @@ def local_drgn_introspect_capability() -> ProviderCapability:
     operations = [
         "debug.introspect.run",
         "debug.introspect.check_prerequisites",
+        "debug.postmortem.check_prereqs",
         "debug.introspect.helper",
         "debug.introspect.from_vmcore",
         "debug.introspect.from_vmcore_helper",

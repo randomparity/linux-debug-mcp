@@ -133,6 +133,23 @@ class DebugIntrospectCheckPrerequisitesRequest(Model):
     rootfs_profile: str | None = None
 
 
+class DebugPostmortemCheckPrereqsRequest(Model):
+    """Request payload for ``debug.postmortem.check_prereqs``. #94 / ADR 0028.
+
+    Run-scoped, live-target kdump-readiness probe. Field-identical to
+    ``DebugIntrospectCheckPrerequisitesRequest`` (a distinct tool gets a distinct
+    model). ``timeout_seconds`` defaults to 20 and is handler-bounded to [5, 60] so
+    an out-of-range value surfaces as ``ToolResponse.failure(CONFIGURATION_ERROR)``.
+    """
+
+    run_id: str
+    target_ref: str
+    timeout_seconds: int = 20
+    debug_profile: str | None = None
+    target_profile: str | None = None
+    rootfs_profile: str | None = None
+
+
 class DebugIntrospectHelperRequest(Model):
     """Request payload for ``debug.introspect.helper``. Spec §6.1.
 

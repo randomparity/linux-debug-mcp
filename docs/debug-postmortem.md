@@ -172,3 +172,60 @@ The composed report and the persisted `report.json` under
 `<run>/debug/postmortem/triage/<call-id>/` pass through `Redactor()`; the
 `triage_all_sources_failed` failure `details` are redacted too. Each sub-call's own raw
 outputs stay under its own `sensitive/` tree (the sub-tiers' contract).
+
+# `debug.postmortem.check_prereqs` — kdump readiness
+
+`debug.postmortem.check_prereqs` probes a **live, booted** target over SSH and reports
+whether it is configured to capture a vmcore on the next panic. It is **diagnostic
+only**: it detects and asserts readiness and never enables, configures, starts, or
+restarts kdump (configuration is out of scope per #14 — the service state is
+*reported*, never changed). The one write it performs is a transient, self-cleaning
+write probe of the dump dir (create + immediately remove a temp file) to assert the
+dir is genuinely writable by the capture kernel; it modifies no kdump configuration or
+service state. Unlike the offline crash/triage tools, it touches a live target, so it
+is an ssh-tier op gated on the target lifecycle: a `HALTED` target is fast-rejected
+(interface-contracts §5.6 rule 2), never left to hang.
+
+Design: [spec](superpowers/specs/2026-05-30-debug-postmortem-check-prereqs-design.md) ·
+[ADR 0028](adr/0028-postmortem-check-prereqs-kdump-readiness.md).
+
+## Request
+
+| Field | Type | Notes |
+|---|---|---|
+| `run_id` | str | Existing run with a SUCCEEDED `boot` step. |
+| `target_ref` | str | Must equal the manifest's `target_profile`. |
+| `timeout_seconds` | int | Handler-bounded to `[5, 60]` (default 20). |
+| `debug_profile` / `target_profile` / `rootfs_profile` | str \| null | When non-null, must match the immutable manifest request. |
+
+## The three independent checks
+
+The on-target probe gathers **all** facts in one round-trip; the host builds the three
+checks from that one object, so one failing probe never masks another.
+
+| `check_id` | PASS when | On FAIL, `suggested_fix` |
+|---|---|---|
+| `kdump.crashkernel_reserved` | kexec/kdump: `/proc/cmdline` has `crashkernel=` **and** `/sys/kernel/kexec_crash_size > 0`. POWER: `/sys/kernel/fadump_enabled == 1`. | add `crashkernel=` and reboot, or fix a value that reserved 0 bytes. |
+| `kdump.service_active` | `systemctl is-active` reports `active` for `kdump` or `kdump-tools`. | enable and start the service (`systemctl enable --now kdump`) — reported only, never started by this tool. |
+| `kdump.dump_path_writable` | the configured dump dir (default `/var/crash`, or an `/etc/kdump.conf` `path`) exists and a transient write probe succeeds. | create the dir, or fix the read-only mount / free space (`ENOSPC`) / ownership. |
+
+Success `data` carries `kdump_ready` (true iff all three PASS), `mechanism`
+(`kdump`/`fadump`/`none`), `probe_id`, and the redacted `checks`.
+
+## ppc64le / fadump
+
+On POWER, firmware-assisted dump (fadump) replaces kexec-based kdump: it reserves
+memory through firmware, so `/sys/kernel/kexec_crash_size` is 0 by design. When
+`/sys/kernel/fadump_enabled == 1` the tool reports `mechanism: "fadump"` and the
+crashkernel check PASSES — a fadump target is **not** a false kdump failure. x86_64
+`/var/crash` kdump is the tested path; fadump detection is documented but unvalidated
+(no POWER hardware in this environment). A dump target on a separate device / NFS / SSH
+is not resolved — the probe reports the local dir it checked.
+
+## Redaction
+
+Raw probe `stdout`/`stderr` stay under
+`<run>/sensitive/debug/postmortem/check_prereqs/<probe_id>/`; only the redacted checks
+are returned and the persisted `probe.json` is redacted. `/proc/cmdline` can carry
+secrets injected as boot args, so redaction runs before the response **and** before
+persistence.
