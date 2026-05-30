@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -205,6 +205,70 @@ class DebugPostmortemCrashRequest(Model):
     modules_ref: str | None = None
     commands: list[str]
     timeout_seconds: int = 60
+
+
+class DebugPostmortemTriageRequest(Model):
+    """Request payload for ``debug.postmortem.triage``. Spec §3.1.
+
+    Composes the crash (#92) and drgn (#54/#55) offline tiers into one report.
+    No ``commands``/``helpers`` (fixed helper set) and no ``target_ref``/``*_profile``
+    (offline, never gated). ``timeout_seconds`` is handler-bounded to ``[5, 300]`` and
+    applied to EACH sub-call; ``modules_ref`` is validated up front and threaded to the
+    crash sub-call only.
+    """
+
+    run_id: str
+    vmcore_ref: str
+    vmlinux_ref: str
+    modules_ref: str | None = None
+    timeout_seconds: int = 60
+
+
+class _TriageSectionBase(Model):
+    """Shared per-section status. Spec §3.3 / ADR 0027 decision 3."""
+
+    status: Literal["ok", "failed"]
+    reason: str | None = None  # the sub-call's stable error code, set iff status == "failed"
+
+
+class PanicReasonSection(_TriageSectionBase):
+    source: Literal["crash"] = "crash"
+    text: str | None = None  # selected panic line; None when none matched (status may still be "ok")
+
+
+class FaultingTaskSection(_TriageSectionBase):
+    source: Literal["crash"] = "crash"
+    pid: int | None = None
+    command: str | None = None
+
+
+class BacktraceSection(_TriageSectionBase):
+    source: Literal["crash"] = "crash"
+    frames: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RecentDmesgSection(_TriageSectionBase):
+    source: Literal["drgn"] = "drgn"
+    entries: list[dict[str, Any]] = Field(default_factory=list)
+    truncated: bool = False
+
+
+class ModulesSection(_TriageSectionBase):
+    source: Literal["drgn"] = "drgn"
+    modules: list[dict[str, Any]] = Field(default_factory=list)
+    decode_errors: int = 0
+
+
+class DebugPostmortemTriageReport(Model):
+    """Composite triage report. Spec §3.3. All section payloads are pass-through of the
+    already-typed-and-redacted upstream shapes (ADR 0027 decision 8)."""
+
+    vmcore_build_id: str
+    panic_reason: PanicReasonSection
+    faulting_task: FaultingTaskSection
+    backtrace: BacktraceSection
+    recent_dmesg: RecentDmesgSection
+    modules: ModulesSection
 
 
 class RunStep(Model):

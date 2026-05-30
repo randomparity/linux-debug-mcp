@@ -30,5 +30,6 @@ Each ADR captures one non-trivial design decision — especially decisions the s
 | [0024](0024-gdb-mi-phase-d-transport-adaptation.md) | gdb/MI Phase D: break-entry routes off the admitted plan; transport-quality warning for lossy out-of-band consoles | Accepted |
 | [0025](0025-gdb-mi-prereq-behavioral-primary-gate.md) | gdb/MI prerequisite: the mi3 `^done` behavioral probe is the primary gate; the version string is advisory | Accepted |
 | [0026](0026-postmortem-crash-batch-runner.md) | `debug.postmortem.crash`: host-side pure-Python vmcore build-id reader, per-command output-redirection framing, best-effort raw-passthrough parsers | Accepted |
+| [0027](0027-postmortem-triage-composition.md) | `debug.postmortem.triage`: handler-level composition, single up-front build-id gate, per-section partial-failure contract | Accepted |
 
 **Layer-4 plan amendments (2026-05-27, addressing the `/challenge` review findings):** ADR 0002 amended with the in-process fenced guard token + post-restart `revoke()` soundness (Finding #4); ADR 0005 amended with the `on_partial` `backend_pid` write-through invariant (Finding #1) and the `recovery_required` single-source-of-truth / write-through-cache rule (Finding #5); ADR 0006 amended with the halt→runner cancel-bridge delivery mechanism + RUNNING-step terminalization (Finding #2).

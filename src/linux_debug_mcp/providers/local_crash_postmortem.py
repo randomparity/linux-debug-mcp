@@ -30,7 +30,7 @@ def local_crash_postmortem_capability() -> ProviderCapability:
         architectures=["x86_64"],
         target_kinds=[TargetKind.VIRTUAL],
         transports=["filesystem"],
-        operations=["debug.postmortem.crash"],
+        operations=["debug.postmortem.crash", "debug.postmortem.triage"],
         required_host_tools=["crash", "timeout", "prlimit"],
         destructive_permissions=[],
         access_methods=["subprocess", "filesystem"],
