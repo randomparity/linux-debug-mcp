@@ -88,19 +88,35 @@ reports that generically), so the preflight must check it here to "name every mi
 
 **`check_gdbstub_port(target_profile, *, port_probe)` → `gdbstub.port`**
 
+The probe must not collapse every bind failure into "in use": a privileged port (`<1024`) without root
+fails with `EACCES`, and a non-loopback `gdbstub_endpoint` host that is not a local address fails with
+`EADDRNOTAVAIL` — neither is "already in use", and a "stop the holder" fix misdirects both. The probe
+therefore returns a small result, not a bare bool: `free`, `in_use` (`EADDRINUSE`), or `error` carrying
+the OS error string. The default probe maps `errno.EADDRINUSE` → `in_use` and any other `OSError` →
+`error`.
+
 | condition | status | message / fix |
 |---|---|---|
 | `target_profile is None` | `SKIPPED` | "no target profile selected" |
 | `not target_profile.debug_gdbstub` | `SKIPPED` | "target profile does not enable gdbstub" |
 | `gdbstub_endpoint` unparseable | `FAILED` | "could not parse gdbstub_endpoint: `<value>`" |
-| `port_probe(host, port)` is False | `FAILED` | "gdbstub endpoint `<host>:<port>` is already in use" + fix: stop the holder or pick a different `gdbstub_endpoint` |
-| `port_probe(host, port)` is True | `PASSED` | "gdbstub endpoint `<host>:<port>` is free", `details` |
+| probe → `in_use` | `FAILED` | "gdbstub endpoint `<host>:<port>` is already in use" + fix: stop the process holding it or pick a different `gdbstub_endpoint` |
+| probe → `error` | `FAILED` | "could not bind gdbstub endpoint `<host>:<port>`: `<os error>`" + fix: for a privileged port run with the needed capability or choose a port `>=1024`; for a non-local host confirm the address is configured on this machine |
+| probe → `free` | `PASSED` | "gdbstub endpoint `<host>:<port>` is free", `details.host`/`details.port` |
 
-`port_probe` is an injected `Callable[[str, int], bool]` (default: a plain TCP `bind`, no `SO_REUSEADDR`,
-so a port held by another process reads as in-use). Injection keeps the unit test deterministic without
-binding real ports (mock the boundary, not the logic). Endpoint parsing is `rsplit(":", 1)` with host
-non-empty and port an int in `1..65535`; the IPv6 bracket form `[::1]:1234` is out of scope (the default
-and every shipped profile are IPv4) and reports the parse-error `FAILED`.
+`port_probe` is an injected `Callable[[str, int], PortProbeResult]` (default: a plain TCP `bind`, no
+`SO_REUSEADDR`, so a port held by another process reads as `in_use`). Injection keeps the unit test
+deterministic without binding real ports (mock the boundary, not the logic). Endpoint parsing is
+`rsplit(":", 1)` with host non-empty and port an int in `1..65535`; the IPv6 bracket form `[::1]:1234` is
+out of scope (the default and every shipped profile are IPv4) and reports the parse-error `FAILED`.
+
+**This check is a point-in-time advisory, not a reservation.** A `PASSED` means the endpoint was free at
+probe time; another process (or QEMU from a prior run) can take it before `target.boot` binds it, and the
+boot path remains the authoritative failure point. The default probe binds a real socket for the duration
+of the probe, so two preflights run concurrently against the *same* endpoint can make one observe
+`EADDRINUSE` and report a false `in_use`; callers should not run concurrent preflights against one
+endpoint. The check exists to surface the common, persistent case (a long-lived process already holding
+`1234`) up front, not to guarantee availability at boot.
 
 ### Unknown profile name → `FAILED` check, not a hard failure
 
@@ -121,8 +137,10 @@ filesystem paths and a host:port are not sensitive; they already appear in profi
 
 ## Acceptance
 
-On a clean machine with `build_profile="x86_64-default"`, `target_profile="local-qemu-debug"`,
-`rootfs_profile="minimal"`:
+On a clean machine with `build_profile="x86_64-debug"`, `target_profile="local-qemu-debug"`,
+`rootfs_profile="minimal"` (a coherent gdbstub-debug roundtrip — `x86_64-debug` carries the DWARF/KASLR
+config the gdbstub tier needs and `base_config=["defconfig"]`; the preflight does **not** itself validate
+build/target pairing coherence):
 
 - `kernel.config` is `PASSED` ("derivable via `make defconfig`").
 - `rootfs.image` is `FAILED`, message names the missing `minimal.qcow2`, fix names `just rootfs`.

@@ -47,13 +47,18 @@ resolution and the unknown-name `FAILED` case live in the server handler, which 
 `checks.py` free of the default-profile constants (avoiding a server→config→checks import knot) and keeps
 each check unit-testable with a constructed profile, no registry needed.
 
-### 5. The gdbstub port probe is an injected `bind`-based callable
+### 5. The gdbstub port probe is an injected `bind`-based callable returning a 3-way result
 
-`check_gdbstub_port` takes `port_probe: Callable[[str, int], bool]`, defaulting to a plain TCP `bind`
-(no `SO_REUSEADDR`) so a port another process holds reads as in-use. Injection makes the unit test
-deterministic without occupying a real port (mock the socket boundary, not the logic). A plain bind —
-not a connect — is the right probe: QEMU's gdbstub binds the listener, so bind-failure is the exact
-condition that will break `target.boot`.
+`check_gdbstub_port` takes `port_probe: Callable[[str, int], PortProbeResult]`, defaulting to a plain TCP
+`bind` (no `SO_REUSEADDR`). The result is three-way (`free` / `in_use` / `error`), not a bool, because
+`bind` failures are not all "in use": `EADDRINUSE` is, but `EACCES` (privileged port without root) and
+`EADDRNOTAVAIL` (a non-local `gdbstub_endpoint` host) are different conditions with different remedies,
+and reporting them all as "already in use" misdirects the fix. The default probe maps `EADDRINUSE` →
+`in_use` and any other `OSError` → `error` (carrying the OS message). Injection makes the unit test
+deterministic without occupying a real port (mock the socket boundary, not the logic). A plain bind — not
+a connect — is the right probe: QEMU's gdbstub binds the listener, so bind-failure is the exact condition
+that will break `target.boot`. The check is advisory (point-in-time), not a reservation; the boot path
+stays the authoritative binder (see spec, gdbstub.port section).
 
 ### 6. `rootfs.image` delegates to `resolve_rootfs_source`, then checks existence
 
