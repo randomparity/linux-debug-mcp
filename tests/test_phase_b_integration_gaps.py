@@ -32,6 +32,7 @@ from typing import Any
 from _layer4_fakes import KEY, PLATFORM, FakeQemuTransport
 from conftest import (
     CancelAwareTestProvider,
+    FakeMiEngine,
     FakeTestProvider,
     create_booted_run,
     kernel_provenance_details,
@@ -45,12 +46,8 @@ from linux_debug_mcp.coordination.admission import AdmissionService
 from linux_debug_mcp.coordination.registry import SessionRegistry
 from linux_debug_mcp.coordination.transaction import TransportTransaction
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
+from linux_debug_mcp.providers.gdb_mi import GdbMiSessionRegistry
 from linux_debug_mcp.providers.local_ssh_tests import TestExecutionResult
-from linux_debug_mcp.providers.qemu_gdbstub import (
-    DebugProviderResult,
-    DebugSession,
-    ProviderDebugError,
-)
 from linux_debug_mcp.seams.lifecycle import LifecycleEvent, LifecycleKind
 from linux_debug_mcp.seams.target import (
     TargetKey,
@@ -250,62 +247,6 @@ def test_run_tests_unexpected_provider_failure_deregisters_ssh_tier_handle(tmp_p
 # ---------------------------------------------------------------------------
 
 
-class _FakeDebugProviderFailingAttach:
-    """Raises ProviderDebugError from start_session AFTER the transaction has committed READY and
-    _halt_debug_transport has persisted HALTED — the exact gap Fix 3 closes."""
-
-    name = "local-qemu-gdbstub"
-
-    def start_session(self, **kwargs: Any) -> DebugProviderResult:
-        raise ProviderDebugError(
-            "gdb attach exploded",
-            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-            details={"code": "attach_failed"},
-        )
-
-
-class _FakeDebugProviderOk:
-    name = "local-qemu-gdbstub"
-
-    def start_session(self, **kwargs: Any) -> DebugProviderResult:
-        run_dir = kwargs["run_dir"]
-        session_path = run_dir / "debug" / "sessions" / "debug-recover.json"
-        transcript_path = run_dir / "debug" / "attempt-001" / "transcript.txt"
-        commands_path = run_dir / "debug" / "attempt-001" / "commands.jsonl"
-        summary_path = run_dir / "debug" / "attempt-001" / "debug-summary.json"
-        for path in [session_path, transcript_path, commands_path, summary_path]:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("{}", encoding="utf-8")
-        session = DebugSession(
-            session_id="debug-recover",
-            run_id=kwargs["run_id"],
-            provider_name=self.name,
-            gdbstub_endpoint=kwargs["gdbstub_endpoint"],
-            vmlinux_path=str(kwargs["vmlinux_path"]),
-            selected_debug_profile=kwargs["debug_profile"].name,
-            attach_status="attached",
-            started_at="2026-05-27T00:00:00+00:00",
-            current_execution_state="stopped",
-            transcript_path=str(transcript_path),
-            command_metadata_path=str(commands_path),
-            latest_summary_path=str(summary_path),
-            symbol_identity_validation={"same_run_artifact_linkage": True, "live_banner_match": True},
-        )
-        session_path.write_text(session.model_dump_json(indent=2), encoding="utf-8")
-        return DebugProviderResult(
-            status=StepStatus.SUCCEEDED,
-            summary="debug session started",
-            session=session,
-            artifacts=[
-                ArtifactRef(path=str(session_path), kind="debug-session"),
-                ArtifactRef(path=str(transcript_path), kind="debug-transcript", sensitive=True),
-                ArtifactRef(path=str(commands_path), kind="debug-command-metadata"),
-                ArtifactRef(path=str(summary_path), kind="debug-summary"),
-            ],
-            details={"debug_session_id": "debug-recover"},
-        )
-
-
 def _build_debug_transaction(
     registry: SessionRegistry, *, generation: int = 1
 ) -> tuple[TransportTransaction, AdmissionService]:
@@ -389,11 +330,14 @@ def test_debug_start_session_closes_transport_on_failed_attach(tmp_path: Path) -
     response = debug_start_session_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
-        provider=_FakeDebugProviderFailingAttach(),
         debug_profiles=_profiles(),
         transaction=txn,
         admission=admission,
         session_registry=registry,
+        # An engine probe fault whose un-halt cannot be confirmed leaves the conservative
+        # closed_while_halted recovery tombstone (the failed-attach gap this test pins).
+        gdb_mi_engine=FakeMiEngine(fail_on="probe", resume_confirmed=False),
+        gdb_mi_sessions=GdbMiSessionRegistry(),
     )
 
     # (a) the response is DEBUG_ATTACH_FAILURE and carries the transport_session_id for diagnostics.
@@ -416,12 +360,13 @@ def test_debug_start_session_closes_transport_on_failed_attach(tmp_path: Path) -
         artifact_root=artifact_root,
         run_id=RUN_ID,
         new_session=True,
-        provider=_FakeDebugProviderOk(),
         debug_profiles=_profiles(),
         transaction=txn,
         admission=admission,
         session_registry=registry,
         recovery=True,
+        gdb_mi_engine=FakeMiEngine(),
+        gdb_mi_sessions=GdbMiSessionRegistry(),
     )
     assert reattach.ok is True
     assert registry.read_tombstone(KEY) is None  # recovery attach cleared it

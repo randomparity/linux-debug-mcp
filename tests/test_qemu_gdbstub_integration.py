@@ -5,6 +5,7 @@ import pytest
 
 from linux_debug_mcp import server
 from linux_debug_mcp.config import RootfsProfile, TargetProfile
+from linux_debug_mcp.providers.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
 from linux_debug_mcp.server import workflow_build_boot_debug_handler
 
 MANAGED_DOMAIN_PREFIX = "mcp-linux-debug-"
@@ -82,6 +83,10 @@ def test_live_build_boot_debug_workflow(tmp_path: Path, monkeypatch: pytest.Monk
         ),
     )
 
+    # The live debug attach drives the persistent gdb/MI engine over the guard-protected transport,
+    # exactly as create_app wires it: build the Layer-4 machinery and a real engine + live-session
+    # registry and thread them through the workflow.
+    machinery = server._build_transport_machinery(session_registry=None, transport_registry=None)
     response = workflow_build_boot_debug_handler(
         artifact_root=tmp_path / "runs",
         source_path=str(source),
@@ -92,6 +97,12 @@ def test_live_build_boot_debug_workflow(tmp_path: Path, monkeypatch: pytest.Monk
         force_rebuild=True,
         force_reboot=True,
         new_session=True,
+        admission=machinery.admission,
+        session_registry=machinery.session_registry,
+        transaction=machinery.transaction,
+        session_guard=machinery.session_guard,
+        gdb_mi_engine=GdbMiEngine(),
+        gdb_mi_sessions=GdbMiSessionRegistry(),
     )
 
     assert response.ok is True, response.model_dump(mode="json")

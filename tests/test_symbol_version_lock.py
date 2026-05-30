@@ -2,21 +2,28 @@
 
 The handler is called directly with injected fakes (the repo convention). The gate
 compares the on-disk vmlinux ELF build-id against the boot-recorded
-KernelProvenance.build_id BEFORE attaching gdb.
+KernelProvenance.build_id BEFORE attaching gdb (the live gdb/MI engine).
 """
 
 from pathlib import Path
 
-from conftest import GDB_TEST_BUILD_ID, kernel_provenance_details, write_vmlinux_with_build_id
-from test_debug_handlers import FakeDebugProvider  # reuse the existing fake (top-level sibling import)
+from conftest import (
+    GDB_TEST_BUILD_ID,
+    FakeMiEngine,
+    build_debug_transport,
+    kernel_provenance_details,
+    write_vmlinux_with_build_id,
+)
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import DebugProfile
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
+from linux_debug_mcp.providers.gdb_mi import GdbMiSessionRegistry
 from linux_debug_mcp.server import debug_start_session_handler
 from linux_debug_mcp.symbols.build_id import BuildIdReadError
 
 _OTHER_BUILD_ID = "ffffffffffffffffffffffffffffffffffffffff"  # pragma: allowlist secret
+RUN_ID = "run-vlock"
 
 
 def _seed(tmp_path: Path, *, provenance: dict | None, real_elf: bool = True) -> tuple[Path, str]:
@@ -31,7 +38,7 @@ def _seed(tmp_path: Path, *, provenance: dict | None, real_elf: bool = True) -> 
             target_profile="local-qemu",
             rootfs_profile="minimal",
             debug_profile="qemu-gdbstub-default",
-            run_id="run-vlock",
+            run_id=RUN_ID,
         )
     )
     vmlinux = artifact_root / manifest.run_id / "build" / "vmlinux"
@@ -73,66 +80,67 @@ def _profiles(symbol_identity_required: bool = True) -> dict[str, DebugProfile]:
     }
 
 
+def _start(tmp_path: Path, artifact_root: Path, run_id: str, *, engine: FakeMiEngine | None = None, **overrides):
+    """Drive debug.start_session over the live-engine path with the transport machinery wired."""
+    engine = engine or FakeMiEngine()
+    registry, txn, admission = build_debug_transport(tmp_path, run_id)
+    return debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_profiles=_profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=GdbMiSessionRegistry(),
+        **overrides,
+    )
+
+
 def test_matching_build_id_attaches(tmp_path):
     artifact_root, run_id = _seed(tmp_path, provenance=kernel_provenance_details())
-    provider = FakeDebugProvider()
-    resp = debug_start_session_handler(
-        artifact_root=artifact_root, run_id=run_id, provider=provider, debug_profiles=_profiles()
-    )
+    engine = FakeMiEngine()
+    resp = _start(tmp_path, artifact_root, run_id, engine=engine)
     assert resp.ok is True
-    assert provider.calls == 1
+    assert engine.attached is True
 
 
 def test_mismatched_build_id_fails_and_never_attaches(tmp_path):
     artifact_root, run_id = _seed(tmp_path, provenance=kernel_provenance_details())
-    provider = FakeDebugProvider()
-    resp = debug_start_session_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        provider=provider,
-        debug_profiles=_profiles(),
-        build_id_reader=lambda _p: _OTHER_BUILD_ID,
-    )
+    engine = FakeMiEngine()
+    resp = _start(tmp_path, artifact_root, run_id, engine=engine, build_id_reader=lambda _p: _OTHER_BUILD_ID)
     assert resp.ok is False
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert resp.error.details["code"] == "provenance_mismatch"
     assert resp.error.details["observed"] == _OTHER_BUILD_ID
     assert resp.error.details["expected"] == GDB_TEST_BUILD_ID
-    assert provider.calls == 0
+    assert engine.attached is False
     manifest = ArtifactStore(artifact_root, create_root=False).load_manifest(run_id)
     assert "debug" not in manifest.step_results
 
 
 def test_unreadable_vmlinux_fails(tmp_path):
     artifact_root, run_id = _seed(tmp_path, provenance=kernel_provenance_details(), real_elf=False)
-    provider = FakeDebugProvider()
+    engine = FakeMiEngine()
 
     def _boom(_p):
         raise BuildIdReadError("not an ELF file (bad magic)")
 
-    resp = debug_start_session_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        provider=provider,
-        debug_profiles=_profiles(),
-        build_id_reader=_boom,
-    )
+    resp = _start(tmp_path, artifact_root, run_id, engine=engine, build_id_reader=_boom)
     assert resp.ok is False
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert resp.error.details["code"] == "vmlinux_build_id_unreadable"
-    assert provider.calls == 0
+    assert engine.attached is False
 
 
 def test_missing_provenance_fails(tmp_path):
     artifact_root, run_id = _seed(tmp_path, provenance=None)
-    provider = FakeDebugProvider()
-    resp = debug_start_session_handler(
-        artifact_root=artifact_root, run_id=run_id, provider=provider, debug_profiles=_profiles()
-    )
+    engine = FakeMiEngine()
+    resp = _start(tmp_path, artifact_root, run_id, engine=engine)
     assert resp.ok is False
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert resp.error.details["code"] == "provenance_missing"
-    assert provider.calls == 0
+    assert engine.attached is False
 
 
 def test_capture_error_surfaces_as_provenance_missing(tmp_path):
@@ -153,51 +161,62 @@ def test_capture_error_surfaces_as_provenance_missing(tmp_path):
         ),
         replace_succeeded=True,
     )
-    provider = FakeDebugProvider()
-    resp = debug_start_session_handler(
-        artifact_root=artifact_root, run_id=run_id, provider=provider, debug_profiles=_profiles()
-    )
+    engine = FakeMiEngine()
+    resp = _start(tmp_path, artifact_root, run_id, engine=engine)
     assert resp.ok is False
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert resp.error.details["code"] == "provenance_missing"
     assert resp.error.details["capture_error"] == "build_id_unavailable"
-    assert provider.calls == 0
+    assert engine.attached is False
 
 
 def test_corrupt_recorded_build_id_fails(tmp_path):
     artifact_root, run_id = _seed(tmp_path, provenance=kernel_provenance_details("NOT-HEX"))
-    provider = FakeDebugProvider()
-    resp = debug_start_session_handler(
-        artifact_root=artifact_root, run_id=run_id, provider=provider, debug_profiles=_profiles()
-    )
+    engine = FakeMiEngine()
+    resp = _start(tmp_path, artifact_root, run_id, engine=engine)
     assert resp.ok is False
     assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert resp.error.details["code"] == "provenance_corrupt"
-    assert provider.calls == 0
+    assert engine.attached is False
 
 
 def test_mismatch_fails_even_when_identity_not_required(tmp_path):
     artifact_root, run_id = _seed(tmp_path, provenance=kernel_provenance_details())
-    provider = FakeDebugProvider()
+    engine = FakeMiEngine()
+    registry, txn, admission = build_debug_transport(tmp_path, run_id)
     resp = debug_start_session_handler(
         artifact_root=artifact_root,
         run_id=run_id,
-        provider=provider,
         debug_profiles=_profiles(symbol_identity_required=False),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=GdbMiSessionRegistry(),
         build_id_reader=lambda _p: _OTHER_BUILD_ID,
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "provenance_mismatch"
-    assert provider.calls == 0
+    assert engine.attached is False
 
 
 def test_idempotent_reattach_skips_version_lock(tmp_path):
     # First attach (matching provenance + real ELF) records a SUCCEEDED debug step.
     artifact_root, run_id = _seed(tmp_path, provenance=kernel_provenance_details())
+    registry, txn, admission = build_debug_transport(tmp_path, run_id)
+    sessions = GdbMiSessionRegistry()
     first = debug_start_session_handler(
-        artifact_root=artifact_root, run_id=run_id, provider=FakeDebugProvider(), debug_profiles=_profiles()
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_profiles=_profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=FakeMiEngine(),
+        gdb_mi_sessions=sessions,
     )
     assert first.ok is True
+    session_id = first.data["debug_session_id"]
     # Strip the recorded provenance from the boot step to prove the idempotent return does NOT re-gate.
     store = ArtifactStore(artifact_root, create_root=False)
     boot = store.load_manifest(run_id).step_results["boot"]
@@ -212,7 +231,14 @@ def test_idempotent_reattach_skips_version_lock(tmp_path):
         replace_succeeded=True,
     )
     second = debug_start_session_handler(
-        artifact_root=artifact_root, run_id=run_id, provider=FakeDebugProvider(), debug_profiles=_profiles()
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_profiles=_profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=FakeMiEngine(),
+        gdb_mi_sessions=sessions,
     )
     assert second.ok is True  # returned the existing session, not provenance_missing
-    assert second.data["debug_session_id"] == "debug-1"
+    assert second.data["debug_session_id"] == session_id

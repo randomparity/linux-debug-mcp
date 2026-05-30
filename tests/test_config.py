@@ -136,6 +136,13 @@ def test_default_debug_profile_matches_sprint_4_policy() -> None:
         "debug.set_breakpoint",
         "debug.clear_breakpoint",
         "debug.list_breakpoints",
+        "debug.step",
+        "debug.next",
+        "debug.finish",
+        "debug.backtrace",
+        "debug.list_variables",
+        "debug.set_watchpoint",
+        "debug.clear_watchpoint",
         "debug.read_registers",
         "debug.read_symbol",
         "debug.read_memory",
@@ -358,3 +365,22 @@ def test_max_introspect_calls_per_run_default() -> None:
 
 def test_prelude_warning_fraction_pct_default() -> None:
     assert PRELUDE_WARNING_FRACTION_PCT == 40
+
+
+def test_new_phase_c_debug_operations_are_allowed() -> None:
+    for op in [
+        "debug.step",
+        "debug.next",
+        "debug.finish",
+        "debug.backtrace",
+        "debug.list_variables",
+        "debug.set_watchpoint",
+        "debug.clear_watchpoint",
+    ]:
+        assert op in ALLOWED_DEBUG_OPERATIONS
+
+
+def test_default_debug_profile_enables_new_ops() -> None:
+    profile = DebugProfile(name="x")
+    assert "debug.step" in profile.enabled_operations
+    assert "debug.set_watchpoint" in profile.enabled_operations

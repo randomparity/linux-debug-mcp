@@ -92,7 +92,13 @@ from linux_debug_mcp.providers.contracts import (
     ReservationRequest,
     ReserveProvisionBootRequest,
 )
-from linux_debug_mcp.providers.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiEngine, GdbMiError
+from linux_debug_mcp.providers.gdb_mi import (
+    CANONICAL_PROBE_SYMBOL,
+    GdbMiAttachment,
+    GdbMiEngine,
+    GdbMiError,
+    GdbMiSessionRegistry,
+)
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from linux_debug_mcp.providers.local_drgn_introspect import (
     SCRIPT_BYTE_CAP,
@@ -119,10 +125,8 @@ from linux_debug_mcp.providers.local_ssh_tests import (
     build_ssh_argv,
 )
 from linux_debug_mcp.providers.qemu_gdbstub import (
-    DebugProviderResult,
     DebugSession,
     ProviderDebugError,
-    QemuGdbstubProvider,
 )
 from linux_debug_mcp.providers.registry import ProviderRegistry
 from linux_debug_mcp.providers.stubs import (
@@ -251,9 +255,16 @@ DEBUG_METHOD_OPERATIONS = {
     "read_memory": "debug.read_memory",
     "evaluate": "debug.evaluate",
     "set_breakpoint": "debug.set_breakpoint",
+    "set_watchpoint": "debug.set_watchpoint",
     "clear_breakpoint": "debug.clear_breakpoint",
+    "clear_watchpoint": "debug.clear_watchpoint",
     "list_breakpoints": "debug.list_breakpoints",
+    "backtrace": "debug.backtrace",
+    "list_variables": "debug.list_variables",
     "continue_execution": "debug.continue",
+    "step": "debug.step",
+    "next": "debug.next",
+    "finish": "debug.finish",
     "interrupt": "debug.interrupt",
     "end_session": "debug.end_session",
 }
@@ -782,23 +793,6 @@ def _debug_session_manifest_details(*, store: ArtifactStore, run_id: str, sessio
     if session.ended_at is not None:
         details["ended_at"] = session.ended_at
     return details
-
-
-def _debug_build_metadata(
-    build_result: StepResult, *, kernel_image: ArtifactRef, vmlinux: ArtifactRef
-) -> dict[str, Any]:
-    return {
-        **build_result.details,
-        "kernel_image_path": str(kernel_image.path),
-        "vmlinux_path": str(vmlinux.path),
-    }
-
-
-def _debug_boot_metadata(boot_result: StepResult, *, kernel_image: ArtifactRef) -> dict[str, Any]:
-    return {
-        **boot_result.details,
-        "kernel_image_path": str(boot_result.details.get("kernel_image_path") or kernel_image.path),
-    }
 
 
 def _ensure_debug_operation_enabled(profile: DebugProfile, operation: str) -> None:
@@ -4053,6 +4047,12 @@ def _teardown_debug_transport(
             transaction.close(sid, force=False)
 
 
+def _mi_probe_transcript_path(run_dir: Path) -> Path:
+    """The live gdb/MI session's transcript. ADR 0021: this is the session-of-record transcript the
+    persisted DebugSession references (it is the same file the attach probe writes into)."""
+    return run_dir / "debug" / "mi-probe.log"
+
+
 def _run_mi_attach_probe(
     *,
     engine: GdbMiEngine,
@@ -4060,20 +4060,22 @@ def _run_mi_attach_probe(
     vmlinux_path: Path,
     run_dir: Path,
     run_id: str,
+    session_id: str,
+    gdb_mi_sessions: GdbMiSessionRegistry,
     transaction: TransportTransaction,
     admission: AdmissionService,
     session_registry: SessionRegistry,
     session_guard: SessionGuard | None,
     redactor: Redactor,
 ) -> tuple[ToolResponse | None, dict[str, object]]:
-    """Phase-A gdb/MI foundation probe: attach over the guard-protected TransportSession.rsp_endpoint,
-    read one MI record as typed JSON, detach cleanly. Returns ``(None, {"mi_probe": ...})`` on success
-    (the typed record is merged into the debug step details; the legacy batch start_session then runs
-    as the session-of-record), or ``(failure_response, {})`` after a guaranteed-resume teardown that
-    never leaves the kernel HALTED. The probe and the batch attach are sequential (QEMU's gdbstub
-    takes one connection at a time); Phase C collapses them by moving the session-of-record onto the
-    engine."""
-    transcript_path = run_dir / "debug" / "mi-probe.log"
+    """Attach the persistent gdb/MI engine over the guard-protected TransportSession.rsp_endpoint,
+    read one MI record as typed JSON, resolve the canonical probe symbol, and — on success — REGISTER
+    the live attachment under ``session_id`` and leave it ATTACHED (ADR 0021 decision 1). Returns
+    ``(None, {"mi_probe": ...})`` on success (the typed record is merged into the debug step details),
+    or ``(failure_response, {})`` after a guaranteed-resume teardown that never leaves the kernel
+    HALTED and reaps any partial registration. The live session is the sole session-of-record; there
+    is no batch attach behind it."""
+    transcript_path = _mi_probe_transcript_path(run_dir)
     attachment = None
     try:
         attachment = engine.attach(
@@ -4081,7 +4083,9 @@ def _run_mi_attach_probe(
         )
         record = engine.probe_read(attachment)
         symbol = engine.resolve_symbol(attachment, CANONICAL_PROBE_SYMBOL)
-        engine.resume_and_detach(attachment)
+        # Keep the engine attached and hold the live attachment across MCP calls under the minted
+        # session id (ADR 0021) — the per-op handlers look it up to issue MI verbs. NO detach here.
+        gdb_mi_sessions.register(session_id, attachment)
         mi_probe: dict[str, object] = {
             "mi_probe": redactor.redact_value(
                 {
@@ -4105,6 +4109,9 @@ def _run_mi_attach_probe(
         # the durable record is un-halted and no recovery tombstone is left. Otherwise run the
         # guaranteed-resume (best-effort continue + disconnect + kill).
         resume_confirmed = engine.force_resume(attachment) if attachment is not None else True
+        # Reap any registration (idempotent no-op when the fault preceded register()) so a failed
+        # attach never leaves a dangling live attachment behind the freed durable record.
+        gdb_mi_sessions.reap(session_id)
         if resume_confirmed:
             # Best-effort: the un-halt is a durable write that could raise (e.g. OSError on a full
             # disk). It MUST NOT be able to skip the teardown below, or the guaranteed-resume
@@ -4130,6 +4137,56 @@ def _run_mi_attach_probe(
             suggested_next_actions=["host.check_prerequisites", "artifacts.get_manifest"],
         )
         return failure, {}
+
+
+def _build_mi_debug_session(
+    *,
+    session_id: str,
+    run_id: str,
+    vmlinux_path: Path,
+    gdbstub_endpoint: dict[str, object],
+    profile_name: str,
+    transcript_path: Path,
+    started_at: str,
+) -> DebugSession:
+    """Build the persisted DebugSession for the live gdb/MI attach (ADR 0021). The id is minted once
+    in the handler BEFORE the probe and threaded here, so the registry key and the persisted id are
+    identical. Symbol-identity validation is empty: the #70 build-id version-lock gate ran before the
+    attach and is authoritative (ADR 0021 decision 2b) — there is no live-banner scrape. The legacy
+    ``controller_*`` fields are inert: the in-process registry is the liveness source, not a pid."""
+    attempt_dir = transcript_path.parent
+    return DebugSession(
+        session_id=session_id,
+        run_id=run_id,
+        provider_name="local-qemu-gdbstub",
+        gdbstub_endpoint=gdbstub_endpoint,
+        vmlinux_path=str(vmlinux_path),
+        selected_debug_profile=profile_name,
+        attach_status="attached",
+        started_at=started_at,
+        ended_at=None,
+        current_execution_state="stopped",
+        breakpoints={},
+        controller_mode="attached",
+        active_controller_pid=None,
+        controller_last_observed_state="attached",
+        active_controller_identity={},
+        transcript_path=str(transcript_path),
+        command_metadata_path=str(attempt_dir / "commands.jsonl"),
+        latest_summary_path=str(attempt_dir / "debug-summary.json"),
+        symbol_identity_validation={},
+    )
+
+
+def _persist_mi_debug_session(*, store: ArtifactStore, run_id: str, session: DebugSession) -> Path:
+    """Write the DebugSession JSON to ``<run>/debug/sessions/<session_id>.json`` (the path
+    ``_debug_session_manifest_details`` records and ``_load_active_debug_session`` reads back) and
+    ensure its transcript/metadata directory exists. Returns the session-file path."""
+    session_path = store.run_dir(run_id) / "debug" / "sessions" / f"{session.session_id}.json"
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    Path(session.transcript_path).parent.mkdir(parents=True, exist_ok=True)
+    session_path.write_text(session.model_dump_json(indent=2), encoding="utf-8")
+    return session_path
 
 
 def _verify_gdb_symbol_version_lock(
@@ -4211,7 +4268,6 @@ def debug_start_session_handler(
     run_id: str,
     debug_profile: str | None = None,
     new_session: bool = False,
-    provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     transaction: TransportTransaction | None = None,
     admission: AdmissionService | None = None,
@@ -4220,6 +4276,7 @@ def debug_start_session_handler(
     recovery: bool = False,
     build_id_reader: Callable[[Path], str] = read_elf_build_id,
     gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -4247,8 +4304,6 @@ def debug_start_session_handler(
     gdbstub_endpoint = boot_result.details.get("gdbstub_endpoint")
     if not isinstance(gdbstub_endpoint, dict):
         return _configuration_failure(run_id=run_id, message="succeeded debug boot did not record a gdbstub endpoint")
-    build_metadata = _debug_build_metadata(build_result, kernel_image=kernel_image, vmlinux=vmlinux)
-    boot_metadata = _debug_boot_metadata(boot_result, kernel_image=kernel_image)
 
     requested_profile = debug_profile or manifest.request.debug_profile or "qemu-gdbstub-default"
     if (
@@ -4270,8 +4325,8 @@ def debug_start_session_handler(
     except ProviderDebugError as exc:
         return _configuration_failure(run_id=run_id, message=str(exc), details=exc.details)
 
-    provider = provider or QemuGdbstubProvider()
     redactor = Redactor()
+    started_at = datetime.now(UTC).isoformat()
     try:
         with store.debug_lock(run_id):
             locked_manifest = store.load_manifest(run_id)
@@ -4300,151 +4355,31 @@ def debug_start_session_handler(
             )
             if version_lock_failure is not None:
                 return version_lock_failure
-            transport_enabled = transaction is not None and admission is not None and session_registry is not None
-            transport_session: TransportSession | None = None
-            mi_probe_details: dict[str, object] = {}
-            if transport_enabled:
-                # mypy/ty narrowing: transport_enabled proves these are not None.
-                assert transaction is not None and admission is not None and session_registry is not None
-                target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
-                if session_guard is not None:
-                    # Pre-attach preconditions (#70 static checks) run BEFORE any acquisition; a
-                    # failure aborts with nothing acquired, so there is nothing to tear down.
-                    try:
-                        session_guard.enter(
-                            SessionGuardContext(
-                                target_key=target_key, generation=0, session_id=None, reason="attach_error"
-                            )
-                        )
-                    except PreconditionError as exc:
-                        return ToolResponse.failure(
-                            category=ErrorCategory.READINESS_FAILURE,
-                            message=str(exc),
-                            run_id=run_id,
-                            details={"code": "precondition_failed", "precondition": exc.name},
-                            suggested_next_actions=["artifacts.get_manifest"],
-                        )
-                try:
-                    request = _debug_open_request(run_id=run_id, gdbstub_endpoint=gdbstub_endpoint, admission=admission)
-                    transport_session = transaction.open(request, recovery=recovery)
-                except (GuardConflict, EndpointSafetyError) as exc:
-                    # Finding F13: these are transport-resource conflicts (guard already held,
-                    # or endpoint exposure refusal), not gdb attach failures. The dedicated
-                    # `TRANSPORT_CONFLICT` category was unreachable before this change.
-                    return ToolResponse.failure(
-                        category=ErrorCategory.TRANSPORT_CONFLICT,
-                        message=str(exc),
-                        run_id=run_id,
-                        details={"code": getattr(exc, "code", "stop_capable_conflict")},
-                        suggested_next_actions=["artifacts.get_manifest"],
-                    )
-                except AdmissionError as exc:
-                    return ToolResponse.failure(
-                        category=exc.category,
-                        message=str(exc),
-                        run_id=run_id,
-                        details={"code": exc.code},
-                        suggested_next_actions=["artifacts.get_manifest"],
-                    )
-                # Persist HALTED + bump the execution epoch BEFORE the gdb attach halts the kernel,
-                # so target.run_tests rejects with target_halted for the debugger's whole window.
-                _halt_debug_transport(session=transport_session, admission=admission, session_registry=session_registry)
-                if gdb_mi_engine is not None:
-                    # Phase-A gdb/MI foundation probe over the guard-protected RSP endpoint, BEFORE the
-                    # legacy batch attach (the session-of-record until Phase C). A probe fault runs the
-                    # guaranteed-resume teardown and returns; success merges the typed record into the
-                    # debug step details.
-                    probe_failure, mi_probe_details = _run_mi_attach_probe(
-                        engine=gdb_mi_engine,
-                        transport_session=transport_session,
-                        vmlinux_path=Path(vmlinux.path),
-                        run_dir=store.run_dir(run_id),
-                        run_id=run_id,
-                        transaction=transaction,
-                        admission=admission,
-                        session_registry=session_registry,
-                        session_guard=session_guard,
-                        redactor=redactor,
-                    )
-                    if probe_failure is not None:
-                        return probe_failure
-            try:
-                result = provider.start_session(
-                    run_id=run_id,
-                    run_dir=store.run_dir(run_id),
-                    vmlinux_path=Path(vmlinux.path),
-                    gdbstub_endpoint=gdbstub_endpoint,
-                    debug_profile=resolved_debug_profile,
-                    build_metadata=build_metadata,
-                    boot_metadata=boot_metadata,
-                )
-            except ProviderDebugError as exc:
-                # The gdb attach failed AFTER transaction.open() committed a READY record + promoted
-                # the admission handle, and AFTER _halt_debug_transport persisted HALTED. Without
-                # closing, the guard stays held / record stays live / handle stays PROMOTED —
-                # so a subsequent debug.start_session on the same target would refuse with
-                # stop_capable_conflict and run_tests would stay gated `target_halted` forever.
-                # transaction.close(force=False) is the proper recovery path here: the attach
-                # FAILED mid-halt, so leaving a `closed_while_halted` tombstone is the right
-                # tombstone semantics (a future recovery=True reattach clears it). Guarded so a
-                # close hiccup never masks the original ProviderDebugError.
-                if transport_session is not None and transaction is not None:
-                    _teardown_debug_transport(
-                        transport_session=transport_session,
-                        transaction=transaction,
-                        session_registry=session_registry,
-                        session_guard=session_guard,
-                    )
-                exc_details = dict(exc.details)
-                if transport_session is not None:
-                    exc_details["transport_session_id"] = transport_session.session_id
-                failed = StepResult(
-                    step_name="debug",
-                    status=StepStatus.FAILED,
-                    summary=str(exc),
-                    artifacts=exc.artifacts,
-                    details=redactor.redact_value(exc_details),
-                )
-                store.record_step_result(run_id, failed, replace_succeeded=replace_existing_debug)
+            # The live gdb/MI engine attach IS the session-of-record (ADR 0021): there is no batch
+            # attach behind it, so the transport machinery AND the engine+registry are mandatory.
+            if not (
+                transaction is not None
+                and admission is not None
+                and session_registry is not None
+                and gdb_mi_engine is not None
+                and gdb_mi_sessions is not None
+            ):
                 return ToolResponse.failure(
-                    category=exc.category,
-                    message=redactor.redact_text(str(exc)),
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    message="debug.start_session requires the transport machinery and the gdb/MI engine",
                     run_id=run_id,
-                    details=redactor.redact_value(exc_details),
-                    artifacts=_redacted_artifacts(exc.artifacts, redactor),
+                    details={"code": "debug_engine_unavailable"},
                     suggested_next_actions=["artifacts.get_manifest"],
                 )
-            details = _debug_session_manifest_details(store=store, run_id=run_id, session=result.session)
-            if mi_probe_details:
-                # surface the typed gdb/MI probe record (AC#1: "one MI record returned as typed JSON").
-                details.update(mi_probe_details)
-            if transport_session is not None:
-                # bind the DebugSession to the transport-ownership record so close() can tear it down.
-                details["transport_session_id"] = transport_session.session_id
-            # Post-attach preconditions (#70 build-id-vs-running-kernel) run with the live session,
-            # BEFORE the SUCCEEDED debug step is persisted: a rejection tears the session down and
-            # returns READINESS_FAILURE, so the manifest never records a SUCCEEDED session that
-            # teardown just deleted.
-            if (
-                session_guard is not None
-                and transport_session is not None
-                and session_registry is not None
-                and transaction is not None
-            ):
-                sid = transport_session.session_id
-                tkey = transport_session.target_key
-                post_ctx = SessionGuardContext(
-                    target_key=tkey, generation=transport_session.generation, session_id=sid, reason="attach_error"
-                )
+            target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+            if session_guard is not None:
+                # Pre-attach preconditions (#70 static checks) run BEFORE any acquisition; a
+                # failure aborts with nothing acquired, so there is nothing to tear down.
                 try:
-                    session_guard.verify_attached(post_ctx, transport_session)
-                except PreconditionError as exc:
-                    session_guard.teardown(
-                        post_ctx,
-                        close=lambda: transaction.close(sid, force=False),
-                        read_record=lambda: session_registry.read_record(tkey),
-                        force_reap=lambda: transaction.force_release(sid),
+                    session_guard.enter(
+                        SessionGuardContext(target_key=target_key, generation=0, session_id=None, reason="attach_error")
                     )
+                except PreconditionError as exc:
                     return ToolResponse.failure(
                         category=ErrorCategory.READINESS_FAILURE,
                         message=str(exc),
@@ -4452,35 +4387,147 @@ def debug_start_session_handler(
                         details={"code": "precondition_failed", "precondition": exc.name},
                         suggested_next_actions=["artifacts.get_manifest"],
                     )
-            terminal = StepResult(
-                step_name="debug",
-                status=result.status,
-                summary=result.summary,
-                artifacts=result.artifacts,
-                details=details,
+            try:
+                request = _debug_open_request(run_id=run_id, gdbstub_endpoint=gdbstub_endpoint, admission=admission)
+                transport_session = transaction.open(request, recovery=recovery)
+            except (GuardConflict, EndpointSafetyError) as exc:
+                # Finding F13: these are transport-resource conflicts (guard already held, or endpoint
+                # exposure refusal), not gdb attach failures.
+                return ToolResponse.failure(
+                    category=ErrorCategory.TRANSPORT_CONFLICT,
+                    message=str(exc),
+                    run_id=run_id,
+                    details={"code": getattr(exc, "code", "stop_capable_conflict")},
+                    suggested_next_actions=["artifacts.get_manifest"],
+                )
+            except AdmissionError as exc:
+                return ToolResponse.failure(
+                    category=exc.category,
+                    message=str(exc),
+                    run_id=run_id,
+                    details={"code": exc.code},
+                    suggested_next_actions=["artifacts.get_manifest"],
+                )
+            # Persist HALTED + bump the execution epoch BEFORE the gdb attach halts the kernel, so
+            # target.run_tests rejects with target_halted for the debugger's whole window.
+            _halt_debug_transport(session=transport_session, admission=admission, session_registry=session_registry)
+            # Mint the session id ONCE before the probe and thread it into BOTH the live registry
+            # (register inside the probe) and the persisted DebugSession, so the registry key and the
+            # persisted id are identical — the per-op lookup finds the right attachment.
+            session_id = f"debug-{uuid.uuid4().hex}"
+            probe_failure, mi_probe_details = _run_mi_attach_probe(
+                engine=gdb_mi_engine,
+                transport_session=transport_session,
+                vmlinux_path=Path(vmlinux.path),
+                run_dir=store.run_dir(run_id),
+                run_id=run_id,
+                session_id=session_id,
+                gdb_mi_sessions=gdb_mi_sessions,
+                transaction=transaction,
+                admission=admission,
+                session_registry=session_registry,
+                session_guard=session_guard,
+                redactor=redactor,
             )
-            store.record_step_result(run_id, terminal, replace_succeeded=replace_existing_debug)
+            if probe_failure is not None:
+                return probe_failure
+            # The live attach succeeded and is registered + held HALTED. Build, persist, and record
+            # the session-of-record from it (no batch attach). Everything below runs AFTER the live
+            # attachment is registered and the kernel is HALTED, so a persistence/manifest fault here
+            # MUST run the guaranteed-resume teardown (reap + un-halt + close) rather than escape and
+            # strand the kernel HALTED with the guard held and the attachment leaked.
+            try:
+                session = _build_mi_debug_session(
+                    session_id=session_id,
+                    run_id=run_id,
+                    vmlinux_path=Path(vmlinux.path),
+                    gdbstub_endpoint=gdbstub_endpoint,
+                    profile_name=resolved_debug_profile.name,
+                    transcript_path=_mi_probe_transcript_path(store.run_dir(run_id)),
+                    started_at=started_at,
+                )
+                session_path = _persist_mi_debug_session(store=store, run_id=run_id, session=session)
+                artifacts = [
+                    ArtifactRef(path=str(session_path), kind="debug-session"),
+                    ArtifactRef(path=session.transcript_path, kind="debug-transcript", sensitive=True),
+                ]
+                details = _debug_session_manifest_details(store=store, run_id=run_id, session=session)
+                details.update(mi_probe_details)
+                details["transport_session_id"] = transport_session.session_id
+                # Post-attach preconditions (#70 build-id-vs-running-kernel) run with the live session,
+                # BEFORE the SUCCEEDED debug step is persisted: a rejection reaps the live attachment
+                # (force_resume un-halts the kernel) and tears the transport down, so the manifest never
+                # records a SUCCEEDED session that teardown just deleted.
+                if session_guard is not None:
+                    sid = transport_session.session_id
+                    tkey = transport_session.target_key
+                    post_ctx = SessionGuardContext(
+                        target_key=tkey, generation=transport_session.generation, session_id=sid, reason="attach_error"
+                    )
+                    try:
+                        session_guard.verify_attached(post_ctx, transport_session)
+                    except PreconditionError as exc:
+                        reaped = gdb_mi_sessions.reap(session_id)
+                        if reaped is not None:
+                            with contextlib.suppress(Exception):
+                                gdb_mi_engine.force_resume(reaped)
+                        session_guard.teardown(
+                            post_ctx,
+                            close=lambda: transaction.close(sid, force=False),
+                            read_record=lambda: session_registry.read_record(tkey),
+                            force_reap=lambda: transaction.force_release(sid),
+                        )
+                        return ToolResponse.failure(
+                            category=ErrorCategory.READINESS_FAILURE,
+                            message=str(exc),
+                            run_id=run_id,
+                            details={"code": "precondition_failed", "precondition": exc.name},
+                            suggested_next_actions=["artifacts.get_manifest"],
+                        )
+                terminal = StepResult(
+                    step_name="debug",
+                    status=StepStatus.SUCCEEDED,
+                    summary="gdb/MI debug session started",
+                    artifacts=artifacts,
+                    details=details,
+                )
+                store.record_step_result(run_id, terminal, replace_succeeded=replace_existing_debug)
+            except Exception as exc:  # noqa: BLE001 - guaranteed-resume is unconditional after register
+                # Persisting the session file or recording the manifest step failed (OSError on a full
+                # disk, a ManifestStateError, ...). The live attachment is already registered and the
+                # kernel HALTED, so reap + un-halt + tear the transport down before reporting, or the
+                # target would be stranded HALTED with the guard held until process restart.
+                reaped = gdb_mi_sessions.reap(session_id)
+                if reaped is not None:
+                    with contextlib.suppress(Exception):
+                        gdb_mi_engine.force_resume(reaped)
+                with contextlib.suppress(Exception):
+                    _resume_debug_transport(
+                        session=transport_session, admission=admission, session_registry=session_registry
+                    )
+                _teardown_debug_transport(
+                    transport_session=transport_session,
+                    transaction=transaction,
+                    session_registry=session_registry,
+                    session_guard=session_guard,
+                )
+                category = exc.category if isinstance(exc, ManifestStateError) else ErrorCategory.INFRASTRUCTURE_FAILURE
+                return ToolResponse.failure(
+                    category=category,
+                    message=redactor.redact_text(str(exc)),
+                    run_id=run_id,
+                    details={"code": "debug_session_persist_failed"},
+                    suggested_next_actions=["host.check_prerequisites", "artifacts.get_manifest"],
+                )
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
 
-    safe_details = redactor.redact_value(details)
-    safe_artifacts = _redacted_artifacts(result.artifacts, redactor)
-    safe_summary = redactor.redact_text(result.summary)
-    if result.status == StepStatus.SUCCEEDED:
-        return ToolResponse.success(
-            summary=safe_summary,
-            run_id=run_id,
-            data=safe_details,
-            artifacts=safe_artifacts,
-            suggested_next_actions=["debug.interrupt", "debug.read_registers", "artifacts.get_manifest"],
-        )
-    return ToolResponse.failure(
-        category=result.error_category or ErrorCategory.DEBUG_ATTACH_FAILURE,
-        message=safe_summary,
+    return ToolResponse.success(
+        summary="gdb/MI debug session started",
         run_id=run_id,
-        details=safe_details,
-        artifacts=safe_artifacts,
-        suggested_next_actions=["artifacts.get_manifest"],
+        data=redactor.redact_value(details),
+        artifacts=_redacted_artifacts(artifacts, redactor),
+        suggested_next_actions=["debug.interrupt", "debug.read_registers", "artifacts.get_manifest"],
     )
 
 
@@ -4638,12 +4685,100 @@ def _fence_legacy_debug_session(
     )
 
 
+# Stateful debug.* ops whose effect changes the persisted breakpoint ledger; after each, the ledger
+# is rebuilt from gdb's authoritative -break-list so the manifest matches the engine.
+_BREAKPOINT_MUTATORS = frozenset({"set_breakpoint", "set_watchpoint", "clear_breakpoint", "clear_watchpoint"})
+# Interactive resume verbs (continue/step/next/finish): engine method + how the timeout maps.
+_EXEC_VERBS = {
+    "continue_execution": lambda engine, att, timeout: engine.continue_(att, timeout_sec=timeout),
+    "step": lambda engine, att, timeout: engine.step(att, timeout_sec=timeout),
+    "next": lambda engine, att, timeout: engine.next(att, timeout_sec=timeout),
+    "finish": lambda engine, att, timeout: engine.finish(att, timeout_sec=timeout),
+}
+
+
+def _engine_op_data(
+    *, engine: GdbMiEngine, attachment: GdbMiAttachment, method_name: str, kwargs: dict[str, object]
+) -> dict[str, object]:
+    """Dispatch one debug.* operation onto the live gdb/MI attachment and return its typed JSON as a
+    dict (the engine has already redacted every value). ``end_session`` is NOT routed here — it has a
+    dedicated reap path. An unknown method is a CONFIGURATION_ERROR (defence in depth; the handler
+    layer already gated the op name)."""
+    if method_name == "read_registers":
+        registers = kwargs["registers"]
+        names = [str(name) for name in registers] if isinstance(registers, list) else []
+        return engine.read_registers(attachment, names)
+    if method_name == "read_symbol":
+        return engine.read_symbol(attachment, str(kwargs["symbol"]))
+    if method_name == "read_memory":
+        address = kwargs["address"]
+        byte_count = kwargs["byte_count"]
+        if not isinstance(address, int) or not isinstance(byte_count, int):
+            raise GdbMiError("address and byte_count must be integers", category=ErrorCategory.CONFIGURATION_ERROR)
+        return engine.read_memory(attachment, address=address, byte_count=byte_count)
+    if method_name == "evaluate":
+        arguments = kwargs.get("arguments")
+        evaluate_args: dict[str, object] = (
+            {str(key): value for key, value in arguments.items()} if isinstance(arguments, dict) else {}
+        )
+        return engine.evaluate_inspector(attachment, inspector=str(kwargs["inspector"]), arguments=evaluate_args)
+    if method_name == "set_breakpoint":
+        return {"breakpoint": engine.set_breakpoint(attachment, str(kwargs["symbol"])).model_dump(mode="json")}
+    if method_name == "set_watchpoint":
+        return {"breakpoint": engine.set_watchpoint(attachment, str(kwargs["symbol"])).model_dump(mode="json")}
+    if method_name == "clear_breakpoint":
+        engine.clear_breakpoint(attachment, str(kwargs["breakpoint_id"]))
+        return {}
+    if method_name == "clear_watchpoint":
+        engine.clear_watchpoint(attachment, str(kwargs["breakpoint_id"]))
+        return {}
+    if method_name == "list_breakpoints":
+        return {"breakpoints": [ref.model_dump(mode="json") for ref in engine.list_breakpoints(attachment)]}
+    if method_name == "backtrace":
+        return {"frames": [frame.model_dump(mode="json") for frame in engine.backtrace(attachment)]}
+    if method_name == "list_variables":
+        return {"variables": [var.model_dump(mode="json") for var in engine.list_variables(attachment)]}
+    if method_name == "interrupt":
+        stop = engine.interrupt(attachment)
+        stop_payload = stop.model_dump(mode="json") if stop is not None else None
+        return {"stop": stop_payload, "current_execution_state": "stopped"}
+    if method_name in _EXEC_VERBS:
+        timeout = kwargs.get("timeout_seconds")
+        stop = _EXEC_VERBS[method_name](engine, attachment, timeout)
+        return {"stop": stop.model_dump(mode="json"), "current_execution_state": "stopped"}
+    raise GdbMiError(
+        "unsupported debug operation", category=ErrorCategory.CONFIGURATION_ERROR, details={"operation": method_name}
+    )
+
+
+def _mi_session_artifacts(*, store: ArtifactStore, run_id: str, session: DebugSession) -> list[ArtifactRef]:
+    """The debug step's artifacts for the live session: the session JSON and its transcript. Rebuilt
+    on each persisted op so a stateful re-record keeps the same artifact set start_session minted."""
+    session_path = store.run_dir(run_id) / "debug" / "sessions" / f"{session.session_id}.json"
+    return [
+        ArtifactRef(path=str(session_path), kind="debug-session"),
+        ArtifactRef(path=session.transcript_path, kind="debug-transcript", sensitive=True),
+    ]
+
+
+def _preserved_debug_step_details(store: ArtifactStore, run_id: str) -> dict[str, object]:
+    """The start_session bindings a stateful re-record must carry forward (else a later end_session
+    could not close the transport, and the MI probe record would be lost): transport_session_id and
+    the typed mi_probe block."""
+    try:
+        existing = store.load_manifest(run_id).step_results.get("debug")
+    except ManifestStateError:
+        return {}
+    if existing is None:
+        return {}
+    return {key: existing.details[key] for key in ("transport_session_id", "mi_probe") if key in existing.details}
+
+
 def _debug_operation_response(
     *,
     artifact_root: Path,
     run_id: str,
     debug_session_id: str | None,
-    provider: QemuGdbstubProvider | None,
     method_name: str,
     kwargs: dict[str, object],
     persist_manifest: bool,
@@ -4651,6 +4786,8 @@ def _debug_operation_response(
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -4659,7 +4796,14 @@ def _debug_operation_response(
             return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-    provider = provider or QemuGdbstubProvider()
+    if gdb_mi_engine is None or gdb_mi_sessions is None:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            message="the gdb/MI engine is not available on this server instance",
+            run_id=run_id,
+            details={"code": "debug_engine_unavailable"},
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
     redactor = Redactor()
     try:
         with store.debug_lock(run_id):
@@ -4668,7 +4812,8 @@ def _debug_operation_response(
             # wired; pure-read assertion (no tombstone — reads are non-destructive) when only the
             # registry is wired. Finding F8: every debug.* path that connects gdb gets at least the
             # ownership assertion, so a legacy session can never silently halt the kernel as a side
-            # effect of `target remote` against a run target.run_tests is unaware of.
+            # effect of `target remote` against a run target.run_tests is unaware of. This runs BEFORE
+            # the live-attachment lookup (ADR 0021 fence-then-lookup).
             if admission is not None:
                 _fence_legacy_debug_session(run_id=run_id, admission=admission, session_registry=session_registry)
             else:
@@ -4678,25 +4823,53 @@ def _debug_operation_response(
                 debug_profiles=debug_profiles,
             )
             _ensure_debug_operation_enabled(profile, DEBUG_METHOD_OPERATIONS[method_name])
-            result: DebugProviderResult = getattr(provider, method_name)(
-                run_dir=store.run_dir(run_id),
-                session=session,
-                **kwargs,
-            )
-            details = result.details
+            attachment = gdb_mi_sessions.require(session.session_id)
+            # Every engine interaction for this op — the op itself AND the post-mutator ledger rebuild
+            # (-break-list) — shares one guard: a raw non-protocol fault (dead gdb pipe / crashed
+            # engine) reaps the unusable attachment, best-effort un-halts the kernel, and returns a
+            # structured failure (defence-in-depth matching start_session's guaranteed-resume
+            # teardown). A GdbMiError means gdb answered (alive) — keep the session, surface it below.
+            try:
+                data = _engine_op_data(
+                    engine=gdb_mi_engine, attachment=attachment, method_name=method_name, kwargs=kwargs
+                )
+                updated_session = session
+                if method_name in _BREAKPOINT_MUTATORS:
+                    ledger = {
+                        ref.number: ref.model_dump(mode="json") for ref in gdb_mi_engine.list_breakpoints(attachment)
+                    }
+                    updated_session = session.model_copy(update={"breakpoints": ledger})
+            except (GdbMiError, ProviderDebugError):
+                raise
+            except Exception as exc:
+                reaped = gdb_mi_sessions.reap(session.session_id)
+                if reaped is not None:
+                    with contextlib.suppress(Exception):
+                        gdb_mi_engine.force_resume(reaped)
+                return ToolResponse.failure(
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    message=redactor.redact_text(f"the gdb/MI engine faulted during debug.{method_name}: {exc}"),
+                    run_id=run_id,
+                    details={"code": "debug_engine_faulted"},
+                    suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
+                )
             if persist_manifest:
+                _persist_mi_debug_session(store=store, run_id=run_id, session=updated_session)
                 details = {
-                    **_debug_session_manifest_details(store=store, run_id=run_id, session=result.session),
-                    **result.details,
+                    **_debug_session_manifest_details(store=store, run_id=run_id, session=updated_session),
+                    **_preserved_debug_step_details(store, run_id),
+                    **data,
                 }
                 terminal = StepResult(
                     step_name="debug",
-                    status=result.status,
-                    summary=result.summary,
-                    artifacts=result.artifacts,
+                    status=StepStatus.SUCCEEDED,
+                    summary=f"debug.{method_name} succeeded",
+                    artifacts=_mi_session_artifacts(store=store, run_id=run_id, session=updated_session),
                     details=details,
                 )
                 store.record_step_result(run_id, terminal, replace_succeeded=True)
+            else:
+                details = data
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
     except ProviderDebugError as exc:
@@ -4708,28 +4881,32 @@ def _debug_operation_response(
             artifacts=_redacted_artifacts(exc.artifacts, redactor),
             suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
         )
-
-    safe_details = redactor.redact_value(result.details)
-    safe_artifacts = _redacted_artifacts(result.artifacts, redactor)
-    safe_summary = redactor.redact_text(result.summary)
-    if result.status == StepStatus.SUCCEEDED:
-        return ToolResponse.success(
-            summary=safe_summary,
+    except GdbMiError as exc:
+        return ToolResponse.failure(
+            category=exc.category,
+            message=redactor.redact_text(str(exc)),
             run_id=run_id,
-            data=safe_details,
-            artifacts=safe_artifacts,
-            suggested_next_actions=["artifacts.get_manifest"],
+            details=redactor.redact_value(exc.details),
+            suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
         )
-    return ToolResponse.failure(
-        category=result.error_category or ErrorCategory.DEBUG_ATTACH_FAILURE,
-        message=safe_summary,
+    except OSError as exc:
+        # The engine op already ran (the live session is healthy); only the persist/record bookkeeping
+        # faulted. Surface a structured failure WITHOUT reaping — the caller can retry the op.
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            message=redactor.redact_text(f"failed to record debug.{method_name}: {exc}"),
+            run_id=run_id,
+            details={"code": "debug_session_op_record_failed"},
+            suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
+        )
+
+    op_artifacts = _mi_session_artifacts(store=store, run_id=run_id, session=updated_session)
+    return ToolResponse.success(
+        summary=f"debug.{method_name} succeeded",
         run_id=run_id,
-        details={
-            **safe_details,
-            "diagnostic": redactor.redact_text(result.diagnostic or ""),
-        },
-        artifacts=safe_artifacts,
-        suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+        data=redactor.redact_value(details),
+        artifacts=_redacted_artifacts(op_artifacts, redactor),
+        suggested_next_actions=["artifacts.get_manifest"],
     )
 
 
@@ -4738,11 +4915,12 @@ def _debug_read_response(
     artifact_root: Path,
     run_id: str,
     debug_session_id: str | None,
-    provider: QemuGdbstubProvider | None,
     method_name: str,
     kwargs: dict[str, object],
     debug_profiles: dict[str, DebugProfile] | None = None,
     session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     """Pure-read debug.* path. Takes `session_registry` (Finding F8) but NOT `admission`: reads
     do not register an ssh-tier admission, so the structural read/ssh-tier separation is
@@ -4754,12 +4932,13 @@ def _debug_read_response(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        provider=provider,
         method_name=method_name,
         kwargs=kwargs,
         persist_manifest=False,
         debug_profiles=debug_profiles,
         session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -4769,19 +4948,21 @@ def debug_read_registers_handler(
     run_id: str,
     registers: list[str],
     debug_session_id: str | None = None,
-    provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_read_response(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        provider=provider,
         method_name="read_registers",
         kwargs={"registers": registers},
         debug_profiles=debug_profiles,
         session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -4791,19 +4972,21 @@ def debug_read_symbol_handler(
     run_id: str,
     symbol: str,
     debug_session_id: str | None = None,
-    provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_read_response(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        provider=provider,
         method_name="read_symbol",
         kwargs={"symbol": symbol},
         debug_profiles=debug_profiles,
         session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -4814,19 +4997,21 @@ def debug_read_memory_handler(
     address: int,
     byte_count: int,
     debug_session_id: str | None = None,
-    provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_read_response(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        provider=provider,
         method_name="read_memory",
         kwargs={"address": address, "byte_count": byte_count},
         debug_profiles=debug_profiles,
         session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -4837,19 +5022,21 @@ def debug_evaluate_handler(
     inspector: str,
     arguments: dict[str, object] | None = None,
     debug_session_id: str | None = None,
-    provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_read_response(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        provider=provider,
         method_name="evaluate",
         kwargs={"inspector": inspector, "arguments": arguments or {}},
         debug_profiles=debug_profiles,
         session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -4858,19 +5045,19 @@ def _debug_stateful_response(
     artifact_root: Path,
     run_id: str,
     debug_session_id: str | None,
-    provider: QemuGdbstubProvider | None,
     method_name: str,
     kwargs: dict[str, object],
     allow_ended: bool = False,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_operation_response(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        provider=provider,
         method_name=method_name,
         kwargs=kwargs,
         persist_manifest=True,
@@ -4878,6 +5065,8 @@ def _debug_stateful_response(
         debug_profiles=debug_profiles,
         admission=admission,
         session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -4887,21 +5076,49 @@ def debug_set_breakpoint_handler(
     run_id: str,
     symbol: str,
     debug_session_id: str | None = None,
-    provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        provider=provider,
         method_name="set_breakpoint",
         kwargs={"symbol": symbol},
         debug_profiles=debug_profiles,
         admission=admission,
         session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
+    )
+
+
+def debug_set_watchpoint_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    symbol: str,
+    debug_session_id: str | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        method_name="set_watchpoint",
+        kwargs={"symbol": symbol},
+        debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -4911,21 +5128,49 @@ def debug_clear_breakpoint_handler(
     run_id: str,
     breakpoint_id: str,
     debug_session_id: str | None = None,
-    provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        provider=provider,
         method_name="clear_breakpoint",
         kwargs={"breakpoint_id": breakpoint_id},
         debug_profiles=debug_profiles,
         admission=admission,
         session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
+    )
+
+
+def debug_clear_watchpoint_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    breakpoint_id: str,
+    debug_session_id: str | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        method_name="clear_watchpoint",
+        kwargs={"breakpoint_id": breakpoint_id},
+        debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -4934,21 +5179,73 @@ def debug_list_breakpoints_handler(
     artifact_root: Path,
     run_id: str,
     debug_session_id: str | None = None,
-    provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        provider=provider,
         method_name="list_breakpoints",
         kwargs={},
         debug_profiles=debug_profiles,
         admission=admission,
         session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
+    )
+
+
+def debug_backtrace_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        method_name="backtrace",
+        kwargs={},
+        debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
+    )
+
+
+def debug_list_variables_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        method_name="list_variables",
+        kwargs={},
+        debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -4958,21 +5255,101 @@ def debug_continue_handler(
     run_id: str,
     timeout_seconds: int | None = None,
     debug_session_id: str | None = None,
-    provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        provider=provider,
         method_name="continue_execution",
         kwargs={"timeout_seconds": timeout_seconds},
         debug_profiles=debug_profiles,
         admission=admission,
         session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
+    )
+
+
+def debug_step_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    timeout_seconds: int | None = None,
+    debug_session_id: str | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        method_name="step",
+        kwargs={"timeout_seconds": timeout_seconds},
+        debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
+    )
+
+
+def debug_next_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    timeout_seconds: int | None = None,
+    debug_session_id: str | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        method_name="next",
+        kwargs={"timeout_seconds": timeout_seconds},
+        debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
+    )
+
+
+def debug_finish_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    timeout_seconds: int | None = None,
+    debug_session_id: str | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+) -> ToolResponse:
+    return _debug_stateful_response(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        method_name="finish",
+        kwargs={"timeout_seconds": timeout_seconds},
+        debug_profiles=debug_profiles,
+        admission=admission,
+        session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -4982,21 +5359,23 @@ def debug_interrupt_handler(
     run_id: str,
     timeout_seconds: int | None = None,
     debug_session_id: str | None = None,
-    provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_stateful_response(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        provider=provider,
         method_name="interrupt",
         kwargs={"timeout_seconds": timeout_seconds},
         debug_profiles=debug_profiles,
         admission=admission,
         session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -5017,44 +5396,117 @@ def _recorded_transport_session_id(*, artifact_root: Path, run_id: str) -> str |
     return transport_session_id if isinstance(transport_session_id, str) else None
 
 
+def _end_mi_debug_session(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None,
+    debug_profiles: dict[str, DebugProfile] | None,
+    gdb_mi_engine: GdbMiEngine | None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None,
+) -> ToolResponse:
+    """Reap the live gdb/MI attachment (force_resume un-halts the kernel) and record the session
+    ENDED. ADR 0021: end_session does NOT issue an interactive verb — it tears the live session down.
+    Idempotent: re-ending an already-ended session reaps nothing and re-records ENDED. The legacy
+    pre-detach fence is intentionally bypassed (this is the one op that force-ends a legacy stop)."""
+    store = ArtifactStore(artifact_root, create_root=False)
+    if not (store.run_dir(run_id) / "manifest.json").is_file():
+        return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+    redactor = Redactor()
+    try:
+        with store.debug_lock(run_id):
+            session = _load_active_debug_session(store, run_id, debug_session_id, allow_ended=True)
+            profile = _resolve_debug_profile(profile_name=session.selected_debug_profile, debug_profiles=debug_profiles)
+            _ensure_debug_operation_enabled(profile, "debug.end_session")
+            ended = session.model_copy(
+                update={"current_execution_state": "ended", "ended_at": datetime.now(UTC).isoformat()}
+            )
+            # Durably record ENDED BEFORE the irreversible reap+force_resume. A disk/manifest fault
+            # here must leave the live attachment intact and the durable record legitimately HALTED
+            # (re-runnable), never resumed-yet-owned — which would strand target.run_tests on a kernel
+            # that is actually running free with no live session left to act on.
+            _persist_mi_debug_session(store=store, run_id=run_id, session=ended)
+            details = {
+                **_debug_session_manifest_details(store=store, run_id=run_id, session=ended),
+                **_preserved_debug_step_details(store, run_id),
+            }
+            terminal = StepResult(
+                step_name="debug",
+                status=StepStatus.SUCCEEDED,
+                summary="debug.end_session succeeded",
+                artifacts=_mi_session_artifacts(store=store, run_id=run_id, session=ended),
+                details=details,
+            )
+            store.record_step_result(run_id, terminal, replace_succeeded=True)
+            # Point of no return: un-halt the kernel only after the ENDED bookkeeping is durable.
+            if gdb_mi_sessions is not None:
+                reaped = gdb_mi_sessions.reap(session.session_id)
+                if reaped is not None and gdb_mi_engine is not None:
+                    with contextlib.suppress(Exception):
+                        gdb_mi_engine.force_resume(reaped)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    except OSError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            message=redactor.redact_text(f"failed to record debug.end_session: {exc}"),
+            run_id=run_id,
+            details={"code": "debug_session_end_record_failed"},
+            suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
+        )
+    except ProviderDebugError as exc:
+        return ToolResponse.failure(
+            category=exc.category,
+            message=redactor.redact_text(str(exc)),
+            run_id=run_id,
+            details=redactor.redact_value(exc.details),
+            suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+        )
+    return ToolResponse.success(
+        summary="debug.end_session succeeded",
+        run_id=run_id,
+        data=redactor.redact_value(details),
+        artifacts=_redacted_artifacts(_mi_session_artifacts(store=store, run_id=run_id, session=ended), redactor),
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
 def debug_end_session_handler(
     *,
     artifact_root: Path,
     run_id: str,
     debug_session_id: str | None = None,
-    provider: QemuGdbstubProvider | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
     transaction: TransportTransaction | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
     session_guard: SessionGuard | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
-    # Capture the transport binding BEFORE the provider detach rewrites the debug step (end_session
-    # records `current_execution_state="ended"` and may drop the start_session details).
+    # Capture the transport binding BEFORE the reap rewrites the debug step (end_session records
+    # `current_execution_state="ended"`).
     transport_session_id = (
         _recorded_transport_session_id(artifact_root=artifact_root, run_id=run_id) if transaction is not None else None
     )
     # B7 review: end_session is the one stateful op that must still detach a LEGACY session (force-end
-    # is the operation here), so the pre-detach fence is bypassed (admission/session_registry passed
-    # as None to `_debug_stateful_response`). A legacy session is one whose target has no
-    # SessionRegistry ownership record; detect it BEFORE the detach so the post-detach tombstone path
-    # below runs even though end_session rewrites the manifest's debug step. A Layer-4-owned session
-    # has a record AND a `transport_session_id` — the transaction.close() branch governs it.
+    # is the operation here), so the pre-detach fence is bypassed. A legacy session is one whose target
+    # has no SessionRegistry ownership record; detect it BEFORE the detach so the post-detach tombstone
+    # path below runs even though end_session rewrites the manifest's debug step. A Layer-4-owned
+    # session has a record AND a `transport_session_id` — the transaction.close() branch governs it.
     is_legacy_session = (
         admission is not None
         and session_registry is not None
         and transport_session_id is None
         and session_registry.read_record(TargetKey(provisioner="local-qemu", target_id=run_id)) is None
     )
-    response = _debug_stateful_response(
+    response = _end_mi_debug_session(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        provider=provider,
-        method_name="end_session",
-        kwargs={},
-        allow_ended=True,
         debug_profiles=debug_profiles,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
     # Clean detach only: close the transaction (release guard/lease, delete the durable record,
     # deregister the AdmissionHandle) AFTER the provider detach succeeded. A failed end leaves the
@@ -5828,6 +6280,8 @@ def workflow_build_boot_debug_handler(
     session_registry: SessionRegistry | None = None,
     transaction: TransportTransaction | None = None,
     session_guard: SessionGuard | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     if run_id is not None:
         try:
@@ -5940,6 +6394,8 @@ def workflow_build_boot_debug_handler(
         admission=admission,
         session_registry=session_registry,
         session_guard=session_guard,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
     if not debug_response.ok:
         return _workflow_failure_response(
@@ -6220,9 +6676,11 @@ def create_app(
     admission_service = machinery.admission
     durable_registry = machinery.session_registry
     session_guard = machinery.session_guard
-    # The persistent gdb/MI engine (#79). One instance is fine: attach() spawns a fresh gdb -i=mi3
-    # subprocess per call and detaches within debug.start_session, so it holds no per-session state.
+    # The persistent gdb/MI engine (#79) and the in-process live-session registry (#81, ADR 0021).
+    # The engine spawns a fresh gdb -i=mi3 per attach; the registry holds each live attachment across
+    # MCP tool calls keyed by DebugSession.session_id so the per-op handlers can issue MI verbs.
     gdb_mi_engine = GdbMiEngine()
+    gdb_mi_sessions = GdbMiSessionRegistry()
     # Stash the assembled machinery on the FastMCP instance so test-injection and any future
     # in-process lifecycle event source can reach the SAME admission/transaction/dispatcher trio
     # the tool wrappers close over (rather than constructing a parallel set that would not share
@@ -6773,6 +7231,7 @@ def create_app(
             session_registry=durable_registry,
             session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.read_registers")
@@ -6788,6 +7247,8 @@ def create_app(
             registers=registers,
             debug_session_id=debug_session_id,
             session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.read_symbol")
@@ -6803,6 +7264,8 @@ def create_app(
             symbol=symbol,
             debug_session_id=debug_session_id,
             session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.read_memory")
@@ -6820,6 +7283,8 @@ def create_app(
             byte_count=byte_count,
             debug_session_id=debug_session_id,
             session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.evaluate")
@@ -6837,6 +7302,8 @@ def create_app(
             arguments=arguments,
             debug_session_id=debug_session_id,
             session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.set_breakpoint")
@@ -6853,6 +7320,26 @@ def create_app(
             debug_session_id=debug_session_id,
             admission=admission_service,
             session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.set_watchpoint")
+    def debug_set_watchpoint(
+        run_id: str,
+        symbol: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_set_watchpoint_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            symbol=symbol,
+            debug_session_id=debug_session_id,
+            admission=admission_service,
+            session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.clear_breakpoint")
@@ -6869,6 +7356,26 @@ def create_app(
             debug_session_id=debug_session_id,
             admission=admission_service,
             session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.clear_watchpoint")
+    def debug_clear_watchpoint(
+        run_id: str,
+        breakpoint_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_clear_watchpoint_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            breakpoint_id=breakpoint_id,
+            debug_session_id=debug_session_id,
+            admission=admission_service,
+            session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.list_breakpoints")
@@ -6883,6 +7390,40 @@ def create_app(
             debug_session_id=debug_session_id,
             admission=admission_service,
             session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.backtrace")
+    def debug_backtrace(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_backtrace_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+            admission=admission_service,
+            session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.list_variables")
+    def debug_list_variables(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        return debug_list_variables_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+            admission=admission_service,
+            session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.continue")
@@ -6899,6 +7440,62 @@ def create_app(
             timeout_seconds=timeout_seconds,
             admission=admission_service,
             session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.step")
+    def debug_step(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        return debug_step_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+            timeout_seconds=timeout_seconds,
+            admission=admission_service,
+            session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.next")
+    def debug_next(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        return debug_next_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+            timeout_seconds=timeout_seconds,
+            admission=admission_service,
+            session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.finish")
+    def debug_finish(
+        run_id: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        debug_session_id: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        return debug_finish_handler(
+            artifact_root=Path(artifact_root),
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+            timeout_seconds=timeout_seconds,
+            admission=admission_service,
+            session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.interrupt")
@@ -6915,6 +7512,8 @@ def create_app(
             timeout_seconds=timeout_seconds,
             admission=admission_service,
             session_registry=durable_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.end_session")
@@ -6931,6 +7530,8 @@ def create_app(
             admission=admission_service,
             session_registry=durable_registry,
             session_guard=session_guard,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
 
     @app.tool(name="transport.open")
@@ -7034,6 +7635,8 @@ def create_app(
             session_registry=durable_registry,
             transaction=transport_transaction,
             session_guard=session_guard,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
         ).model_dump(mode="json")
 
     return app

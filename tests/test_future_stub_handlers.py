@@ -10,7 +10,6 @@ from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider
 from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
 from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider
-from linux_debug_mcp.providers.qemu_gdbstub import QemuGdbstubProvider
 from linux_debug_mcp.providers.registry import ProviderRegistry
 from linux_debug_mcp.providers.stubs import remote_build_stub_capability
 from linux_debug_mcp.server import (
@@ -279,7 +278,6 @@ def test_future_stub_handlers_do_not_create_run_workspace_or_touch_forbidden_dep
     monkeypatch.setattr(LocalKernelBuildProvider, "plan_build", fail_forbidden_dependency)
     monkeypatch.setattr(LocalSshTestProvider, "plan_tests", fail_forbidden_dependency)
     monkeypatch.setattr(LibvirtQemuProvider, "plan_boot", fail_forbidden_dependency)
-    monkeypatch.setattr(QemuGdbstubProvider, "start_session", fail_forbidden_dependency)
 
     response = handler(**payload)
 

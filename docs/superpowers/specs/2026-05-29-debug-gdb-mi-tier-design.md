@@ -1,6 +1,6 @@
 # `debug.gdb` KGDB/RSP tier (gdb/MI) — design & decomposition
 
-**Type:** Design spec · **Issue:** #13 (epic #9) · **ADR:** [0019](../../adr/0019-debug-gdb-mi-tier-decomposition.md), [0020](../../adr/0020-gdb-mi-symbol-resolution-mechanism.md) · **Status:** Phases A–B implemented (2026-05-29); C/D proposed
+**Type:** Design spec · **Issue:** #13 (epic #9) · **ADR:** [0019](../../adr/0019-debug-gdb-mi-tier-decomposition.md), [0020](../../adr/0020-gdb-mi-symbol-resolution-mechanism.md), [0021](../../adr/0021-gdb-mi-phase-c-session-registry-and-execution-state.md) · **Status:** Phases A–B implemented (2026-05-29); C designed (2026-05-29), D proposed
 
 ## Summary
 
@@ -155,12 +155,57 @@ fails `provenance_missing` rather than attaching against unverified symbols; a
 matching image attaches and resolves a symbol by name (the probe surfaces the
 typed `linux_banner` resolution).
 
-### Phase C — core operations, MI-typed
-**Scope.** Migrate onto MI typed JSON: set/clear breakpoints & watchpoints,
-`continue`, `step`/`next`/`finish`, `-stack-list-frames`,
-`-stack-list-variables`, register/memory reads (preserve the 4096-byte
-`read_memory` cap). **Delete** the corresponding `-batch` paths in
-`qemu_gdbstub.py`.
+### Phase C — core operations, MI-typed *(design 2026-05-29, #81; ADR [0021](../../adr/0021-gdb-mi-phase-c-session-registry-and-execution-state.md))*
+**Scope.** Migrate the **complete** `DEBUG_METHOD_OPERATIONS` set
+(`server.py:248-259`) onto MI typed JSON — `read_registers`, `read_symbol`
+(`-data-evaluate-expression "<validated_symbol>"`, a name-shape-gated value read),
+`read_memory` (4096-byte cap), `evaluate`, set/clear/list breakpoints, `continue`,
+`interrupt`, `end_session` — and add the new structured ops: `step`/`next`/`finish`,
+`-stack-list-frames` (`backtrace`), `-stack-list-variables` (`list_variables`),
+set/clear **watchpoints**. **Delete** the corresponding `-batch` paths in
+`qemu_gdbstub.py`; no `DEBUG_METHOD_OPERATIONS` entry is left calling a deleted
+method. `start_session`'s legacy live-banner identity scrape
+(`live_banner_match`/`symbol_identity_required`) is **subsumed by** the pre-attach
+build_id provenance gate (ADR 0017 / #70) and removed; the migrated `start_session`
+keeps the engine attached and retains the typed `mi_probe` connect record +
+`linux_banner` resolution in its success data (now from the live session, not a
+detach-probe) — the existing `test_server_debug_mi_probe` assertions migrate to the
+still-attached shape.
+
+**Live session held across calls (ADR 0021 decision 1).** The acceptance spans
+separate MCP tool calls (set a breakpoint, *then* continue, *then* backtrace), so
+the `gdb -i=mi3` engine must stay alive between calls — a breakpoint set in a
+prior, exited process never fires. A new in-process `GdbMiSessionRegistry`
+(lock-guarded dict in `providers/gdb_mi.py`) holds the live `GdbMiAttachment`
+keyed by the `DebugSession.session_id`. `debug.start_session` registers it (and no
+longer resumes-and-detaches as the Phase-A probe did); each per-op handler looks
+it up; `debug.end_session` and every guaranteed-resume teardown reap it. A lookup
+miss is `CONFIGURATION_ERROR` / `no_live_session` (server restarted or session
+already reaped) routing the agent back to `debug.start_session`. gdb's own MI
+breakpoint numbers are the breakpoint identity; `debug.list_breakpoints` reads
+`-break-list` from the live engine (source of truth), with a typed JSON ledger
+persisted into the manifest for enumerability.
+
+**Execution-state: HALTED for the whole window (ADR 0021 decision 2).** The
+durable record is parked HALTED at attach and stays HALTED until `end_session`.
+The interactive resume verbs (`continue`/`step`/`next`/`finish`) are
+**continue-and-wait-for-stop, bounded by a validated 1–`MAX_INTERACTIVE_WAIT_SEC`
+(60s) timeout** (default 10s — deliberately *not* the legacy 1–3600s, so a blocking
+call holding `debug_lock` can never outlast a client request timeout or wedge
+`end_session`): they issue the MI exec verb, wait for the `*stopped` async record,
+and return it as a typed `StopRecord`; on timeout they issue `-exec-interrupt`
+(short 10s bound) to return to a known stopped state and report `timed_out=true`.
+"Run until this breakpoint" is the agent re-polling `debug.continue`, not one long
+blocking call. A terminal `*stopped` reason (`exited*` — kernel panic / inferior
+gone) is **not** a HALTED stop: it reaps the session and reports `session_exited`
+(DEBUG_ATTACH_FAILURE) so no later verb runs against a dead inferior. The session
+is otherwise always HALTED between calls, so `target.run_tests` stays gated
+`target_halted` for the window and never races a breakpoint that silently halts a
+"running" kernel. The kernel returns to EXECUTING exactly once, at `end_session`'s
+resume-and-detach. This narrows `debug.continue` to never admit ssh-tier
+mid-session — a deliberate Phase-C safety choice; a detached free-running continue
+is out of scope.
+
 **MI eval stays internal-only behind the inspector allowlist.**
 `-data-evaluate-expression` is used **only as the internal implementation** of the
 existing named inspectors — today `debug.evaluate` accepts `kernel_version` and
@@ -170,12 +215,51 @@ does **not** add an arbitrary-expression capability. Swapping the batch
 text-scrape for an MI `-data-evaluate-expression` call is an implementation
 detail behind the same allowlist; this keeps the constrained-debug-surface
 invariant (CLAUDE.md, `ALLOWED_DEBUG_OPERATIONS`) intact.
-**Acceptance.** Set a breakpoint by symbol, continue, hit it, backtrace, read a
-local — all returned as structured JSON via MI. No batch-mode gdb invocation
-remains. `debug.evaluate` with `kernel_version` / `symbol_address` returns
-MI-typed JSON; an **arbitrary expression (any unknown inspector / raw expression
-string) is rejected** with a `CONFIGURATION_ERROR`-class response — no MI
-`-data-evaluate-expression` is reachable without going through a named inspector.
+**Acceptance — integration-only (env-gated, skipped in local CI, never counted as a passing gate when skipped).**
+Against local QEMU gdbstub: set a breakpoint by symbol, continue, hit it,
+backtrace, read a local — all returned as structured JSON via MI;
+`step`/`next`/`finish` return typed `StopRecord`/frame records; set a **watchpoint**
+(`-break-watch`), continue, and stop on the write with a typed `StopRecord`. The
+existing env-gated local-QEMU gdbstub coverage passes on the MI engine.
+
+**Acceptance — unit-level (runs in CI against the injected `FakeController`/`MiController` seam, so the state machine is verified without live hardware).**
+- A scripted deferred `*stopped` (arriving on a later `read()`, not the
+  `-exec-continue` `^running` return) yields a typed `StopRecord` from
+  `debug.continue`.
+- A continue whose wait expires issues `-exec-interrupt`, collects the
+  `*stopped (SIGINT)`, returns `timed_out=true`, leaves the durable
+  `execution_state` HALTED, and the whole call returns within its ≤60s ceiling
+  (+10s interrupt fallback).
+- A `*stopped, reason=exited*` arriving during a continue reaps the session and
+  returns `session_exited` (DEBUG_ATTACH_FAILURE), not a HALTED `StopRecord`.
+- `debug.interrupt` against an already-stopped engine returns success (the
+  non-raising interrupt primitive tolerates a "not running" `^error`).
+- `debug.read_memory` with `byte_count=4097` is rejected `CONFIGURATION_ERROR`
+  by the engine **before** any MI command (the 4096-byte cap, re-homed off the
+  deleted batch validator).
+- `debug.evaluate` with `kernel_version` / `symbol_address` returns MI-typed JSON;
+  an **arbitrary expression (any unknown inspector / raw expression string) is
+  rejected** with a `CONFIGURATION_ERROR`-class response — no MI
+  `-data-evaluate-expression` is reachable without going through a named inspector.
+- A mutating `debug.*` op against a session whose live engine is gone returns
+  `CONFIGURATION_ERROR` / `no_live_session` when the durable ownership record still
+  exists (post-restart orphan), and `legacy_session_no_ownership` when it does not
+  (the fence runs before the live lookup, ADR 0021 decision 1) — never a silent
+  no-op.
+- set/clear watchpoint issue the expected `-break-watch`/`-break-delete` MI verbs
+  and are refused when the `DebugProfile` narrows them out of `enabled_operations`.
+- every new typed record (`StopRecord`, frames, `list_variables`, register values,
+  memory bytes) is routed through `Redactor` before return **and** before
+  persistence: a secret-looking local/register value is redacted in both the
+  response and the manifest, and `list_variables` output is bounded
+  (`MAX_RESPONSE_SNIPPET`) so a deep frame cannot bloat the response.
+- the shipped default `DebugProfile`s enable the new structured/watchpoint ops
+  (they ride the `ALLOWED_DEBUG_OPERATIONS` default factory); a profile that
+  supplied an explicit narrowed `enabled_operations` must opt the new names in —
+  this compatibility expectation is documented, not silently assumed.
+
+**Acceptance — static.** No batch-mode (`-batch`) gdb invocation remains anywhere
+(CI grep tripwire).
 
 ### Phase D — module symbols, robustness, serial transport
 **Scope.** Per-module section-address discovery + `add-symbol-file` at runtime

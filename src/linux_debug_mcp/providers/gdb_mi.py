@@ -5,6 +5,7 @@ import ipaddress
 import json
 import re
 import shutil
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -37,6 +38,26 @@ _SYMBOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # The fixed canonical symbol the Phase-B attach probe resolves: present in every kernel image
 # (the /proc/version string), so it needs no kernel-config gating (ADR 0020 decision 3).
 CANONICAL_PROBE_SYMBOL = "linux_banner"
+
+# Max wall-clock an interactive resume verb blocks (ADR 0021 decision 2). NOT the legacy 1-3600s:
+# the call holds debug_lock, so it must not outlast a client request timeout.
+MAX_INTERACTIVE_WAIT_SEC = 60
+# Fixed bound for the post-timeout -exec-interrupt to land its *stopped (SIGINT).
+_INTERRUPT_STOP_TIMEOUT_SEC = 10.0
+# Poll slice when looping read() toward the deadline.
+_STOP_POLL_SLICE_SEC = 0.5
+# gdb stop reasons meaning the inferior is gone (not a debuggable HALT).
+_TERMINAL_STOP_REASONS = frozenset({"exited", "exited-normally", "exited-signalled"})
+# Per-call read_memory cap (CLAUDE.md invariant; re-homed off the deleted batch validator).
+MAX_MEMORY_READ_BYTES = 4096
+# Snippet bound for variable values so a deep frame cannot bloat the response.
+MAX_RESPONSE_SNIPPET = 4096
+# A register name (passed to -data-list-register-names lookup).
+_REGISTER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+# A breakpoint/watchpoint location: a bare C identifier (function/symbol/expression).
+_BREAK_LOCATION_RE = _SYMBOL_NAME_RE
+# A gdb breakpoint id is a bare integer.
+_BREAK_ID_RE = re.compile(r"^[0-9]+$")
 
 
 class MiRecord(Model):
@@ -71,6 +92,49 @@ class ResolvedSymbol(Model):
     value: str
 
 
+class Frame(Model):
+    """One stack frame from a gdb/MI ``frame={...}`` payload. Optional fields mirror what gdb omits
+    for frames without source info. Frozen wire shape (``Model`` => extra="forbid")."""
+
+    level: int | None = None
+    func: str | None = None
+    addr: str | None = None
+    file: str | None = None
+    line: int | None = None
+
+
+class StopRecord(Model):
+    """A parsed ``*stopped`` async record. ``reason`` is gdb's stop reason (``breakpoint-hit``,
+    ``end-stepping-range``, ``watchpoint-trigger``, ``exited``, ...); ``frame`` is the stop frame.
+    ``timed_out`` is True when the wait expired and the handler had to ``-exec-interrupt``."""
+
+    reason: str | None = None
+    bkptno: str | None = None
+    stopped_thread: str | None = None
+    frame: Frame | None = None
+    timed_out: bool = False
+
+
+class Variable(Model):
+    """One local/arg from ``-stack-list-variables``. ``value`` is the gdb-rendered value string
+    (redacted before return/persist)."""
+
+    name: str
+    value: str | None = None
+
+
+class BreakpointRef(Model):
+    """One breakpoint/watchpoint from ``-break-insert``/``-break-watch``/``-break-list``.
+    ``number`` is gdb's authoritative breakpoint id."""
+
+    number: str
+    type: str | None = None
+    addr: str | None = None
+    func: str | None = None
+    what: str | None = None
+    enabled: bool | None = None
+
+
 def parse_mi_records(text: str) -> list[MiRecord]:
     """Parse newline-delimited MI output into typed records, skipping blank lines and the literal
     ``(gdb)`` prompt terminator. Used both for the controller's returned dicts (already parsed) and
@@ -101,9 +165,15 @@ class GdbMiError(Exception):
 class MiController(Protocol):
     """The injectable subprocess seam. The real impl drives a ``gdb --interpreter=mi3`` child via
     pygdbmi; tests inject a scripted fake. ``write`` returns the raw pygdbmi record dicts for the
-    command; ``exit`` terminates the child."""
+    command; ``read`` polls for further out-of-band records (the async ``*stopped`` that arrives
+    after a ``^running``); ``exit`` terminates the child."""
 
     def write(self, command: str, *, timeout_sec: float) -> list[dict[str, object]]: ...
+
+    def read(self, *, timeout_sec: float) -> list[dict[str, object]]:
+        """Poll for further out-of-band records. Returns an empty list when nothing arrived within
+        ``timeout_sec`` (the async stop has not been emitted yet)."""
+        ...
 
     def exit(self) -> None: ...
 
@@ -125,6 +195,12 @@ class PygdbmiController:
                 category=ErrorCategory.DEBUG_ATTACH_FAILURE,
                 details={"command": command, "timeout_seconds": timeout_sec},
             ) from exc
+
+    def read(self, *, timeout_sec: float) -> list[dict[str, object]]:
+        try:
+            return self._controller.get_gdb_response(timeout_sec=timeout_sec, raise_error_on_timeout=False)
+        except GdbTimeoutError:
+            return []
 
     def exit(self) -> None:
         self._controller.exit()
@@ -231,6 +307,286 @@ class GdbMiEngine:
             )
         return ResolvedSymbol(name=symbol_name, value=value)
 
+    # --- Phase C: interactive execution control -------------------------------------------------
+
+    def wait_for_stop(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> StopRecord | None:
+        """Poll read() until a record with message=="stopped" appears or the slice budget is spent.
+        Returns the parsed StopRecord, or None on timeout. Raises GdbMiError(session_exited) on a
+        terminal (exited*) stop. The slice budget keeps the loop test-deterministic; a real read()
+        blocks up to one slice, so the real wall-clock is bounded by timeout_sec."""
+        slices = max(1, int(timeout_sec / _STOP_POLL_SLICE_SEC) + 1)
+        for _ in range(slices):
+            records = self._records_from(attachment.controller.read(timeout_sec=_STOP_POLL_SLICE_SEC))
+            attachment.records.extend(records)
+            if records:
+                self._append_transcript(attachment.transcript_path, "<read>", records)
+            stop = next((record for record in records if record.message == "stopped"), None)
+            if stop is not None:
+                return self._stop_record_from(stop)
+        return None
+
+    def _stop_record_from(self, record: MiRecord) -> StopRecord:
+        payload = record.payload if isinstance(record.payload, dict) else {}
+        reason = payload.get("reason")
+        if isinstance(reason, str) and reason in _TERMINAL_STOP_REASONS:
+            raise GdbMiError(
+                f"gdb/MI inferior exited ({reason}); the debug session is dead",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={"code": "session_exited", "reason": reason},
+            )
+        frame_payload = payload.get("frame")
+        frame = self._frame_from(frame_payload) if isinstance(frame_payload, dict) else None
+        thread = payload.get("stopped-threads")
+        return StopRecord(
+            reason=reason if isinstance(reason, str) else None,
+            bkptno=payload.get("bkptno") if isinstance(payload.get("bkptno"), str) else None,
+            stopped_thread=thread if isinstance(thread, str) else None,
+            frame=frame,
+        )
+
+    def _frame_from(self, payload: dict[str, Any]) -> Frame:
+        def _int(value: object) -> int | None:
+            return int(value) if isinstance(value, str) and value.lstrip("-").isdigit() else None
+
+        return Frame(
+            level=_int(payload.get("level")),
+            func=payload.get("func") if isinstance(payload.get("func"), str) else None,
+            addr=payload.get("addr") if isinstance(payload.get("addr"), str) else None,
+            file=payload.get("file") if isinstance(payload.get("file"), str) else None,
+            line=_int(payload.get("line")),
+        )
+
+    def interrupt(self, attachment: GdbMiAttachment) -> StopRecord | None:
+        """Idempotent 'ensure HALTED'. Issues -exec-interrupt without routing through the raising
+        _run (an already-stopped target answers ^error 'not being run', which is benign), then waits
+        the short fixed bound for the SIGINT stop. Returns the StopRecord if one arrived, else None.
+        Only a controller fault (write raising) propagates."""
+        raw = attachment.controller.write("-exec-interrupt", timeout_sec=_MI_COMMAND_TIMEOUT_SEC)
+        records = self._records_from(raw)
+        attachment.records.extend(records)
+        self._append_transcript(attachment.transcript_path, "-exec-interrupt", records)
+        stop = self.wait_for_stop(attachment, timeout_sec=_INTERRUPT_STOP_TIMEOUT_SEC)
+        return self._redact_stop(stop) if stop is not None else None
+
+    def _redact_stop(self, stop: StopRecord) -> StopRecord:
+        return StopRecord.model_validate(self._redactor.redact_value(stop.model_dump(mode="json")))
+
+    def resume(self, attachment: GdbMiAttachment, verb: str, *, timeout_sec: float) -> StopRecord:
+        """Issue an interactive exec verb (-exec-continue/-step/-next/-finish), wait for the stop, and
+        return a redacted StopRecord. On timeout, -exec-interrupt back to a known stop and mark
+        timed_out=True. Always returns HALTED (or raises session_exited)."""
+        bounded = max(1, min(int(timeout_sec) if timeout_sec else MAX_INTERACTIVE_WAIT_SEC, MAX_INTERACTIVE_WAIT_SEC))
+        self._run(attachment, verb)  # ^running under mi-async on
+        stop = self.wait_for_stop(attachment, timeout_sec=bounded)
+        if stop is not None:
+            return self._redact_stop(stop)
+        interrupted = self.interrupt(attachment)
+        return self._redact_stop((interrupted or StopRecord()).model_copy(update={"timed_out": True}))
+
+    def continue_(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> StopRecord:
+        return self.resume(attachment, "-exec-continue", timeout_sec=timeout_sec)
+
+    def step(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> StopRecord:
+        return self.resume(attachment, "-exec-step", timeout_sec=timeout_sec)
+
+    def next(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> StopRecord:
+        return self.resume(attachment, "-exec-next", timeout_sec=timeout_sec)
+
+    def finish(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> StopRecord:
+        return self.resume(attachment, "-exec-finish", timeout_sec=timeout_sec)
+
+    # --- Phase C: breakpoints / watchpoints -----------------------------------------------------
+
+    def set_breakpoint(self, attachment: GdbMiAttachment, location: str) -> BreakpointRef:
+        if not _BREAK_LOCATION_RE.match(location):
+            raise GdbMiError(
+                f"breakpoint location must be a bare C identifier, got {location!r}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"location": location},
+            )
+        return self._breakpoint_ref(self._run(attachment, f"-break-insert {location}"), key="bkpt")
+
+    def set_watchpoint(self, attachment: GdbMiAttachment, expression: str) -> BreakpointRef:
+        if not _BREAK_LOCATION_RE.match(expression):
+            raise GdbMiError(
+                f"watchpoint expression must be a bare C identifier, got {expression!r}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"expression": expression},
+            )
+        return self._breakpoint_ref(self._run(attachment, f"-break-watch {expression}"), key="wpt")
+
+    def clear_breakpoint(self, attachment: GdbMiAttachment, number: str) -> None:
+        if not _BREAK_ID_RE.match(number):
+            raise GdbMiError(
+                f"breakpoint id must be numeric, got {number!r}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"number": number},
+            )
+        self._run(attachment, f"-break-delete {number}")
+
+    # A watchpoint is a breakpoint to gdb; clearing one is the same `-break-delete <n>` verb. Kept as
+    # a named method so the debug.clear_watchpoint handler has an explicit engine target.
+    def clear_watchpoint(self, attachment: GdbMiAttachment, number: str) -> None:
+        self.clear_breakpoint(attachment, number)
+
+    def list_breakpoints(self, attachment: GdbMiAttachment) -> list[BreakpointRef]:
+        records = self._run(attachment, "-break-list")
+        result = MiRecord.first_result(records)
+        payload = result.payload if result is not None and isinstance(result.payload, dict) else {}
+        table = payload.get("BreakpointTable") if isinstance(payload.get("BreakpointTable"), dict) else {}
+        body = table.get("body") if isinstance(table, dict) else None
+        rows = body if isinstance(body, list) else []
+        refs: list[BreakpointRef] = []
+        for row in rows:
+            entry = row.get("bkpt") if isinstance(row, dict) else None
+            if isinstance(entry, dict):
+                refs.append(self._breakpoint_ref_from(entry))
+        return refs
+
+    def _breakpoint_ref(self, records: list[MiRecord], *, key: str) -> BreakpointRef:
+        result = MiRecord.first_result(records)
+        payload = result.payload if result is not None and isinstance(result.payload, dict) else {}
+        entry = payload.get(key)
+        if not isinstance(entry, dict):
+            raise GdbMiError(
+                f"gdb/MI {key} response had no breakpoint record",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={"command_key": key},
+            )
+        return self._breakpoint_ref_from(entry)
+
+    def _breakpoint_ref_from(self, entry: dict[str, Any]) -> BreakpointRef:
+        return BreakpointRef.model_validate(
+            self._redactor.redact_value(
+                {
+                    "number": str(entry.get("number")),
+                    "type": entry.get("type") if isinstance(entry.get("type"), str) else None,
+                    "addr": entry.get("addr") if isinstance(entry.get("addr"), str) else None,
+                    "func": entry.get("func") if isinstance(entry.get("func"), str) else None,
+                    "what": entry.get("what") if isinstance(entry.get("what"), str) else None,
+                }
+            )
+        )
+
+    # --- Phase C: stack inspection --------------------------------------------------------------
+
+    def backtrace(self, attachment: GdbMiAttachment) -> list[Frame]:
+        records = self._run(attachment, "-stack-list-frames")
+        result = MiRecord.first_result(records)
+        payload = result.payload if result is not None and isinstance(result.payload, dict) else {}
+        stack_value = payload.get("stack")
+        stack = stack_value if isinstance(stack_value, list) else []
+        frames: list[Frame] = []
+        for row in stack:
+            frame_payload = row.get("frame") if isinstance(row, dict) else None
+            if isinstance(frame_payload, dict):
+                redacted = self._redactor.redact_value(frame_payload)
+                if isinstance(redacted, dict):
+                    frames.append(self._frame_from(redacted))
+        return frames
+
+    def list_variables(self, attachment: GdbMiAttachment) -> list[Variable]:
+        records = self._run(attachment, "-stack-list-variables --all-values")
+        result = MiRecord.first_result(records)
+        payload = result.payload if result is not None and isinstance(result.payload, dict) else {}
+        rows_value = payload.get("variables")
+        rows = rows_value if isinstance(rows_value, list) else []
+        variables: list[Variable] = []
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+                continue
+            value = row.get("value")
+            value_text = value[:MAX_RESPONSE_SNIPPET] if isinstance(value, str) else None
+            redacted = self._redactor.redact_value({"name": row["name"], "value": value_text})
+            variables.append(Variable.model_validate(redacted))
+        return variables
+
+    # --- Phase C: register / memory / symbol / evaluate -----------------------------------------
+
+    def read_registers(self, attachment: GdbMiAttachment, register_names: list[str]) -> dict[str, object]:
+        if not isinstance(register_names, list) or not register_names:
+            raise GdbMiError("registers must be a non-empty list", category=ErrorCategory.CONFIGURATION_ERROR)
+        requested: list[str] = []
+        for name in register_names:
+            if not isinstance(name, str) or not _REGISTER_RE.match(name):
+                raise GdbMiError(f"invalid register name {name!r}", category=ErrorCategory.CONFIGURATION_ERROR)
+            requested.append(name)
+        # gdb keys register VALUES by ordinal number; map names->ordinals via -data-list-register-names,
+        # then return only the requested names (the legacy op filtered; preserve that).
+        names_result = MiRecord.first_result(self._run(attachment, "-data-list-register-names"))
+        names_payload = names_result.payload if names_result is not None else None
+        ordered = names_payload.get("register-names") if isinstance(names_payload, dict) else None
+        ordered_names = ordered if isinstance(ordered, list) else []
+        values_result = MiRecord.first_result(self._run(attachment, "-data-list-register-values x"))
+        values_payload = values_result.payload if values_result is not None else None
+        rows = values_payload.get("register-values") if isinstance(values_payload, dict) else None
+        by_number = {
+            row.get("number"): row.get("value")
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict)
+        }
+        registers: dict[str, object] = {}
+        for name in requested:
+            if name in ordered_names:
+                ordinal = str(ordered_names.index(name))
+                if ordinal in by_number:
+                    registers[name] = by_number[ordinal]
+        return self._redactor.redact_value({"registers": registers})
+
+    def read_memory(self, attachment: GdbMiAttachment, *, address: int, byte_count: int) -> dict[str, object]:
+        if not isinstance(address, int) or not isinstance(byte_count, int):
+            raise GdbMiError("address and byte_count must be integers", category=ErrorCategory.CONFIGURATION_ERROR)
+        if address < 0 or address > 0xFFFFFFFFFFFFFFFF:
+            raise GdbMiError("address out of range", category=ErrorCategory.CONFIGURATION_ERROR)
+        if byte_count < 1 or byte_count > MAX_MEMORY_READ_BYTES:
+            raise GdbMiError("byte_count must be between 1 and 4096", category=ErrorCategory.CONFIGURATION_ERROR)
+        records = self._run(attachment, f"-data-read-memory-bytes 0x{address:x} {byte_count}")
+        result = MiRecord.first_result(records)
+        payload = result.payload if result is not None and isinstance(result.payload, dict) else {}
+        return self._redactor.redact_value(
+            {"address": f"0x{address:x}", "byte_count": byte_count, "memory": payload.get("memory", [])}
+        )
+
+    def read_symbol(self, attachment: GdbMiAttachment, symbol: str) -> dict[str, object]:
+        if not _SYMBOL_NAME_RE.match(symbol):
+            raise GdbMiError(
+                f"symbol name must be a bare C identifier, got {symbol!r}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"symbol": symbol},
+            )
+        value = self._evaluate_expression(attachment, f'"{symbol}"')
+        return self._redactor.redact_value({"symbol": symbol, "value": value})
+
+    def evaluate_inspector(
+        self, attachment: GdbMiAttachment, *, inspector: str, arguments: dict[str, object]
+    ) -> dict[str, object]:
+        if inspector == "kernel_version":
+            value = self._evaluate_expression(attachment, f'"{CANONICAL_PROBE_SYMBOL}"')
+            return self._redactor.redact_value({"inspector": inspector, "kernel_version": value})
+        if inspector == "symbol_address":
+            symbol = arguments.get("symbol")
+            if not isinstance(symbol, str) or not _SYMBOL_NAME_RE.match(symbol):
+                raise GdbMiError(
+                    "symbol_address requires a bare C identifier 'symbol'",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                )
+            resolved = self.resolve_symbol(attachment, symbol)
+            return self._redactor.redact_value({"inspector": inspector, "symbol": symbol, "address": resolved.value})
+        raise GdbMiError(
+            "unknown debug inspector", category=ErrorCategory.CONFIGURATION_ERROR, details={"inspector": inspector}
+        )
+
+    def _evaluate_expression(self, attachment: GdbMiAttachment, quoted: str) -> str:
+        records = self._run(attachment, f"-data-evaluate-expression {quoted}")
+        result = MiRecord.first_result(records)
+        payload = result.payload if result is not None else None
+        value = payload.get("value") if isinstance(payload, dict) else None
+        if not isinstance(value, str):
+            raise GdbMiError(
+                "gdb/MI returned no value", category=ErrorCategory.DEBUG_ATTACH_FAILURE, details={"expr": quoted}
+            )
+        return value
+
     def resume_and_detach(self, attachment: GdbMiAttachment) -> bool:
         """Clean teardown: async continue, ``-target-disconnect``, exit the engine. Returns whether
         resume is confirmed (the exit() kill disconnects RSP, which resumes QEMU even if the MI
@@ -314,3 +670,35 @@ class GdbMiEngine:
         with transcript_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(self._redactor.redact_value(entry), default=str))
             handle.write("\n")
+
+
+class GdbMiSessionRegistry:
+    """In-process holder of live GdbMiAttachments keyed by DebugSession.session_id (ADR 0021
+    decision 1). Lock-guards the dict; the live engine is server-process-scoped, not durable, so a
+    server restart strands the attachment and the next mutating debug.* op gets ``no_live_session``."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._sessions: dict[str, GdbMiAttachment] = {}
+
+    def register(self, session_id: str, attachment: GdbMiAttachment) -> None:
+        with self._lock:
+            self._sessions[session_id] = attachment
+
+    def get(self, session_id: str) -> GdbMiAttachment | None:
+        with self._lock:
+            return self._sessions.get(session_id)
+
+    def require(self, session_id: str) -> GdbMiAttachment:
+        attachment = self.get(session_id)
+        if attachment is None:
+            raise GdbMiError(
+                "no live gdb/MI session; the engine is gone (server restarted or session reaped)",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"code": "no_live_session", "debug_session_id": session_id},
+            )
+        return attachment
+
+    def reap(self, session_id: str) -> GdbMiAttachment | None:
+        with self._lock:
+            return self._sessions.pop(session_id, None)

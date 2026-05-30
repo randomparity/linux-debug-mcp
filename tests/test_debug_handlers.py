@@ -1,108 +1,20 @@
+"""Handler-level tests for debug.start_session / debug.read_memory / debug.end_session on the live
+gdb/MI engine (#81). The session-of-record is the live attachment held by the registry; there is no
+batch provider behind it."""
+
 from pathlib import Path
 
-from conftest import kernel_provenance_details, write_vmlinux_with_build_id
+from conftest import FakeMiEngine, build_debug_transport, kernel_provenance_details, write_vmlinux_with_build_id
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import DebugProfile
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from linux_debug_mcp.providers.qemu_gdbstub import DebugProviderResult, DebugSession, ProviderDebugError
+from linux_debug_mcp.providers.gdb_mi import GdbMiError, GdbMiSessionRegistry
+from linux_debug_mcp.providers.qemu_gdbstub import DebugSession
+from linux_debug_mcp.seams.target import TargetKey
 from linux_debug_mcp.server import debug_end_session_handler, debug_read_memory_handler, debug_start_session_handler
 
-
-class FakeDebugProvider:
-    name = "local-qemu-gdbstub"
-
-    def __init__(self) -> None:
-        self.calls = 0
-        self.call_kwargs: list[dict[str, object]] = []
-
-    def start_session(self, **kwargs):
-        self.calls += 1
-        self.call_kwargs.append(kwargs)
-        run_dir = kwargs["run_dir"]
-        session_path = run_dir / "debug" / "sessions" / "debug-1.json"
-        transcript_path = run_dir / "debug" / "attempt-001" / "transcript.txt"
-        commands_path = run_dir / "debug" / "attempt-001" / "commands.jsonl"
-        summary_path = run_dir / "debug" / "attempt-001" / "debug-summary.json"
-        for path in [session_path, transcript_path, commands_path, summary_path]:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("{}", encoding="utf-8")
-        session = DebugSession(
-            session_id="debug-1",
-            run_id=kwargs["run_id"],
-            provider_name=self.name,
-            gdbstub_endpoint=kwargs["gdbstub_endpoint"],
-            vmlinux_path=str(kwargs["vmlinux_path"]),
-            selected_debug_profile=kwargs["debug_profile"].name,
-            attach_status="attached",
-            started_at="2026-05-23T00:00:00+00:00",
-            current_execution_state="stopped",
-            transcript_path=str(transcript_path),
-            command_metadata_path=str(commands_path),
-            latest_summary_path=str(summary_path),
-            symbol_identity_validation={"same_run_artifact_linkage": True, "live_banner_match": True},
-        )
-        session_path.write_text(session.model_dump_json(indent=2), encoding="utf-8")
-        return DebugProviderResult(
-            status=StepStatus.SUCCEEDED,
-            summary="debug session started",
-            session=session,
-            artifacts=[
-                ArtifactRef(path=str(session_path), kind="debug-session"),
-                ArtifactRef(path=str(transcript_path), kind="debug-transcript", sensitive=True),
-                ArtifactRef(path=str(commands_path), kind="debug-command-metadata"),
-                ArtifactRef(path=str(summary_path), kind="debug-summary"),
-            ],
-            details={"debug_session_id": "debug-1"},
-        )
-
-    def read_memory(self, **kwargs):
-        self.calls += 1
-        self.call_kwargs.append(kwargs)
-        return DebugProviderResult(
-            status=StepStatus.SUCCEEDED,
-            summary="memory read succeeded",
-            session=kwargs["session"],
-            details={
-                "address": "0x1000",
-                "byte_count": 2,
-                "bytes": ["0x12", "0x34"],
-                "stdout_snippet": "0x1000:\t0x12\t0x34\n",
-            },
-        )
-
-    def end_session(self, **kwargs):
-        self.calls += 1
-        self.call_kwargs.append(kwargs)
-        session = kwargs["session"].model_copy(
-            update={
-                "current_execution_state": "ended",
-                "ended_at": "2026-05-23T00:01:00+00:00",
-            }
-        )
-        return DebugProviderResult(
-            status=StepStatus.SUCCEEDED,
-            summary="debug session ended",
-            session=session,
-            artifacts=[
-                ArtifactRef(
-                    path=str(kwargs["run_dir"] / "debug" / "sessions" / f"{session.session_id}.json"),
-                    kind="debug-session",
-                ),
-            ],
-            details={"debug_session_id": session.session_id, "current_execution_state": "ended"},
-        )
-
-
-class FailingDebugProvider:
-    name = "local-qemu-gdbstub"
-
-    def start_session(self, **kwargs):
-        raise ProviderDebugError(
-            "strict symbol identity live target check failed",
-            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-            details={"diagnostic": "token=secret", "symbol_identity_validation": {"live_banner_match": False}},
-        )
+RUN_ID = "run-debug"
 
 
 def create_debug_ready_run(tmp_path: Path) -> tuple[Path, str]:
@@ -117,7 +29,7 @@ def create_debug_ready_run(tmp_path: Path) -> tuple[Path, str]:
             target_profile="local-qemu",
             rootfs_profile="minimal",
             debug_profile="qemu-gdbstub-default",
-            run_id="run-debug",
+            run_id=RUN_ID,
         )
     )
     vmlinux = artifact_root / manifest.run_id / "build" / "vmlinux"
@@ -153,223 +65,173 @@ def create_debug_ready_run(tmp_path: Path) -> tuple[Path, str]:
     return artifact_root, manifest.run_id
 
 
-def test_debug_start_session_records_manifest_debug_step(tmp_path: Path) -> None:
-    artifact_root, run_id = create_debug_ready_run(tmp_path)
-    provider = FakeDebugProvider()
+def _profiles(**overrides) -> dict[str, DebugProfile]:
+    return {"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default", **overrides)}
 
-    response = debug_start_session_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        provider=provider,
-        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
-    )
+
+class _Fixture:
+    """A wired run: transport machinery + a shared engine and live-session registry, so a started
+    session stays reachable by the per-op handlers."""
+
+    def __init__(self, tmp_path: Path, *, engine: FakeMiEngine | None = None) -> None:
+        self.artifact_root, self.run_id = create_debug_ready_run(tmp_path)
+        self.registry, self.txn, self.admission = build_debug_transport(tmp_path, self.run_id)
+        self.engine = engine or FakeMiEngine()
+        self.sessions = GdbMiSessionRegistry()
+
+    def start(self, *, profiles=None, **overrides):
+        return debug_start_session_handler(
+            artifact_root=self.artifact_root,
+            run_id=self.run_id,
+            debug_profiles=profiles or _profiles(),
+            transaction=self.txn,
+            admission=self.admission,
+            session_registry=self.registry,
+            gdb_mi_engine=self.engine,
+            gdb_mi_sessions=self.sessions,
+            **overrides,
+        )
+
+    def read_memory(self, *, profiles=None, **overrides):
+        return debug_read_memory_handler(
+            artifact_root=self.artifact_root,
+            run_id=self.run_id,
+            debug_profiles=profiles or _profiles(),
+            session_registry=self.registry,
+            gdb_mi_engine=self.engine,
+            gdb_mi_sessions=self.sessions,
+            **overrides,
+        )
+
+    def end(self, **overrides):
+        return debug_end_session_handler(
+            artifact_root=self.artifact_root,
+            run_id=self.run_id,
+            debug_profiles=_profiles(),
+            transaction=self.txn,
+            admission=self.admission,
+            session_registry=self.registry,
+            gdb_mi_engine=self.engine,
+            gdb_mi_sessions=self.sessions,
+            **overrides,
+        )
+
+
+def test_debug_start_session_records_manifest_debug_step(tmp_path: Path) -> None:
+    fx = _Fixture(tmp_path)
+    response = fx.start()
 
     assert response.ok is True
-    assert response.data["debug_session_id"] == "debug-1"
+    session_id = response.data["debug_session_id"]
+    assert session_id.startswith("debug-")
     assert response.data["current_execution_state"] == "stopped"
     assert response.data["gdbstub_endpoint"] == {"host": "127.0.0.1", "port": 1234}
-    assert response.data["transcript_path"].endswith("/debug/attempt-001/transcript.txt")
-    assert response.data["command_metadata_path"].endswith("/debug/attempt-001/commands.jsonl")
-    assert response.data["latest_summary_path"].endswith("/debug/attempt-001/debug-summary.json")
-    assert response.data["symbol_identity_validation"] == {
-        "same_run_artifact_linkage": True,
-        "live_banner_match": True,
-    }
-    assert provider.call_kwargs[0]["build_metadata"] == {
-        "kernel_release": "6.9.0-test",
-        "kernel_image_path": str(artifact_root / run_id / "build" / "bzImage"),
-        "vmlinux_path": str(artifact_root / run_id / "build" / "vmlinux"),
-    }
-    assert provider.call_kwargs[0]["boot_metadata"] == {
-        "debug_boot": True,
-        "gdbstub_endpoint": {"host": "127.0.0.1", "port": 1234},
-        "kernel_provenance": kernel_provenance_details(),
-        "kernel_image_path": str(artifact_root / run_id / "build" / "bzImage"),
-    }
-    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest(run_id)
+    # The session-of-record transcript is the live engine's MI log (ADR 0021), not a batch attempt dir.
+    assert response.data["transcript_path"].endswith("/debug/mi-probe.log")
+    # build-id version-lock is authoritative; no live-banner symbol scrape remains.
+    assert response.data["symbol_identity_validation"] == {}
+    assert response.data["mi_probe"]["record"]["message"] == "connected"
+    assert fx.sessions.get(session_id) is not None  # held live across calls
+    manifest = ArtifactStore(fx.artifact_root, create_root=False).load_manifest(fx.run_id)
     assert manifest.step_results["debug"].status == StepStatus.SUCCEEDED
-    assert manifest.step_results["debug"].details["debug_session_id"] == "debug-1"
+    assert manifest.step_results["debug"].details["debug_session_id"] == session_id
 
 
 def test_debug_start_session_rejects_profile_without_start_operation(tmp_path: Path) -> None:
-    artifact_root, run_id = create_debug_ready_run(tmp_path)
-    provider = FakeDebugProvider()
-
-    response = debug_start_session_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        provider=provider,
-        debug_profiles={
-            "qemu-gdbstub-default": DebugProfile(
-                name="qemu-gdbstub-default",
-                enabled_operations=["debug.read_registers"],
-            )
-        },
-    )
+    fx = _Fixture(tmp_path)
+    response = fx.start(profiles=_profiles(enabled_operations=["debug.read_registers"]))
 
     assert response.ok is False
     assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
-    assert provider.calls == 0
+    assert fx.engine.attached is False
 
 
 def test_debug_start_session_is_idempotent_for_active_session(tmp_path: Path) -> None:
-    artifact_root, run_id = create_debug_ready_run(tmp_path)
-    provider = FakeDebugProvider()
-
-    first = debug_start_session_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        provider=provider,
-        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
-    )
-    second = debug_start_session_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        provider=provider,
-        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
-    )
+    fx = _Fixture(tmp_path)
+    first = fx.start()
+    second = fx.start()
 
     assert first.ok is True
     assert second.ok is True
-    assert provider.calls == 1
+    # The idempotent return surfaces the same active session without a second attach.
+    assert first.data["debug_session_id"] == second.data["debug_session_id"]
 
 
-def test_debug_start_session_redacts_provider_error_details_before_recording(tmp_path: Path) -> None:
-    artifact_root, run_id = create_debug_ready_run(tmp_path)
+def test_debug_start_session_redacts_engine_fault_details(tmp_path: Path) -> None:
+    class _SecretFault(FakeMiEngine):
+        def probe_read(self, attachment):
+            raise GdbMiError(
+                "token=secret leaked",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={"diagnostic": "token=secret"},
+            )
 
-    response = debug_start_session_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        provider=FailingDebugProvider(),
-        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
-    )
+    fx = _Fixture(tmp_path, engine=_SecretFault())
+    response = fx.start()
 
     assert response.ok is False
-    assert response.error is not None
-    assert response.error.details["diagnostic"] == "token=[REDACTED]"
-    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest(run_id)
-    assert manifest.step_results["debug"].details["diagnostic"] == "token=[REDACTED]"
+    assert response.error.category == ErrorCategory.DEBUG_ATTACH_FAILURE
+    # The fault message and details are redacted before they reach the caller.
+    assert "secret" not in response.error.message
+    assert response.error.details.get("diagnostic", "") in ("token=[REDACTED]", "[REDACTED]")
+    # A faulted attach records no SUCCEEDED debug step.
+    manifest = ArtifactStore(fx.artifact_root, create_root=False).load_manifest(fx.run_id)
+    assert "debug" not in manifest.step_results
 
 
-def test_debug_start_session_replaces_ended_session_without_new_session_flag(tmp_path: Path) -> None:
-    artifact_root, run_id = create_debug_ready_run(tmp_path)
-    provider = FakeDebugProvider()
-
-    first = debug_start_session_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        provider=provider,
-        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
-    )
+def test_debug_start_session_replaces_ended_session(tmp_path: Path) -> None:
+    fx = _Fixture(tmp_path)
+    first = fx.start()
     assert first.ok is True
-    store = ArtifactStore(artifact_root, create_root=False)
-    ended = StepResult(
-        step_name="debug",
-        status=StepStatus.SUCCEEDED,
-        summary="debug session ended",
-        artifacts=store.load_manifest(run_id).step_results["debug"].artifacts,
-        details={**first.data, "current_execution_state": "ended"},
-    )
-    store.record_step_result(run_id, ended, replace_succeeded=True)
+    # end_session frees the transport guard and records the session ENDED.
+    ended = fx.end(debug_session_id=first.data["debug_session_id"])
+    assert ended.ok is True
 
-    second = debug_start_session_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        provider=provider,
-        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
-    )
-
+    second = fx.start(new_session=True)
     assert second.ok is True
-    assert provider.calls == 2
-    manifest = store.load_manifest(run_id)
+    manifest = ArtifactStore(fx.artifact_root, create_root=False).load_manifest(fx.run_id)
     assert manifest.step_results["debug"].details["current_execution_state"] == "stopped"
 
 
 def test_debug_read_memory_requires_active_session(tmp_path: Path) -> None:
-    artifact_root, run_id = create_debug_ready_run(tmp_path)
-
-    response = debug_read_memory_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        address=0x1000,
-        byte_count=16,
-        provider=FakeDebugProvider(),
-    )
+    fx = _Fixture(tmp_path)
+    response = fx.read_memory(address=0x1000, byte_count=16)
 
     assert response.ok is False
     assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
 
 
-def test_debug_read_memory_loads_active_session_and_invokes_provider(tmp_path: Path) -> None:
-    artifact_root, run_id = create_debug_ready_run(tmp_path)
-    provider = FakeDebugProvider()
-    start = debug_start_session_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        provider=provider,
-        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
-    )
-    assert start.ok is True
+def test_debug_read_memory_loads_active_session_and_invokes_engine(tmp_path: Path) -> None:
+    fx = _Fixture(tmp_path)
+    assert fx.start().ok is True
 
-    response = debug_read_memory_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        address=0x1000,
-        byte_count=2,
-        provider=provider,
-    )
+    response = fx.read_memory(address=0x1000, byte_count=2)
 
     assert response.ok is True
-    assert response.data["bytes"] == ["0x12", "0x34"]
-    assert provider.call_kwargs[-1]["run_dir"] == artifact_root / run_id
-    assert provider.call_kwargs[-1]["address"] == 0x1000
-    assert provider.call_kwargs[-1]["byte_count"] == 2
-    assert provider.call_kwargs[-1]["session"].session_id == "debug-1"
+    assert response.data["memory"] == [{"contents": "deadbeef"}]
+    assert ("read_memory", (0x1000, 2)) in fx.engine.calls
 
 
 def test_debug_read_memory_rejects_profile_without_read_memory_operation(tmp_path: Path) -> None:
-    artifact_root, run_id = create_debug_ready_run(tmp_path)
-    provider = FakeDebugProvider()
-    start = debug_start_session_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        provider=provider,
-        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
-    )
-    assert start.ok is True
+    fx = _Fixture(tmp_path)
+    assert fx.start().ok is True
 
-    response = debug_read_memory_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
+    response = fx.read_memory(
         address=0x1000,
         byte_count=2,
-        provider=provider,
-        debug_profiles={
-            "qemu-gdbstub-default": DebugProfile(
-                name="qemu-gdbstub-default",
-                enabled_operations=["debug.start_session"],
-            )
-        },
+        profiles=_profiles(enabled_operations=["debug.start_session"]),
     )
 
     assert response.ok is False
     assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
-    assert provider.calls == 1
 
 
 def test_debug_read_memory_rejects_session_paths_outside_run_debug_dir(tmp_path: Path) -> None:
-    artifact_root, run_id = create_debug_ready_run(tmp_path)
-    provider = FakeDebugProvider()
-    start = debug_start_session_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        provider=provider,
-        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
-    )
+    fx = _Fixture(tmp_path)
+    start = fx.start()
     assert start.ok is True
-    store = ArtifactStore(artifact_root, create_root=False)
-    manifest = store.load_manifest(run_id)
-    debug_result = manifest.step_results["debug"]
+    store = ArtifactStore(fx.artifact_root, create_root=False)
+    debug_result = store.load_manifest(fx.run_id).step_results["debug"]
     session_path = Path(debug_result.details["session_path"])
     session = DebugSession.model_validate_json(session_path.read_text(encoding="utf-8"))
     outside_path = tmp_path / "outside-transcript.txt"
@@ -378,38 +240,92 @@ def test_debug_read_memory_rejects_session_paths_outside_run_debug_dir(tmp_path:
         encoding="utf-8",
     )
 
-    response = debug_read_memory_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        address=0x1000,
-        byte_count=2,
-        provider=provider,
-    )
+    response = fx.read_memory(address=0x1000, byte_count=2)
 
     assert response.ok is False
     assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
-    assert provider.calls == 1
+
+
+def test_start_session_persist_failure_reaps_and_resumes(tmp_path: Path, monkeypatch) -> None:
+    """Guaranteed-resume invariant on the persistence partial-failure path: if writing the session
+    file (or recording the manifest step) raises AFTER the live attachment is registered and the
+    kernel is HALTED, the handler must reap the attachment, un-halt, and tear the transport down —
+    never strand the kernel HALTED with the guard held."""
+    import linux_debug_mcp.server as server
+
+    fx = _Fixture(tmp_path)
+
+    def _boom(**_kwargs):
+        raise OSError("disk full while persisting the debug session")
+
+    monkeypatch.setattr(server, "_persist_mi_debug_session", _boom)
+    response = fx.start()
+
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert response.error.details["code"] == "debug_session_persist_failed"
+    # The live attachment was reaped (force_resume un-halted the kernel) ...
+    assert fx.engine.forced is True
+    assert not fx.sessions._sessions  # the live-session registry was emptied
+    # ... and the transport was torn down: the durable record is gone and the guard is free.
+    assert fx.registry.read_record(TargetKey(provisioner="local-qemu", target_id=RUN_ID)) is None
+    # no SUCCEEDED debug step was recorded.
+    manifest = ArtifactStore(fx.artifact_root, create_root=False).load_manifest(RUN_ID)
+    assert "debug" not in manifest.step_results
+
+
+def test_read_memory_over_cap_rejected_through_handler(tmp_path: Path) -> None:
+    """The 4096-byte cap is enforced at the handler boundary: the engine raises CONFIGURATION_ERROR
+    and _debug_operation_response surfaces it (FakeMiEngine is permissive, so use a strict engine)."""
+
+    class _CapEngine(FakeMiEngine):
+        def read_memory(self, attachment, *, address: int, byte_count: int) -> dict[str, object]:
+            if byte_count > 4096:
+                raise GdbMiError("byte_count over cap", category=ErrorCategory.CONFIGURATION_ERROR)
+            return super().read_memory(attachment, address=address, byte_count=byte_count)
+
+    fx = _Fixture(tmp_path, engine=_CapEngine())
+    assert fx.start().ok is True
+    response = fx.read_memory(address=0x1000, byte_count=4097)
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_evaluate_unknown_inspector_rejected_through_handler(tmp_path: Path) -> None:
+    """debug.evaluate rejects arbitrary expressions with CONFIGURATION_ERROR at the handler boundary."""
+    from linux_debug_mcp.server import debug_evaluate_handler
+
+    class _StrictEvalEngine(FakeMiEngine):
+        def evaluate_inspector(self, attachment, *, inspector: str, arguments: dict[str, object]):
+            if inspector not in ("kernel_version", "symbol_address"):
+                raise GdbMiError("unknown inspector", category=ErrorCategory.CONFIGURATION_ERROR)
+            return {"inspector": inspector}
+
+    fx = _Fixture(tmp_path, engine=_StrictEvalEngine())
+    assert fx.start().ok is True
+    response = debug_evaluate_handler(
+        artifact_root=fx.artifact_root,
+        run_id=fx.run_id,
+        inspector="$(rm -rf /)",
+        debug_profiles=_profiles(),
+        session_registry=fx.registry,
+        gdb_mi_engine=fx.engine,
+        gdb_mi_sessions=fx.sessions,
+    )
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_debug_end_session_finalizes_manifest_state(tmp_path: Path) -> None:
-    artifact_root, run_id = create_debug_ready_run(tmp_path)
-    provider = FakeDebugProvider()
-    start = debug_start_session_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        provider=provider,
-        debug_profiles={"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
-    )
+    fx = _Fixture(tmp_path)
+    start = fx.start()
     assert start.ok is True
 
-    response = debug_end_session_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=start.data["debug_session_id"],
-        provider=provider,
-    )
+    response = fx.end(debug_session_id=start.data["debug_session_id"])
 
     assert response.ok is True
     assert response.data["current_execution_state"] == "ended"
-    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest(run_id)
+    manifest = ArtifactStore(fx.artifact_root, create_root=False).load_manifest(fx.run_id)
     assert manifest.step_results["debug"].details["current_execution_state"] == "ended"
+    # The live attachment was reaped on end.
+    assert fx.sessions.get(start.data["debug_session_id"]) is None
