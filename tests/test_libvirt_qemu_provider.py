@@ -1523,3 +1523,36 @@ def test_plan_boot_sets_wait_for_debugger_when_enabled(tmp_path: Path) -> None:
 def test_plan_boot_wait_for_debugger_defaults_false(tmp_path: Path) -> None:
     plan = make_plan(tmp_path)
     assert plan.wait_for_debugger is False
+
+
+def test_render_domain_xml_emits_wait_on_for_frozen_boot(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider()
+    plan = provider.plan_boot(
+        run_id="run-abc123",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(debug_gdbstub=True, gdbstub_endpoint="127.0.0.1:1234", wait_for_debugger=True),
+        rootfs_profile=rootfs_profile(rootfs),
+    )
+
+    xml_text = provider.render_domain_xml(plan)
+
+    assert "server=on,wait=on" in xml_text
+    assert "wait=off" not in xml_text
+
+
+def test_render_domain_xml_emits_wait_off_for_non_frozen_debug_boot(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider()
+    plan = provider.plan_boot(
+        run_id="run-abc123",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(debug_gdbstub=True, gdbstub_endpoint="127.0.0.1:1234"),
+        rootfs_profile=rootfs_profile(rootfs),
+    )
+
+    xml_text = provider.render_domain_xml(plan)
+
+    assert "server=on,wait=off" in xml_text

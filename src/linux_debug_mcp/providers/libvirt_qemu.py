@@ -666,12 +666,13 @@ class LibvirtQemuProvider:
         ElementTree.SubElement(console, "target", {"type": "serial", "port": "0"})
 
         if plan.debug_gdbstub and plan.gdbstub_endpoint is not None:
+            wait = "on" if plan.wait_for_debugger else "off"
             qemu_commandline = ElementTree.SubElement(domain, f"{{{QEMU_NS}}}commandline")
             ElementTree.SubElement(qemu_commandline, f"{{{QEMU_NS}}}arg", {"value": "-gdb"})
             ElementTree.SubElement(
                 qemu_commandline,
                 f"{{{QEMU_NS}}}arg",
-                {"value": f"tcp:{plan.gdbstub_endpoint.host}:{plan.gdbstub_endpoint.port},server=on,wait=off"},
+                {"value": f"tcp:{plan.gdbstub_endpoint.host}:{plan.gdbstub_endpoint.port},server=on,wait={wait}"},
             )
 
         return ElementTree.tostring(domain, encoding="unicode")
