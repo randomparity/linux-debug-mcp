@@ -1748,6 +1748,10 @@ def target_boot_handler(
                         )
                     }
                 )
+            if effective_boot_overrides.wait_for_debugger is not None:
+                resolved_target_profile = resolved_target_profile.model_copy(
+                    update={"wait_for_debugger": effective_boot_overrides.wait_for_debugger}
+                )
             rootfs_update: dict[str, object] = {}
             if effective_boot_overrides.rootfs_source is not None:
                 validated = validate_rootfs_source(
@@ -1788,6 +1792,7 @@ def target_boot_handler(
         bool(boot_overrides.kernel_args)
         or boot_overrides.rootfs_source is not None
         or boot_overrides.has_rootfs_field_overrides()
+        or boot_overrides.wait_for_debugger is not None
     )
 
     existing = manifest.step_results.get("boot")
@@ -1922,12 +1927,17 @@ def target_boot_handler(
                 rootfs_profile=resolved_rootfs_profile,
             )
         if execution.status == StepStatus.SUCCEEDED:
+            next_actions = (
+                ["debug.start_session"]
+                if terminal.details.get("console_status") == "frozen"
+                else ["artifacts.get_manifest"]
+            )
             return ToolResponse.success(
                 summary=execution.summary,
                 run_id=run_id,
                 data=_redacted_boot_data(terminal.details),
                 artifacts=execution.artifacts,
-                suggested_next_actions=["artifacts.get_manifest"],
+                suggested_next_actions=next_actions,
             )
         return ToolResponse.failure(
             category=execution.error_category or ErrorCategory.INFRASTRUCTURE_FAILURE,

@@ -606,3 +606,23 @@ def test_boot_prebuilt_kind_returns_not_implemented(tmp_path: Path) -> None:
     assert response.ok is False
     assert response.error.category == ErrorCategory.NOT_IMPLEMENTED
     assert "#106" in response.error.message
+
+
+def test_target_boot_frozen_override_yields_debug_next_action(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    debug_target = target_profile().model_copy(update={"debug_gdbstub": True})
+    provider = FakeBootProvider(details={"console_status": "frozen"})
+
+    response = boot(
+        artifact_root,
+        tmp_path,
+        provider=provider,
+        target=debug_target,
+        boot_overrides=BootOverrides(wait_for_debugger=True),
+    )
+
+    assert response.ok is True
+    assert response.data["console_status"] == "frozen"
+    assert response.suggested_next_actions == ["debug.start_session"]
+    assert provider.plans[-1]["target_profile"].wait_for_debugger is True
