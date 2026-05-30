@@ -1280,3 +1280,48 @@ def test_parse_domifaddr_skips_linklocal_takes_routable() -> None:
 
 def test_parse_domifaddr_malformed_rows_are_skipped() -> None:
     assert parse_domifaddr_ipv4("garbage\nipv4 not-an-ip\n   \n") is None
+
+
+def test_plan_boot_sets_domifaddr_argv_and_discovery_gate(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider()
+
+    plan = provider.plan_boot(
+        run_id="run-abc123",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(),
+        rootfs_profile=rootfs_profile(rootfs),  # default access_method="ssh"
+    )
+
+    assert plan.domifaddr_argv == [
+        "virsh",
+        "-c",
+        "qemu:///system",
+        "domifaddr",
+        "debug-vm",
+        "--source",
+        "lease",
+    ]
+    assert plan.discover_guest_ip is True
+
+
+def test_plan_boot_disables_discovery_for_serial_only_profile(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider()
+    profile = RootfsProfile(
+        name="minimal",
+        source=str(rootfs),
+        access_method="serial",
+        readiness_marker="linux-debug-mcp-ready",
+    )
+
+    plan = provider.plan_boot(
+        run_id="run-abc123",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(),
+        rootfs_profile=profile,
+    )
+
+    assert plan.discover_guest_ip is False

@@ -96,6 +96,8 @@ class BootPlan:
     debug_gdbstub: bool
     gdbstub_endpoint: GdbstubEndpoint | None
     nokaslr_source: Literal["not_applicable", "profile_supplied", "provider_added"]
+    domifaddr_argv: list[str]
+    discover_guest_ip: bool
 
 
 @dataclass(frozen=True)
@@ -433,6 +435,8 @@ class LibvirtQemuProvider:
             debug_gdbstub=target_profile.debug_gdbstub,
             gdbstub_endpoint=gdbstub_endpoint,
             nokaslr_source=nokaslr_source,
+            domifaddr_argv=[*virsh_prefix, "domifaddr", domain_name, "--source", "lease"],
+            discover_guest_ip=rootfs_profile.access_method in {"ssh", "ssh_and_serial"},
         )
 
     def execute_boot(
