@@ -219,22 +219,27 @@ from the crash parsers / drgn helper output models (ADR 0027 decision 8).
 | up-front vmcore ref missing/escaping | `CONFIGURATION_ERROR` | `vmcore_not_found` |
 | up-front vmlinux/modules ref unsafe/missing | `CONFIGURATION_ERROR` | `symbol_resolution_failed` |
 | up-front resolved `modules_path` charset-unsafe | `CONFIGURATION_ERROR` | `modules_path_unsafe` |
-| `sensitive/` missing/too-permissive | `CONFIGURATION_ERROR` | `sensitive_dir_missing` / `sensitive_dir_too_permissive` |
 | **zero `ok` sections** (both sources produced nothing usable) | `INFRASTRUCTURE_FAILURE` | `triage_all_sources_failed` (details carry redacted `sub_call_ids` + `section_reasons`) |
 | ≥1 `ok` section, ≥1 `failed` section | success, `partial=True`, failed sections carry `reason` (the sub-call `code`) | — |
 
-The up-front gate (rows 3–9 + sensitive-dir) reuses `_crash_buildid_failloud` and the
-crash handler's preflight, so the codes match #92 exactly. Note rows 3–9 are emitted
-**before any sub-call** (AC#3): the section-failure path (last row) is reached only when
-the up-front gate passed.
+The up-front gate (the `provenance_*` / `vmcore_*` / `vmlinux_*` / `symbol_resolution_failed`
+/ `modules_path_unsafe` rows) reuses `_crash_buildid_failloud`, `confine_run_relative`,
+`resolve_symbols`, and `validate_modules_path`, so the codes match #92 exactly. Those
+rows are emitted **before any sub-call** (AC#3); the section-failure path (last row) is
+reached only when the up-front gate passed.
 
 ## 4. Composition pipeline (`debug_postmortem_triage_handler`)
 
 A linear orchestrator:
 
 1. Resolve `ArtifactStore`; load manifest (missing → `run_not_found`). Validate
-   `timeout_seconds ∈ [5,300]` (`invalid_timeout`). `sensitive/` mode-0700 preflight
-   (reused from the crash handler; `sensitive_dir_*`).
+   `timeout_seconds ∈ [5,300]` (`invalid_timeout`). Triage runs **no** `sensitive/`
+   preflight of its own: it writes only the redacted `report.json` under
+   `debug/postmortem/triage/<call-id>/` (step 7) and never creates a sensitive call dir,
+   so a `sensitive/`-mode check would be a phantom precondition. Each sub-handler still
+   runs its own `sensitive/` preflight for the raw outputs *it* writes; a too-permissive
+   `sensitive/` therefore surfaces as that sub-call's section failure (degraded report),
+   not a triage-level reject.
 2. **Up-front gate over the shared refs + build-id (ADR 0027 decision 4):** confine
    `vmcore_ref`, resolve `vmlinux_ref` **and `modules_ref`** via `resolve_symbols`, and
    — when `modules_ref` is given — run the crash handler's `validate_modules_path`
@@ -435,7 +440,8 @@ convention.
 - **`partial` flag + `sub_call_ids`:** assert `partial` reflects any failed section and
   `sub_call_ids` maps each present sub-call id.
 - **timeout/precondition edges:** `timeout_seconds=4` → `invalid_timeout` (no sub-call);
-  missing run → `run_not_found`; `sensitive/` too-permissive → `sensitive_dir_too_permissive`.
+  missing run → `run_not_found`; missing/escaping `vmcore_ref` → `vmcore_not_found` (no
+  sub-call).
 - **Capability/config:** `local-crash-postmortem` advertises `debug.postmortem.triage`;
   the op is in `ALLOWED_DEBUG_OPERATIONS`; `TRIAGE_CRASH_COMMANDS == ("log","bt")`.
 
@@ -456,10 +462,15 @@ fixture guarantees (not prose heuristics):
 2. **Crash side well-formed** — `report["faulting_task"]["status"] == "ok"` and
    `faulting_task["pid"]` is an `int >= 0`; `backtrace["frames"]` is non-empty (a panic
    core always has a faulting stack).
-3. **Drgn side well-formed against a pinned fixture** — `LDM_VMCORE` documents that the
-   fixture kernel is **modular**; the test asserts `report["modules"]["status"]=="ok"`
-   and `modules["modules"]` is **non-empty** (not conditioned on an undetectable
-   "if modular"), and `recent_dmesg["entries"]` is non-empty.
+3. **Drgn side well-formed, fixture-agnostic** — `report["modules"]["status"]=="ok"`
+   **and** `report["modules"]["decode_errors"]==0` (falsifiable — fails if the `modules`
+   helper regresses on this kernel — without assuming the kernel is modular, which the
+   shared `LDM_VMCORE` contract from #92/#55 does not promise: a valid monolithic core
+   would otherwise spuriously fail a "non-empty modules" assertion), and
+   `report["recent_dmesg"]["status"]=="ok"` with `recent_dmesg["entries"]` non-empty (a
+   panic core always logged *something*). A non-empty *module list* is asserted only when
+   the dedicated `LDM_VMCORE_MODULAR=1` signal is set (opt-in for a known-modular
+   fixture), so the default path stays fixture-agnostic.
 
 It is the **only** test exercising the real composition end-to-end; the unit suite proves
 the assembly/partial/redaction logic with fakes.
