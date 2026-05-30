@@ -199,6 +199,16 @@ class ArtifactStore:
             yield
 
     @contextmanager
+    def postmortem_fetch_lock(self, run_id: str) -> Iterator[None]:
+        run_dir = self._run_dir(run_id)
+        with self._file_lock(
+            run_dir / ".postmortem-fetch.lock",
+            locked_message="postmortem fetch is locked",
+            failure_prefix="failed to lock postmortem fetch",
+        ):
+            yield
+
+    @contextmanager
     def debug_lock(self, run_id: str) -> Iterator[None]:
         run_dir = self._run_dir(run_id)
         with self._file_lock(
