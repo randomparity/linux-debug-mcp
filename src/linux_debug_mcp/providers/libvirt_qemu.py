@@ -540,6 +540,29 @@ class LibvirtQemuProvider:
                 details=details,
             )
 
+        if plan.wait_for_debugger:
+            frozen_details: dict[str, object] = {
+                "domain": plan.domain_name,
+                "console_status": "frozen",
+                "wait_for_debugger": True,
+                "matched_marker": None,
+                "console_snippet": "",
+                "kernel_args": plan.kernel_args,
+                "guest_ip": None,
+                "guest_ip_discovery": {
+                    "status": "skipped",
+                    "source": "lease",
+                    "reason": "wait_for_debugger",
+                },
+            }
+            return self._boot_result(
+                plan=plan,
+                status=StepStatus.SUCCEEDED,
+                summary="target booted frozen, waiting for debugger attach",
+                details=frozen_details,
+                artifacts=self._existing_artifacts(artifacts),
+            )
+
         console = self.runner.stream_console(
             plan.domain_name,
             libvirt_uri=plan.libvirt_uri,

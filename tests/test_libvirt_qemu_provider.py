@@ -1556,3 +1556,45 @@ def test_render_domain_xml_emits_wait_off_for_non_frozen_debug_boot(tmp_path: Pa
     xml_text = provider.render_domain_xml(plan)
 
     assert "server=on,wait=off" in xml_text
+
+
+def _frozen_plan(tmp_path: Path):
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider()
+    return provider.plan_boot(
+        run_id="run-abc123",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(debug_gdbstub=True, gdbstub_endpoint="127.0.0.1:1234", wait_for_debugger=True),
+        rootfs_profile=rootfs_profile(rootfs),
+    )
+
+
+def test_execute_boot_frozen_returns_succeeded_without_streaming(tmp_path: Path) -> None:
+    plan = _frozen_plan(tmp_path)
+    runner = FakeLibvirtRunner()
+    provider = LibvirtQemuProvider(runner=runner)
+
+    result = provider.execute_boot(plan)
+
+    assert result.status == StepStatus.SUCCEEDED
+    assert result.details["console_status"] == "frozen"
+    assert result.details["wait_for_debugger"] is True
+    assert result.details["debug_boot"] is True
+    assert result.details["gdbstub_endpoint"] == {"host": "127.0.0.1", "port": 1234}
+    assert result.details["guest_ip"] is None
+    assert result.details["guest_ip_discovery"]["status"] == "skipped"
+    assert result.details["guest_ip_discovery"]["reason"] == "wait_for_debugger"
+    assert runner.console_calls == []
+    assert runner.domifaddr_calls == []
+
+
+def test_execute_boot_frozen_still_fails_on_start_error(tmp_path: Path) -> None:
+    plan = _frozen_plan(tmp_path)
+    runner = FakeLibvirtRunner(start=CommandResult(["virsh", "start"], 1, stderr="boom\n"))
+    provider = LibvirtQemuProvider(runner=runner)
+
+    result = provider.execute_boot(plan)
+
+    assert result.status == StepStatus.FAILED
+    assert runner.console_calls == []
