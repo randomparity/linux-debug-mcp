@@ -260,3 +260,13 @@ def test_redaction_masks_secret_in_report(tmp_path) -> None:
     rd = store.run_dir("r1")
     for p in (rd / "debug" / "postmortem" / "triage").glob("*/report.json"):
         assert secret not in p.read_text(encoding="utf-8")
+
+
+def test_tool_is_registered() -> None:
+    import asyncio
+
+    from linux_debug_mcp.server import create_app
+
+    app = create_app()
+    tools = asyncio.run(app.list_tools())
+    assert any(t.name == "debug.postmortem.triage" for t in tools)

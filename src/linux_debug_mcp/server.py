@@ -8362,6 +8362,27 @@ def create_app(
             artifact_root=Path(artifact_root),
         ).model_dump(mode="json")
 
+    @app.tool(name="debug.postmortem.triage")
+    def debug_postmortem_triage(
+        run_id: str,
+        vmcore_ref: str,
+        vmlinux_ref: str,
+        modules_ref: str | None = None,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        timeout_seconds: int = 60,
+    ) -> dict[str, Any]:
+        request = DebugPostmortemTriageRequest(
+            run_id=run_id,
+            vmcore_ref=vmcore_ref,
+            vmlinux_ref=vmlinux_ref,
+            modules_ref=modules_ref,
+            timeout_seconds=timeout_seconds,
+        )
+        return debug_postmortem_triage_handler(
+            request,
+            artifact_root=Path(artifact_root),
+        ).model_dump(mode="json")
+
     @app.tool(name="artifacts.collect")
     def artifacts_collect(
         run_id: str,
