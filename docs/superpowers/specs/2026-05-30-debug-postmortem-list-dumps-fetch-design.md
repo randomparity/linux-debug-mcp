@@ -280,6 +280,14 @@ Raw enumeration stdout/stderr and scp stdout/stderr stay under
 `dumps`/`files`/refs and the persisted `probe.json` / `fetch.json` are
 `redactor.redact_value`'d; the redactor is seeded with the rootfs `ssh_key_ref`.
 
+**`dump_ref` round-trip.** The redactor is seeded only with the `ssh_key_ref`, which
+does not appear in a `/var/crash/<host>-<timestamp>` dump path, so a `DumpEntry.path`
+survives redaction unchanged and is usable verbatim as `fetch`'s `dump_ref`. `fetch`
+does not depend on this: it re-enumerates and matches `dump_ref` against the **raw**
+(pre-redaction) listing it just collected, so even a hypothetically redacted path the
+caller echoed back would simply fail the match with `dump_not_found` rather than
+fetch the wrong file.
+
 ## 4. Acceptance-criteria traceability
 
 | AC | Satisfied by |
