@@ -95,15 +95,19 @@ fail, `recent_dmesg`/`modules` still populate, and the call returns
 **partial**, never collapsed to a hard error, **as long as at least one section is
 `ok`**.
 
-The single hard-failure boundary inside the composition is: **all five sections
-failed** → `ToolResponse.failure(INFRASTRUCTURE_FAILURE, code="triage_all_sources_failed")`
-carrying each section's reason in `details`. "≥1 section `ok` ⇒ partial success;
-0 sections `ok` ⇒ hard failure" is the concrete reading of the issue's "provided at
-least one source succeeded" — slightly more lenient (it also yields a report when only
-*one* section of one source survives) and simpler to reason about than tracking
-source-granularity success. The up-front build-id gate (decision 4) and triage's own
-input/precondition errors (run-not-found, bad timeout) are the **only** other hard
-failures; every per-sub-call analysis failure degrades to a section.
+The single hard-failure boundary inside the composition is: **zero `ok` sections** →
+`ToolResponse.failure(INFRASTRUCTURE_FAILURE, code="triage_all_sources_failed")` whose
+`details` carry the redacted `sub_call_ids` and a `section_reasons` map. "≥1 section
+`ok` ⇒ partial success; 0 sections `ok` ⇒ hard failure" is the concrete reading of the
+issue's "provided at least one source succeeded" — simpler than tracking
+source-granularity success, and it can fire even when a sub-call's `resp.ok` was `True`
+but produced no usable section (e.g. crash ran but `bt`/`log` were `not_captured`).
+Carrying `sub_call_ids` on the failure keeps any transcript a sub-call *did* persist
+reachable, so the stronger rule loses no forensic reach. The `reason` on a failed
+section is the sub-call's **stable error `code`** (`details["code"]`), not the prose
+`message`, so agents branch on a contract value. The up-front build-id gate (decision 4)
+and triage's own input/precondition errors (run-not-found, bad timeout) are the **only**
+other hard failures; every per-sub-call analysis failure degrades to a section.
 
 ### 4. A single build-id fail-loud runs **up front**, before any sub-call
 
@@ -145,7 +149,10 @@ persisting `report.json` and returning it, so the contract ("all report fields +
 persisted artifacts through `Redactor()`", AC#5) holds for the composed artifact as a
 single chokepoint — and any field the composer itself synthesises (e.g. the selected
 panic line) is covered without relying on the upstream pass. Re-redaction is idempotent
-on already-redacted text.
+on already-redacted text. The **hard-fail exit** (`triage_all_sources_failed`) redacts
+too: its `details` (`sub_call_ids` + `section_reasons`) pass through `Redactor()` before
+return, so the chokepoint covers both the success and the all-sources-down paths — not
+only the success path.
 
 ## Consequences
 

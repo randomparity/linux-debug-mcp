@@ -109,7 +109,7 @@ class DebugPostmortemTriageRequest(Model):        # extra="forbid"
     vmcore_ref: str          # run-relative path to the captured vmcore file
     vmlinux_ref: str         # run-relative path to the uncompressed ELF vmlinux+symbols
     modules_ref: str | None = None   # optional run-relative directory of *.ko[.debug]
-    timeout_seconds: int = 60        # handler-bounded to [5, 300]; applied to each sub-call
+    timeout_seconds: int = 60        # handler-bounded to [5, 300]; applied to EACH sub-call
 ```
 
 There is **no** `commands`/`helpers`/section field (fixed helper set, ADR 0027 decision
@@ -117,6 +117,15 @@ There is **no** `commands`/`helpers`/section field (fixed helper set, ADR 0027 d
 when given, is threaded to all three sub-calls (crash `mod -S` best-effort load; the
 `modules` helper's `for_each_module` does not need it but the crash side does). The
 manifest is consulted only for the run-directory layout — never for a target profile.
+
+**Aggregate wall-clock and sequential ordering.** The three sub-calls run
+**sequentially** (crash → dmesg → modules), each bounded by `timeout_seconds`, so a
+triage call's worst-case wall-clock is **≈ 3 × `timeout_seconds`** (up to ~900 s at the
+300 s cap). Sequential ordering is deliberate: each sub-call maps the multi-GB core, and
+running them one at a time caps peak memory at a **single** core mapping (parallel
+sub-calls would triple it for no latency win on a single-agent local server). The
+response's `duration_ms` reports the real elapsed time so an agent sees the true cost;
+the docs (§7) state the ≈3× relationship so agents budget `timeout_seconds` accordingly.
 
 ### 3.2 Operation gating
 
@@ -171,9 +180,13 @@ Success `data` carries:
 - `partial` — `true` when any section's `status == "failed"`.
 - `vmcore_build_id` — the verified up-front id (also on the report).
 - `sub_call_ids` — `{crash, dmesg, modules}` → each sub-call's `call_id` (or `null` if
-  that sub-call returned no id), so an agent can fetch a sub-call's own artifacts.
+  that sub-call returned no id), so an agent can fetch a sub-call's own artifacts. This
+  is also carried in the `triage_all_sources_failed` hard-failure `details` (§3.4) so a
+  sub-call that *ran* (and persisted a transcript) before the report came back empty
+  stays reachable even when triage hard-fails.
 - `artifacts` — an `ArtifactRef` to the redacted `report.json`.
-- timing (`started_at`, `finished_at`, `duration_ms`).
+- timing (`started_at`, `finished_at`, `duration_ms`). `duration_ms` is the true elapsed
+  time across all three sequential sub-calls (≈ up to 3 × `timeout_seconds`, §3.1).
 
 `suggested_next_actions`: `["debug.postmortem.crash", "debug.introspect.from_vmcore_helper", "artifacts.get_manifest"]`
 on success; `["artifacts.get_manifest"]` on the build-id hard failure.
@@ -196,8 +209,8 @@ from the crash parsers / drgn helper output models (ADR 0027 decision 8).
 | up-front vmcore ref missing/escaping | `CONFIGURATION_ERROR` | `vmcore_not_found` |
 | up-front vmlinux ref unsafe/missing | `CONFIGURATION_ERROR` | `symbol_resolution_failed` |
 | `sensitive/` missing/too-permissive | `CONFIGURATION_ERROR` | `sensitive_dir_missing` / `sensitive_dir_too_permissive` |
-| **all five sections failed** (both sources down) | `INFRASTRUCTURE_FAILURE` | `triage_all_sources_failed` |
-| one source failed, the other produced ≥1 `ok` section | success, `partial=True`, failed sections carry `reason` | — |
+| **zero `ok` sections** (both sources produced nothing usable) | `INFRASTRUCTURE_FAILURE` | `triage_all_sources_failed` (details carry redacted `sub_call_ids` + `section_reasons`) |
+| ≥1 `ok` section, ≥1 `failed` section | success, `partial=True`, failed sections carry `reason` (the sub-call `code`) | — |
 
 The up-front gate (rows 3–9 + sensitive-dir) reuses `_crash_buildid_failloud` and the
 crash handler's preflight, so the codes match #92 exactly. Note rows 3–9 are emitted
@@ -220,28 +233,49 @@ A linear orchestrator:
 4. **drgn sub-calls:** `drgn_helper_handler(DebugIntrospectFromVmcoreHelperRequest(...,
    name="dmesg", timeout_seconds), …)` then the same with `name="modules"`. The drgn
    handler takes `build_id_reader=vmlinux_build_id_reader` and `runner=…`, `clock=…`.
-5. **Assemble** the five sections from the three responses (`postmortem/triage.py`):
+5. **Assemble** the five sections from the three responses (`postmortem/triage.py`).
+   A section's `reason` (when `failed`) is the sub-call's **stable error `code`**
+   (`resp.error.details["code"]` — e.g. `crash_timeout`, `helper_script_error`,
+   `manifest_call_budget_exhausted`), not the prose `message`, so an agent can branch on
+   a contract value rather than free text. For the per-result (within-crash) failures the
+   `reason` is the parser's `reason` token (`unknown_command` / `parse_failed` /
+   `not_captured` / `output_truncated`).
    - crash `resp.ok` → `results = resp.data["results"]`:
      - `bt = results.get("bt")`; `parsed` truthy → `backtrace.status="ok"`,
        `frames=bt["frames"]`; `faulting_task.status="ok"`, `pid=bt.get("pid")`,
        `command=bt.get("command")`. Else both `failed` with `reason = bt.get("reason")`
-       (`unknown_command`/`parse_failed`/`not_captured`/`output_truncated`) or
-       `"bt_missing"`.
+       or `"bt_missing"`.
      - `log = results.get("log")`; `parsed` truthy → `panic_reason.status="ok"`,
-       `text=select_panic_reason(log["lines"])` (may be `None`). Else `failed`.
-   - crash `not resp.ok` → all three crash sections `failed`, `reason = resp.error.message`.
+       `text=select_panic_reason(log["lines"])` (may be `None`). Else `failed`
+       (`reason = log.get("reason")` or `"log_missing"`).
+   - crash `not resp.ok` → all three crash sections `failed`,
+     `reason = resp.error.details["code"]`.
    - dmesg `resp.ok` (and `resp.data["result"]` present) → `recent_dmesg.status="ok"`,
      `entries=result["entries"]`, `truncated=result["truncated"]`. Else `failed`,
-     `reason = resp.error.message`.
+     `reason = resp.error.details["code"]`.
    - modules likewise → `modules.status="ok"`, `modules=result["modules"]`,
      `decode_errors=result["decode_errors"]`. Else `failed`.
 6. If **all five** sections `failed` → `INFRASTRUCTURE_FAILURE` /
-   `triage_all_sources_failed` (each reason in `details`). No `report.json` persisted
-   (there is no usable report). Record a FAILED `postmortem.triage:<call_id>` step.
-7. Else: `report = Redactor().redact_value(report.model_dump(mode="json"))`; mint
-   triage `call_id`; create `<run>/debug/postmortem/triage/<call-id>/` (0700); write
-   redacted `report.json`; record a SUCCEEDED `postmortem.triage:<call_id>` step with an
-   `ArtifactRef`; return `ToolResponse.success(data={report, partial, call_id, …})`.
+   `triage_all_sources_failed`. The failure `details` carry `sub_call_ids` (§3.3) and a
+   `section_reasons` map (each section → its `reason`), **both passed through
+   `Redactor()` before return** (ADR 0027 decision 6 / AC#5 — the hard-fail exit redacts
+   too, not only the success path). No `report.json` is persisted (there is no usable
+   report), but the sub-call ids keep any transcript a sub-call *did* persist reachable.
+   Record a FAILED `postmortem.triage:<call_id>` step.
+
+   **Hard-fail boundary vs the issue's "source" wording.** "All five sections failed"
+   means **zero** `ok` sections; it can be reached even when a sub-call's `resp.ok` was
+   `True` (e.g. crash ran but both `bt`/`log` were `not_captured`, and both drgn calls
+   failed). This is the deliberate, simpler reading of the issue's "provided at least one
+   source succeeded": the report is only worth returning when it has at least one `ok`
+   section to show. Because `sub_call_ids` rides on the failure `details`, a sub-call that
+   ran-but-produced-nothing is still discoverable (its raw transcript is on disk), so the
+   stronger hard-fail rule loses no forensic reach.
+7. Else: `report = Redactor().redact_value(report.model_dump(mode="json"))` (covers the
+   composed payload **and** every section `reason`); mint triage `call_id`; create
+   `<run>/debug/postmortem/triage/<call-id>/` (0700); write redacted `report.json`;
+   record a SUCCEEDED `postmortem.triage:<call_id>` step with an `ArtifactRef`; return
+   `ToolResponse.success(data={report, partial, call_id, …})`.
 
 The crash sub-handler writes its own `postmortem.crash:<id>` step + artifacts; each drgn
 sub-handler writes its own `introspect:<id>` step + artifacts; triage references them via
@@ -337,9 +371,10 @@ convention.
   `backtrace.frames`/`recent_dmesg.entries`/`modules.modules` populated, a
   `postmortem.triage:*` SUCCEEDED step + `report.json` under `debug/`.
 - **AC#2 partial (crash source down):** fake crash returns
-  `ToolResponse.failure(INFRASTRUCTURE_FAILURE, "crash binary not found")`; drgn fakes
-  succeed → `resp.ok`, `partial=True`, the three crash sections `failed` with the crash
-  reason, `recent_dmesg`/`modules` `ok`. Symmetric test: drgn down, crash up.
+  `ToolResponse.failure(INFRASTRUCTURE_FAILURE, code="crash_open_failure")`; drgn fakes
+  succeed → `resp.ok`, `partial=True`, the three crash sections `failed` with
+  `reason == "crash_open_failure"` (the stable `code`, not prose), `recent_dmesg`/`modules`
+  `ok`. Symmetric test: drgn down, crash up.
 - **AC#2 within-source partial:** crash `ok` but `bt` is `{parsed:False,
   reason:"not_captured"}` and `log` parsed → `backtrace`/`faulting_task` `failed`
   (reason `not_captured`), `panic_reason` `ok`.
@@ -349,8 +384,15 @@ convention.
   (`provenance_unverifiable`, `vmcore_format_unsupported`, `vmlinux_build_id_unreadable`)
   via raising readers — each fails up front, no sub-call.
 - **All-sources-down hard fail:** crash fails AND both drgn calls fail → hard
-  `INFRASTRUCTURE_FAILURE` / `triage_all_sources_failed`, each reason in `details`, no
-  `report.json`, a FAILED `postmortem.triage:*` step.
+  `INFRASTRUCTURE_FAILURE` / `triage_all_sources_failed`; `details` carry `sub_call_ids`
+  and a `section_reasons` map; no `report.json`; a FAILED `postmortem.triage:*` step.
+- **Hard-fail still reachable when a sub-call ran:** crash `resp.ok=True` but `bt`/`log`
+  both `not_captured` (3 crash sections fail) AND both drgn fail → hard
+  `triage_all_sources_failed`, but `details["sub_call_ids"]["crash"]` is the crash
+  sub-call id (its transcript stays reachable).
+- **Hard-fail redaction:** a secret-shaped token in a sub-call's error `code`/reason is
+  masked in the `triage_all_sources_failed` `details` (the hard-fail exit redacts, not
+  only the success path).
 - **`select_panic_reason` unit tests:** ordered signature precedence (`Kernel panic -
   not syncing` chosen over a later `BUG:`); no-match → `None`; empty list → `None`;
   a line missing `text` does not raise.
@@ -370,12 +412,27 @@ convention.
 **AC#4 env-gated integration test** (`test_postmortem_triage_integration.py`): runs the
 **real** crash + drgn against a fixture vmcore+vmlinux (skipped unless `crash` is on PATH,
 drgn importable, and `LDM_VMCORE` points at a captured core + matching vmlinux — the same
-gating the libvirt/gdb/drgn/crash suites use). Asserts the crash-sourced `backtrace`
-faulting frame and the drgn-sourced `recent_dmesg`/`modules` are mutually consistent on
-the same dump (e.g. the panicking task in `faulting_task` appears in the dmesg tail; the
-module list is non-empty when the kernel is modular) — the issue's "crash and drgn runners
-produce consistent results" AC. It is the **only** test exercising the real composition
-end-to-end.
+gating the libvirt/gdb/drgn/crash suites use). The "crash and drgn runners produce
+consistent results" AC is asserted as **deterministic, falsifiable invariants** the
+fixture guarantees (not prose heuristics):
+
+1. **Same-core provenance agreement** — the report's `vmcore_build_id` (the host VMCOREINFO
+   id the up-front gate verified, fed to the crash side) equals the kernel build-id drgn
+   reports for the *same* core. The fixture's drgn path exposes `main_module().build_id`;
+   the test runs a one-line `from_vmcore` script (or reads the `modules`/`dmesg` sub-call's
+   verified `build_id` field) and asserts byte-equality with `report["vmcore_build_id"]`.
+   This is the strongest "same dump, consistent across runners" check and cannot pass
+   vacuously.
+2. **Crash side well-formed** — `report["faulting_task"]["status"] == "ok"` and
+   `faulting_task["pid"]` is an `int >= 0`; `backtrace["frames"]` is non-empty (a panic
+   core always has a faulting stack).
+3. **Drgn side well-formed against a pinned fixture** — `LDM_VMCORE` documents that the
+   fixture kernel is **modular**; the test asserts `report["modules"]["status"]=="ok"`
+   and `modules["modules"]` is **non-empty** (not conditioned on an undetectable
+   "if modular"), and `recent_dmesg["entries"]` is non-empty.
+
+It is the **only** test exercising the real composition end-to-end; the unit suite proves
+the assembly/partial/redaction logic with fakes.
 
 ## 9. Acceptance-criteria mapping
 
