@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -2033,6 +2034,41 @@ def target_boot_handler(
             if existing and existing.status == StepStatus.RUNNING:
                 return _running_boot_response(run_id=run_id, result=existing)
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+
+def _ssh_host_is_unset_or_loopback(host: str | None) -> bool:
+    """True when ``host`` is unset/empty, ``localhost``, or a loopback IP (ADR 0032 d6).
+
+    Any other value — a routable IP or a non-IP DNS name — is a deliberate operator
+    override and returns False so it is preserved.
+    """
+    if host is None or not host.strip():
+        return True
+    normalized = host.strip()
+    if normalized.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _validated_guest_ip(value: object) -> str | None:
+    """Return a routable IP string from an untrusted persisted ``guest_ip`` or None (ADR 0032 d7).
+
+    Re-validates the on-disk value before it can reach an SSH argv: rejects non-strings,
+    non-IP text, and loopback/link-local/unspecified addresses, keeping the SSH target
+    injection-free even if the manifest was corrupted between boot and test.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = ipaddress.ip_address(value.strip())
+    except ValueError:
+        return None
+    if parsed.is_loopback or parsed.is_link_local or parsed.is_unspecified:
+        return None
+    return str(parsed)
 
 
 def target_run_tests_handler(
