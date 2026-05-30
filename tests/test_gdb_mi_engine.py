@@ -32,6 +32,9 @@ class FakeController:
             raise item
         return item  # type: ignore[return-value]
 
+    def read(self, *, timeout_sec: float) -> list[dict[str, object]]:
+        return []
+
     def exit(self) -> None:
         self.exited = True
 
