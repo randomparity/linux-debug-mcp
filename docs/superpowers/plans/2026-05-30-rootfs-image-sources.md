@@ -20,7 +20,8 @@
 - `scripts/build-rootfs.sh` — Fedora image builder (create).
 - `justfile` — `rootfs` recipe (modify).
 - `docs/fedora-libvirt-user-guide.md` — §5 leads with `just rootfs` (modify).
-- Tests: `tests/test_rootfs_sources.py` (create), `tests/test_config.py`, `tests/test_libvirt_qemu_provider.py`, `tests/test_target_boot_handler.py` or the existing boot-handler test module (modify/extend).
+- `tests/conftest.py` — shared test harness (`create_run`, `record_build`, `profiles`, `rootfs_profile`, `target_profile`, `FakeBootProvider`); reused, not modified.
+- Tests: `tests/test_rootfs_sources.py` (create), `tests/test_config.py`, `tests/test_libvirt_qemu_provider.py`, `tests/test_target_boot_handler.py` (existing — extend) (modify/extend).
 
 ---
 
@@ -497,9 +498,9 @@ Then, immediately before the `define = self.runner.run(plan.define_argv, ...)` l
                 )
 ```
 
-- [ ] **Step 7: Verify `_command_failure_result` maps to INFRASTRUCTURE_FAILURE**
+- [ ] **Step 7: (No code) `_command_failure_result` already returns INFRASTRUCTURE_FAILURE**
 
-Read `_command_failure_result` in `libvirt_qemu.py` (search for `def _command_failure_result`). Confirm it sets `error_category=ErrorCategory.INFRASTRUCTURE_FAILURE`. If it already does (it is the path used by define/start failures), no change is needed. If a timeout maps to a different category, that is acceptable — the test only asserts `INFRASTRUCTURE_FAILURE` for a non-zero exit, which is the default mapping.
+`_command_failure_result` (`libvirt_qemu.py`) unconditionally passes `error_category=ErrorCategory.INFRASTRUCTURE_FAILURE` (including the timed-out case), so the qemu-img failure test's assertion holds with no change. Nothing to do here.
 
 - [ ] **Step 8: Advertise `qemu-img` in the capability**
 
@@ -533,65 +534,25 @@ git commit -m "feat(libvirt): copy_on_write rootfs via per-boot qemu-img overlay
 
 **Files:**
 - Modify: `src/linux_debug_mcp/server.py` (`target_boot_handler`, the `try` around `plan_boot` ~line 1971-1998; imports ~line 170-180)
-- Test: `tests/test_target_boot_handler.py` (create if absent; otherwise add to the existing boot-handler test module)
+- Test: `tests/test_target_boot_handler.py` (**exists**) using the shared harness in `tests/conftest.py`.
 
-- [ ] **Step 1: Locate the boot-handler test module**
+**Harness note:** `tests/conftest.py` already provides `create_run(tmp_path) -> artifact_root` (run id `"run-abc123"`, target `local-qemu`, rootfs `minimal`), `record_build(artifact_root)` (records a SUCCEEDED build with a kernel-image artifact + `architecture="x86_64"`), `target_profile()`, and `FakeBootProvider`. The resolver runs in the handler **before** `provider.plan_boot`, so `FakeBootProvider` is sufficient — no real libvirt. Do **not** call `create_run_handler` directly with profile registries (it takes profile *names*, not `target_profiles`/`rootfs_profiles` dicts). Do **not** route through the file's `boot()` helper for these tests — it already passes `**profiles(...)`, so adding `rootfs_profiles=` would collide on that keyword.
 
-Run: `ls tests/ | grep -i boot`
-If a boot-handler unit-test module exists (e.g. `tests/test_target_boot_handler.py`), add the tests there. Otherwise create `tests/test_target_boot_handler.py`. The tests below assume creation; if adding to an existing file, reuse its run-setup helpers instead of the inline `_succeeded_build_run` below and drop the duplicated imports.
+- [ ] **Step 1: Write the failing tests**
 
-- [ ] **Step 2: Write the failing tests**
-
-Create/append `tests/test_target_boot_handler.py`:
+Append to the existing `tests/test_target_boot_handler.py` (it already imports `create_run`, `record_build`, `FakeBootProvider` from `conftest`, and `RootfsProfile`, `ErrorCategory`, `StepStatus` are imported there; add `target_profile` to the `conftest` import list and `ArtifactStore` is already imported):
 
 ```python
-from pathlib import Path
-
-from linux_debug_mcp.config import RootfsProfile, TargetProfile
-from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
-from linux_debug_mcp.server import create_run_handler, target_boot_handler
-
-
-def _target_profiles() -> dict[str, TargetProfile]:
-    return {
-        "local-qemu": TargetProfile(
-            name="local-qemu",
-            architecture="x86_64",
-            target_ref="mcp-linux-debug-dev",
-            managed_domain=True,
-            managed_domain_prefix="mcp-linux-debug-",
-            libvirt_uri="qemu:///system",
-        )
-    }
-
-
-def _succeeded_build_run(tmp_path: Path, *, rootfs: RootfsProfile) -> tuple[Path, str]:
-    artifact_root = tmp_path / "runs"
-    source = tmp_path / "linux"
-    (source / "arch" / "x86" / "boot").mkdir(parents=True)
-    bzimage = source / "arch" / "x86" / "boot" / "bzImage"
-    bzimage.write_bytes(b"kernel")
-    created = create_run_handler(
+def _booted_run_with_rootfs(tmp_path: Path, rootfs: RootfsProfile):
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    return target_boot_handler(
         artifact_root=artifact_root,
-        source_path=str(source),
-        target_profiles=_target_profiles(),
+        run_id="run-abc123",
+        provider=FakeBootProvider(),
+        target_profiles={"local-qemu": target_profile()},
         rootfs_profiles={"minimal": rootfs},
-    )
-    run_id = created.run_id
-    from linux_debug_mcp.artifacts.store import ArtifactStore
-
-    store = ArtifactStore(artifact_root, create_root=False)
-    store.record_step_result(
-        run_id,
-        StepResult(
-            step_name="build",
-            status=StepStatus.SUCCEEDED,
-            summary="built",
-            details={"architecture": "x86_64"},
-            artifacts=[ArtifactRef(path=str(bzimage), kind="kernel-image")],
-        ),
-    )
-    return artifact_root, run_id
+    ), artifact_root
 
 
 def test_boot_builder_missing_image_returns_configuration_error(tmp_path: Path) -> None:
@@ -600,50 +561,40 @@ def test_boot_builder_missing_image_returns_configuration_error(tmp_path: Path) 
         source=str(tmp_path / "absent.qcow2"),
         source_kind="builder",
         mutability="copy_on_write",
-        readiness_marker="linux-debug-mcp-ready",
+        readiness_marker="ready",
     )
-    artifact_root, run_id = _succeeded_build_run(tmp_path, rootfs=rootfs)
-    response = target_boot_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        target_profiles=_target_profiles(),
-        rootfs_profiles={"minimal": rootfs},
-    )
+    response, artifact_root = _booted_run_with_rootfs(tmp_path, rootfs)
+    assert response.ok is False
     assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert "just rootfs" in response.error.details["suggested_fix"]
-
-    from linux_debug_mcp.artifacts.store import ArtifactStore
-
-    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest(run_id)
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
     assert manifest.step_results["boot"].status == StepStatus.FAILED
 
 
 def test_boot_prebuilt_kind_returns_not_implemented(tmp_path: Path) -> None:
     image = tmp_path / "minimal.qcow2"
-    image.write_bytes(b"qcow2")
+    image.write_text("qcow2\n", encoding="utf-8")
     rootfs = RootfsProfile(
         name="minimal",
         source=str(image),
         source_kind="prebuilt",
-        readiness_marker="linux-debug-mcp-ready",
+        mutability="read_only",
+        readiness_marker="ready",
     )
-    artifact_root, run_id = _succeeded_build_run(tmp_path, rootfs=rootfs)
-    response = target_boot_handler(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        target_profiles=_target_profiles(),
-        rootfs_profiles={"minimal": rootfs},
-    )
+    response, _ = _booted_run_with_rootfs(tmp_path, rootfs)
+    assert response.ok is False
     assert response.error.category == ErrorCategory.NOT_IMPLEMENTED
     assert "#106" in response.error.message
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+If `target_profile` is not yet in the file's `from conftest import (...)` block, add it. `create_run` records `manifest.request.rootfs_profile = "minimal"`, which matches the injected `rootfs_profiles={"minimal": ...}` so the manifest-immutability check passes.
 
-Run: `uv run python -m pytest tests/test_target_boot_handler.py -q`
-Expected: FAIL — without the resolver, a `builder`-missing profile falls through to `plan_boot`'s generic "rootfs source path does not exist" (no `suggested_fix`), and `prebuilt` is treated as a normal path (no NOT_IMPLEMENTED).
+- [ ] **Step 2: Run tests to verify they fail**
 
-- [ ] **Step 4: Import the resolver in `server.py`**
+Run: `uv run python -m pytest tests/test_target_boot_handler.py -k "builder_missing or prebuilt" -q`
+Expected: FAIL — without the resolver, a `builder`-missing profile falls through to `FakeBootProvider.plan_boot` (no `suggested_fix`/CONFIGURATION_ERROR from the resolver), and `prebuilt` is treated as a normal path (no NOT_IMPLEMENTED).
+
+- [ ] **Step 3: Import the resolver in `server.py`**
 
 In `src/linux_debug_mcp/server.py`, add to the imports near the other `linux_debug_mcp` imports:
 
@@ -651,7 +602,7 @@ In `src/linux_debug_mcp/server.py`, add to the imports near the other `linux_deb
 from linux_debug_mcp.rootfs.sources import RootfsSourceError, resolve_rootfs_source
 ```
 
-- [ ] **Step 5: Resolve under the lock before `plan_boot`**
+- [ ] **Step 4: Resolve under the lock before `plan_boot`**
 
 In `target_boot_handler`, inside the `with store.target_lock(target_ref):` block, in the `try:` that wraps `plan = provider.plan_boot(...)`, add the resolver call as the **first** statement of the `try`, before `plan = provider.plan_boot(`:
 
@@ -686,12 +637,12 @@ In `target_boot_handler`, inside the `with store.target_lock(target_ref):` block
 
 (The `except ProviderBootError as exc:` line already exists immediately after the `plan_boot` call — you are inserting the `resolve_rootfs_source(...)` line and the new `except RootfsSourceError` arm before it. Keep the existing `except ProviderBootError` and `except (ManifestStateError, OSError, ValueError)` arms intact.)
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run python -m pytest tests/test_target_boot_handler.py -q`
 Expected: PASS (2 tests). `prebuilt` is rejected before `plan_boot` with NOT_IMPLEMENTED; `builder`-missing records a FAILED boot with the `suggested_fix`.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/linux_debug_mcp/server.py tests/test_target_boot_handler.py
