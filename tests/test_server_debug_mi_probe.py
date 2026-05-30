@@ -208,6 +208,65 @@ def _profiles() -> dict[str, DebugProfile]:
     return {"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")}
 
 
+_OTHER_BUILD_ID = "ffffffffffffffffffffffffffffffffffffffff"  # pragma: allowlist secret
+
+
+def test_provenance_mismatch_blocks_mi_attach(tmp_path: Path) -> None:
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+    engine = FakeEngine()
+    resp = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        provider=FakeDebugProvider(),
+        debug_profiles=_profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        build_id_reader=lambda _p: _OTHER_BUILD_ID,
+    )
+    assert resp.ok is False
+    assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert resp.error.details["code"] == "provenance_mismatch"
+    # the gate fires before any acquisition or attach: the MI engine was never reached.
+    assert engine.attached is False
+    assert registry.read_record(KEY) is None
+
+
+def test_missing_provenance_blocks_mi_attach(tmp_path: Path) -> None:
+    artifact_root = _create_debug_ready_run(tmp_path)
+    store = ArtifactStore(artifact_root, create_root=False)
+    boot = store.load_manifest(RUN_ID).step_results["boot"]
+    store.record_step_result(
+        RUN_ID,
+        StepResult(
+            step_name="boot",
+            status=StepStatus.SUCCEEDED,
+            summary=boot.summary,
+            details={k: v for k, v in boot.details.items() if k != "kernel_provenance"},
+        ),
+        replace_succeeded=True,
+    )
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+    engine = FakeEngine()
+    resp = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        provider=FakeDebugProvider(),
+        debug_profiles=_profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+    )
+    assert resp.ok is False
+    assert resp.error.details["code"] == "provenance_missing"
+    assert engine.attached is False
+
+
 def test_probe_success_records_session_and_leaves_record_halted(tmp_path: Path) -> None:
     artifact_root = _create_debug_ready_run(tmp_path)
     registry = _make_registry(tmp_path / "reg")
