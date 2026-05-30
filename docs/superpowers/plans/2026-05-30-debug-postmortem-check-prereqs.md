@@ -1297,52 +1297,88 @@ git commit -m "feat(server): register debug.postmortem.check_prereqs MCP tool"
 
 ## Task 10: Env-gated live-target integration test
 
+The CI-runnable script-structure cross-check is already covered by Task 3's
+`test_probe_script_runs_on_host_and_emits_expected_keys` (it runs the real probe
+against the local host). Task 10 is the **human-run live-SSH-to-a-guest** test for
+AC#6. It must join the project's existing live-libvirt gated group — gated by
+`LINUX_DEBUG_MCP_LIBVIRT_TEST=1` plus the source/rootfs/domain env, exactly like
+`tests/test_drgn_introspect_integration.py` (the true live-SSH analog). Do **not**
+invent a new env var, and do not model it on `tests/test_drgn_probe_integration.py`
+(that is a local-host cross-check, not a live-SSH test).
+
 **Files:**
 - Create: `tests/test_kdump_prereqs_integration.py`
 
-- [ ] **Step 1: Write the gated test**
+- [ ] **Step 1: Write the gated test reusing the established live-libvirt bring-up**
 
-Read `tests/test_drgn_probe_integration.py` (or the closest existing env-gated live-SSH test) for the exact env-var name and skip idiom, then create `tests/test_kdump_prereqs_integration.py` mirroring it:
+Read `tests/test_drgn_introspect_integration.py` and reuse its `_require_integration_env()`
+gate and its run bring-up (`create_run_handler` → `target_boot_handler`) verbatim,
+changing only the final call to the kdump handler. Create
+`tests/test_kdump_prereqs_integration.py`:
 
 ```python
-"""Env-gated: real SSH to a kdump-capable guest. Skipped without the guest.
+"""Env-gated live-SSH kdump readiness probe against a managed libvirt guest.
 
-Set LINUX_DEBUG_MCP_KDUMP_GUEST (and the same run/profile env the sibling
-integration tests use) to exercise the real probe. Never un-gated in CI.
+Skipped unless LINUX_DEBUG_MCP_LIBVIRT_TEST=1 (plus the source/rootfs/domain env)
+is set and virsh/qemu are present — identical gating to
+tests/test_drgn_introspect_integration.py. Never un-gated in CI. The CI-runnable
+script-structure cross-check lives in tests/test_prereqs_kdump_probe.py
+(test_probe_script_runs_on_host_and_emits_expected_keys).
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("LINUX_DEBUG_MCP_KDUMP_GUEST"),
-    reason="no reachable kdump-capable guest (set LINUX_DEBUG_MCP_KDUMP_GUEST)",
-)
+from linux_debug_mcp.providers.local_ssh_tests import SubprocessSshRunner
+
+
+def _require_integration_env() -> None:
+    missing = []
+    if shutil.which("qemu-system-x86_64") is None:
+        missing.append("qemu-system-x86_64")
+    if shutil.which("virsh") is None:
+        missing.append("virsh")
+    if os.environ.get("LINUX_DEBUG_MCP_LIBVIRT_TEST") != "1":
+        missing.append("LINUX_DEBUG_MCP_LIBVIRT_TEST=1")
+    if missing:
+        pytest.skip(
+            "kdump prereq integration test skipped; set "
+            f"{', '.join(missing)} (+ LINUX_DEBUG_MCP_SOURCE / _ROOTFS / _DOMAIN / "
+            "_LIBVIRT_URI / _READINESS_MARKER) to run it"
+        )
 
 
 def test_real_target_reports_consistent_kdump_readiness() -> None:
-    # Build a run against the live guest exactly as the sibling integration tests do,
-    # call debug_postmortem_check_prereqs_handler with the real SubprocessSshRunner,
-    # and assert: ok is True, mechanism in {"kdump","fadump","none"}, exactly three
-    # checks, and that on a known-ready guest all three are PASSED.
+    _require_integration_env()
+    # Bring up the guest exactly as tests/test_drgn_introspect_integration.py does
+    # (create_run_handler then target_boot_handler with the _SOURCE/_ROOTFS/_DOMAIN/
+    # _LIBVIRT_URI env), then run the real probe over SSH:
+    #   resp = debug_postmortem_check_prereqs_handler(
+    #       DebugPostmortemCheckPrereqsRequest(run_id=run_id, target_ref=domain),
+    #       artifact_root=..., rootfs_profiles=..., ssh_runner=SubprocessSshRunner())
+    # Assert: resp.ok is True; resp.data["mechanism"] in {"kdump","fadump","none"};
+    # exactly three checks; and on a known kdump-ready guest, all three PASSED.
     ...
 ```
 
-Match the env-var name to whatever the existing integration tests already use for a reachable guest (reuse it rather than inventing a new one) so this test joins the same gated group.
+Fill the bring-up by copying the run-creation + boot block from
+`test_drgn_introspect_integration.py` verbatim (same env vars, same handlers), so
+this test joins the same gated group and shares its setup contract.
 
-- [ ] **Step 2: Verify it skips cleanly with no guest**
+- [ ] **Step 2: Verify it skips cleanly without the live env**
 
 Run: `uv run python -m pytest tests/test_kdump_prereqs_integration.py -q`
-Expected: 1 skipped.
+Expected: 1 skipped (reason names `LINUX_DEBUG_MCP_LIBVIRT_TEST=1`).
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add tests/test_kdump_prereqs_integration.py
-git commit -m "test(postmortem): env-gated live kdump prereq integration test"
+git commit -m "test(postmortem): env-gated live-SSH kdump prereq integration test"
 ```
 
 ---
@@ -1375,6 +1411,6 @@ git commit -m "docs(tool-reference): list debug.postmortem.check_prereqs"
 
 ## Self-review checklist (run before handing off)
 
-- **Spec coverage:** crashkernel/service/dump-path checks (Task 2), fadump mechanism (Task 2), independence + service-fact-missing (Task 2), HALTED fast-reject (Task 6), redaction (Task 7), python3-absent/unparseable/oversize/ssh-failure contract (Task 7), enumeration + capability (Task 8), registration with admission wiring (Task 9), env-gated live test (Task 10), docs (spec phase + Task 11). All AC rows in the spec §4 map to a task.
+- **Spec coverage:** crashkernel/service/dump-path checks (Task 2), fadump mechanism (Task 2), independence + service-fact-missing (Task 2), HALTED fast-reject (Task 6), redaction (Task 7), python3-absent/unparseable/oversize/ssh-failure contract (Task 7), enumeration + capability (Task 8), registration with admission wiring (Task 9), docs (spec phase + Task 11). AC#6 (env-gated live test) is split: the CI-runnable on-host script-structure cross-check is Task 3's `test_probe_script_runs_on_host_and_emits_expected_keys`, and the human-run live-SSH-to-a-guest test is Task 10 (gated on `LINUX_DEBUG_MCP_LIBVIRT_TEST=1`). All AC rows in the spec §4 map to a task.
 - **Placeholder scan:** the only `...` are in test fixtures explicitly instructed to be copied from the existing introspect check_prereqs handler test — replace them with the real fixture during execution; no production code has placeholders.
 - **Type consistency:** `build_kdump_checks(probe) -> (list[PrerequisiteCheck], str)`, `render_kdump_probe_script(*, systemctl_timeout: int) -> str`, `_reject_if_target_halted(*, run_id, admission, session_registry) -> ToolResponse | None`, `debug_postmortem_check_prereqs_handler(request, *, artifact_root, rootfs_profiles=, ssh_runner=, admission=, session_registry=)` are used identically wherever referenced. `kdump_ready = not any FAILED` matches §3.2.
