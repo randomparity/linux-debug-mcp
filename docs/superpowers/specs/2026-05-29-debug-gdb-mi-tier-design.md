@@ -298,9 +298,13 @@ warning (over SOL/HMC vterm, warn that RSP may be unreliable and suggest
   `wait_for_stop`. The tier never re-derives the method. A transport-quality
   warning (`data["transport_quality_warning"]` + `debug.kdb` /
   `debug.introspect.run` in `suggested_next_actions`; `ToolResponse` has no
-  `warnings` field) fires when the admitted RSP rides a lossy out-of-band console
-  — `line_role == SHARED_CONSOLE` and `console_kind in {HVC, VIRTIO}` — and is
-  silent on the clean QEMU `RSP`/`UART` path.
+  `warnings` field) fires on the session-wide `PlatformMetadata.console_kind in
+  {HVC, VIRTIO}` (a demuxed RSP channel is `line_role == RSP`/`DEDICATED_DEBUG`,
+  never `SHARED_CONSOLE`, so keying on `line_role` would never fire) and is silent
+  on the clean QEMU `console_kind == UART` path. The non-native break-entry
+  inject-execution seam (resolving the live proxy handle for an open session) is
+  exercised by the gated serial test, not local CI; Phase D lands the pure
+  routing decision + the `gdbstub_native` path that local CI covers.
 - **Serial fixture (ADR 0024, path b).** The serial break/continue test
   (`tests/test_gdb_mi_serial_kgdb_integration.py`) is gated exactly like
   `test_serial_local_transport_integration.py` (skipped without `agent-proxy`/the
