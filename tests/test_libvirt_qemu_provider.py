@@ -906,25 +906,39 @@ def test_execute_boot_dumpxml_non_absent_failure_maps_to_infrastructure_failure(
     assert runner.commands == [plan.dumpxml_argv]
 
 
-@pytest.mark.parametrize(
-    "dumpxml",
-    [
-        CommandResult(["virsh", "dumpxml"], 1, stderr="Domain not found: debug-vm\n", timed_out=True),
-        CommandResult(["virsh", "dumpxml"], 1, stderr="error: failed to get domain 'debug-vm'\n"),
-    ],
-)
-def test_execute_boot_dumpxml_only_specific_domain_not_found_is_absent(
-    tmp_path: Path,
-    dumpxml: CommandResult,
-) -> None:
+def test_execute_boot_dumpxml_timed_out_not_found_is_not_absent(tmp_path: Path) -> None:
+    # A timed-out dumpxml is never treated as "domain absent" even when its captured
+    # stderr mentions a missing domain: the timeout is the dominant signal.
     plan = make_plan(tmp_path)
-    runner = FakeLibvirtRunner(dumpxml=dumpxml)
+    runner = FakeLibvirtRunner(
+        dumpxml=CommandResult(plan.dumpxml_argv, 1, stderr="Domain not found: debug-vm\n", timed_out=True),
+    )
 
     result = LibvirtQemuProvider(runner=runner).execute_boot(plan)
 
     assert result.status == StepStatus.FAILED
     assert result.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert runner.commands == [plan.dumpxml_argv]
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "Domain not found: no domain with matching name 'debug-vm'\n",
+        "error: failed to get domain 'debug-vm'\n",
+    ],
+)
+def test_execute_boot_dumpxml_domain_absent_phrasings_proceed_to_define(tmp_path: Path, stderr: str) -> None:
+    # libvirt phrases an absent-domain lookup as "Domain not found:" (<=10.x) or
+    # "failed to get domain '<name>'" (>=11.x). Both must be treated as absent so a
+    # first boot of a managed transient domain proceeds to define + start.
+    plan = make_plan(tmp_path)
+    runner = FakeLibvirtRunner(dumpxml=CommandResult(plan.dumpxml_argv, 1, stderr=stderr))
+
+    result = LibvirtQemuProvider(runner=runner).execute_boot(plan)
+
+    assert result.status == StepStatus.SUCCEEDED
+    assert runner.commands == [plan.dumpxml_argv, plan.define_argv, plan.start_argv, plan.domifaddr_argv]
 
 
 def test_execute_boot_retry_stops_matching_domain_before_define_start(tmp_path: Path) -> None:

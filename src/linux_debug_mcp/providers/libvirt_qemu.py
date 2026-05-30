@@ -954,7 +954,9 @@ class LibvirtQemuProvider:
         if result.timed_out:
             return False
         output = f"{result.stdout}\n{result.stderr}".lower()
-        return "domain not found" in output
+        # libvirt <=10.x: "Domain not found: ..."; libvirt >=11.x: "failed to get domain '<name>'".
+        # Both denote VIR_ERR_NO_DOMAIN (lookup by name failed), distinct from a connection error.
+        return "domain not found" in output or "failed to get domain" in output
 
     def _metadata_tag(self, name: str) -> str:
         return f"{{{MCP_METADATA_NS}}}{name}"
