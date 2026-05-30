@@ -7,6 +7,7 @@ import selectors
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -336,8 +337,20 @@ class LibvirtQemuProvider:
     serial_device = "ttyS0"
     default_readiness_marker = "linux-debug-mcp-ready"
 
-    def __init__(self, *, runner: LibvirtRunner | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        runner: LibvirtRunner | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        lease_discovery_attempts: int = 8,
+        lease_discovery_interval: float = 1.0,
+        lease_discovery_call_timeout: int = 5,
+    ) -> None:
         self.runner = runner or SubprocessLibvirtRunner()
+        self._sleep = sleep
+        self._lease_discovery_attempts = lease_discovery_attempts
+        self._lease_discovery_interval = lease_discovery_interval
+        self._lease_discovery_call_timeout = lease_discovery_call_timeout
 
     def plan_boot(
         self,
@@ -540,6 +553,7 @@ class LibvirtQemuProvider:
             "kernel_args": plan.kernel_args,
         }
         if console.status == "ready":
+            details.update(self._discover_guest_ip(plan))
             return self._boot_result(
                 plan=plan,
                 status=StepStatus.SUCCEEDED,
@@ -561,6 +575,38 @@ class LibvirtQemuProvider:
             artifacts=self._existing_artifacts(artifacts),
             diagnostic=console.snippet,
         )
+
+    def _discover_guest_ip(self, plan: BootPlan) -> dict[str, object]:
+        """Best-effort guest-IP discovery from the libvirt lease (ADR 0032).
+
+        Never raises: any failure resolves to a typed status. Polls
+        ``virsh domifaddr --source lease`` up to ``lease_discovery_attempts`` times,
+        sleeping ``lease_discovery_interval`` between attempts, stopping at the first
+        routable IPv4. A non-zero ``domifaddr`` exit stops the poll immediately.
+        """
+        if not plan.discover_guest_ip:
+            return {"guest_ip": None, "guest_ip_discovery": {"status": "skipped", "source": "lease"}}
+        for attempt in range(self._lease_discovery_attempts):
+            result = self.runner.run(
+                plan.domifaddr_argv,
+                timeout=self._lease_discovery_call_timeout,
+                log_path=plan.boot_log_path,
+            )
+            if result.exit_status != 0 or result.timed_out:
+                detail = (result.stderr or result.stdout or "").strip()[:512]
+                return {
+                    "guest_ip": None,
+                    "guest_ip_discovery": {"status": "unavailable", "source": "lease", "detail": detail},
+                }
+            guest_ip = parse_domifaddr_ipv4(result.stdout)
+            if guest_ip is not None:
+                return {
+                    "guest_ip": guest_ip,
+                    "guest_ip_discovery": {"status": "found", "source": "lease"},
+                }
+            if attempt < self._lease_discovery_attempts - 1:
+                self._sleep(self._lease_discovery_interval)
+        return {"guest_ip": None, "guest_ip_discovery": {"status": "no_lease", "source": "lease"}}
 
     def render_domain_xml(self, plan: BootPlan) -> str:
         domain = ElementTree.Element("domain", {"type": "kvm"})
