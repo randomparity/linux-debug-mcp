@@ -9172,6 +9172,66 @@ def create_app(
             session_registry=durable_registry,
         ).model_dump(mode="json")
 
+    @app.tool(name="debug.postmortem.list_dumps")
+    def debug_postmortem_list_dumps(
+        run_id: str,
+        target_ref: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        dump_dir: str | None = None,
+        timeout_seconds: int = 20,
+        debug_profile: str | None = None,
+        target_profile: str | None = None,
+        rootfs_profile: str | None = None,
+    ) -> dict[str, Any]:
+        request = DebugPostmortemListDumpsRequest(
+            run_id=run_id,
+            target_ref=target_ref,
+            dump_dir=dump_dir,
+            timeout_seconds=timeout_seconds,
+            debug_profile=debug_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+        )
+        return debug_postmortem_list_dumps_handler(
+            request,
+            artifact_root=Path(artifact_root),
+            admission=admission_service,
+            session_registry=durable_registry,
+        ).model_dump(mode="json")
+
+    @app.tool(name="debug.postmortem.fetch")
+    def debug_postmortem_fetch(
+        run_id: str,
+        target_ref: str,
+        dump_ref: str,
+        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
+        force: bool = False,
+        dump_dir: str | None = None,
+        max_bytes: int | None = None,
+        timeout_seconds: int = 300,
+        debug_profile: str | None = None,
+        target_profile: str | None = None,
+        rootfs_profile: str | None = None,
+    ) -> dict[str, Any]:
+        request = DebugPostmortemFetchRequest(
+            run_id=run_id,
+            target_ref=target_ref,
+            dump_ref=dump_ref,
+            force=force,
+            dump_dir=dump_dir,
+            max_bytes=max_bytes,
+            timeout_seconds=timeout_seconds,
+            debug_profile=debug_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+        )
+        return debug_postmortem_fetch_handler(
+            request,
+            artifact_root=Path(artifact_root),
+            admission=admission_service,
+            session_registry=durable_registry,
+        ).model_dump(mode="json")
+
     @app.tool(name="artifacts.collect")
     def artifacts_collect(
         run_id: str,

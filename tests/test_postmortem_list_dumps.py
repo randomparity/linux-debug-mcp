@@ -148,3 +148,13 @@ def test_build_scp_argv_quotes_remote_path() -> None:
     src = next(a for a in argv if a.startswith("root@h:"))
     assert "127.0.0.1-2026-05-30-12:00:00" in src
     assert argv[-1] == "/tmp/dest/vmcore"
+
+
+def test_tools_registered() -> None:
+    from linux_debug_mcp.server import create_app
+
+    # access pattern verified against tests/test_server.py — the registry is the
+    # `_tool_manager._tools` dict keyed by tool name.
+    names = set(create_app()._tool_manager._tools)
+    assert "debug.postmortem.list_dumps" in names
+    assert "debug.postmortem.fetch" in names
