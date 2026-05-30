@@ -1,4 +1,4 @@
-# ADR 0026 — `debug.postmortem.crash`: host-side build-id reader, batch `!echo` framing, raw-passthrough parsers
+# ADR 0026 — `debug.postmortem.crash`: host-side build-id reader, per-command output-redirection framing, raw-passthrough parsers
 
 **Status:** Accepted (2026-05-30) · **Issue:** #92 · **Epic:** #9 · **Affects:** `src/linux_debug_mcp/symbols/vmcore_build_id.py` (new), `src/linux_debug_mcp/postmortem/` (new package: `crash_batch.py`, `crash_parsers.py`), `src/linux_debug_mcp/providers/local_crash_postmortem.py` (new), `src/linux_debug_mcp/server.py` (`_execute_postmortem_crash_call`, `debug_postmortem_crash_handler`, tool registration), `src/linux_debug_mcp/config.py` (`ALLOWED_DEBUG_OPERATIONS` + caps), `src/linux_debug_mcp/prereqs/checks.py` (`crash` check)
 
@@ -49,20 +49,28 @@ synthesised vmcore. ELF is the format this repo's QEMU world produces (`virsh du
 §5.3) that adds one magic-keyed branch — until then it fails loud, never silently
 skips the check.
 
-### 2. `crash` is driven in one batch session over stdin, framed by `!echo` sentinels
+### 2. `crash` is driven in one batch session over stdin, framed by server-controlled per-command output redirection
 
 `crash -s <vmlinux> <vmcore>` is invoked **once per call** with the command batch on
 stdin (mirroring the drgn-wrapper-on-stdin pattern), under
-`timeout --kill-after=2s <t>s`. `build_command_script(commands, token)` interleaves a
-server-minted UUIDv4-hex sentinel before each command via `crash`'s `!echo
-<token>-<i>` shell escape, ending with `exit`. `split_transcript(raw, token, commands)`
-splits the captured stdout on full-line sentinel matches; the segment after sentinel
-`i` is command `i`'s output. A sentinel that never appears (crash aborted mid-batch)
-marks that command `parsed:false`, `reason:not_captured` — never silently dropped. The
-index in the sentinel makes a gap detectable rather than mis-attributing output.
+`timeout --kill-after=2s <t>s`. `build_command_script` appends a **server-minted**
+redirect target to each validated command — `<command> > <sensitive_call_dir>/cmd-NNNN.out`
+— ending with `exit`. `crash` writes each command's output to its own file and closes
+that file before processing the next command, so the per-command boundary is set by the
+filesystem. `collect_command_outputs(call_dir, commands)` reads `cmd-NNNN.out` per
+command: a missing file (crash aborted mid-batch) → `parsed:false, reason:not_captured`;
+a file at `CRASH_PER_CMD_CAP` → `output_truncated` (never typed-parsed) — never silently
+dropped. The whole call is `crash_open_failure` only when **no** output file was created
+and crash exited nonzero (it could not open the pair).
 
-The token is server-generated, not caller input, so `!echo` carries no injection
-surface. `-s` (silent) suppresses the banner/prompt/scroll noise for a clean stream.
+This is **race-free by construction**: it does not depend on `crash` flushing libc
+stdio between commands, nor on the ordering of a forked `!echo` child's writes relative
+to crash's own block-buffered pipe stdout. The redirect targets are server-generated
+(never caller input) and caller commands cannot contain `>` (denied by decision 2a), so
+appending ` > <path>` is unambiguous and injection-free. `-s` (silent) suppresses the
+banner/scroll noise. The same mechanism frames the server-injected `mod -S … >
+mod-load.out` so module-load status is detectable from its own file (reported in the
+top-level `module_symbols` response field, not the command-keyed `results`).
 
 ### 2a. Command content is validated (sanitise + allowlist) — the only trust boundary
 
@@ -148,12 +156,21 @@ at — exactly the split #55 uses (`sensitive/stdout.raw` vs `debug/.../stdout.j
 
 3. **One `crash` invocation per command** (trivial per-command framing). Rejected: each
    invocation re-opens and re-maps the multi-GB vmcore — the cost the issue's "batch
-   runner" framing exists to avoid. The `!echo`-sentinel batch opens the core once.
+   runner" framing exists to avoid. The single redirected batch opens the core once.
 
 4. **Frame by parsing `crash`'s `crash> ` prompt.** Rejected: prompt formatting is
    fragile and version-dependent, and a command's own output can contain the literal
-   `crash> ` string, mis-splitting the transcript. A full-line server-minted UUID
-   sentinel cannot be forged by command output.
+   `crash> ` string, mis-splitting the transcript.
+
+4a. **Frame with an in-band `!echo <token>` sentinel between commands.** Rejected: the
+   tool captures crash's stdout from a **pipe**, where libc stdout is block-buffered,
+   and `!echo` runs via `system()`, which does **not** flush the parent's stdio. So a
+   command's still-buffered output can reach the pipe *after* the next command's
+   sentinel that the forked `echo` already wrote, silently misframing per-command
+   attribution — a failure invisible on a TTY (line-buffered) and dependent on
+   unverified crash flush behaviour. Server-controlled per-command `> file` redirection
+   (decision 2) removes the shared-stream ordering question entirely: each file is
+   closed before the next command runs.
 
 5. **Make parsers strict (fail the call on an unparseable command).** Rejected: the
    issue requires "never silently drops a command" and "unknown ⇒ raw text." A strict

@@ -6,7 +6,7 @@
 **Supersedes (in part):** #14
 **Status:** Draft — pending adversarial review
 **Depends on:** #55 (host-authoritative `build_id` via `symbols/build_id.py:read_elf_build_id`; run-relative confinement via `confine_run_relative`; the shared local-subprocess runner + manifest/redaction step pattern in `_execute_vmcore_introspect_call`)
-**Design decisions:** [ADR 0026](../../adr/0026-postmortem-crash-batch-runner.md) (pure-Python ELF vmcore build-id reader, batch-via-stdin with `!echo` sentinel framing, parser-failure = raw passthrough, parser/runner ownership)
+**Design decisions:** [ADR 0026](../../adr/0026-postmortem-crash-batch-runner.md) (pure-Python ELF vmcore build-id reader, batch-via-stdin with per-command output-redirection framing, parser-failure = raw passthrough, parser/runner ownership)
 
 ## 1. Background and scope
 
@@ -36,7 +36,7 @@ command does not parse, and where the parsers and batch driver live.
 
 - `debug.postmortem.crash(run_id, vmcore_ref, vmlinux_ref, modules_ref?, commands[], timeout_seconds) → ToolResponse` MCP tool, wired via `server.py`'s tool-registration pattern.
 - Run-scoped, run-relative refs confined to `<run_dir>` via #53's `confine_run_relative` / `resolve_symbols`. **No** `target_ref`, no `*_profile`, no admission gate, no SSH — identical scoping to #55.
-- Driving `crash` non-interactively (batch commands fed on stdin), with each command's output framed by a server-minted sentinel so the parser can split the transcript reliably (ADR 0026 §2).
+- Driving `crash` non-interactively (batch commands fed on stdin), with each command's output captured into its own server-minted file via crash's output redirection so the per-command boundary is race-free (ADR 0026 §2).
 - Best-effort parsers → typed JSON for `bt`, `ps`, `log`, `kmem -i`, `sys`. An unknown or unparseable command returns its **raw text** under the command key — parsing never silently drops a command.
 - Host-side `build_id` fail-loud: the vmcore's embedded build-id (`symbols/vmcore_build_id.py:read_vmcore_build_id`) vs the host-parsed `read_elf_build_id(vmlinux)` (#55's reader). Mismatch → `CONFIGURATION_ERROR` / `provenance_mismatch`, **no crash run**. Distinct codes for an unreadable vmlinux, a vmcore with no build-id, and an unsupported vmcore container — matching ADR 0010.
 - Bounded execution: handler-bounded `commands` count and `timeout_seconds`; raw-transcript and parsed-JSON output caps; the `crash` child killed on timeout (`timeout --kill-after`), no strand.
@@ -79,12 +79,12 @@ agent ──MCP──▶ debug.postmortem.crash handler
          observed != expected  → provenance_mismatch (no crash run)
                       │
                       ▼
-       render command script (build_command_script: !echo sentinels per command)
+       render command script (build_command_script: per-command ` > cmd-NNNN.out`)
                       ▼
        runner.run(["timeout","--kill-after=2s","<t>s","crash","-s",vmlinux,vmcore],
                       │          stdin=cmd_script, stdout→sensitive/stdout.raw, cap)
                       ▼
-       split_transcript → per-command segments → parse_command (typed | raw)
+       collect_command_outputs (read cmd-NNNN.out files) → parse_command (typed | raw)
                       ▼
        Redactor → debug/postmortem/crash/<call-id>/{transcript.txt, parsed.json}
                 → postmortem.crash:<call_id> manifest step → ToolResponse
@@ -97,7 +97,8 @@ New components:
 2. **`symbols/vmcore_build_id.py`** — `read_vmcore_build_id(path)`, the host-side
    reader for the vmcore's embedded build-id (ELF container).
 3. **`postmortem/` package** — `crash_batch.py` (pure command-script build +
-   transcript split) and `crash_parsers.py` (per-command parsers + dispatch).
+   per-command output-file collection) and `crash_parsers.py` (per-command parsers +
+   dispatch).
 4. **`providers/local_crash_postmortem.py`** — the capability factory.
 
 Reused without change: `resolve_symbols` / `confine_run_relative` (#53),
@@ -145,22 +146,27 @@ Success `data` carries:
 
 - `call_id` — the per-call UUIDv4-hex id.
 - `vmcore_build_id` — the vmcore's embedded build-id (the verified value).
-- `results` — an object keyed by the **exact command string** the caller supplied;
-  each value is either a typed parsed object (`bt`/`ps`/`log`/`kmem -i`/`sys`) or a
-  raw string (unknown/unparseable command, or a command whose output was truncated
+- `results` — an object keyed by the **stripped command string** (see dedup note
+  below); each value is either a typed parsed object (`bt`/`ps`/`log`/`kmem -i`/`sys`)
+  or a raw string (unknown/unparseable command, or a command whose output was truncated
   or not captured). Each value also carries `parsed: bool` and, when not parsed, a
   `reason` (`unknown_command` / `parse_failed` / `output_truncated` / `not_captured`).
-- `truncated` — `true` when the raw transcript hit the output cap.
+- `module_symbols` — present only when `modules_ref` was supplied: `{requested: true,
+  status: "loaded" | "load_failed", detail}` from the server-injected `mod -S` load
+  (§6 step 8). This is **not** in `results` (which is keyed by caller commands; the
+  `mod -S` is server-injected and has no caller key).
+- `truncated` — `true` when the aggregate output hit `CRASH_STDOUT_CAP`.
 - `artifacts` — `ArtifactRef`s to the **redacted** transcript and parsed JSON under
   `<run>/debug/postmortem/crash/<call-id>/`.
 - timing (`started_at`, `finished_at`, `duration_ms`), `crash_exit_code`.
 
 `suggested_next_actions` is `["artifacts.get_manifest", "debug.postmortem.crash"]`.
 
-Duplicate command strings: if the caller supplies the same command twice, the keyed
-`results` object would collide. The handler rejects a `commands` list with duplicate
-entries (`invalid_commands` / `duplicate_command`) so the keyed response is
-unambiguous; an agent that wants the same command twice issues two calls.
+**Command normalisation & dedup.** Each command is `strip()`-ed once; the stripped form
+is what is validated (§3.4), used for duplicate detection, and used as the `results`
+key. So `"bt"` and `"bt "` are the *same* command and rejected as a duplicate
+(`invalid_commands` / `duplicate_command`); the keyed response is therefore
+collision-free. An agent that wants the same command twice issues two calls.
 
 ### 3.4 Command validation is the load-bearing security control
 
@@ -182,8 +188,9 @@ The handler validates **every** command in `commands` before any crash invocatio
 
 1. **Sanitisation (security-critical denylist).** Reject a command that:
    - contains any newline, carriage-return, NUL, or other ASCII control character
-     (an embedded newline would split into multiple `crash` commands, both desyncing
-     the `!echo` sentinel framing and smuggling a second command past the allowlist);
+     (an embedded newline would split into multiple `crash` commands — breaking the
+     per-command ` > cmd-NNNN.out` redirect association and smuggling a second command
+     past the allowlist);
    - has `!` as its first non-space character (shell escape);
    - contains any of `|`, `>`, `<`, `` ` ``, `$(`, `;`, `&` (pipe-to-shell, file
      redirection, command substitution, chaining/backgrounding).
@@ -204,7 +211,7 @@ caps so the vocabulary is reviewable in one place.
 
 ## 4. Driving `crash` non-interactively (ADR 0026 §2)
 
-`crash` is invoked once per call with the vmlinux + vmcore as positional arguments
+`crash` is invoked **once per call** with the vmlinux + vmcore as positional arguments
 and the command batch on **stdin** (mirroring how the drgn wrapper is fed on stdin),
 under `timeout(1)` for kill-after defence-in-depth:
 
@@ -212,50 +219,59 @@ under `timeout(1)` for kill-after defence-in-depth:
 timeout --kill-after=2s <t>s crash -s <vmlinux_path> <vmcore_path>
 ```
 
-`-s` (silent) suppresses the version banner, the `crash> ` prompt, and runtime
-scrolling messages, leaving a clean stream to parse. The stdin script is built by
-`build_command_script(commands, sentinel_token)`:
+`-s` (silent) suppresses the version banner and scrolling notices. The single vmcore
+open is shared across the whole batch.
+
+### 4.1 Per-command framing via server-controlled output redirection
+
+Each command's output is captured into its **own server-minted file** using `crash`'s
+output-redirection operator, rather than an in-band sentinel. `build_command_script`
+appends ` > <call_dir>/cmd-NNNN.out` to each validated caller command:
 
 ```
-!echo <token>-0
-<command 0>
-!echo <token>-1
-<command 1>
+bt > <sensitive_call_dir>/cmd-0000.out
+ps > <sensitive_call_dir>/cmd-0001.out
 ...
-!echo <token>-N
 exit
 ```
 
-`<token>` is a server-minted UUIDv4 hex (not caller input — no injection surface).
-`!echo` is `crash`'s shell escape; it prints the sentinel line to the same stdout
-stream, immediately *before* each command's output. The trailing `exit` ends the
-session deterministically.
+The redirect targets are **server-generated** (zero-padded index under the call's
+`sensitive/` dir — see §6), never caller input, so they carry no injection surface; and
+caller commands cannot contain `>` (denied by §3.4), so appending ` > <path>` is
+unambiguous. `crash` writes each command's output to its file and **closes that file
+before processing the next command**, so the per-command boundary is established by the
+filesystem, not by parsing a shared stream. This is **race-free by construction**: it
+does not depend on crash flushing libc stdio between commands, nor on the ordering of a
+forked `!echo` child's writes relative to crash's own block-buffered pipe output (the
+hazard that sinks the in-band-sentinel approach — ADR 0026 §2, rejected alternative).
 
-`split_transcript(raw, token, commands)` splits the captured stdout on the sentinel
-lines. The segment after sentinel `i` (up to sentinel `i+1` or EOF) is command `i`'s
-output. Three boundary rules make the split unambiguous and fail-closed:
+`collect_command_outputs(call_dir, commands)` reads `cmd-NNNN.out` for each command.
+Boundary rules, fail-closed:
 
-- **Missing sentinel (crash aborted mid-batch).** If a command faults the session, the
-  trailing sentinels never appear; every command whose sentinel is absent is recorded
-  `parsed:false`, `reason:not_captured` — never silently dropped (AC generalised). The
-  sentinel carries the command index, so a gap is detectable rather than
-  mis-attributing one command's output to another.
-- **Truncation (output cap hit).** When `CRASH_STDOUT_CAP` truncates the stream
-  mid-transcript, the segment that contains the truncation offset is **partial**; it is
-  recorded `parsed:false`, `reason:output_truncated` and is **never typed-parsed** (a
-  half-`kmem`/`bt` report must not be fed to a parser that would emit confidently wrong
-  typed JSON). Commands after the truncation point are `not_captured`. The response
-  `truncated` flag is set.
-- **"Usable transcript" boundary.** A transcript is *usable* iff sentinel `0` appears
-  in stdout. Zero sentinels ⇒ `crash` produced nothing parseable (it could not open the
-  pair) ⇒ `INFRASTRUCTURE_FAILURE` / `crash_open_failure` for the whole call. ≥1
-  sentinel ⇒ success with per-command markers (some commands ran). This is the crisp
-  test the §8 taxonomy refers to, independent of `crash`'s exit code.
+- **Missing file (crash aborted mid-batch).** A command whose `cmd-NNNN.out` was never
+  created (crash faulted before reaching it) is recorded `parsed:false`,
+  `reason:not_captured` — never silently dropped (AC generalised).
+- **Per-file output cap.** Each `cmd-NNNN.out` is read up to `CRASH_PER_CMD_CAP`; a file
+  that hits the cap is recorded `parsed:false`, `reason:output_truncated` and is **never
+  typed-parsed** (a half-`kmem`/`bt` report must not become confidently-wrong typed
+  JSON). The aggregate of all files is also bounded by `CRASH_STDOUT_CAP`; exceeding it
+  sets the response `truncated` flag and marks the remaining files `output_truncated`.
+- **"crash opened the pair" boundary.** crash's own session stdout/stderr (banner,
+  open errors, the prompt stream) is still captured to `stdout.raw`/`stderr.raw`. If
+  **no** `cmd-NNNN.out` file was created **and** crash exited nonzero, crash could not
+  open the pair → `INFRASTRUCTURE_FAILURE` / `crash_open_failure` for the whole call. If
+  at least one output file exists, the call is a success with per-command markers,
+  independent of crash's exit code.
 
-**Why not one `crash` per command:** re-opening a multi-GB vmcore N times is the cost
-the issue's "batch runner" framing rejects (ADR 0026 §2, rejected alternative). **Why
-not prompt-parsing:** `crash> ` prompt formatting is fragile and a command's own
-output can contain the prompt string (ADR 0026 §2, rejected alternative).
+A command whose output `crash` rejects (e.g. an allowlisted verb with a bad argument)
+produces an empty or error-bearing `cmd-NNNN.out`; the parser falls back to raw
+passthrough (`parse_failed`), and crash's error text is preserved in the file and in
+the global `stderr.raw`. No command is dropped.
+
+The redaction story is unchanged: the raw `cmd-NNNN.out` files live under the call's
+`sensitive/` dir (0600, never returned); the handler redacts each command's collected
+output before it enters `results`, the persisted `parsed.json`, or the redacted
+`transcript.txt`.
 
 ## 5. Host-side build-id fail-loud
 
@@ -366,28 +382,32 @@ A linear orchestrator mirroring `_execute_vmcore_introspect_call`. Steps:
    on mismatch, **return before any crash invocation**.
 7. Mint `call_id`; create `<run>/debug/postmortem/crash/<call-id>/` (0700) and
    `<run>/sensitive/debug/postmortem/crash/<call-id>/` (0700); build the command
-   script (`build_command_script`); write the redacted `request.json` (with the
-   resolved paths recorded as their run-relative refs).
+   script (`build_command_script`), which assigns each command a server-minted
+   redirect target `<sensitive_call_dir>/cmd-NNNN.out` (§4.1); write the redacted
+   `request.json` (with the resolved paths recorded as their run-relative refs).
 8. Run locally: `runner.run(["timeout","--kill-after=2s", f"{t}s","crash","-s",
    vmlinux_path, vmcore_path], timeout=t+10, stdin=cmd_script,
    stdout_path=sensitive/stdout.raw, stderr_path=sensitive/stderr.raw,
    cancel=<unused event>, max_stdout_bytes=CRASH_STDOUT_CAP)`. No sudo, no SSH argv,
    no admission watcher — `cancel` is an event that never fires (the runner timeout +
    `timeout(1)` bound the call). The `vmlinux`/`vmcore` paths ride in `argv` (execve —
-   no shell), so they need no escaping. `modules_ref`, when given, is loaded via the
-   crash command stream (a server-injected `mod -S <modules_path>` line, before
-   sentinel 0 so its output lands in the preamble) **best-effort**: a failed module
-   load is a non-fatal note in `results`, never a hard failure. **Path-injection
-   guard:** `confine_run_relative` enforces containment, *not* character safety (ADR
-   0010 item 8) — a confined `modules_path` may contain a space or newline that would
-   break the `mod -S` command line or inject a second crash command. So the resolved
+   no shell), so they need no escaping. `modules_ref`, when given, is loaded by a
+   **server-injected** `mod -S <modules_path> > <sensitive_call_dir>/mod-load.out`
+   line at the head of the batch (its own redirect file, §4.1) **best-effort**: after
+   the run, `mod-load.out` is inspected for crash's load-success vs error pattern and
+   the result is reported in the top-level `module_symbols` response field (§3.3) —
+   never a hard failure, never in `results`. **Path-injection guard:**
+   `confine_run_relative` enforces containment, *not* character safety (ADR 0010 item
+   8) — a confined `modules_path` may contain a space or newline that would break the
+   `mod -S` command line or inject a second crash command. So the resolved
    `modules_path` is validated against a strict `[A-Za-z0-9._/-]+` charset before
    interpolation; a violation is `CONFIGURATION_ERROR` / `modules_path_unsafe` (no
    crash run). `vmlinux_path`/`vmcore_path` need no such guard — they are argv, not
    command-stream, text. chmod 0600 the raw files.
 9. Triage the runner result (mirrors `_finalize_introspect_call`'s
    `oversized_output` / `cancelled` / `stdin_failed` / `timed_out` / `exit==124`
-   branches). On a clean run, `split_transcript` + `parse_command` per segment,
+   branches). On a run that produced ≥1 `cmd-NNNN.out` (§4.1 boundary),
+   `collect_command_outputs` + `parse_command` per file, inspect `mod-load.out`,
    redact, persist, write the `postmortem.crash:<call_id>` step, return.
 
 `Redactor` is seeded with no secret values (no `ssh_key_ref`); the refs are
@@ -420,9 +440,9 @@ parser, yields `{"parsed": False, "reason": ..., "raw": <text>}`. Typed parsers:
 Parsers operate purely on text (no crash dependency) and are unit-tested against
 captured-output fixtures. They never raise out of `parse_command`; a parse exception
 is caught and converted to the raw-passthrough form. `parse_command` is **only called
-for fully-captured segments** — a segment marked `not_captured` or `output_truncated`
-by `split_transcript` (§4) is recorded as-is and never typed-parsed, so a partial
-report can never become confidently-wrong typed JSON. Each parsed value is redacted by
+for fully-captured outputs** — a command marked `not_captured` or `output_truncated`
+by `collect_command_outputs` (§4.1) is recorded as-is and never typed-parsed, so a
+partial report can never become confidently-wrong typed JSON. Each parsed value is redacted by
 the handler before it is returned/persisted (the parser does not redact — redaction
 is the handler's single responsibility, applied uniformly to typed and raw values).
 
@@ -446,12 +466,13 @@ is the handler's single responsibility, applied uniformly to typed and raw value
 | crash cannot open the core / load the vmlinux (nonzero exit, no usable transcript) | `INFRASTRUCTURE_FAILURE` | `crash_open_failure` |
 | timeout / oversized transcript | `INFRASTRUCTURE_FAILURE` | `crash_timeout` / `oversized_output` |
 | crash ran; a command did not parse / was not captured | success; that key is `parsed:false` + `reason` | — |
-| module bundle present but `mod -S` failed | success + non-fatal note in `results` | `modules_load_failed` |
+| module bundle present but `mod -S` failed | success + `module_symbols.status="load_failed"` (top-level, not `results`) | — |
 
-A nonzero `crash` exit with a usable transcript (some commands ran before a later one
-faulted) is **success** with per-command `not_captured` markers for the unrun tail —
-not a blanket `crash_open_failure`. `crash_open_failure` is reserved for the case
-where `crash` produced no parseable transcript at all (it could not open the pair).
+A nonzero `crash` exit that still produced ≥1 `cmd-NNNN.out` file (some commands ran
+before a later one faulted) is **success** with per-command `not_captured` markers for
+the unrun tail — not a blanket `crash_open_failure`. `crash_open_failure` is reserved
+for the case where **no** command output file was created and crash exited nonzero (it
+could not open the pair), per the §4.1 boundary.
 
 ## 9. Concurrency (§5.6 rule 3)
 
@@ -474,8 +495,8 @@ added (no speculative multi-tenant feature). Documented so the agent can self-li
 
 - `config.py`: add `"debug.postmortem.crash"` to `ALLOWED_DEBUG_OPERATIONS`; add
   `MAX_POSTMORTEM_CRASH_CALLS_PER_RUN`, `MAX_CRASH_COMMANDS`, `CRASH_SCRIPT_BYTE_CAP`,
-  `CRASH_STDOUT_CAP`, and `CRASH_COMMAND_ALLOWLIST` (§3.4, the curated read-only verb
-  set) so the whole bounded surface is reviewable in one place.
+  `CRASH_PER_CMD_CAP`, `CRASH_STDOUT_CAP`, and `CRASH_COMMAND_ALLOWLIST` (§3.4, the
+  curated read-only verb set) so the whole bounded surface is reviewable in one place.
 - `providers/local_crash_postmortem.py`: `local_crash_postmortem_capability()` →
   `ProviderCapability(provider_name="local-crash-postmortem", provider_family="debug",
   operations=["debug.postmortem.crash"], required_host_tools=["crash"],
@@ -499,11 +520,13 @@ Handler tests instantiate the handler directly with injected fakes (`runner=`,
   with `NT_GNU_BUILD_ID` fallback and no VMCOREINFO; ELF with neither →
   `VmcoreBuildIdAbsent`; truncated ELF → `VmcoreBuildIdError`; non-ELF
   (compressed-kdump magic / random bytes) → `VmcoreFormatUnsupported`.
-- `crash_batch`: `build_command_script` interleaves sentinels and a trailing `exit`;
-  `split_transcript` maps clean output to the right command; a transcript missing the
-  last two sentinels marks those commands `not_captured`; a command whose output
-  *contains* a sentinel-shaped substring is still split correctly (sentinel is a
-  full-line UUID match, not a substring).
+- `crash_batch`: `build_command_script` appends ` > cmd-NNNN.out` to each command, a
+  trailing `exit`, and (when `modules_ref` set) the leading `mod -S … > mod-load.out`;
+  `collect_command_outputs` maps each present file to its command, marks a missing file
+  `not_captured`, and marks a file at `CRASH_PER_CMD_CAP` `output_truncated` (never
+  typed-parsed). Because each command writes a distinct server-named file, framing does
+  not depend on stream ordering — a unit test feeds a call dir with some files present,
+  some absent, one over-cap, and asserts the right markers.
 - `crash_parsers`: each typed parser against a captured-output fixture (happy path) and
   against a malformed/empty fixture (falls back to raw passthrough, never raises);
   `parse_command` dispatch (`kmem -i` vs bare `kmem`); unknown command → raw.
@@ -524,11 +547,20 @@ Handler tests instantiate the handler directly with injected fakes (`runner=`,
   `kmem -i`, `sys`) pass validation.
 - **`modules_path_unsafe` (§6 step 8):** a fake `resolve_symbols` returning a
   `modules_path` containing a space / newline → `modules_path_unsafe`, runner never
-  called; a clean `[A-Za-z0-9._/-]+` path passes.
-- **Truncation segment (§4):** a fake runner returns a transcript truncated inside a
-  command's segment with `oversized`/cap hit → that command is `output_truncated`
-  (never typed-parsed), later commands `not_captured`, response `truncated:true`; a
-  transcript with **zero** sentinels → `crash_open_failure`.
+  called; a clean `[A-Za-z0-9._/-]+` path passes. **Module-load status:** a fake run
+  where `mod-load.out` carries crash's error pattern → `module_symbols.status =
+  "load_failed"` (top-level, success call); a clean `mod-load.out` → `"loaded"`.
+- **Framing/boundary (§4.1):** a fake runner that writes only `cmd-0000.out` and
+  `cmd-0001.out` of three commands → command 2 is `not_captured`; an over-cap
+  `cmd-0000.out` → `output_truncated` (never typed-parsed) + response `truncated:true`;
+  **no** output files + nonzero exit → `crash_open_failure`; ≥1 output file + nonzero
+  exit → success with markers. **Command normalisation:** `"bt"` and `"bt "` rejected
+  as `duplicate_command`; `results` keyed by the stripped form.
+- **AC#1 framing is proven only end-to-end (§11 integration):** the unit tests above
+  feed pre-written `cmd-NNNN.out` files, so they prove `collect_command_outputs`/parsing
+  but **not** that real `crash` actually honours ` > file` redirection per command. The
+  env-gated integration test is the sole proof that the redirection-framing assumption
+  holds against the real binary.
 - Unknown/unparseable command not dropped: a command with no parser and a command
   whose parser raises both appear in `results` as `parsed:false` (AC).
 - Timeout/oversized: fake runner reports `exit 124` → `crash_timeout`; oversized output
@@ -546,7 +578,10 @@ Handler tests instantiate the handler directly with injected fakes (`runner=`,
 the real `crash` binary against a fixture vmcore+vmlinux, skipped unless `crash` is on
 PATH and `LDM_VMCORE` points at a captured core + matching vmlinux — exactly the
 gating the libvirt/gdb/drgn integration suites use. It is the only test that exercises
-the real batch framing and parsers end-to-end.
+the real batch framing and parsers end-to-end, and it specifically asserts the
+**redirection-framing assumption**: a multi-command batch (including one command whose
+output crosses the libc buffer size) yields one fully-populated `cmd-NNNN.out` per
+command, confirming real `crash` honours per-command ` > file` redirection over a pipe.
 
 ## 12. Acceptance-criteria mapping
 
