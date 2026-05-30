@@ -91,15 +91,55 @@ override cannot set `debug_gdbstub`, so the override can only *add* `wait_for_de
   - `details["guest_ip"] = None`,
     `details["guest_ip_discovery"] = {"status": "skipped", "source": "lease", "reason": "wait_for_debugger"}`
   - `details["nokaslr_source"]`, `details["kernel_args"]` as today
+  - `details["kernel_provenance"]` — added by the handler's success-branch capture (see the
+    version-lock dependency below), **not** by the provider
   - `suggested_next_actions` (handler layer) = `["debug.start_session"]`
 - **Normal (`wait_for_debugger=False`):** unchanged — `stream_console`, readiness/timeout branches, and
   guest-IP discovery on success exactly as today.
 
+The frozen branch returns the **same artifact set** as the normal success branch — the boot/console
+log artifacts are created (the console log exists but is empty, the vCPU having printed nothing) and the
+rotated-console-log handling runs unchanged — so the returned `artifacts` list shape is invariant across
+frozen and normal success and no downstream artifact lookup sees a missing entry.
+
 The frozen VM is a valid `debug.start_session` target: that handler requires
 `boot_result.details["debug_boot"] is True` and a `gdbstub_endpoint` dict — both present — and gates on
-`boot_result.status == SUCCEEDED`. No debug-tier change is needed; gdb attaches to a CPU stopped at the
-reset vector, the caller sets a breakpoint (`debug.set_breakpoint dcache_init`), and `debug.continue`
-releases the CPU, which then runs into the breakpoint deterministically.
+`boot_result.status == SUCCEEDED`. No debug-tier code change is needed for **attach**: the attach path
+reads no guest memory that is invalid at reset. `SessionGuard()` is wired with empty pre/post-attach
+preconditions (`server.py:8654`), so `verify_attached` is a no-op — there is no running-kernel build-id
+read over RSP at attach. `_run_mi_attach_probe` resolves the canonical probe symbol from the host-side
+vmlinux ELF symbol table (`-data-evaluate-expression &symbol`, ADR 0020), which is independent of guest
+execution. So gdb attaches to the CPU stopped at the reset vector and the MI handshake completes.
+
+#### `kernel_provenance` must be captured on the frozen path (version-lock dependency)
+
+`debug.start_session` runs `_verify_gdb_symbol_version_lock` (`server.py:5679`) *before* attaching, and
+that gate **hard-requires** `boot_result.details["kernel_provenance"]`; when it is absent the handler
+returns `CONFIGURATION_ERROR` ("boot did not record a KernelProvenance") and never attaches. The
+provenance is captured in `target_boot_handler` on the `execution.status == StepStatus.SUCCEEDED` branch
+(`server.py:1884`), gated **only on status, not on `console_status`**, and is entirely host-side (it
+reads the build step's recorded `build_id` and the on-disk vmlinux/config artifacts — no guest
+execution). Therefore the frozen branch satisfies the version-lock gate **provided it returns
+`SUCCEEDED` and stays on the handler's success path**: the implementer MUST NOT gate the frozen branch
+(or the handler's provenance capture) on `console_status == "ready"` or on the guest-IP discovery path,
+or `debug.start_session` will reject every frozen boot before any breakpoint is set. `kernel_provenance`
+is one of the recorded boot details on the frozen branch, set by the handler's existing capture, not by
+the provider.
+
+#### Breakpoint mechanism for the early-init target
+
+The acceptance breakpoint must survive being set while the CPU sits at the reset vector. The debug tier
+sets breakpoints through QEMU's gdbstub; under KVM, gdb breakpoints are inserted via
+`KVM_SET_GUEST_DEBUG` (the gdbstub maps `Z0`/`Z1` to guest-debug state), so the breakpoint is honored by
+the vCPU when its PC matches the **virtual** address resolved from the (KASLR-off) vmlinux symbols — it
+does not depend on a guest-memory `int3` write landing in an already-mapped page at insert time. KASLR
+is disabled on the debug profile (`DebugProfile.kaslr_policy="disabled"`, with `nokaslr` on the kernel
+command line), so the symbol address gdb computes for `dcache_init` / `__d_lookup` equals the address the
+kernel will execute at. The caller therefore: `debug.start_session` (attaches at reset) →
+`debug.set_breakpoint dcache_init` → `debug.continue` (releases the vCPU) → the vCPU runs through the
+decompressor and `start_kernel` into the breakpoint and HALTs, at which point `d_hash_shift` is
+inspectable. This path is **not** unit-testable (it needs a real QEMU+KVM guest), so it is covered by a
+gated integration test (§Verification), not asserted from the unit suite alone.
 
 ### 5. Idempotency / short-circuit
 
@@ -109,6 +149,17 @@ counts as a new boot override and re-plans (decision 1), so a run first booted n
 re-booted frozen with `force_reboot`/override. The frozen `details` persist on disk, so a
 `debug.start_session` after a server restart still reads `debug_boot` / `gdbstub_endpoint` from the
 recorded result.
+
+### 6. Frozen-domain lifetime — no new leak surface
+
+A frozen `SUCCEEDED` boot leaves a libvirt domain blocked at the reset vector. Its lifetime is identical
+to a non-frozen debug boot's domain: it is reclaimed by the **same** `existing_domain` → `destroy` path
+in `execute_boot` on any re-boot (a `force_reboot` or `wait_for_debugger`-override re-plan destroys the
+prior frozen domain before defining the new one), and by `cleanup_policy="stop_on_failure"` on a failed
+re-attempt. A frozen domain that is never attached-to (the agent never calls `debug.start_session`, or it
+fails the version-lock gate) persists exactly as today's free-running debug domain does — there is no new
+leak class; the frozen state does not change *which* component owns teardown, only that the vCPU is
+blocked rather than running while the domain is alive.
 
 ## Failure contract
 
@@ -154,5 +205,18 @@ readiness-timeout or lease-poll budget; it returns as soon as `virsh start` succ
   over a `debug_gdbstub` profile yields a frozen `SUCCEEDED` boot with
   `suggested_next_actions=["debug.start_session"]`; an override `None` inherits the profile value;
   `wait_for_debugger` override marks the boot as a new override (re-plans an already-`SUCCEEDED` run).
+- Unit: a frozen `SUCCEEDED` boot still records `details["kernel_provenance"]` (the handler's
+  success-branch capture runs because the branch returns `SUCCEEDED`), so `_verify_gdb_symbol_version_lock`
+  passes against it — i.e. `debug.start_session`'s version-lock gate is satisfied by a frozen boot. This
+  is the regression guard for the §4 version-lock dependency.
+- Unit: the frozen branch returns the same `artifacts` shape as the normal success branch (console/boot
+  log artifacts present), so the artifact list is invariant across frozen/normal success.
+- Integration (env-gated, **skipped in CI**, new test in `test_qemu_gdbstub_integration.py`): the
+  acceptance scenario end-to-end — boot a `debug_gdbstub` target with `wait_for_debugger=True`, assert
+  the boot returns `SUCCEEDED`/`console_status="frozen"` without a readiness wait; `debug.start_session`
+  attaches to the reset-vector CPU; set a breakpoint at an early-init symbol (`dcache_init` /
+  `start_kernel`); `debug.continue`; assert the breakpoint is hit and an early symbol is inspectable.
+  This is the only place the headline acceptance criterion (deterministic early breakpoint) is provable;
+  it requires a real QEMU+KVM guest and stays gated behind the existing tool/env guard.
 - The env-gated `test_libvirt_boot_integration.py` / `test_qemu_gdbstub_integration.py` stay gated; no
   un-gating.
