@@ -12,7 +12,9 @@ from linux_debug_mcp.config import BuildProfile
 from linux_debug_mcp.domain import ErrorCategory
 from linux_debug_mcp.providers.local_kernel_build import (
     BuildIdMissing,
+    ConfigGenerationError,
     LocalKernelBuildProvider,
+    MissingConfigError,
     ReadelfUnavailable,
     _extract_build_id,
 )
@@ -67,6 +69,24 @@ def test_plan_build_appends_make_variables_after_provider_owned_args(tmp_path: P
         "bzImage",
         "modules",
     ]
+
+
+def test_plan_build_carries_base_config(tmp_path: Path) -> None:
+    provider = LocalKernelBuildProvider()
+    profile = BuildProfile(name="debug", architecture="x86_64", base_config=["defconfig", "kvm_guest.config"])
+
+    plan = provider.plan_build(source_path=tmp_path / "linux", output_path=tmp_path / "build", profile=profile)
+
+    assert plan.base_config == ["defconfig", "kvm_guest.config"]
+
+
+def test_plan_build_base_config_defaults_empty(tmp_path: Path) -> None:
+    provider = LocalKernelBuildProvider()
+    profile = BuildProfile(name="x86_64-default", architecture="x86_64")
+
+    plan = provider.plan_build(source_path=tmp_path / "linux", output_path=tmp_path / "build", profile=profile)
+
+    assert plan.base_config == []
 
 
 def test_plan_build_rejects_unsupported_architecture(tmp_path: Path) -> None:
@@ -167,44 +187,143 @@ def test_plan_build_sanitizes_host_make_environment(tmp_path: Path, monkeypatch:
     assert "KBUILD_OUTPUT" not in plan.environment
 
 
-def test_prepare_config_seeds_source_config_when_output_config_missing(tmp_path: Path) -> None:
-    source = tmp_path / "linux"
-    output = tmp_path / "runs" / "run-1" / "build"
-    source.mkdir()
-    output.mkdir(parents=True)
-    (source / ".config").write_text("CONFIG_TEST=y\n", encoding="utf-8")
+class ConfigGeneratingRunner(FakeRunner):
+    """FakeRunner that writes ``<output>/.config`` when one of ``creates`` (matched on the make
+    target — the last argv token) runs successfully, modelling ``make defconfig`` seeding a config."""
 
-    provider = LocalKernelBuildProvider()
-    config_path = provider.prepare_config(source_path=source, output_path=output)
+    def __init__(self, *, output_path: Path, creates: set[str] | None = None, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.output_path = output_path
+        self.creates = creates if creates is not None else {"defconfig"}
 
-    assert config_path == output / ".config"
-    assert config_path.read_text(encoding="utf-8") == "CONFIG_TEST=y\n"
+    def run(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        log_path: Path,
+        env: dict[str, str],
+        cwd: Path | None = None,
+    ) -> int:
+        returncode = super().run(argv, timeout=timeout, log_path=log_path, env=env, cwd=cwd)
+        if returncode == 0 and argv and argv[-1] in self.creates:
+            self.output_path.mkdir(parents=True, exist_ok=True)
+            (self.output_path / ".config").write_text("CONFIG_GENERATED=y\n", encoding="utf-8")
+        return returncode
 
 
-def test_prepare_config_uses_existing_output_config_without_overwrite(tmp_path: Path) -> None:
+def _config_plan(provider: LocalKernelBuildProvider, source: Path, output: Path, **profile_kwargs: object):
+    profile = BuildProfile(name="cfg", architecture="x86_64", **profile_kwargs)  # type: ignore[arg-type]
+    return provider.plan_build(source_path=source, output_path=output, profile=profile)
+
+
+def test_prepare_config_uses_existing_output_config_without_regenerating(tmp_path: Path) -> None:
     source = tmp_path / "linux"
     output = tmp_path / "runs" / "run-1" / "build"
     source.mkdir()
     output.mkdir(parents=True)
     (source / ".config").write_text("CONFIG_SOURCE=y\n", encoding="utf-8")
     (output / ".config").write_text("CONFIG_OUTPUT=y\n", encoding="utf-8")
+    runner = FakeRunner()
+    provider = LocalKernelBuildProvider(runner=runner)
+    plan = _config_plan(provider, source, output, base_config=["defconfig"])
 
-    provider = LocalKernelBuildProvider()
-    config_path = provider.prepare_config(source_path=source, output_path=output)
+    config_path = provider.prepare_config(plan=plan, log_dir=tmp_path / "logs")
 
     assert config_path.read_text(encoding="utf-8") == "CONFIG_OUTPUT=y\n"
+    assert runner.commands == []
 
 
-def test_prepare_config_fails_without_developer_config(tmp_path: Path) -> None:
+def test_prepare_config_prefers_source_config_over_base_config(tmp_path: Path) -> None:
     source = tmp_path / "linux"
     output = tmp_path / "runs" / "run-1" / "build"
     source.mkdir()
     output.mkdir(parents=True)
+    (source / ".config").write_text("CONFIG_TEST=y\n", encoding="utf-8")
+    runner = FakeRunner()
+    provider = LocalKernelBuildProvider(runner=runner)
+    plan = _config_plan(provider, source, output, base_config=["defconfig"])
 
-    provider = LocalKernelBuildProvider()
+    config_path = provider.prepare_config(plan=plan, log_dir=tmp_path / "logs")
 
-    with pytest.raises(ValueError, match="missing developer-prepared .config"):
-        provider.prepare_config(source_path=source, output_path=output)
+    assert config_path == output / ".config"
+    assert config_path.read_text(encoding="utf-8") == "CONFIG_TEST=y\n"
+    assert runner.commands == []
+
+
+def test_prepare_config_generates_from_base_config(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    output = tmp_path / "runs" / "run-1" / "build"
+    source.mkdir()
+    output.mkdir(parents=True)
+    runner = ConfigGeneratingRunner(output_path=output, output="ok\n")
+    provider = LocalKernelBuildProvider(runner=runner)
+    plan = _config_plan(provider, source, output, base_config=["defconfig"])
+
+    config_path = provider.prepare_config(plan=plan, log_dir=tmp_path / "logs")
+
+    assert config_path == output / ".config"
+    assert runner.commands == [["make", "-C", str(source), f"O={output}", "ARCH=x86_64", "defconfig"]]
+
+
+def test_prepare_config_runs_base_config_targets_in_order(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    output = tmp_path / "runs" / "run-1" / "build"
+    source.mkdir()
+    output.mkdir(parents=True)
+    runner = ConfigGeneratingRunner(output_path=output, creates={"kvm_guest.config"}, output="ok\n")
+    provider = LocalKernelBuildProvider(runner=runner)
+    plan = _config_plan(provider, source, output, base_config=["defconfig", "kvm_guest.config"])
+
+    provider.prepare_config(plan=plan, log_dir=tmp_path / "logs")
+
+    assert [command[-1] for command in runner.commands] == ["defconfig", "kvm_guest.config"]
+
+
+def test_prepare_config_raises_when_base_config_produces_no_config(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    output = tmp_path / "runs" / "run-1" / "build"
+    source.mkdir()
+    output.mkdir(parents=True)
+    runner = FakeRunner(output="ok\n")  # returns 0 but never writes .config
+    provider = LocalKernelBuildProvider(runner=runner)
+    plan = _config_plan(provider, source, output, base_config=["defconfig"])
+
+    with pytest.raises(ConfigGenerationError, match="produced no .config"):
+        provider.prepare_config(plan=plan, log_dir=tmp_path / "logs")
+
+
+def test_prepare_config_raises_on_base_config_nonzero_exit(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    output = tmp_path / "runs" / "run-1" / "build"
+    source.mkdir()
+    output.mkdir(parents=True)
+    runner = FakeRunner(returncode=2, output="token=secret\ndefconfig boom\n")
+    provider = LocalKernelBuildProvider(runner=runner)
+    plan = _config_plan(provider, source, output, base_config=["defconfig"])
+
+    with pytest.raises(ConfigGenerationError) as excinfo:
+        provider.prepare_config(plan=plan, log_dir=tmp_path / "logs")
+
+    assert "token=[REDACTED]" in (excinfo.value.diagnostic or "")
+    assert excinfo.value.log_path is not None
+    assert excinfo.value.log_path.name == "config-base-00-defconfig.log"
+
+
+def test_prepare_config_missing_config_without_base_config(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    output = tmp_path / "runs" / "run-1" / "build"
+    source.mkdir()
+    output.mkdir(parents=True)
+    runner = FakeRunner()
+    provider = LocalKernelBuildProvider(runner=runner)
+    plan = _config_plan(provider, source, output)
+
+    with pytest.raises(MissingConfigError) as excinfo:
+        provider.prepare_config(plan=plan, log_dir=tmp_path / "logs")
+
+    assert "base_config" in excinfo.value.suggested_fix
+    assert runner.commands == []
 
 
 def test_execute_success_records_artifacts_and_summary(tmp_path: Path) -> None:
@@ -519,6 +638,103 @@ def test_execute_olddefconfig_nonzero_returns_configuration_error(tmp_path: Path
     assert "token=[REDACTED]" in result.diagnostic
     # merge_config.sh then olddefconfig ran; the main make never started
     assert len(runner.commands) == 2
+
+
+def test_execute_generates_base_config_before_main_make(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    source.mkdir()
+    output = tmp_path / "runs" / "run-1" / "build"
+    (output / "arch" / "x86" / "boot").mkdir(parents=True)
+    (output / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
+    runner = ConfigGeneratingRunner(output_path=output, output="ok\n")
+    provider = LocalKernelBuildProvider(runner=runner)
+    profile = BuildProfile(name="x86_64-default", architecture="x86_64", base_config=["defconfig"])
+    plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
+
+    result = provider.execute_build(
+        plan=plan,
+        log_path=output.parent / "logs" / "build.log",
+        summary_path=output.parent / "summaries" / "build-summary.json",
+    )
+
+    assert result.status == "succeeded"
+    # No config_lines on this profile: generation (defconfig) then the main make, nothing between.
+    assert [command[-1] for command in runner.commands] == ["defconfig", "bzImage"]
+
+
+def test_execute_base_config_then_config_lines_then_main_make(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    add_merge_config_script(source)
+    output = tmp_path / "runs" / "run-1" / "build"
+    (output / "arch" / "x86" / "boot").mkdir(parents=True)
+    (output / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
+    runner = ConfigGeneratingRunner(output_path=output, output="ok\n")
+    provider = LocalKernelBuildProvider(runner=runner)
+    profile = BuildProfile(
+        name="x86_64-debug",
+        architecture="x86_64",
+        base_config=["defconfig"],
+        config_lines=["CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y"],
+    )
+    plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
+
+    result = provider.execute_build(
+        plan=plan,
+        log_path=output.parent / "logs" / "build.log",
+        summary_path=output.parent / "summaries" / "build-summary.json",
+    )
+
+    assert result.status == "succeeded"
+    assert runner.commands[0][-1] == "defconfig"
+    assert runner.commands[1][0].endswith("merge_config.sh")
+    assert runner.commands[2][-1] == "olddefconfig"
+    assert runner.commands[3][-1] == "bzImage"
+
+
+def test_execute_base_config_nonzero_returns_configuration_error_with_log_artifact(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    source.mkdir()
+    output = tmp_path / "runs" / "run-1" / "build"
+    output.mkdir(parents=True)
+    runner = FakeRunner(returncode=2, output="token=secret\ndefconfig boom\n")
+    provider = LocalKernelBuildProvider(runner=runner)
+    profile = BuildProfile(name="x86_64-default", architecture="x86_64", base_config=["defconfig"])
+    plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
+
+    result = provider.execute_build(
+        plan=plan,
+        log_path=output.parent / "logs" / "build.log",
+        summary_path=output.parent / "summaries" / "build-summary.json",
+    )
+
+    assert result.status == "failed"
+    assert result.error_category == ErrorCategory.CONFIGURATION_ERROR
+    assert "token=[REDACTED]" in (result.diagnostic or "")
+    config_logs = [artifact for artifact in result.artifacts if artifact.kind == "config-log"]
+    assert len(config_logs) == 1
+    assert config_logs[0].path.endswith("config-base-00-defconfig.log")
+
+
+def test_execute_without_config_or_base_config_returns_suggested_fix(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    source.mkdir()
+    output = tmp_path / "runs" / "run-1" / "build"
+    output.mkdir(parents=True)
+    runner = FakeRunner(output="ok\n")
+    provider = LocalKernelBuildProvider(runner=runner)
+    profile = BuildProfile(name="nobase", architecture="x86_64")
+    plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
+
+    result = provider.execute_build(
+        plan=plan,
+        log_path=output.parent / "logs" / "build.log",
+        summary_path=output.parent / "summaries" / "build-summary.json",
+    )
+
+    assert result.status == "failed"
+    assert result.error_category == ErrorCategory.CONFIGURATION_ERROR
+    assert "base_config" in result.details["suggested_fix"]
+    assert runner.commands == []
 
 
 def test_execute_config_lines_without_merge_script_fails(tmp_path: Path) -> None:

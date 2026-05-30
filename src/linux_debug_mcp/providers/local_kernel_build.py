@@ -28,6 +28,34 @@ class ConfigMergeError(Exception):
         self.diagnostic = diagnostic
 
 
+class ConfigGenerationError(Exception):
+    """A ``base_config`` make target failed, or the targets ran but left no ``.config``.
+
+    ``diagnostic`` carries the redacted log tail of the failing target; ``log_path`` points at the
+    per-target log so the handler can attach it as a ``config-log`` artifact (ADR 0030 decision 7).
+    """
+
+    def __init__(self, message: str, *, diagnostic: str | None = None, log_path: Path | None = None) -> None:
+        super().__init__(message)
+        self.diagnostic = diagnostic
+        self.log_path = log_path
+
+
+class MissingConfigError(Exception):
+    """No ``.config`` exists and the profile declares no ``base_config`` to generate one.
+
+    ``suggested_fix`` is surfaced through ``BuildExecutionResult.details`` (ADR 0030 decision 6).
+    """
+
+    def __init__(self, message: str, *, suggested_fix: str) -> None:
+        super().__init__(message)
+        self.suggested_fix = suggested_fix
+
+
+def _sanitize_target(target: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", target)
+
+
 class ReadelfUnavailable(Exception):
     """``readelf`` failed — binary missing, non-zero exit, or timed out.
 
@@ -101,6 +129,7 @@ class BuildPlan:
     required_tools: list[str]
     environment: dict[str, str]
     config_lines: list[str] = field(default_factory=list)
+    base_config: list[str] = field(default_factory=list)
 
 
 class BuildRunner(Protocol):
@@ -187,18 +216,54 @@ class LocalKernelBuildProvider:
             required_tools=profile.effective_required_tools(),
             environment=self._sanitized_environment(),
             config_lines=list(profile.config_lines),
+            base_config=list(profile.base_config),
         )
 
-    def prepare_config(self, *, source_path: Path, output_path: Path) -> Path:
+    def prepare_config(self, *, plan: BuildPlan, log_dir: Path) -> Path:
+        """Resolve the base ``.config`` via the ADR 0030 precedence ladder.
+
+        1. output-dir ``.config`` exists → use it (idempotent rebuild);
+        2. else source-tree ``.config`` exists → copy it (developer-prepared wins);
+        3. else ``base_config`` non-empty → generate it via the ordered make targets;
+        4. else → ``MissingConfigError`` carrying an actionable ``suggested_fix``.
+        """
+        output_path = plan.output_path
         output_path.mkdir(parents=True, exist_ok=True)
         output_config = output_path / ".config"
         if output_config.exists():
             return output_config
-        source_config = source_path / ".config"
-        if not source_config.exists():
-            raise ValueError("missing developer-prepared .config")
-        shutil.copy2(source_config, output_config)
-        return output_config
+        source_config = plan.source_path / ".config"
+        if source_config.exists():
+            shutil.copy2(source_config, output_config)
+            return output_config
+        if plan.base_config:
+            self._generate_base_config(plan=plan, log_dir=log_dir)
+            if not output_config.exists():
+                raise ConfigGenerationError("base config targets produced no .config")
+            return output_config
+        raise MissingConfigError(
+            "missing developer-prepared .config",
+            suggested_fix='Set base_config (e.g. ["defconfig"]) on the build profile, '
+            "or provide a .config in the source tree.",
+        )
+
+    def _generate_base_config(self, *, plan: BuildPlan, log_dir: Path) -> None:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        for index, target in enumerate(plan.base_config):
+            target_log = log_dir / f"config-base-{index:02d}-{_sanitize_target(target)}.log"
+            status = self.runner.run(
+                ["make", "-C", str(plan.source_path), f"O={plan.output_path}", "ARCH=x86_64", target],
+                timeout=plan.timeout_seconds,
+                log_path=target_log,
+                env=plan.environment,
+                cwd=plan.output_path,
+            )
+            if status != 0:
+                raise ConfigGenerationError(
+                    f"base config target {target!r} failed (exit status {status})",
+                    diagnostic=self._log_tail(target_log),
+                    log_path=target_log,
+                )
 
     def _apply_config_lines(self, *, plan: BuildPlan, base_config: Path, log_dir: Path) -> None:
         if not plan.config_lines:
@@ -277,7 +342,7 @@ class LocalKernelBuildProvider:
                 details={"missing_tools": missing_tools, "argv": plan.argv, "source_revision": source_revision},
             )
         try:
-            base_config = self.prepare_config(source_path=plan.source_path, output_path=plan.output_path)
+            base_config = self.prepare_config(plan=plan, log_dir=log_path.parent)
             self._apply_config_lines(plan=plan, base_config=base_config, log_dir=log_path.parent)
             exit_status = self.runner.run(
                 plan.argv, timeout=plan.timeout_seconds, log_path=log_path, env=plan.environment
@@ -290,12 +355,30 @@ class LocalKernelBuildProvider:
                 details={"argv": plan.argv, "source_revision": source_revision},
                 diagnostic=exc.diagnostic,
             )
-        except ValueError as exc:
+        except ConfigGenerationError as exc:
+            artifacts = (
+                [ArtifactRef(path=str(exc.log_path), kind="config-log")]
+                if exc.log_path is not None and exc.log_path.is_file()
+                else []
+            )
+            return BuildExecutionResult(
+                status=StepStatus.FAILED,
+                summary=str(exc),
+                artifacts=artifacts,
+                error_category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"argv": plan.argv, "source_revision": source_revision},
+                diagnostic=exc.diagnostic,
+            )
+        except MissingConfigError as exc:
             return BuildExecutionResult(
                 status=StepStatus.FAILED,
                 summary=str(exc),
                 error_category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"argv": plan.argv, "source_revision": source_revision},
+                details={
+                    "argv": plan.argv,
+                    "source_revision": source_revision,
+                    "suggested_fix": exc.suggested_fix,
+                },
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return BuildExecutionResult(
