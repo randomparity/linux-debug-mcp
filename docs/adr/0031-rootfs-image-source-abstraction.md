@@ -24,11 +24,13 @@ open and that have viable alternatives. Phases 2–4 are #106/#107/#108.
 ### 1. Resolution is a handler-layer pre-boot gate, not provider logic
 
 `source_kind` resolution lives in a new pure module `rootfs/sources.py` (`resolve_rootfs_source`),
-invoked by `target_boot_handler` before `provider.plan_boot`. The provider stays `source_kind`-agnostic:
-it continues to resolve `profile.source` as a path. Resolution is acquisition *policy* (which kinds
-exist, where caches live, what remedy a missing image suggests); the provider is libvirt *mechanism*.
-Keeping policy out of the provider also means Phases 2–4 add source kinds without touching libvirt code,
-and the resolver is reusable by other (future) target providers.
+invoked by `target_boot_handler` **inside `store.boot_lock`, immediately before `provider.plan_boot`** so a
+`RootfsSourceError` is recorded as a FAILED boot `StepResult` with the correct attempt/`replace_succeeded`
+handling, mirroring the existing `ProviderBootError` branch. The provider stays `source_kind`-agnostic: it
+continues to resolve `profile.source` as a path. Resolution is acquisition *policy* (which kinds exist,
+where caches live, what remedy a missing image suggests); the provider is libvirt *mechanism*. Keeping
+policy out of the provider also means Phases 2–4 add source kinds without touching libvirt code, and the
+resolver is reusable by other (future) target providers.
 
 ### 2. `builder` does not build at tool-call time; it gates and names the remedy
 
@@ -81,9 +83,11 @@ default profile stays unset because the matching private key is per-user; the gu
   `CONFIGURATION_ERROR` instead of a generic path error.
 - The base image stays byte-for-byte stable across boots; systemd/sshd get a writable root.
 - `BootPlan` gains `rootfs_backing_path` and `overlay_create_argv`; provider unit tests adapt.
-- `copy_on_write` adds a `qemu-img` runtime dependency, surfaced as `MISSING_DEPENDENCY` when absent.
-- Under `qemu:///system`, operators must grant libvirt access to the artifact root for `copy_on_write`;
-  documented in the user guide.
+- `copy_on_write` adds a `qemu-img` dependency, advertised in the capability's `required_host_tools` (so
+  `providers.list`/#105 surface it) and surfaced as `MISSING_DEPENDENCY` at boot when absent.
+- Under `qemu:///system`, operators must grant libvirt access to the run-dir overlay — but this is the
+  **same** access already required for the by-path kernel image (`<kernel>` in the domain XML) and the
+  base image, so the overlay introduces no new *class* of host-prep. Documented in the user guide.
 - Existing frozen manifests are unaffected: `source_kind` defaults to `local_path` and the immutable
   `RunRequest`/`RootfsProfile` keep whatever they were created with; only new runs pick up the flipped
   `minimal` default.
@@ -101,7 +105,11 @@ default profile stays unset because the matching private key is per-user; the gu
    `copy_on_write` preserves the base and isolates each boot. (decision 3)
 4. **Place the overlay beside the base image in the labeled rootfs dir.** Rejected: it mixes ephemeral
    run state into the curated base directory, needs separate cleanup, and risks collisions across runs.
-   Run-local placement has a clean lifecycle; the access cost is documented host-prep. (decision 4)
+   Run-local placement has a clean lifecycle (removed with the run). The apparent advantage of the
+   labeled-dir placement — `qemu:///system` readability — is moot because the provider already attaches
+   the kernel image by host path, so the operator must already make server-supplied paths libvirt-readable;
+   the overlay rides that same, pre-existing requirement rather than justifying a placement that pollutes
+   the base dir. (decision 4)
 5. **Omit `prebuilt`/`url` from the enum until their phases land.** Rejected: adding enum members later
    would churn the wire contract and any persisted profiles. Shipping the full enum now with
    `NOT_IMPLEMENTED` behavior keeps the contract stable. (decision 5)
