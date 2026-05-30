@@ -114,27 +114,50 @@ engine crash, RSP timeout, or tool-level exception returns a best-effort
 `HALTED`.
 
 **gdb version & MI-capability probe.** Today `host.check_prerequisites` checks
-only that `gdb` is *present* (`prereqs/checks.py:48`). Phase A pins a **minimum
-gdb version of 9.1** — the release in which the GDB manual documents the `mi3`
-interpreter was introduced ("GDB/MI" chapter) — and adds an MI-capability probe
-that does more than read the version string: it **runs one mi3 MI command and
-asserts a well-formed `^done` record**. As implemented, the probe is
-`gdb -nx -q -ex 'interpreter-exec mi3 "-list-features"' -ex quit` — feeding the MI
-command via `-ex 'interpreter-exec mi3 ...'` from CLI mode (gdb's `-ex` runs *CLI*
-commands, so a bare `--interpreter=mi3 -ex "-list-features"` would report
-`-list-features` as an undefined CLI command and never reach MI; `interpreter-exec`
-runs it in the mi3 interpreter and prints its `^done`, with no stdin channel
-needed). **Pass:** the probe returns a valid mi3 `^done` record. **Fail:** gdb absent, gdb < 9.1, or no
-valid mi3 `^done` record (older gdb may accept the `mi3` *name* without yielding
-usable records) → `host.check_prerequisites` reports the probe failed and the tier
-**hard-fails with a clear, actionable message** naming the detected version and
-the required minimum. `mi3` is required — there is no `mi2` fallback.
+only that `gdb` is *present* (`prereqs/checks.py:48`). Phase A adds an
+MI-capability probe that does more than read the version string: it **runs one
+mi3 MI command and asserts a well-formed `^done` record**. As implemented, the
+probe is `gdb -nx -q -ex 'interpreter-exec mi3 "-list-features"' -ex quit` —
+feeding the MI command via `-ex 'interpreter-exec mi3 ...'` from CLI mode (gdb's
+`-ex` runs *CLI* commands, so a bare `--interpreter=mi3 -ex "-list-features"`
+would report `-list-features` as an undefined CLI command and never reach MI;
+`interpreter-exec` runs it in the mi3 interpreter and prints its `^done`, with no
+stdin channel needed).
+
+**The behavioral `^done` probe is the primary gate; the version string is
+advisory (ADR [0025](../../adr/0025-gdb-mi-prereq-behavioral-primary-gate.md)).**
+Whether a host can drive the tier is decided by whether its `gdb` actually
+answers an `mi3` command, not by its self-reported version. The GDB manual's
+"introduced in 9.1" is a documentation statement, not the exact capability
+boundary — per `NEWS`, the first `mi3`-specific change and "default MI version is
+now 3" land in the "since GDB 8.3" section, so a sub-9.1 gdb can emit a valid
+`^done`. Joining a version veto to the behavioral probe by `OR` would let the
+less-authoritative signal override the more-authoritative one; instead the
+documented `9.1` minimum is recorded as advisory context (`details["version"]`,
+`details["mi3_documented_minimum"]`) and named in messages.
+
+**Pass:** `gdb` present, the probe runs without a host-level error, and it
+returns `mi_code == 0` with a `^done` record. When the host passes behaviorally
+but its version is below — or could not be parsed against — the documented `9.1`
+minimum, the check still PASSES, sets `details["version_below_documented_minimum"]
+= True` (a machine-readable flag, not just prose; `False` on a clean ≥-minimum
+pass), and notes in the message that it was admitted on the behavioral signal.
+`details["version"]` is always present on a pass (`"unknown"` when unparseable),
+alongside `details["mi3_documented_minimum"]`. **Fail:** gdb absent, the probe
+cannot run, or no valid mi3 `^done` record (older/`mi3`-less gdb may accept the
+`mi3` *name* without yielding usable records) → `host.check_prerequisites`
+reports the probe failed and the tier **hard-fails with a clear, actionable
+message** naming the detected version (or `"unknown"` — this path is now
+reachable with an unparseable version, so the version is formatted defensively
+and never indexed when `None`) and the documented minimum. `mi3` is required —
+there is no `mi2` fallback.
 
 **Acceptance.** Against local QEMU gdbstub: attach over `rsp_endpoint`, read one
 MI record as typed JSON, detach cleanly; a second concurrent stop-capable attach
-is refused by the guard. The MI-capability probe passes on gdb ≥ 9.1 by returning
-a valid mi3 `^done` record, and hard-fails with a version-naming message on
-older/`mi3`-less gdb.
+is refused by the guard. The MI-capability probe passes whenever `gdb` returns a
+valid mi3 `^done` record (noting an advisory sub-9.1 version when applicable),
+and hard-fails with a version-naming message on a gdb that cannot answer an
+`mi3` command.
 **Fault-injection acceptance.** With a session attached and `HALTED`: an induced
 engine crash, an induced RSP timeout, and a raised tool exception each (a) return
 the target to `EXECUTING`, (b) release the `StopCapableGuard` + any lease, and
@@ -399,6 +422,6 @@ must land after B is in place.
 
 - gdb/MI: gdb manual "GDB/MI" chapter; `pygdbmi`
 - `Documentation/dev-tools/kgdb.rst` (kgdboc, connecting gdb)
-- ADR [0017](../../adr/0017-symbol-version-lock-gdb-tier.md), [0018](../../adr/0018-break-injection-policy-mapping.md), [0019](../../adr/0019-debug-gdb-mi-tier-decomposition.md)
+- ADR [0017](../../adr/0017-symbol-version-lock-gdb-tier.md), [0018](../../adr/0018-break-injection-policy-mapping.md), [0019](../../adr/0019-debug-gdb-mi-tier-decomposition.md), [0025](../../adr/0025-gdb-mi-prereq-behavioral-primary-gate.md)
 - `docs/specs/interface-contracts.md` §3.3, §4.1, §4.2, §5.3, §5.6, §9.3
 - Decomposition precedent: `docs/superpowers/specs/2026-05-28-debug-introspect-run-design.md`

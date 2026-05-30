@@ -108,9 +108,11 @@ def _parse_gdb_version(text: str) -> tuple[int, int] | None:
 
 
 def _gdb_mi_capability_check(runner: PrerequisiteRunner) -> PrerequisiteCheck:
-    """Verify gdb supports the mi3 machine interface the debug.gdb tier requires: gdb must be
-    present, at least 9.1 (the GDB manual's documented mi3 introduction), and must answer one mi3
-    command with a well-formed ``^done`` record -- not merely accept the ``mi3`` interpreter name."""
+    """Verify gdb can drive the mi3 machine interface the debug.gdb tier requires. The behavioral
+    probe is authoritative (ADR 0025): a host passes iff gdb is present, the probe runs, and it
+    returns ``mi_code == 0`` with a ``^done`` record. The reported version is advisory only --
+    recorded in ``details`` and named in messages, never a veto -- because the documented ``9.1``
+    minimum is a manual statement, not the exact capability boundary."""
     required = f"{_MI_MIN_VERSION[0]}.{_MI_MIN_VERSION[1]}"
     if runner.which("gdb") is None:
         return PrerequisiteCheck(
@@ -136,29 +138,33 @@ def _gdb_mi_capability_check(runner: PrerequisiteRunner) -> PrerequisiteCheck:
             suggested_fix=f"Confirm gdb >= {required} is installed and runnable.",
         )
     version = _parse_gdb_version(version_out)
-    if version is None or version < _MI_MIN_VERSION:
-        detected = f"{version[0]}.{version[1]}" if version is not None else "unknown"
-        return PrerequisiteCheck(
-            check_id="tool.gdb_mi",
-            status=PrerequisiteStatus.FAILED,
-            message=f"gdb {detected} is too old for the mi3 interface; the debug.gdb tier requires gdb >= {required}",
-            suggested_fix=f"Upgrade gdb to >= {required}.",
-        )
+    detected = f"{version[0]}.{version[1]}" if version is not None else "unknown"
     if mi_code != 0 or "^done" not in mi_out:
         return PrerequisiteCheck(
             check_id="tool.gdb_mi",
             status=PrerequisiteStatus.FAILED,
             message=(
-                f"gdb {version[0]}.{version[1]} did not return a valid mi3 ^done record; the debug.gdb "
-                f"tier requires a working mi3 interpreter (gdb >= {required})"
+                f"gdb {detected} did not return a valid mi3 ^done record; the debug.gdb "
+                f"tier requires a working mi3 interpreter"
             ),
-            suggested_fix=f"Confirm gdb >= {required} was built with mi3 support.",
+            suggested_fix=f"Confirm a gdb with mi3 support (>= {required} documents it) is installed.",
+        )
+    below_minimum = version is None or version < _MI_MIN_VERSION
+    message = f"gdb {detected} supports the mi3 machine interface"
+    if below_minimum:
+        relation = "could not be parsed against" if version is None else "is below"
+        message += (
+            f" (admitted on the behavioral mi3 probe; reported version {relation} the documented minimum {required})"
         )
     return PrerequisiteCheck(
         check_id="tool.gdb_mi",
         status=PrerequisiteStatus.PASSED,
-        message=f"gdb {version[0]}.{version[1]} supports the mi3 machine interface",
-        details={"version": f"{version[0]}.{version[1]}"},
+        message=message,
+        details={
+            "version": detected,
+            "mi3_documented_minimum": required,
+            "version_below_documented_minimum": below_minimum,
+        },
     )
 
 
