@@ -155,7 +155,7 @@ Success `data`:
 
 | Key | Meaning |
 |---|---|
-| `kdump_ready` | bool — true iff all three checks are `PASSED`. |
+| `kdump_ready` | bool — true iff **no** check is `FAILED` (a `WARNING`, e.g. an unassessed non-local dump target, is non-blocking; §3.2). |
 | `mechanism` | `"kdump"` \| `"fadump"` \| `"none"` — the detected active crash-capture mechanism. |
 | `probe_id` | the per-call probe id (also the sensitive-artifact subdir). |
 | `checks` | list of redacted `PrerequisiteCheck` JSON (3 entries, stable order). |
@@ -192,7 +192,8 @@ removes the worst-case `2×T` overrun.
 | `fadump_enabled` / `fadump_registered` | int of `/sys/kernel/fadump_{enabled,registered}` (or null) | mechanism + crashkernel check |
 | `service_active` | `True` if any unit line from the single `systemctl is-active kdump kdump-tools` call is `active`; `null` if `systemctl` is absent/errors/times out | service check |
 | `service_units` | per-unit raw states parsed from that one call's stdout (or an error marker) | service check details |
-| `dump_dir` | `/etc/kdump.conf` `path` directive when readable, else `/var/crash` | dump-path check |
+| `dump_target_directive` | the dump-target directive in `/etc/kdump.conf` if present — a line beginning `raw`/`ext2`/`ext3`/`ext4`/`xfs`/`btrfs`/`minix`/`nfs`/`ssh`/`nvme`/`virtiofs` (the makedumpfile target types); `null` if none/file unreadable | dump-path check (non-local guard) |
+| `dump_dir` | the `/etc/kdump.conf` `path` directive when readable, else `/var/crash` | dump-path check |
 | `dump_dir_exists` | `os.path.isdir(dump_dir)` | dump-path check |
 | `dump_dir_writable` | **transient write probe**: `tempfile.mkstemp(dir=dump_dir, prefix=".ldm-writecheck-")` then `unlink` in a `finally` (returns `False` on any `OSError`; `null` if the dir is absent). NOT `os.access(W_OK)` — the probe runs as root and root bypasses mode bits, so `os.access` returns `True` for any existing dir on a writable mount and could never detect a genuinely unwritable target (ADR 0028 decision 5). Self-cleaning on every path **except** an outer-`timeout` SIGKILL mid-probe, which may leave one small uniquely-named `.ldm-writecheck-*` file; the recognizable prefix lets an operator/agent identify the stray (ADR 0028 decision 5). | dump-path check |
 | `dump_dir_write_error` | the `OSError` class/errno when the write probe failed (e.g. `ENOSPC`, `EROFS`, `EACCES`) | dump-path check fix text |
@@ -214,16 +215,27 @@ Check verdicts:
   otherwise, fix: "enable and start the kdump service (`systemctl enable --now
   kdump`); this tool reports state only and never starts it." `details` carry the
   per-unit states so an agent sees which unit name applies.
-- **`kdump.dump_path_writable`** — `PASSED` if `dump_dir_exists` and the write probe
-  succeeded; `FAILED` if missing ("create `<dir>`") or present-but-the-write-failed
-  ("`<dir>` is not writable by the capture kernel: `<errno>`; fix the mount
-  (read-only?), free space (`ENOSPC`), or ownership/permissions"). The fix text is
-  driven by `dump_dir_write_error` so an agent gets the specific cause. `details`
-  carry the resolved `dump_dir` and whether it came from `/etc/kdump.conf`. The write
-  probe is transient and self-cleaning (§3.0 / scope note) — it is the only oracle
-  that reflects what the capture kernel will actually be able to do.
+- **`kdump.dump_path_writable`** — when `dump_target_directive` is **non-null**, the
+  dump target is a separate device / NFS / SSH whose `path` is relative to that
+  target's mount, **not** the rootfs, so a local write-probe would be meaningless;
+  the check is `WARNING` ("dump target is a separate `<directive>` device/share; local
+  writability not assessed — x86_64 local `/var/crash` is the tested path") and is
+  **not** treated as a blocker. Otherwise (local dump dir): `PASSED` if `dump_dir_exists`
+  and the write probe succeeded; `FAILED` if missing ("create `<dir>`") or
+  present-but-the-write-failed ("`<dir>` is not writable by the capture kernel:
+  `<errno>`; fix the mount (read-only?), free space (`ENOSPC`), or
+  ownership/permissions"). The fix text is driven by `dump_dir_write_error` so an agent
+  gets the specific cause. `details` carry the resolved `dump_dir`, its source
+  (`/etc/kdump.conf` vs default), and any `dump_target_directive`. The write probe is
+  transient and self-cleaning (§3.0 / scope note) — it is the only oracle that reflects
+  what the capture kernel will actually be able to do for a local target.
 
-`kdump_ready = all(c.status == PASSED for c in checks)`.
+`kdump_ready = not any(c.status == FAILED for c in checks)` — i.e. no *detected*
+blocker. A `WARNING` (e.g. an unassessed non-local dump target) is non-blocking, so a
+correctly-configured separate-dump-device target is not falsely reported not-ready; an
+agent distinguishes "ready" from "ready-but-something-unassessed" via the per-check
+statuses. A fully-local kdump-ready target has all three `PASSED` (AC#1); any genuine
+fault is a `FAILED` check (AC#2).
 
 ### 3.3 HALTED fast-reject (`_reject_if_target_halted`)
 
@@ -305,7 +317,9 @@ return and before persist covers that.
   fix text), fadump-enabled, mechanism=none. Assert independence (a probe with all
   three faults yields three FAILs) **and** the service-fact-missing case
   (`service_active=null` from a stalled/absent `systemctl` → `kdump.service_active`
-  FAILED while the crashkernel and dump-path checks still produce their own verdicts).
+  FAILED while the crashkernel and dump-path checks still produce their own verdicts)
+  **and** the non-local-dump case (`dump_target_directive` set → `kdump.dump_path_writable`
+  WARNING, not a false FAIL, and `kdump_ready` stays true when the other two PASS).
 - **Handler tests** (`tests/test_postmortem_check_prereqs.py`): a fake `SshRunner`
   returning canned JSON → success with three checks; HALTED fast-reject via an
   injected session registry; config errors (run-not-found, profile mismatch, bad

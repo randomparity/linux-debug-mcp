@@ -107,9 +107,19 @@ handler.
 The dump dir itself is the `path` directive of `/etc/kdump.conf` when that file is
 readable, else the `/var/crash` default; the resolved dir and its source are in
 `details`. A dump target on a separate block device / NFS / SSH (where `path` is
-relative to that target's mount, not the rootfs) is **not** resolved; the limitation
-is documented. This matches the issue's "default `/var/crash`" and keeps the probe a
-diagnostic, not a kdump.conf interpreter.
+relative to that target's mount, not the rootfs) must **not** be write-probed on the
+rootfs — that would emit a confident `FAILED` ("create `/crash`") for a *correctly*
+configured target and a false `kdump_ready=false`. So the probe detects a dump-target
+directive (`raw`/`ext4`/`xfs`/`btrfs`/`nfs`/`ssh`/`nvme`/… — the makedumpfile target
+types) in `/etc/kdump.conf`; when present, `kdump.dump_path_writable` is a `WARNING`
+("separate device/share; local writability not assessed"), not a write-probe of a
+meaningless local path. `kdump_ready` is defined as **no `FAILED` check** (a `WARNING`
+is non-blocking), so an unassessed non-local target is not falsely reported not-ready,
+and an agent distinguishes "ready" from "ready-but-unassessed" via the per-check
+statuses. Only when no dump-target directive is present is `path` treated as a
+rootfs-local dir and write-probed. This keeps the probe a diagnostic, not a kdump.conf
+interpreter, while refusing to emit a wrong verdict for the out-of-scope non-local
+case (x86_64 local `/var/crash` remains the tested path).
 
 ### 6. python3-absent is a fail-closed infrastructure failure, not synthesized checks
 
