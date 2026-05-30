@@ -130,6 +130,9 @@ ALLOWED_DEBUG_OPERATIONS = [
     # Host-side crash-utility postmortem (#92). Listed for enumerability; never
     # gated (no DebugProfile in the request) — §5.6 rule 3 / ADR 0010 item 7.
     "debug.postmortem.crash",
+    # Composite triage (#93). Listed for enumerability; never gated (§5.6 rule 3) —
+    # composes the crash + drgn offline tiers, no DebugProfile in the request.
+    "debug.postmortem.triage",
     # ADR 0011 / #56: capability token (NOT an MCP tool) gating allow_write=true on the live
     # introspect path. Only ever passed to `_ensure_debug_operation_enabled`, never registered
     # as a tool. A read-only profile narrows `enabled_operations` to exclude it to refuse writes.
@@ -177,6 +180,11 @@ CRASH_COMMAND_ALLOWLIST: set[str] = {
     "foreach",
     "help",
 }
+
+# debug.postmortem.triage fixed helper set (#93 / spec §7). Reviewable in one place.
+TRIAGE_CRASH_COMMANDS: tuple[str, ...] = ("log", "bt")
+TRIAGE_DMESG_HELPER = "dmesg"
+TRIAGE_MODULES_HELPER = "modules"
 
 # Spec §11 open risk 4a: integer-percent threshold for the host-side prelude-cost warning;
 # fires when `prelude_ms * 100 >= PRELUDE_WARNING_FRACTION_PCT * timeout_seconds * 1000`.
