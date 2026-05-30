@@ -5473,6 +5473,9 @@ def _debug_open_request(*, run_id: str, gdbstub_endpoint: dict[str, Any], admiss
             line_role=LineRole.RSP,
             caps=("rsp",),
             target_ref=gdbstub_endpoint,
+            # The qemu-gdbstub transport reads the RSP host/port from opts (transport.qemu_gdbstub),
+            # so the endpoint must be in opts, not only target_ref, or attach raises KeyError: 'port'.
+            opts=gdbstub_endpoint,
         ),
         required_caps=["rsp"],
         platform=snapshot.platform,
