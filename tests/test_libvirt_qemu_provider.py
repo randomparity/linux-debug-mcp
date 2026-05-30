@@ -356,7 +356,11 @@ def test_render_domain_xml_includes_direct_kernel_boot_devices_and_metadata(tmp_
     assert disk is not None
     assert disk.find("source").attrib["file"] == str(plan.rootfs_path)
     assert disk.find("target").attrib == {"dev": "vda", "bus": "virtio"}
-    assert root.find("./devices/serial[@type='pty']") is not None
+    serial = root.find("./devices/serial[@type='pty']")
+    assert serial is not None
+    log = serial.find("log")
+    assert log is not None
+    assert log.attrib == {"file": str(plan.console_log_path), "append": "off"}
     assert root.find("./devices/console[@type='pty']") is not None
     metadata = root.find(f"metadata/{{{MCP_METADATA_NS}}}linux-debug-mcp")
     assert metadata is not None
@@ -538,39 +542,11 @@ def test_default_runner_run_maps_timeout_to_command_result(
     assert "timed out after 3s" in log_path.read_text(encoding="utf-8")
 
 
-def test_default_runner_stream_console_detects_marker_and_writes_bounded_snippet(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    popen_calls: list[dict[str, object]] = []
-
-    class FakeStdout:
-        def __init__(self) -> None:
-            self.lines = iter(["booting\n", "x" * 5000 + "\n", "linux-debug-mcp-ready\n"])
-
-        def readline(self) -> str:
-            return next(self.lines, "")
-
-    class FakePopen:
-        def __init__(self, argv: list[str], **kwargs: object) -> None:
-            popen_calls.append({"argv": argv, **kwargs})
-            self.stdout = FakeStdout()
-            self.terminated = False
-
-        def poll(self) -> int | None:
-            return None
-
-        def terminate(self) -> None:
-            self.terminated = True
-
-        def wait(self, timeout: int | None = None) -> int:
-            return 0
-
-        def kill(self) -> None:
-            raise AssertionError("ready console should terminate cleanly")
-
-    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+def test_default_runner_stream_console_detects_marker_from_log_file(tmp_path: Path) -> None:
+    # libvirt writes the serial chardev to output_path via the domain <log> element; the runner
+    # tails that file with no controlling TTY. A marker already present is detected on first read.
     console_log = tmp_path / "console.log"
+    console_log.write_text("booting\n" + "x" * 5000 + "\nlinux-debug-mcp-ready\n", encoding="utf-8")
 
     result = SubprocessLibvirtRunner(snippet_limit=128).stream_console(
         "debug-vm",
@@ -580,164 +556,105 @@ def test_default_runner_stream_console_detects_marker_and_writes_bounded_snippet
         readiness_marker="linux-debug-mcp-ready",
     )
 
-    assert popen_calls[0]["argv"] == ["virsh", "-c", "qemu:///system", "console", "--force", "debug-vm"]
-    assert popen_calls[0]["shell"] is False
     assert result.status == "ready"
     assert result.matched_marker == "linux-debug-mcp-ready"
     assert len(result.snippet) <= 128
-    assert "linux-debug-mcp-ready" in console_log.read_text(encoding="utf-8")
+    assert "linux-debug-mcp-ready" in result.snippet
 
 
-def test_default_runner_stream_console_times_out_and_terminates_child(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    instances: list[object] = []
-
-    class FakeStdout:
-        def readline(self) -> str:
-            return ""
-
-    class FakePopen:
-        def __init__(self, argv: list[str], **kwargs: object) -> None:
-            self.stdout = FakeStdout()
-            self.terminated = False
-            instances.append(self)
-
-        def poll(self) -> int | None:
-            return None
-
-        def terminate(self) -> None:
-            self.terminated = True
-
-        def wait(self, timeout: int | None = None) -> int:
-            return 0
-
-        def kill(self) -> None:
-            raise AssertionError("terminate should be enough in this fake")
-
-    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+def test_default_runner_stream_console_detects_marker_without_trailing_newline(tmp_path: Path) -> None:
+    console_log = tmp_path / "console.log"
+    console_log.write_text("partial linux-debug-mcp-ready", encoding="utf-8")
 
     result = SubprocessLibvirtRunner().stream_console(
         "debug-vm",
         libvirt_uri="qemu:///system",
-        output_path=tmp_path / "console.log",
-        timeout=0,
-        readiness_marker="ready",
-    )
-
-    assert result.status == "timeout"
-    assert instances[0].terminated is True
-
-
-def test_default_runner_stream_console_reports_early_exit_and_terminates_child(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    instances: list[object] = []
-
-    class FakeStdout:
-        def __init__(self) -> None:
-            self.lines = iter(["booting\n", ""])
-
-        def readline(self) -> str:
-            return next(self.lines, "")
-
-    class FakePopen:
-        def __init__(self, argv: list[str], **kwargs: object) -> None:
-            self.stdout = FakeStdout()
-            self.terminated = False
-            self.polls = 0
-            instances.append(self)
-
-        def poll(self) -> int | None:
-            self.polls += 1
-            return 0 if self.polls > 1 else None
-
-        def terminate(self) -> None:
-            self.terminated = True
-
-        def wait(self, timeout: int | None = None) -> int:
-            return 0
-
-        def kill(self) -> None:
-            raise AssertionError("early exit should terminate cleanly")
-
-    monkeypatch.setattr(subprocess, "Popen", FakePopen)
-
-    result = SubprocessLibvirtRunner().stream_console(
-        "debug-vm",
-        libvirt_uri="qemu:///system",
-        output_path=tmp_path / "console.log",
-        timeout=5,
-        readiness_marker="ready",
-    )
-
-    assert result.status == "exited"
-    assert instances[0].terminated is True
-
-
-def test_default_runner_stream_console_reads_partial_output_without_newline(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeStdout:
-        def __init__(self) -> None:
-            self.payload = b"partial linux-debug-mcp-ready"
-
-        def fileno(self) -> int:
-            return 123
-
-        def readline(self) -> str:
-            raise AssertionError("partial console output must not use blocking readline after readiness")
-
-    class FakeSelector:
-        def register(self, file_number: int, event: int) -> None:
-            assert file_number == 123
-
-        def select(self, timeout: float) -> list[tuple[object, int]]:
-            return [(object(), 1)]
-
-        def close(self) -> None:
-            pass
-
-    class FakePopen:
-        def __init__(self, argv: list[str], **kwargs: object) -> None:
-            self.stdout = FakeStdout()
-            self.terminated = False
-
-        def poll(self) -> int | None:
-            return None
-
-        def terminate(self) -> None:
-            self.terminated = True
-
-        def wait(self, timeout: int | None = None) -> int:
-            return 0
-
-        def kill(self) -> None:
-            raise AssertionError("marker detection should terminate cleanly")
-
-    def fake_os_read(file_number: int, size: int) -> bytes:
-        assert file_number == 123
-        assert size > 0
-        return b"partial linux-debug-mcp-ready"
-
-    monkeypatch.setattr(subprocess, "Popen", FakePopen)
-    monkeypatch.setattr("linux_debug_mcp.providers.libvirt_qemu.selectors.DefaultSelector", FakeSelector)
-    monkeypatch.setattr("linux_debug_mcp.providers.libvirt_qemu.os.read", fake_os_read)
-
-    result = SubprocessLibvirtRunner().stream_console(
-        "debug-vm",
-        libvirt_uri="qemu:///system",
-        output_path=tmp_path / "console.log",
+        output_path=console_log,
         timeout=5,
         readiness_marker="linux-debug-mcp-ready",
     )
 
     assert result.status == "ready"
     assert result.matched_marker == "linux-debug-mcp-ready"
-    assert (tmp_path / "console.log").read_text(encoding="utf-8") == "partial linux-debug-mcp-ready"
+
+
+def test_default_runner_stream_console_times_out_without_marker(tmp_path: Path) -> None:
+    console_log = tmp_path / "console.log"
+    console_log.write_text("still booting\n", encoding="utf-8")
+
+    result = SubprocessLibvirtRunner().stream_console(
+        "debug-vm",
+        libvirt_uri="qemu:///system",
+        output_path=console_log,
+        timeout=0,
+        readiness_marker="never-appears",
+    )
+
+    assert result.status == "timeout"
+    assert result.matched_marker is None
+
+
+def test_default_runner_stream_console_reports_exit_when_domain_stops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    domstate_calls: list[list[str]] = []
+
+    class FakeCompleted:
+        returncode = 0
+        stdout = "shut off\n"
+        stderr = ""
+
+    def fake_run(argv: list[str], **kwargs: object) -> FakeCompleted:
+        domstate_calls.append(argv)
+        return FakeCompleted()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    console_log = tmp_path / "console.log"
+    console_log.write_text("booting but no marker\n", encoding="utf-8")
+
+    result = SubprocessLibvirtRunner().stream_console(
+        "debug-vm",
+        libvirt_uri="qemu:///system",
+        output_path=console_log,
+        timeout=5,
+        readiness_marker="linux-debug-mcp-ready",
+    )
+
+    assert result.status == "exited"
+    assert domstate_calls[0] == ["virsh", "-c", "qemu:///system", "domstate", "debug-vm"]
+
+
+def test_default_runner_stream_console_drains_final_marker_before_reporting_exit(tmp_path: Path) -> None:
+    # When the domain stops, a final flush of the log file is read before deciding: a marker written
+    # in the guest's last gasp must still be reported as ready, not exited.
+    console_log = tmp_path / "console.log"
+    console_log.write_text("", encoding="utf-8")
+
+    class DrainingRunner(SubprocessLibvirtRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self._reads = 0
+
+        def _domain_is_running(self, domain: str, *, libvirt_uri: str, timeout: int) -> bool:
+            return False
+
+        def _read_new_console_text(self, path: Path, position: int) -> tuple[str, int]:
+            self._reads += 1
+            if self._reads == 1:
+                return "", position
+            return "linux-debug-mcp-ready\n", position + 1
+
+    result = DrainingRunner().stream_console(
+        "debug-vm",
+        libvirt_uri="qemu:///system",
+        output_path=console_log,
+        timeout=5,
+        readiness_marker="linux-debug-mcp-ready",
+    )
+
+    assert result.status == "ready"
+    assert result.matched_marker == "linux-debug-mcp-ready"
 
 
 class FakeLibvirtRunner:
@@ -906,25 +823,39 @@ def test_execute_boot_dumpxml_non_absent_failure_maps_to_infrastructure_failure(
     assert runner.commands == [plan.dumpxml_argv]
 
 
-@pytest.mark.parametrize(
-    "dumpxml",
-    [
-        CommandResult(["virsh", "dumpxml"], 1, stderr="Domain not found: debug-vm\n", timed_out=True),
-        CommandResult(["virsh", "dumpxml"], 1, stderr="error: failed to get domain 'debug-vm'\n"),
-    ],
-)
-def test_execute_boot_dumpxml_only_specific_domain_not_found_is_absent(
-    tmp_path: Path,
-    dumpxml: CommandResult,
-) -> None:
+def test_execute_boot_dumpxml_timed_out_not_found_is_not_absent(tmp_path: Path) -> None:
+    # A timed-out dumpxml is never treated as "domain absent" even when its captured
+    # stderr mentions a missing domain: the timeout is the dominant signal.
     plan = make_plan(tmp_path)
-    runner = FakeLibvirtRunner(dumpxml=dumpxml)
+    runner = FakeLibvirtRunner(
+        dumpxml=CommandResult(plan.dumpxml_argv, 1, stderr="Domain not found: debug-vm\n", timed_out=True),
+    )
 
     result = LibvirtQemuProvider(runner=runner).execute_boot(plan)
 
     assert result.status == StepStatus.FAILED
     assert result.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert runner.commands == [plan.dumpxml_argv]
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "Domain not found: no domain with matching name 'debug-vm'\n",
+        "error: failed to get domain 'debug-vm'\n",
+    ],
+)
+def test_execute_boot_dumpxml_domain_absent_phrasings_proceed_to_define(tmp_path: Path, stderr: str) -> None:
+    # libvirt phrases an absent-domain lookup as "Domain not found:" (<=10.x) or
+    # "failed to get domain '<name>'" (>=11.x). Both must be treated as absent so a
+    # first boot of a managed transient domain proceeds to define + start.
+    plan = make_plan(tmp_path)
+    runner = FakeLibvirtRunner(dumpxml=CommandResult(plan.dumpxml_argv, 1, stderr=stderr))
+
+    result = LibvirtQemuProvider(runner=runner).execute_boot(plan)
+
+    assert result.status == StepStatus.SUCCEEDED
+    assert runner.commands == [plan.dumpxml_argv, plan.define_argv, plan.start_argv, plan.domifaddr_argv]
 
 
 def test_execute_boot_retry_stops_matching_domain_before_define_start(tmp_path: Path) -> None:

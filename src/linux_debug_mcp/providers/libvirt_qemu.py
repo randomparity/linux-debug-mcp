@@ -3,8 +3,6 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
-import os
-import selectors
 import shutil
 import subprocess
 import time
@@ -171,8 +169,16 @@ class LibvirtRunner(Protocol):
 
 
 class SubprocessLibvirtRunner:
-    def __init__(self, *, snippet_limit: int = 4096) -> None:
+    def __init__(
+        self,
+        *,
+        snippet_limit: int = 4096,
+        poll_interval: float = 0.05,
+        state_poll_interval: float = 1.0,
+    ) -> None:
         self.snippet_limit = snippet_limit
+        self.poll_interval = poll_interval
+        self.state_poll_interval = state_poll_interval
 
     def which(self, command: str) -> str | None:
         return shutil.which(command)
@@ -224,53 +230,44 @@ class SubprocessLibvirtRunner:
         timeout: int,
         readiness_marker: str,
     ) -> ConsoleResult:
+        # libvirt tees the guest serial chardev to output_path via the domain <log> element (see
+        # render_domain_xml), so this tails that file for the readiness marker — no controlling TTY
+        # is needed (the MCP server runs headless) and output is captured from the first boot byte.
+        # Domain liveness is polled with `virsh domstate` to report an early exit (ADR 0035).
         started_at = datetime.now(UTC)
-        argv = ["virsh", "-c", libvirt_uri, "console", "--force", domain]
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        process = subprocess.Popen(
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            shell=False,
-            bufsize=1,
-        )
-        snippet = ""
-        status: Literal["ready", "timeout", "exited"] = "exited"
-        matched_marker: str | None = None
         deadline = time.monotonic() + timeout
-        selector: selectors.BaseSelector | None = None
-        if process.stdout is not None:
-            try:
-                selector = selectors.DefaultSelector()
-                selector.register(process.stdout.fileno(), selectors.EVENT_READ)
-            except (AttributeError, OSError, ValueError):
-                if selector is not None:
-                    selector.close()
-                selector = None
-        try:
-            with output_path.open("w", encoding="utf-8") as output_file:
-                while True:
-                    if time.monotonic() >= deadline:
-                        status = "timeout"
-                        break
-                    line = self._read_console_line(process=process, deadline=deadline, selector=selector)
-                    if line:
-                        output_file.write(line)
-                        snippet = self._bounded_snippet(snippet + line)
-                        if readiness_marker in line or readiness_marker in snippet:
-                            status = "ready"
-                            matched_marker = readiness_marker
-                            break
-                        continue
-                    if process.poll() is not None:
+        snippet = ""
+        matched_marker: str | None = None
+        status: Literal["ready", "timeout", "exited"] = "timeout"
+        position = 0
+        next_state_poll = 0.0
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                status = "timeout"
+                break
+            chunk, position = self._read_new_console_text(output_path, position)
+            if chunk:
+                snippet = self._bounded_snippet(snippet + chunk)
+                if readiness_marker in snippet:
+                    status = "ready"
+                    matched_marker = readiness_marker
+                    break
+                continue
+            if now >= next_state_poll:
+                next_state_poll = now + self.state_poll_interval
+                if not self._domain_is_running(domain, libvirt_uri=libvirt_uri, timeout=timeout):
+                    chunk, position = self._read_new_console_text(output_path, position)
+                    if chunk:
+                        snippet = self._bounded_snippet(snippet + chunk)
+                    if readiness_marker in snippet:
+                        status = "ready"
+                        matched_marker = readiness_marker
+                    else:
                         status = "exited"
-                        break
-                    time.sleep(0.05)
-        finally:
-            if selector is not None:
-                selector.close()
-            self._terminate_process(process)
+                    break
+            time.sleep(self.poll_interval)
         return ConsoleResult(
             status=status,
             matched_marker=matched_marker,
@@ -278,6 +275,25 @@ class SubprocessLibvirtRunner:
             started_at=started_at,
             ended_at=datetime.now(UTC),
         )
+
+    def _read_new_console_text(self, path: Path, position: int) -> tuple[str, int]:
+        try:
+            with path.open("rb") as handle:
+                handle.seek(position)
+                data = handle.read()
+        except FileNotFoundError:
+            return "", position
+        if not data:
+            return "", position
+        return data.decode("utf-8", errors="replace"), position + len(data)
+
+    def _domain_is_running(self, domain: str, *, libvirt_uri: str, timeout: int) -> bool:
+        probe_timeout = max(1, min(timeout, 10))
+        result = self.run(["virsh", "-c", libvirt_uri, "domstate", domain], timeout=probe_timeout)
+        if result.timed_out:
+            # A flaky/slow probe is not proof the guest stopped; keep waiting for the marker.
+            return True
+        return "running" in result.stdout.lower()
 
     def _append_command_log(self, *, log_path: Path, result: CommandResult, timeout: int) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -290,41 +306,6 @@ class SubprocessLibvirtRunner:
 
     def _bounded_snippet(self, text: str) -> str:
         return text[-self.snippet_limit :]
-
-    def _read_console_line(
-        self,
-        *,
-        process: subprocess.Popen[str],
-        deadline: float,
-        selector: selectors.BaseSelector | None,
-    ) -> str:
-        if process.stdout is None:
-            return ""
-        timeout = max(min(deadline - time.monotonic(), 0.05), 0)
-        if selector is not None:
-            if not selector.select(timeout):
-                return ""
-            return os.read(process.stdout.fileno(), 4096).decode("utf-8", errors="replace")
-        try:
-            file_number = process.stdout.fileno()
-        except (AttributeError, OSError):
-            return process.stdout.readline()
-        with selectors.DefaultSelector() as fallback_selector:
-            fallback_selector.register(file_number, selectors.EVENT_READ)
-            if not fallback_selector.select(timeout):
-                return ""
-            return os.read(file_number, 4096).decode("utf-8", errors="replace")
-
-    def _terminate_process(self, process: subprocess.Popen[str]) -> None:
-        try:
-            process.terminate()
-        except OSError:
-            return
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=2)
 
     def _to_text(self, value: str | bytes | None) -> str:
         if value is None:
@@ -687,6 +668,9 @@ class LibvirtQemuProvider:
         if plan.rootfs_mutability == "read_only":
             ElementTree.SubElement(disk, "readonly")
         serial = ElementTree.SubElement(devices, "serial", {"type": "pty"})
+        # libvirt tees this serial chardev to the log file from domain start, so headless capture
+        # (SubprocessLibvirtRunner.stream_console tails it) needs no interactive virsh console (ADR 0035).
+        ElementTree.SubElement(serial, "log", {"file": str(plan.console_log_path), "append": "off"})
         ElementTree.SubElement(serial, "target", {"port": "0"})
         console = ElementTree.SubElement(devices, "console", {"type": "pty"})
         ElementTree.SubElement(console, "target", {"type": "serial", "port": "0"})
@@ -954,7 +938,9 @@ class LibvirtQemuProvider:
         if result.timed_out:
             return False
         output = f"{result.stdout}\n{result.stderr}".lower()
-        return "domain not found" in output
+        # libvirt <=10.x: "Domain not found: ..."; libvirt >=11.x: "failed to get domain '<name>'".
+        # Both denote VIR_ERR_NO_DOMAIN (lookup by name failed), distinct from a connection error.
+        return "domain not found" in output or "failed to get domain" in output
 
     def _metadata_tag(self, name: str) -> str:
         return f"{{{MCP_METADATA_NS}}}{name}"
