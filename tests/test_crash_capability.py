@@ -7,7 +7,7 @@ from linux_debug_mcp.providers.plugins import local_provider_plugin_specs
 def test_capability_advertises_operation() -> None:
     cap = local_crash_postmortem_capability()
     assert cap.provider_name == "local-crash-postmortem"
-    assert cap.operations == ["debug.postmortem.crash"]
+    assert cap.operations == ["debug.postmortem.crash", "debug.postmortem.triage"]
     assert "crash" in cap.required_host_tools
     assert cap.semantics.concurrent_safe is True
 
