@@ -157,6 +157,8 @@ def test_default_debug_profile_matches_sprint_4_policy() -> None:
         "debug.postmortem.crash",
         "debug.postmortem.triage",
         "debug.postmortem.check_prereqs",
+        "debug.postmortem.list_dumps",
+        "debug.postmortem.fetch",
         "debug.introspect.write",
     ]
 
