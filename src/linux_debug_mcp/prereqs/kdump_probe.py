@@ -9,6 +9,7 @@ PASS/FAIL (the trust boundary mirrors ``prereqs/drgn_probe.py``).
 
 from __future__ import annotations
 
+from string import Template
 from typing import Any
 
 from linux_debug_mcp.domain import PrerequisiteCheck, PrerequisiteStatus
@@ -163,3 +164,133 @@ def build_kdump_checks(probe: dict[str, Any]) -> tuple[list[PrerequisiteCheck], 
         _dump_path_check(probe),
     ]
     return checks, mechanism
+
+
+# On-target probe. stdlib-only python3 reading stdin, emitting ONE JSON facts object
+# on stdout. The host (build_kdump_checks) decides verdicts. `$systemctl_timeout` and
+# `$units` / `$targets` are substituted by render_kdump_probe_script: the systemctl
+# timeout is derived from the call budget so the single systemctl call is provably
+# under the outer `timeout Ns` bound (ADR 0028 decision 2). The probe runs as root
+# (sudo prefix for non-root logins), so the dump-dir writability fact is a transient
+# mkstemp write probe, NOT os.access(W_OK) (root bypasses mode bits — ADR 0028 dec 5).
+# Self-cleaning except on an outer-timeout SIGKILL, which skips the finally and may
+# leave one ".ldm-writecheck-*" temp file in the dump dir.
+KDUMP_PROBE_SCRIPT_TEMPLATE = Template(
+    r"""import errno, json, os, subprocess, sys, tempfile
+
+UNITS = list($units)
+TARGETS = set($targets)
+
+
+def _read_int(path):
+    try:
+        with open(path) as fh:
+            return int(fh.read().strip())
+    except Exception:
+        return None
+
+
+def _cmdline_has_crashkernel():
+    try:
+        with open("/proc/cmdline") as fh:
+            return "crashkernel=" in fh.read()
+    except Exception:
+        return None
+
+
+def _service_states():
+    states = {}
+    try:
+        proc = subprocess.run(
+            ["systemctl", "is-active", *UNITS],
+            capture_output=True,
+            text=True,
+            timeout=$systemctl_timeout,
+        )
+        lines = proc.stdout.splitlines()
+        for i, unit in enumerate(UNITS):
+            states[unit] = lines[i].strip() if i < len(lines) else "unknown"
+        return any(s == "active" for s in states.values()), states
+    except Exception as exc:
+        return None, {"error": type(exc).__name__}
+
+
+def _kdump_conf():
+    directive = None
+    dump_dir = None
+    try:
+        with open("/etc/kdump.conf") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split(None, 1)
+                kw = parts[0]
+                if kw in TARGETS and directive is None:
+                    directive = kw
+                elif kw == "path" and len(parts) > 1:
+                    dump_dir = parts[1].strip()
+    except Exception:
+        pass
+    return directive, dump_dir
+
+
+def _writable(d):
+    if not os.path.isdir(d):
+        return None, None
+    fd = None
+    path = None
+    try:
+        fd, path = tempfile.mkstemp(dir=d, prefix=".ldm-writecheck-")
+        return True, None
+    except OSError as exc:
+        return False, errno.errorcode.get(exc.errno, str(exc.errno))
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        if path is not None:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+
+
+directive, conf_dir = _kdump_conf()
+dump_dir = conf_dir or "/var/crash"
+service_active, service_units = _service_states()
+writable, write_error = _writable(dump_dir)
+try:
+    arch = os.uname().machine
+except Exception:
+    arch = None
+
+result = {
+    "arch": arch,
+    "cmdline_has_crashkernel": _cmdline_has_crashkernel(),
+    "kexec_crash_size": _read_int("/sys/kernel/kexec_crash_size"),
+    "fadump_enabled": _read_int("/sys/kernel/fadump_enabled"),
+    "fadump_registered": _read_int("/sys/kernel/fadump_registered"),
+    "service_active": service_active,
+    "service_units": service_units,
+    "dump_target_directive": directive,
+    "dump_dir": conf_dir,
+    "dump_dir_exists": os.path.isdir(dump_dir),
+    "dump_dir_writable": writable,
+    "dump_dir_write_error": write_error,
+}
+sys.stdout.write(json.dumps(result))
+"""
+)
+
+
+def render_kdump_probe_script(*, systemctl_timeout: int) -> str:
+    """Render the on-target probe with the budget-derived systemctl timeout and the
+    canonical unit / dump-target lists (one source of truth — ADR 0028 dec 2)."""
+    return KDUMP_PROBE_SCRIPT_TEMPLATE.substitute(
+        systemctl_timeout=systemctl_timeout,
+        units=repr(list(SERVICE_UNITS)),
+        targets=repr(list(DUMP_TARGET_DIRECTIVES)),
+    )

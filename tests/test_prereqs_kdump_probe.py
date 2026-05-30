@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+
 from linux_debug_mcp.domain import PrerequisiteStatus
-from linux_debug_mcp.prereqs.kdump_probe import build_kdump_checks
+from linux_debug_mcp.prereqs.kdump_probe import build_kdump_checks, render_kdump_probe_script
 
 
 def _by_id(checks):
@@ -120,3 +124,33 @@ def test_separate_dump_device_is_warning_not_false_fail() -> None:
     chk = _by_id(checks)["kdump.dump_path_writable"]
     assert chk.status == PrerequisiteStatus.WARNING
     assert "ext4" in chk.message
+
+
+def test_render_substitutes_systemctl_timeout() -> None:
+    script = render_kdump_probe_script(systemctl_timeout=3)
+    assert "timeout=3" in script
+    assert "$systemctl_timeout" not in script
+
+
+def test_probe_script_runs_on_host_and_emits_expected_keys() -> None:
+    # The script is stdlib-only and must run without crashing on any Linux host,
+    # emitting one JSON object with the full fact set (values may be null here).
+    script = render_kdump_probe_script(systemctl_timeout=3)
+    proc = subprocess.run([sys.executable, "-"], input=script, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    facts = json.loads(proc.stdout)
+    for key in (
+        "arch",
+        "cmdline_has_crashkernel",
+        "kexec_crash_size",
+        "fadump_enabled",
+        "fadump_registered",
+        "service_active",
+        "service_units",
+        "dump_target_directive",
+        "dump_dir",
+        "dump_dir_exists",
+        "dump_dir_writable",
+        "dump_dir_write_error",
+    ):
+        assert key in facts
