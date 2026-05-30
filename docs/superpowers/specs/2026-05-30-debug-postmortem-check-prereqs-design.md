@@ -33,7 +33,8 @@ never changed.
 - `debug.postmortem.check_prereqs(run_id, target_ref, …) → ToolResponse` MCP tool,
   wired via `server.py`'s registration pattern, returning a list of
   `PrerequisiteCheck` (the existing `domain.PrerequisiteCheck` model).
-- Three **independent** read-only SSH probes, each emitting one `PrerequisiteCheck`:
+- Three **independent** SSH probes (all read-only except the transient dump-dir
+  write probe of §3.2), each emitting one `PrerequisiteCheck`:
   - `kdump.crashkernel_reserved` — kexec/kdump path: `/proc/cmdline` carries
     `crashkernel=` **and** `/sys/kernel/kexec_crash_size > 0`. POWER fadump path:
     `/sys/kernel/fadump_enabled == 1` (the reservation is firmware-assisted, so
