@@ -229,3 +229,61 @@ Raw probe `stdout`/`stderr` stay under
 are returned and the persisted `probe.json` is redacted. `/proc/cmdline` can carry
 secrets injected as boot args, so redaction runs before the response **and** before
 persistence.
+
+# `debug.postmortem.list_dumps` + `.fetch` — vmcore retrieval
+
+`list_dumps` enumerates captured vmcores under the configured dump dir (default
+`/var/crash`, the `vmcore` + `vmcore-dmesg.txt` layout) over SSH and returns one entry
+per dump (`path`, `kernel`, `capture_time`, `size_bytes`, `incomplete`,
+`available_files`). An empty dump dir returns an empty list, not an error.
+
+`fetch` copies the selected dump (`dump_ref` = a `path` from `list_dumps`) plus any
+co-located `vmcore-dmesg.txt` / `vmlinux` / `vmcoreinfo` into
+`<run>/debug/postmortem/dumps/<dump_id>/`, returning run-relative refs
+(`vmcore_ref`, `vmlinux_ref`, …) that `debug.postmortem.crash` and
+`debug.introspect.from_vmcore` accept directly. Each file reports `sha256` + size.
+
+## Integrity, bounding, idempotency
+
+- **Path-injection guard:** `fetch` re-enumerates and matches `dump_ref` against the
+  target's own listing, so it only ever transfers a dump the target reported (an agent
+  cannot coax scp into pulling an arbitrary path).
+- **Truncation:** every staged file's local size must equal the size the enumeration
+  reported; a mismatch (or non-zero scp exit) is `incomplete_transfer`, the partial
+  staging dir is removed, and no success is recorded.
+- **Bounding:** the total fetch size (known from the listing) must be within the
+  effective ceiling (`max_bytes`, else `DEFAULT_FETCH_MAX_BYTES`) and the host must
+  retain free space beyond it (`insufficient_disk`); both are checked before any byte
+  moves.
+- **Idempotency:** a second `fetch` of an already-staged dump returns the existing refs
+  (`already_fetched=true`) without re-transferring; `force=true` re-transfers and
+  replaces.
+- **Incomplete dumps:** an in-progress (`vmcore-incomplete`) or flattened
+  (`vmcore.flat`) dump is refused (`dump_incomplete`) unless `force`.
+- **HALTED fast-reject:** both ops are ssh-tier, so a HALTED target is rejected
+  immediately, never left to hang.
+
+## Host-side vs target-side analysis
+
+This phase pulls the vmcore to the host for offline analysis
+(`debug.postmortem.crash`, `debug.introspect.from_vmcore`). For a dump too large to
+transfer economically, target-side analysis (running `crash`/drgn on the target)
+avoids the move — that is the documented large-dump alternative and is deferred to a
+future issue. Use the sizes `list_dumps` reports to decide before committing to a
+fetch.
+
+## ppc64le / fadump
+
+The enumeration is layout-based (any dump-dir subdir holding a `vmcore`), so it is not
+x86_64-specific by construction, but x86_64 `/var/crash` kdump is the only tested path.
+POWER fadump may use a different dump path/capture layout; that is documented, not
+silently claimed.
+
+## Redaction (retrieval)
+
+Raw enumeration and scp `stdout`/`stderr` stay under
+`<run>/sensitive/debug/postmortem/{list_dumps,fetch}/<id>/`; the returned
+`dumps`/`files`/refs and the persisted `probe.json` / `fetch.json` are redacted, seeded
+with the rootfs `ssh_key_ref`. `fetch` matches `dump_ref` against the raw (pre-redaction)
+listing, so a redacted path echoed back fails closed as `dump_not_found` rather than
+fetching the wrong file.
