@@ -4432,62 +4432,93 @@ def debug_start_session_handler(
             if probe_failure is not None:
                 return probe_failure
             # The live attach succeeded and is registered + held HALTED. Build, persist, and record
-            # the session-of-record from it (no batch attach).
-            session = _build_mi_debug_session(
-                session_id=session_id,
-                run_id=run_id,
-                vmlinux_path=Path(vmlinux.path),
-                gdbstub_endpoint=gdbstub_endpoint,
-                profile_name=resolved_debug_profile.name,
-                transcript_path=_mi_probe_transcript_path(store.run_dir(run_id)),
-                started_at=started_at,
-            )
-            session_path = _persist_mi_debug_session(store=store, run_id=run_id, session=session)
-            artifacts = [
-                ArtifactRef(path=str(session_path), kind="debug-session"),
-                ArtifactRef(path=session.transcript_path, kind="debug-transcript", sensitive=True),
-            ]
-            details = _debug_session_manifest_details(store=store, run_id=run_id, session=session)
-            details.update(mi_probe_details)
-            details["transport_session_id"] = transport_session.session_id
-            # Post-attach preconditions (#70 build-id-vs-running-kernel) run with the live session,
-            # BEFORE the SUCCEEDED debug step is persisted: a rejection reaps the live attachment
-            # (force_resume un-halts the kernel) and tears the transport down, so the manifest never
-            # records a SUCCEEDED session that teardown just deleted.
-            if session_guard is not None:
-                sid = transport_session.session_id
-                tkey = transport_session.target_key
-                post_ctx = SessionGuardContext(
-                    target_key=tkey, generation=transport_session.generation, session_id=sid, reason="attach_error"
+            # the session-of-record from it (no batch attach). Everything below runs AFTER the live
+            # attachment is registered and the kernel is HALTED, so a persistence/manifest fault here
+            # MUST run the guaranteed-resume teardown (reap + un-halt + close) rather than escape and
+            # strand the kernel HALTED with the guard held and the attachment leaked.
+            try:
+                session = _build_mi_debug_session(
+                    session_id=session_id,
+                    run_id=run_id,
+                    vmlinux_path=Path(vmlinux.path),
+                    gdbstub_endpoint=gdbstub_endpoint,
+                    profile_name=resolved_debug_profile.name,
+                    transcript_path=_mi_probe_transcript_path(store.run_dir(run_id)),
+                    started_at=started_at,
                 )
-                try:
-                    session_guard.verify_attached(post_ctx, transport_session)
-                except PreconditionError as exc:
-                    reaped = gdb_mi_sessions.reap(session_id)
-                    if reaped is not None:
-                        with contextlib.suppress(Exception):
-                            gdb_mi_engine.force_resume(reaped)
-                    session_guard.teardown(
-                        post_ctx,
-                        close=lambda: transaction.close(sid, force=False),
-                        read_record=lambda: session_registry.read_record(tkey),
-                        force_reap=lambda: transaction.force_release(sid),
+                session_path = _persist_mi_debug_session(store=store, run_id=run_id, session=session)
+                artifacts = [
+                    ArtifactRef(path=str(session_path), kind="debug-session"),
+                    ArtifactRef(path=session.transcript_path, kind="debug-transcript", sensitive=True),
+                ]
+                details = _debug_session_manifest_details(store=store, run_id=run_id, session=session)
+                details.update(mi_probe_details)
+                details["transport_session_id"] = transport_session.session_id
+                # Post-attach preconditions (#70 build-id-vs-running-kernel) run with the live session,
+                # BEFORE the SUCCEEDED debug step is persisted: a rejection reaps the live attachment
+                # (force_resume un-halts the kernel) and tears the transport down, so the manifest never
+                # records a SUCCEEDED session that teardown just deleted.
+                if session_guard is not None:
+                    sid = transport_session.session_id
+                    tkey = transport_session.target_key
+                    post_ctx = SessionGuardContext(
+                        target_key=tkey, generation=transport_session.generation, session_id=sid, reason="attach_error"
                     )
-                    return ToolResponse.failure(
-                        category=ErrorCategory.READINESS_FAILURE,
-                        message=str(exc),
-                        run_id=run_id,
-                        details={"code": "precondition_failed", "precondition": exc.name},
-                        suggested_next_actions=["artifacts.get_manifest"],
+                    try:
+                        session_guard.verify_attached(post_ctx, transport_session)
+                    except PreconditionError as exc:
+                        reaped = gdb_mi_sessions.reap(session_id)
+                        if reaped is not None:
+                            with contextlib.suppress(Exception):
+                                gdb_mi_engine.force_resume(reaped)
+                        session_guard.teardown(
+                            post_ctx,
+                            close=lambda: transaction.close(sid, force=False),
+                            read_record=lambda: session_registry.read_record(tkey),
+                            force_reap=lambda: transaction.force_release(sid),
+                        )
+                        return ToolResponse.failure(
+                            category=ErrorCategory.READINESS_FAILURE,
+                            message=str(exc),
+                            run_id=run_id,
+                            details={"code": "precondition_failed", "precondition": exc.name},
+                            suggested_next_actions=["artifacts.get_manifest"],
+                        )
+                terminal = StepResult(
+                    step_name="debug",
+                    status=StepStatus.SUCCEEDED,
+                    summary="gdb/MI debug session started",
+                    artifacts=artifacts,
+                    details=details,
+                )
+                store.record_step_result(run_id, terminal, replace_succeeded=replace_existing_debug)
+            except Exception as exc:  # noqa: BLE001 - guaranteed-resume is unconditional after register
+                # Persisting the session file or recording the manifest step failed (OSError on a full
+                # disk, a ManifestStateError, ...). The live attachment is already registered and the
+                # kernel HALTED, so reap + un-halt + tear the transport down before reporting, or the
+                # target would be stranded HALTED with the guard held until process restart.
+                reaped = gdb_mi_sessions.reap(session_id)
+                if reaped is not None:
+                    with contextlib.suppress(Exception):
+                        gdb_mi_engine.force_resume(reaped)
+                with contextlib.suppress(Exception):
+                    _resume_debug_transport(
+                        session=transport_session, admission=admission, session_registry=session_registry
                     )
-            terminal = StepResult(
-                step_name="debug",
-                status=StepStatus.SUCCEEDED,
-                summary="gdb/MI debug session started",
-                artifacts=artifacts,
-                details=details,
-            )
-            store.record_step_result(run_id, terminal, replace_succeeded=replace_existing_debug)
+                _teardown_debug_transport(
+                    transport_session=transport_session,
+                    transaction=transaction,
+                    session_registry=session_registry,
+                    session_guard=session_guard,
+                )
+                category = exc.category if isinstance(exc, ManifestStateError) else ErrorCategory.INFRASTRUCTURE_FAILURE
+                return ToolResponse.failure(
+                    category=category,
+                    message=redactor.redact_text(str(exc)),
+                    run_id=run_id,
+                    details={"code": "debug_session_persist_failed"},
+                    suggested_next_actions=["host.check_prerequisites", "artifacts.get_manifest"],
+                )
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
 

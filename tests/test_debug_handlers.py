@@ -11,6 +11,7 @@ from linux_debug_mcp.config import DebugProfile
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
 from linux_debug_mcp.providers.gdb_mi import GdbMiError, GdbMiSessionRegistry
 from linux_debug_mcp.providers.qemu_gdbstub import DebugSession
+from linux_debug_mcp.seams.target import TargetKey
 from linux_debug_mcp.server import debug_end_session_handler, debug_read_memory_handler, debug_start_session_handler
 
 RUN_ID = "run-debug"
@@ -241,6 +242,76 @@ def test_debug_read_memory_rejects_session_paths_outside_run_debug_dir(tmp_path:
 
     response = fx.read_memory(address=0x1000, byte_count=2)
 
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_start_session_persist_failure_reaps_and_resumes(tmp_path: Path, monkeypatch) -> None:
+    """Guaranteed-resume invariant on the persistence partial-failure path: if writing the session
+    file (or recording the manifest step) raises AFTER the live attachment is registered and the
+    kernel is HALTED, the handler must reap the attachment, un-halt, and tear the transport down —
+    never strand the kernel HALTED with the guard held."""
+    import linux_debug_mcp.server as server
+
+    fx = _Fixture(tmp_path)
+
+    def _boom(**_kwargs):
+        raise OSError("disk full while persisting the debug session")
+
+    monkeypatch.setattr(server, "_persist_mi_debug_session", _boom)
+    response = fx.start()
+
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert response.error.details["code"] == "debug_session_persist_failed"
+    # The live attachment was reaped (force_resume un-halted the kernel) ...
+    assert fx.engine.forced is True
+    assert not fx.sessions._sessions  # the live-session registry was emptied
+    # ... and the transport was torn down: the durable record is gone and the guard is free.
+    assert fx.registry.read_record(TargetKey(provisioner="local-qemu", target_id=RUN_ID)) is None
+    # no SUCCEEDED debug step was recorded.
+    manifest = ArtifactStore(fx.artifact_root, create_root=False).load_manifest(RUN_ID)
+    assert "debug" not in manifest.step_results
+
+
+def test_read_memory_over_cap_rejected_through_handler(tmp_path: Path) -> None:
+    """The 4096-byte cap is enforced at the handler boundary: the engine raises CONFIGURATION_ERROR
+    and _debug_operation_response surfaces it (FakeMiEngine is permissive, so use a strict engine)."""
+
+    class _CapEngine(FakeMiEngine):
+        def read_memory(self, attachment, *, address: int, byte_count: int) -> dict[str, object]:
+            if byte_count > 4096:
+                raise GdbMiError("byte_count over cap", category=ErrorCategory.CONFIGURATION_ERROR)
+            return super().read_memory(attachment, address=address, byte_count=byte_count)
+
+    fx = _Fixture(tmp_path, engine=_CapEngine())
+    assert fx.start().ok is True
+    response = fx.read_memory(address=0x1000, byte_count=4097)
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_evaluate_unknown_inspector_rejected_through_handler(tmp_path: Path) -> None:
+    """debug.evaluate rejects arbitrary expressions with CONFIGURATION_ERROR at the handler boundary."""
+    from linux_debug_mcp.server import debug_evaluate_handler
+
+    class _StrictEvalEngine(FakeMiEngine):
+        def evaluate_inspector(self, attachment, *, inspector: str, arguments: dict[str, object]):
+            if inspector not in ("kernel_version", "symbol_address"):
+                raise GdbMiError("unknown inspector", category=ErrorCategory.CONFIGURATION_ERROR)
+            return {"inspector": inspector}
+
+    fx = _Fixture(tmp_path, engine=_StrictEvalEngine())
+    assert fx.start().ok is True
+    response = debug_evaluate_handler(
+        artifact_root=fx.artifact_root,
+        run_id=fx.run_id,
+        inspector="$(rm -rf /)",
+        debug_profiles=_profiles(),
+        session_registry=fx.registry,
+        gdb_mi_engine=fx.engine,
+        gdb_mi_sessions=fx.sessions,
+    )
     assert response.ok is False
     assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
 
