@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -28,6 +29,9 @@ from linux_debug_mcp.config import (
     CRASH_PER_CMD_CAP,
     CRASH_SCRIPT_BYTE_CAP,
     CRASH_STDOUT_CAP,
+    DEFAULT_FETCH_MAX_BYTES,
+    FETCH_DISK_HEADROOM_BYTES,
+    FETCH_TIMEOUT_BAND,
     INTROSPECT_DESTRUCTIVE_PERMISSIONS,
     MAX_CRASH_COMMANDS,
     MAX_INTROSPECT_CALLS_PER_RUN,
@@ -71,9 +75,12 @@ from linux_debug_mcp.domain import (
     DebugIntrospectRunRequest,
     DebugPostmortemCheckPrereqsRequest,
     DebugPostmortemCrashRequest,
+    DebugPostmortemFetchRequest,
     DebugPostmortemListDumpsRequest,
     DebugPostmortemTriageRequest,
+    DumpEntry,
     ErrorCategory,
+    FetchedFile,
     PrerequisiteCheck,
     PrerequisiteStatus,
     RunRequest,
@@ -88,7 +95,10 @@ from linux_debug_mcp.postmortem.crash_commands import validate_crash_command, va
 from linux_debug_mcp.postmortem.crash_parsers import parse_command
 from linux_debug_mcp.postmortem.dumps import (
     DEFAULT_DUMP_DIR,
+    FetchSpec,
+    derive_dump_id,
     parse_dump_listing,
+    plan_fetch,
     render_dump_list_script,
 )
 from linux_debug_mcp.postmortem.triage import (
@@ -2923,6 +2933,292 @@ def debug_postmortem_list_dumps_handler(
         },
         suggested_next_actions=["debug.postmortem.fetch"],
     )
+
+
+def _match_dump(parsed: dict[str, Any], dump_ref: str) -> DumpEntry | None:
+    for entry in parse_dump_listing(parsed):
+        if entry.path == dump_ref:
+            return entry
+    return None
+
+
+def _core_name(entry: DumpEntry) -> str:
+    for name in ("vmcore", "vmcore.flat", "vmcore-incomplete"):
+        if name in entry.file_sizes:
+            return name
+    return "vmcore"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _record_fetch_result(
+    store: ArtifactStore,
+    run_id: str,
+    result: StepResult,
+    *,
+    replace_succeeded: bool,
+    attempts: int = 5,
+    initial_delay_seconds: float = 0.01,
+) -> None:
+    """Record a postmortem.fetch step under the manifest-lock retry-with-backoff.
+
+    Clone of ``_record_terminal_build_result`` that threads ``replace_succeeded`` so a
+    ``force`` re-fetch replaces the SUCCEEDED step rather than no-op-ing (ADR 0029
+    decision 6 / review finding 2).
+    """
+    delay = initial_delay_seconds
+    for attempt in range(attempts):
+        try:
+            store.record_step_result(run_id, result, replace_succeeded=replace_succeeded)
+            return
+        except ManifestStateError as exc:
+            if "manifest is locked" not in str(exc) or attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
+
+
+def _stage_one_file(
+    *,
+    runner: SshRunner,
+    ctx: _ProbeContext,
+    spec: FetchSpec,
+    dest_dir: Path,
+    sensitive_dir: Path,
+    timeout_seconds: int,
+) -> tuple[FetchedFile | None, ToolResponse | None]:
+    run_id = ctx.run_id
+    local_dest = dest_dir / spec.local_name
+    try:
+        scp_argv = build_scp_argv(
+            rootfs_profile=ctx.rootfs,
+            known_hosts_path=ctx.store.run_dir(run_id) / "sensitive" / "known_hosts",
+            remote_path=spec.remote_path,
+            local_dest=local_dest,
+            command_timeout=timeout_seconds,
+        )
+    except ValueError as exc:
+        return None, _configuration_failure(
+            run_id=run_id,
+            message=_redact_and_truncate(ctx.redactor, str(exc), cap=256),
+            details={"code": "invalid_ssh_options"},
+        )
+    stdout_path = sensitive_dir / f"{spec.local_name}.scp.out"
+    stderr_path = sensitive_dir / f"{spec.local_name}.scp.err"
+    try:
+        result = runner.run(
+            scp_argv,
+            timeout=timeout_seconds,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            max_stdout_bytes=None,
+        )
+    except Exception as exc:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=_redact_and_truncate(ctx.redactor, f"scp raised: {exc}", cap=256),
+            details={"code": "ssh_failure"},
+        )
+    if result.exit_status != 0 or result.timed_out or result.cancelled:
+        snippet = _redact_and_truncate(ctx.redactor, result.stderr_snippet or "", cap=256)
+        return None, ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"scp of {spec.local_name} failed",
+            details={"code": "incomplete_transfer", "stderr": snippet},
+        )
+    local_size = local_dest.stat().st_size if local_dest.is_file() else -1
+    if local_size != spec.expected_size:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"{spec.local_name} truncated: got {local_size} bytes, expected {spec.expected_size}",
+            details={"code": "incomplete_transfer"},
+        )
+    ref = str(local_dest.relative_to(ctx.store.run_dir(run_id)))
+    return FetchedFile(name=spec.local_name, ref=ref, sha256=_sha256_file(local_dest), size_bytes=local_size), None
+
+
+def _fetch_success_response(run_id: str, details: dict[str, Any], *, already_fetched: bool) -> ToolResponse:
+    data = {**details, "already_fetched": already_fetched}
+    return ToolResponse.success(
+        summary=f"dump {details['dump_id']} staged ({details['total_bytes']} bytes)",
+        run_id=run_id,
+        data=data,
+        suggested_next_actions=[
+            "debug.postmortem.crash",
+            "debug.postmortem.triage",
+            "debug.introspect.from_vmcore",
+        ],
+    )
+
+
+def _admit_fetch_entry(
+    ctx: _ProbeContext, *, runner: SshRunner, request: DebugPostmortemFetchRequest, dump_dir: str, dest_dir: Path
+) -> tuple[DumpEntry | None, ToolResponse | None]:
+    """Re-enumerate, match dump_ref, and apply the pre-transfer bound checks.
+
+    Returns (entry, None) when the dump may be fetched, else (None, failure). Run on a
+    cache miss only (inside the fetch lock), so a cached re-fetch never re-enumerates.
+    """
+    run_id = ctx.run_id
+    parsed, failure = _run_dump_enumeration(
+        ctx,
+        runner=runner,
+        dump_dir=dump_dir,
+        timeout_seconds=min(request.timeout_seconds, 60),
+        category=("debug", "postmortem", "fetch", "enumerate"),
+    )
+    if failure is not None:
+        return None, failure
+    assert parsed is not None
+    entry = _match_dump(parsed, request.dump_ref)
+    if entry is None:
+        return None, _configuration_failure(
+            run_id=run_id,
+            message=f"dump_ref not found in current listing: {request.dump_ref!r}",
+            details={"code": "dump_not_found"},
+        )
+    if entry.incomplete and not request.force:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.READINESS_FAILURE,
+            run_id=run_id,
+            message="dump is incomplete (in-progress or vmcore.flat); pass force to fetch anyway",
+            details={"code": "dump_incomplete"},
+            suggested_next_actions=["debug.postmortem.list_dumps"],
+        )
+    total = sum(entry.file_sizes.values()) or entry.size_bytes
+    ceiling = request.max_bytes if request.max_bytes is not None else DEFAULT_FETCH_MAX_BYTES
+    if total > ceiling:
+        return None, _configuration_failure(
+            run_id=run_id,
+            message=f"dump total {total} bytes exceeds ceiling {ceiling}",
+            details={"code": "dump_too_large"},
+        )
+    free = shutil.disk_usage(ctx.store.run_dir(run_id)).free
+    if free < total + FETCH_DISK_HEADROOM_BYTES:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"insufficient host disk: {free} free, need {total} + headroom",
+            details={"code": "insufficient_disk"},
+        )
+    return entry, None
+
+
+def _fetch_under_lock(
+    ctx: _ProbeContext,
+    *,
+    runner: SshRunner,
+    request: DebugPostmortemFetchRequest,
+    dump_dir: str,
+    dump_id: str,
+    dest_dir: Path,
+) -> ToolResponse:
+    run_id = ctx.run_id
+    step_name = f"postmortem.fetch:{dump_id}"
+    with ctx.store.postmortem_fetch_lock(run_id):
+        manifest = ctx.store.load_manifest(run_id)
+        prior = manifest.step_results.get(step_name)
+        if prior is not None and prior.status == StepStatus.SUCCEEDED and not request.force:
+            # Cached short-circuit BEFORE enumeration: a prior SUCCEEDED fetch already
+            # validated dump_ref, so return the staged refs without any SSH (review finding 3).
+            return _fetch_success_response(run_id, dict(prior.details), already_fetched=True)
+        entry, failure = _admit_fetch_entry(ctx, runner=runner, request=request, dump_dir=dump_dir, dest_dir=dest_dir)
+        if failure is not None:
+            return failure
+        assert entry is not None
+        if dest_dir.exists():
+            shutil.rmtree(dest_dir)
+        dest_dir.mkdir(parents=True, mode=0o700)
+        sensitive_dir = ctx.store.run_dir(run_id) / "sensitive" / "debug" / "postmortem" / "fetch" / dump_id
+        sensitive_dir.mkdir(parents=True, exist_ok=True)
+        sensitive_dir.chmod(0o700)
+        fetched: list[FetchedFile] = []
+        ref_map: dict[str, str | None] = {
+            "vmcore_ref": None,
+            "vmlinux_ref": None,
+            "vmcoreinfo_ref": None,
+            "vmcore_dmesg_ref": None,
+            "modules_ref": None,
+        }
+        for spec in plan_fetch(entry, vmcore_name=_core_name(entry)):
+            staged, failure = _stage_one_file(
+                runner=runner,
+                ctx=ctx,
+                spec=spec,
+                dest_dir=dest_dir,
+                sensitive_dir=sensitive_dir,
+                timeout_seconds=request.timeout_seconds,
+            )
+            if failure is not None:
+                shutil.rmtree(dest_dir, ignore_errors=True)
+                return failure
+            assert staged is not None
+            fetched.append(staged)
+            ref_map[spec.ref_key] = staged.ref
+        details: dict[str, Any] = {
+            "dump_id": dump_id,
+            "total_bytes": sum(f.size_bytes for f in fetched),
+            "files": ctx.redactor.redact_value([f.model_dump(mode="json") for f in fetched]),
+            **ref_map,
+        }
+        (dest_dir / "fetch.json").write_text(json.dumps(details), encoding="utf-8")
+        step = StepResult(
+            step_name=step_name,
+            status=StepStatus.SUCCEEDED,
+            summary=f"fetched dump {dump_id} ({len(fetched)} files)",
+            artifacts=[ArtifactRef(path=str(dest_dir / "fetch.json"), kind="application/json")],
+            details=details,
+        )
+        _record_fetch_result(ctx.store, run_id, step, replace_succeeded=request.force)
+    return _fetch_success_response(run_id, details, already_fetched=False)
+
+
+def debug_postmortem_fetch_handler(
+    request: DebugPostmortemFetchRequest,
+    *,
+    artifact_root: Path,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    ssh_runner: SshRunner | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+) -> ToolResponse:
+    """#95 / ADR 0029: scp a captured dump (+ symbols) into the run dir."""
+    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    _ctx, failure = _resolve_probe_context(
+        request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles, timeout_band=FETCH_TIMEOUT_BAND
+    )
+    if failure is not None:
+        return failure
+    assert _ctx is not None
+    ctx = _ctx
+    run_id = ctx.run_id
+    dump_dir, dd_failure = _validated_dump_dir(request, run_id)
+    if dd_failure is not None:
+        return dd_failure
+    assert dump_dir is not None
+    try:
+        halted = _reject_if_target_halted(
+            run_id=run_id, admission=admission, session_registry=session_registry, action="fetching a dump"
+        )
+    except AdmissionError as exc:
+        return ToolResponse.failure(category=exc.category, run_id=run_id, message=str(exc), details={"code": exc.code})
+    if halted is not None:
+        return halted
+    runner: SshRunner = ssh_runner or SubprocessSshRunner()
+    # dump_ref is the remote dump dir (a DumpEntry.path), so the staging id is derivable
+    # without enumeration — letting a cached re-fetch short-circuit before any SSH.
+    dump_id = derive_dump_id(request.dump_ref)
+    dest_dir = ctx.store.run_dir(run_id) / "debug" / "postmortem" / "dumps" / dump_id
+    return _fetch_under_lock(ctx, runner=runner, request=request, dump_dir=dump_dir, dump_id=dump_id, dest_dir=dest_dir)
 
 
 IntrospectPostValidator = Callable[[dict[str, Any]], "PostValidatorVerdict | None"]
