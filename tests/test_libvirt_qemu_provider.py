@@ -1468,6 +1468,24 @@ def test_execute_boot_skips_discovery_for_serial_profile(tmp_path: Path) -> None
     assert runner.domifaddr_calls == []
 
 
+def test_execute_boot_discovery_runner_exception_stays_succeeded(tmp_path: Path) -> None:
+    plan = make_plan(tmp_path)
+
+    class RaisingDomifaddrRunner(FakeLibvirtRunner):
+        def run(self, argv, *, timeout, log_path=None):
+            if len(argv) > 3 and argv[3] == "domifaddr":
+                raise FileNotFoundError("virsh disappeared")
+            return super().run(argv, timeout=timeout, log_path=log_path)
+
+    provider = LibvirtQemuProvider(runner=RaisingDomifaddrRunner(), sleep=SleepRecorder())
+
+    result = provider.execute_boot(plan)
+
+    assert result.status == StepStatus.SUCCEEDED
+    assert result.details["guest_ip"] is None
+    assert result.details["guest_ip_discovery"]["status"] == "unavailable"
+
+
 def test_execute_boot_timeout_skips_discovery(tmp_path: Path) -> None:
     plan = make_plan(tmp_path)
     timeout_console = ConsoleResult(

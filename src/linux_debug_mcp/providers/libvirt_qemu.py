@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import os
 import selectors
 import shutil
@@ -28,6 +29,8 @@ MCP_METADATA_NS = "urn:linux-debug-mcp:domain"
 QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 ElementTree.register_namespace("ldmcp", MCP_METADATA_NS)
 ElementTree.register_namespace("qemu", QEMU_NS)
+
+logger = logging.getLogger(__name__)
 
 
 def parse_domifaddr_ipv4(output: str) -> str | None:
@@ -579,13 +582,33 @@ class LibvirtQemuProvider:
     def _discover_guest_ip(self, plan: BootPlan) -> dict[str, object]:
         """Best-effort guest-IP discovery from the libvirt lease (ADR 0032).
 
-        Never raises: any failure resolves to a typed status. Polls
+        Never raises: any failure — including an unexpected ``runner.run`` exception —
+        resolves to a typed status so a successful boot is never downgraded. Polls
         ``virsh domifaddr --source lease`` up to ``lease_discovery_attempts`` times,
         sleeping ``lease_discovery_interval`` between attempts, stopping at the first
         routable IPv4. A non-zero ``domifaddr`` exit stops the poll immediately.
         """
         if not plan.discover_guest_ip:
             return {"guest_ip": None, "guest_ip_discovery": {"status": "skipped", "source": "lease"}}
+        try:
+            return self._poll_guest_ip(plan)
+        except Exception as exc:
+            # Broad catch is deliberate (ADR 0032 d3): discovery is best-effort enrichment
+            # and must never turn a boot that reached readiness into a FAILED result. The
+            # SubprocessLibvirtRunner only converts TimeoutExpired to a CommandResult, so a
+            # FileNotFoundError/OSError from virsh would otherwise propagate. Log with a
+            # traceback so a masked defect stays observable, then report a typed status.
+            logger.warning("guest-ip discovery failed: %s", exc, exc_info=True)
+            return {
+                "guest_ip": None,
+                "guest_ip_discovery": {
+                    "status": "unavailable",
+                    "source": "lease",
+                    "detail": f"{type(exc).__name__}: {exc}"[:512],
+                },
+            }
+
+    def _poll_guest_ip(self, plan: BootPlan) -> dict[str, object]:
         for attempt in range(self._lease_discovery_attempts):
             result = self.runner.run(
                 plan.domifaddr_argv,
