@@ -71,6 +71,7 @@ from linux_debug_mcp.domain import (
     DebugIntrospectRunRequest,
     DebugPostmortemCheckPrereqsRequest,
     DebugPostmortemCrashRequest,
+    DebugPostmortemListDumpsRequest,
     DebugPostmortemTriageRequest,
     ErrorCategory,
     PrerequisiteCheck,
@@ -85,6 +86,11 @@ from linux_debug_mcp.logging import SECRET_REGISTRY, configure_logging
 from linux_debug_mcp.postmortem.crash_batch import build_command_script, collect_command_outputs
 from linux_debug_mcp.postmortem.crash_commands import validate_crash_command, validate_modules_path
 from linux_debug_mcp.postmortem.crash_parsers import parse_command
+from linux_debug_mcp.postmortem.dumps import (
+    DEFAULT_DUMP_DIR,
+    parse_dump_listing,
+    render_dump_list_script,
+)
 from linux_debug_mcp.postmortem.triage import (
     CrashOutcome,
     DrgnOutcome,
@@ -329,6 +335,49 @@ def _target_python_remote_argv(*, timeout_seconds: int, use_sudo: bool) -> list[
     if use_sudo:
         argv.append("sudo")
     argv.extend(TARGET_PYTHON_ARGV)
+    return argv
+
+
+def build_scp_argv(
+    *,
+    rootfs_profile: RootfsProfile,
+    known_hosts_path: Path,
+    remote_path: str,
+    local_dest: Path,
+    command_timeout: int,
+) -> list[str]:
+    """Canonical ``scp`` argv mirroring ``build_ssh_argv``'s option shape (#95).
+
+    scp's ``host:remote_path`` is expanded by a remote shell, so the remote path is
+    ``shlex.quote``d after the ``user@host:`` prefix and ``-T`` disables the
+    remote-side filename check (ADR 0029 decision 3).
+    """
+    configured_timeout = rootfs_profile.ssh_options.get("ConnectTimeout")
+    if configured_timeout is not None and int(configured_timeout) > command_timeout:
+        raise ValueError("ConnectTimeout cannot exceed command timeout")
+    connect_timeout = configured_timeout or str(min(command_timeout, 10))
+    strict = rootfs_profile.ssh_options.get("StrictHostKeyChecking", "accept-new")
+    argv = [
+        "scp",
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"UserKnownHostsFile={known_hosts_path}",
+        "-o",
+        f"ConnectTimeout={connect_timeout}",
+        "-o",
+        f"StrictHostKeyChecking={strict}",
+    ]
+    for key in sorted(rootfs_profile.ssh_options):
+        if key in {"ConnectTimeout", "StrictHostKeyChecking"}:
+            continue
+        argv.extend(["-o", f"{key}={rootfs_profile.ssh_options[key]}"])
+    argv.extend(["-P", str(rootfs_profile.ssh_port)])
+    if rootfs_profile.ssh_key_ref:
+        argv.extend(["-i", rootfs_profile.ssh_key_ref])
+    source = f"{rootfs_profile.ssh_user}@{rootfs_profile.ssh_host}:{shlex.quote(remote_path)}"
+    argv.extend([source, str(local_dest)])
     return argv
 
 
@@ -2173,6 +2222,12 @@ class _SupportsProbeRequest(Protocol):
     rootfs_profile: str | None
 
 
+class _SupportsDumpRequest(Protocol):
+    """Structural type for the ``dump_dir`` field both retrieval requests carry (#95)."""
+
+    dump_dir: str | None
+
+
 @dataclass(frozen=True)
 class _ProbeContext:
     store: ArtifactStore
@@ -2687,6 +2742,186 @@ def _assemble_kdump_response(
         },
         artifacts=artifacts,
         suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
+def _validated_dump_dir(request: _SupportsDumpRequest, run_id: str) -> tuple[str | None, ToolResponse | None]:
+    dump_dir = request.dump_dir or DEFAULT_DUMP_DIR
+    if not dump_dir.startswith("/"):
+        return None, _configuration_failure(
+            run_id=run_id,
+            message=f"dump_dir must be an absolute path; got {dump_dir!r}",
+            details={"code": "invalid_dump_dir"},
+        )
+    return dump_dir, None
+
+
+def _parse_enumeration_result(
+    ctx: _ProbeContext, *, ssh_result: SshCommandResult, stdout_path: Path
+) -> tuple[dict[str, Any] | None, ToolResponse | None]:
+    run_id = ctx.run_id
+    if ssh_result.oversized_output:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"enumeration stdout exceeded {PROBE_STDOUT_CAP} bytes",
+            details={"code": "oversized_output"},
+        )
+    raw = _read_capped(stdout_path, PROBE_STDOUT_CAP)
+    if raw is None:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"enumeration stdout exceeded {PROBE_STDOUT_CAP} bytes",
+            details={"code": "oversized_output"},
+        )
+    if ssh_result.cancelled or ssh_result.timed_out or ssh_result.stdin_failed:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="enumeration ssh round trip failed",
+            details={"code": "ssh_failure"},
+        )
+    if ssh_result.exit_status == 255:
+        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
+        return None, ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="enumeration ssh transport failed before the target ran",
+            details={"code": "ssh_connect_failure", "stderr": snippet},
+        )
+    if ssh_result.exit_status == 127:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="python3 is not available on the target; cannot enumerate dumps",
+            details={"code": "probe_no_python"},
+        )
+    try:
+        parsed = json.loads(raw) if raw else None
+    except json.JSONDecodeError:
+        parsed = None
+    if not isinstance(parsed, dict):
+        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
+        return None, ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"enumeration did not return parseable JSON (exit {ssh_result.exit_status})",
+            details={"code": "probe_unparseable", "stderr": snippet},
+        )
+    return parsed, None
+
+
+def _run_dump_enumeration(
+    ctx: _ProbeContext,
+    *,
+    runner: SshRunner,
+    dump_dir: str,
+    timeout_seconds: int,
+    category: tuple[str, ...],
+) -> tuple[dict[str, Any] | None, ToolResponse | None]:
+    """Run DUMP_LIST_SCRIPT over SSH; return (parsed_probe, None) or (None, failure)."""
+    run_id = ctx.run_id
+    probe_id = uuid.uuid4().hex
+    agent_dir, sensitive_dir = _prepare_probe_dirs(ctx.store, run_id, probe_id, category=category)
+    use_sudo = ctx.rootfs.ssh_user != "root"
+    remote_argv = _target_python_remote_argv(timeout_seconds=timeout_seconds, use_sudo=use_sudo)
+    script = render_dump_list_script(dump_dir=dump_dir)
+    try:
+        ssh_argv = build_ssh_argv(
+            rootfs_profile=ctx.rootfs,
+            known_hosts_path=ctx.store.run_dir(run_id) / "sensitive" / "known_hosts",
+            command=remote_argv,
+            command_timeout=timeout_seconds + 10,
+        )
+    except ValueError as exc:
+        return None, _configuration_failure(
+            run_id=run_id,
+            message=_redact_and_truncate(ctx.redactor, str(exc), cap=256),
+            details={"code": "invalid_ssh_options"},
+        )
+    stdout_path = sensitive_dir / "stdout.raw"
+    stderr_path = sensitive_dir / "stderr.raw"
+    try:
+        ssh_result = runner.run(
+            ssh_argv,
+            timeout=timeout_seconds + 10,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            stdin=script,
+            max_stdout_bytes=PROBE_STDOUT_CAP,
+        )
+    except Exception as exc:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=_redact_and_truncate(ctx.redactor, f"ssh probe raised: {exc}", cap=256),
+            details={"code": "ssh_failure"},
+        )
+    for _path in (stdout_path, stderr_path):
+        with contextlib.suppress(FileNotFoundError):
+            _path.chmod(0o600)
+    parsed, failure = _parse_enumeration_result(ctx, ssh_result=ssh_result, stdout_path=stdout_path)
+    if failure is not None:
+        return None, failure
+    assert parsed is not None
+    (agent_dir / "probe.json").write_text(json.dumps(ctx.redactor.redact_value(parsed)), encoding="utf-8")
+    return parsed, None
+
+
+def debug_postmortem_list_dumps_handler(
+    request: DebugPostmortemListDumpsRequest,
+    *,
+    artifact_root: Path,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    ssh_runner: SshRunner | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+) -> ToolResponse:
+    """#95 / ADR 0029: enumerate captured vmcores over SSH."""
+    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    _ctx, failure = _resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
+    if failure is not None:
+        return failure
+    assert _ctx is not None
+    ctx = _ctx
+    dump_dir, dd_failure = _validated_dump_dir(request, ctx.run_id)
+    if dd_failure is not None:
+        return dd_failure
+    assert dump_dir is not None
+    try:
+        halted = _reject_if_target_halted(
+            run_id=ctx.run_id,
+            admission=admission,
+            session_registry=session_registry,
+            action="enumerating dumps",
+        )
+    except AdmissionError as exc:
+        return ToolResponse.failure(
+            category=exc.category, run_id=ctx.run_id, message=str(exc), details={"code": exc.code}
+        )
+    if halted is not None:
+        return halted
+    runner: SshRunner = ssh_runner or SubprocessSshRunner()
+    parsed, failure = _run_dump_enumeration(
+        ctx,
+        runner=runner,
+        dump_dir=dump_dir,
+        timeout_seconds=request.timeout_seconds,
+        category=("debug", "postmortem", "list_dumps"),
+    )
+    if failure is not None:
+        return failure
+    assert parsed is not None
+    entries = parse_dump_listing(parsed)
+    return ToolResponse.success(
+        summary=f"found {len(entries)} captured dump(s) under {dump_dir}",
+        run_id=ctx.run_id,
+        data={
+            "dump_dir": dump_dir,
+            "dumps": ctx.redactor.redact_value([e.model_dump(mode="json") for e in entries]),
+        },
+        suggested_next_actions=["debug.postmortem.fetch"],
     )
 
 
