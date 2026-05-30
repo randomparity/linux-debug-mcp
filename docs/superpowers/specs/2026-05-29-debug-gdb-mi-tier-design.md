@@ -1,6 +1,6 @@
 # `debug.gdb` KGDB/RSP tier (gdb/MI) — design & decomposition
 
-**Type:** Design spec · **Issue:** #13 (epic #9) · **ADR:** [0019](../../adr/0019-debug-gdb-mi-tier-decomposition.md) · **Status:** proposed (2026-05-29)
+**Type:** Design spec · **Issue:** #13 (epic #9) · **ADR:** [0019](../../adr/0019-debug-gdb-mi-tier-decomposition.md) · **Status:** Phase A implemented (2026-05-29); B/C/D proposed
 
 ## Summary
 
@@ -97,9 +97,13 @@ only that `gdb` is *present* (`prereqs/checks.py:48`). Phase A pins a **minimum
 gdb version of 9.1** — the release in which the GDB manual documents the `mi3`
 interpreter was introduced ("GDB/MI" chapter) — and adds an MI-capability probe
 that does more than read the version string: it **runs one mi3 MI command and
-asserts a well-formed `^done` record**, e.g.
-`gdb -nx -q --interpreter=mi3 -ex "-list-features" -ex "-gdb-exit"`. **Pass:** the
-probe returns a valid mi3 `^done` record. **Fail:** gdb absent, gdb < 9.1, or no
+asserts a well-formed `^done` record**. As implemented, the probe is
+`gdb -nx -q -ex 'interpreter-exec mi3 "-list-features"' -ex quit` — feeding the MI
+command via `-ex 'interpreter-exec mi3 ...'` from CLI mode (gdb's `-ex` runs *CLI*
+commands, so a bare `--interpreter=mi3 -ex "-list-features"` would report
+`-list-features` as an undefined CLI command and never reach MI; `interpreter-exec`
+runs it in the mi3 interpreter and prints its `^done`, with no stdin channel
+needed). **Pass:** the probe returns a valid mi3 `^done` record. **Fail:** gdb absent, gdb < 9.1, or no
 valid mi3 `^done` record (older gdb may accept the `mi3` *name* without yielding
 usable records) → `host.check_prerequisites` reports the probe failed and the tier
 **hard-fails with a clear, actionable message** naming the detected version and
