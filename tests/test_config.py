@@ -421,3 +421,28 @@ def test_default_debug_profile_enables_new_ops() -> None:
     profile = DebugProfile(name="x")
     assert "debug.step" in profile.enabled_operations
     assert "debug.set_watchpoint" in profile.enabled_operations
+
+
+def test_rootfs_profile_source_kind_defaults_to_local_path() -> None:
+    from linux_debug_mcp.config import RootfsProfile
+
+    profile = RootfsProfile(name="minimal", source="/img.qcow2")
+    assert profile.source_kind == "local_path"
+
+
+def test_rootfs_profile_accepts_each_source_kind() -> None:
+    from linux_debug_mcp.config import RootfsProfile
+
+    for kind in ("local_path", "builder", "prebuilt", "url"):
+        profile = RootfsProfile(name="m", source="/img.qcow2", source_kind=kind)
+        assert profile.source_kind == kind
+
+
+def test_rootfs_profile_rejects_unknown_source_kind() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from linux_debug_mcp.config import RootfsProfile
+
+    with pytest.raises(ValidationError):
+        RootfsProfile(name="m", source="/img.qcow2", source_kind="nfs")
