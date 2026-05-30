@@ -41,14 +41,17 @@ already-collected object. Trust boundary: the target emits data, the host emits 
 contract objects (same rule as ADR 0026 decision-mirroring; the target never decides
 PASS/FAIL).
 
-The one subprocess the script shells out to (`systemctl is-active`) is run with its
-own short internal timeout (≤ 5 s, well under the outer `timeout Ns` interpreter
-bound). Without it, a stalled `systemctl` (degraded/booting systemd, blocked D-Bus)
-would let the *outer* timeout kill the whole probe → no JSON → a total
-`INFRASTRUCTURE_FAILURE` that masks the crashkernel and dump-path facts too — exactly
-the cross-check masking the independence invariant forbids. With it, a stalled
-`systemctl` yields `service_active=null` → a `FAILED` service check, and the
-file-read facts still return their own verdicts.
+The script makes exactly one subprocess call — `systemctl is-active kdump kdump-tools`
+(both unit names in one invocation, one state line per unit) — bounded by a single
+in-script timeout `T = max(2, timeout_seconds // 2)`, templated into the script via
+`string.Template` (the introspect-wrapper mechanism). One call at `T ≤ timeout_seconds
+// 2 < timeout_seconds` is provably under the outer `timeout {timeout_seconds}s`
+interpreter bound for the whole `[5, 60]` range — including the `=5` minimum, where a
+fixed "≤5 s" timeout run twice would have overrun the budget and got the interpreter
+killed (→ no JSON → a total `INFRASTRUCTURE_FAILURE` masking the crashkernel and
+dump-path facts, the cross-check the independence invariant forbids). With this bound,
+a stalled/blocked `systemctl` yields `service_active=null` → a `FAILED` service check
+while the file-read facts still return their own verdicts.
 
 ### 3. HALTED is a proof-only fast-reject, not a full admission promotion
 
@@ -91,9 +94,15 @@ then `unlink` it in a `finally`. `dump_dir_writable` is the success of that prob
 `OSError` the errno (`EROFS`, `ENOSPC`, `EACCES`, …) is captured into
 `dump_dir_write_error` and drives a cause-specific fix message. This is the only
 oracle that reflects what the kdump capture kernel (also root) will actually
-experience. The probe is self-cleaning and changes no kdump configuration or service
-state, so the tool remains diagnostic; "read-only" is narrowed to "does not modify
-kdump config/service state" (the spec scope note).
+experience. It uses `tempfile.mkstemp(dir=dump_dir, prefix=".ldm-writecheck-")` and
+`unlink`s in a `finally`; it changes no kdump configuration or service state, so the
+tool remains diagnostic and "read-only" is narrowed to "does not modify kdump
+config/service state" (the spec scope note). Cleanup runs on every path **except** an
+outer-`timeout --kill-after` SIGKILL mid-probe (SIGKILL skips `finally`), which may
+leave one small uniquely-named `.ldm-writecheck-*` file in the dump dir; the
+recognizable prefix lets an operator/agent identify the stray. This residual is
+benign (tiny, self-identifying) and accepted rather than guarded with a signal
+handler.
 
 The dump dir itself is the `path` directive of `/etc/kdump.conf` when that file is
 readable, else the `/var/crash` default; the resolved dir and its source are in

@@ -173,21 +173,28 @@ tuple[list[PrerequisiteCheck], str]` returning the three checks plus the mechani
 string. The builder is the unit-test surface; it never touches SSH.
 
 Raw facts the script gathers (all unconditional, each guarded so one read failing
-never aborts the others). **Every subprocess (`systemctl`) is run with its own short
-internal timeout** (≤ 5 s, well under the outer `timeout Ns` bound) so a stalled
-`systemctl` yields `service_active=None` — a `FAILED` service check — instead of
-killing the whole probe and masking the other two facts (independence invariant):
+never aborts the others). The script makes **exactly one** subprocess call —
+`systemctl is-active kdump kdump-tools` (one invocation, one state line per unit) —
+bounded by **a single in-script timeout `T = max(2, timeout_seconds // 2)`**, which is
+templated into the script (`string.Template`, the introspect-wrapper mechanism). Since
+there is one call and `T ≤ timeout_seconds // 2 < timeout_seconds`, the subprocess is
+provably under the outer `timeout {timeout_seconds}s` bound across the whole `[5, 60]`
+range (at the `=5` minimum, `T=2`). A stalled `systemctl` thus yields
+`service_active=None` — a `FAILED` service check — instead of overrunning the budget,
+getting the whole interpreter killed, and masking the other two facts (independence
+invariant). Running both unit names in one call (rather than two sequential calls)
+removes the worst-case `2×T` overrun.
 
 | Fact | Source | Used by |
 |---|---|---|
 | `cmdline_has_crashkernel` | `crashkernel=` substring of `/proc/cmdline` | crashkernel check |
 | `kexec_crash_size` | int of `/sys/kernel/kexec_crash_size` (or null) | crashkernel check |
 | `fadump_enabled` / `fadump_registered` | int of `/sys/kernel/fadump_{enabled,registered}` (or null) | mechanism + crashkernel check |
-| `service_active` | first of `systemctl is-active kdump\|kdump-tools` returning `active`; `null` if `systemctl` is absent/errors/times out | service check |
-| `service_units` | per-unit `is-active` raw states (or an error marker per unit) | service check details |
+| `service_active` | `True` if any unit line from the single `systemctl is-active kdump kdump-tools` call is `active`; `null` if `systemctl` is absent/errors/times out | service check |
+| `service_units` | per-unit raw states parsed from that one call's stdout (or an error marker) | service check details |
 | `dump_dir` | `/etc/kdump.conf` `path` directive when readable, else `/var/crash` | dump-path check |
 | `dump_dir_exists` | `os.path.isdir(dump_dir)` | dump-path check |
-| `dump_dir_writable` | **transient write probe**: create + `unlink` a uniquely named temp file in `dump_dir` (returns `False` on any `OSError`; `null` if the dir is absent); cleaned up in a `finally`. NOT `os.access(W_OK)` — the probe runs as root and root bypasses mode bits, so `os.access` returns `True` for any existing dir on a writable mount and could never detect a genuinely unwritable target (ADR 0028 decision 5). | dump-path check |
+| `dump_dir_writable` | **transient write probe**: `tempfile.mkstemp(dir=dump_dir, prefix=".ldm-writecheck-")` then `unlink` in a `finally` (returns `False` on any `OSError`; `null` if the dir is absent). NOT `os.access(W_OK)` — the probe runs as root and root bypasses mode bits, so `os.access` returns `True` for any existing dir on a writable mount and could never detect a genuinely unwritable target (ADR 0028 decision 5). Self-cleaning on every path **except** an outer-`timeout` SIGKILL mid-probe, which may leave one small uniquely-named `.ldm-writecheck-*` file; the recognizable prefix lets an operator/agent identify the stray (ADR 0028 decision 5). | dump-path check |
 | `dump_dir_write_error` | the `OSError` class/errno when the write probe failed (e.g. `ENOSPC`, `EROFS`, `EACCES`) | dump-path check fix text |
 | `arch` | `os.uname().machine` | mechanism reporting |
 
