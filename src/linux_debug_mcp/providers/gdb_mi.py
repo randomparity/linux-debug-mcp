@@ -172,6 +172,18 @@ class GdbMiError(Exception):
         self.details = details or {}
 
 
+def _timeout_error(command: str, timeout_sec: float) -> GdbMiError:
+    """The error an MI write timeout raises (ADR 0023 decision 3). Tagged `transport_stall` /
+    INFRASTRUCTURE_FAILURE: a timeout reached through the per-op path (post-`^connected` by
+    construction) means the RSP link stalled. `attach()` re-tags its own connect-phase timeouts as
+    DEBUG_ATTACH_FAILURE, so this `transport_stall` tag only ever surfaces on an established session."""
+    return GdbMiError(
+        f"gdb/MI command timed out after {timeout_sec}s: {command}",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details={"code": "transport_stall", "command": command, "timeout_seconds": timeout_sec},
+    )
+
+
 @runtime_checkable
 class MiController(Protocol):
     """The injectable subprocess seam. The real impl drives a ``gdb --interpreter=mi3`` child via
@@ -201,11 +213,7 @@ class PygdbmiController:
         try:
             return self._controller.write(command, timeout_sec=timeout_sec, raise_error_on_timeout=True)
         except GdbTimeoutError as exc:
-            raise GdbMiError(
-                f"gdb/MI command timed out after {timeout_sec}s: {command}",
-                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={"command": command, "timeout_seconds": timeout_sec},
-            ) from exc
+            raise _timeout_error(command, timeout_sec) from exc
 
     def read(self, *, timeout_sec: float) -> list[dict[str, object]]:
         try:
@@ -277,10 +285,12 @@ class GdbMiEngine:
             # `remotetimeout` is set BEFORE the connect so the RSP wait is finite from the first packet.
             self._run(attachment, f"-gdb-set remotetimeout {RSP_REMOTE_TIMEOUT_SEC}")
             self._connect_with_retry(attachment, host, port)
-        except GdbMiError:
+        except GdbMiError as exc:
             with contextlib.suppress(Exception):
                 controller.exit()
-            raise
+            # Every attach-phase fault (including a connect-phase timeout) is an attach failure, never a
+            # mid-session `transport_stall`: the session never reached `^connected`.
+            raise self._as_attach_failure(exc) from exc
         return attachment
 
     def _connect_with_retry(self, attachment: GdbMiAttachment, host: str, port: int) -> None:
@@ -428,8 +438,19 @@ class GdbMiEngine:
         stop = self.wait_for_stop(attachment, timeout_sec=bounded)
         if stop is not None:
             return self._redact_stop(stop)
+        # The wait timed out. Fall back to -exec-interrupt: a reachable kernel CANNOT ignore a
+        # delivered SIGINT, so if the interrupt write is accepted but no *stopped arrives, the link is
+        # dead (silence-path stall, ADR 0023 decision 3) — distinct from a benign no-breakpoint timeout
+        # where the SIGINT stop DOES arrive. A write-path stall on the interrupt itself raises
+        # transport_stall straight from interrupt().
         interrupted = self.interrupt(attachment)
-        return self._redact_stop((interrupted or StopRecord()).model_copy(update={"timed_out": True}))
+        if interrupted is None:
+            raise GdbMiError(
+                "gdb/MI RSP went silent: interrupt issued but no *stopped arrived; the link stalled",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"code": "transport_stall", "verb": verb},
+            )
+        return self._redact_stop(interrupted.model_copy(update={"timed_out": True}))
 
     def continue_(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> StopRecord:
         return self.resume(attachment, "-exec-continue", timeout_sec=timeout_sec)
