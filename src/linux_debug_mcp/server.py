@@ -589,6 +589,40 @@ def _admit_run_tests_ssh_tier(
     return admission.admit_ssh_tier(target_key, snapshot.generation, snapshot.platform, execution_proof=proof)
 
 
+def _reject_if_target_halted(
+    *,
+    run_id: str,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+) -> ToolResponse | None:
+    """§5.6 rule 2 proof-only fast-reject for the read-only kdump prereq probe.
+
+    Returns a READINESS_FAILURE/target_halted response when the target is HALTED, else
+    None (proceed). Inert when admission/registry are absent (handler-test and legacy
+    callers run ungated). Unlike `_admit_run_tests_ssh_tier` it does NOT promote the
+    ssh tier — a bounded single-shot read-only probe only needs the immediate
+    rejection; the SSH command timeout bounds the residual TOCTOU window (ADR 0028
+    decision 3). May raise AdmissionError(snapshot_missing); the caller maps it to its
+    carried category/code.
+    """
+    if admission is None or session_registry is None:
+        return None
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    snapshot = _require_snapshot(admission, target_key)
+    proof = probe_execution_state(
+        registry=session_registry, admission=admission, target_key=target_key, generation=snapshot.generation
+    )
+    if proof.state is ExecutionState.HALTED:
+        return ToolResponse.failure(
+            category=ErrorCategory.READINESS_FAILURE,
+            run_id=run_id,
+            message="target halted in debugger; resume or detach before probing kdump prerequisites",
+            details={"code": "target_halted"},
+            suggested_next_actions=["debug.continue", "debug.end_session"],
+        )
+    return None
+
+
 def _execute_tests_under_gate(
     *,
     provider: LocalSshTestProvider,
