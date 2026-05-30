@@ -454,11 +454,12 @@ fixture guarantees (not prose heuristics):
 
 1. **Same-core provenance agreement** — the report's `vmcore_build_id` (the host VMCOREINFO
    id the up-front gate verified, fed to the crash side) equals the kernel build-id drgn
-   reports for the *same* core. The fixture's drgn path exposes `main_module().build_id`;
-   the test runs a one-line `from_vmcore` script (or reads the `modules`/`dmesg` sub-call's
-   verified `build_id` field) and asserts byte-equality with `report["vmcore_build_id"]`.
-   This is the strongest "same dump, consistent across runners" check and cannot pass
-   vacuously.
+   reports for the *same* core. The test obtains drgn's id via a dedicated **one-line
+   `debug.introspect.from_vmcore`** script (`emit({"build_id": prog.main_module().build_id.hex()})`
+   — the non-helper `from_vmcore` response carries a top-level `build_id`, whereas the
+   `from_vmcore_helper` response does **not**, so the helper sub-calls cannot supply it)
+   and asserts byte-equality with `report["vmcore_build_id"]`. This is the strongest
+   "same dump, consistent across runners" check and cannot pass vacuously.
 2. **Crash side well-formed** — `report["faulting_task"]["status"] == "ok"` and
    `faulting_task["pid"]` is an `int >= 0`; `backtrace["frames"]` is non-empty (a panic
    core always has a faulting stack).
