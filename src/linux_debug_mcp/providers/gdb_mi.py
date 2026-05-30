@@ -69,6 +69,13 @@ _REGISTER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _BREAK_LOCATION_RE = _SYMBOL_NAME_RE
 # A gdb breakpoint id is a bare integer.
 _BREAK_ID_RE = re.compile(r"^[0-9]+$")
+# A runtime section base address: a 0x-prefixed hex literal (ADR 0022). Re-validated in the engine
+# (defence in depth) before it is interpolated into the add-symbol-file console command.
+_HEX_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]+$")
+# An ELF section name as it appears under /sys/module/<name>/sections/ (e.g. .text, .data, .bss).
+_SECTION_NAME_RE = re.compile(r"^\.[A-Za-z0-9_.]+$")
+# The mandatory section: add-symbol-file's positional load address.
+_MODULE_TEXT_SECTION = ".text"
 
 
 class MiRecord(Model):
@@ -101,6 +108,16 @@ class ResolvedSymbol(Model):
 
     name: str
     value: str
+
+
+class LoadedModule(Model):
+    """One module whose symbols were loaded at runtime addresses via ``add-symbol-file`` (ADR 0022).
+    ``sections`` maps the loaded ELF section names to their relocated base addresses (``.text`` is
+    mandatory; the value is the redacted address string). Frozen wire shape (``Model`` =>
+    extra="forbid")."""
+
+    name: str
+    sections: dict[str, str]
 
 
 class Frame(Model):
@@ -364,6 +381,51 @@ class GdbMiEngine:
                 details={"symbol": symbol_name},
             )
         return ResolvedSymbol(name=symbol_name, value=value)
+
+    # --- Phase D: module symbol loading ---------------------------------------------------------
+
+    def load_module_symbols(
+        self, attachment: GdbMiAttachment, *, name: str, ko_path: Path, sections: dict[str, str]
+    ) -> LoadedModule:
+        """Load a loadable module's symbols at their runtime addresses (ADR 0022) via
+        ``-interpreter-exec console "add-symbol-file <ko> <text> -s <sec> <addr> ..."``. ``.text`` is
+        the mandatory positional load address; the other sections follow as ``-s`` arguments in a
+        deterministic order. Every address is re-validated as a 0x-hex literal and the ``.ko`` path is
+        rejected if it carries whitespace or quotes, so the console string is non-injectable. An MI
+        ``^error`` (bad address / unreadable object) is a DEBUG_ATTACH_FAILURE."""
+        if _MODULE_TEXT_SECTION not in sections:
+            raise GdbMiError(
+                "module symbol load requires a .text section address",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"module": name},
+            )
+        for section, address in sections.items():
+            if not _SECTION_NAME_RE.match(section) or not _HEX_ADDRESS_RE.match(address):
+                raise GdbMiError(
+                    f"module section/address must be a valid ELF section + 0x-hex address, got {section}={address!r}",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                    details={"module": name, "section": section},
+                )
+        text_address = sections[_MODULE_TEXT_SECTION]
+        extra = "".join(
+            f" -s {section} {sections[section]}" for section in sorted(sections) if section != _MODULE_TEXT_SECTION
+        )
+        command = f'-interpreter-exec console "add-symbol-file {self._console_ko(ko_path)} {text_address}{extra}"'
+        self._run(attachment, command)
+        return LoadedModule.model_validate(self._redactor.redact_value({"name": name, "sections": sections}))
+
+    def _console_ko(self, ko_path: Path) -> str:
+        """The module object path for the add-symbol-file console command. Rejected (not escaped) if
+        it carries whitespace or a double-quote: a kernel build-tree path has neither, and refusing
+        keeps the console string trivially non-injectable (gdb's console splits on whitespace)."""
+        text = str(ko_path)
+        if any(char in text for char in ' \t\r\n"'):
+            raise GdbMiError(
+                "module object path must not contain whitespace or quotes",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"ko_path": text},
+            )
+        return text
 
     # --- Phase C: interactive execution control -------------------------------------------------
 
