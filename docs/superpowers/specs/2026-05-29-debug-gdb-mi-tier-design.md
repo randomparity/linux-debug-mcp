@@ -198,17 +198,37 @@ does **not** add an arbitrary-expression capability. Swapping the batch
 text-scrape for an MI `-data-evaluate-expression` call is an implementation
 detail behind the same allowlist; this keeps the constrained-debug-surface
 invariant (CLAUDE.md, `ALLOWED_DEBUG_OPERATIONS`) intact.
-**Acceptance.** Set a breakpoint by symbol, continue, hit it, backtrace, read a
-local — all returned as structured JSON via MI. `step`/`next`/`finish` return typed
-`StopRecord`/frame records. No batch-mode (`-batch`) gdb invocation remains (CI
-grep tripwire). `debug.read_memory` is still capped at 4096 bytes per call.
-`debug.evaluate` with `kernel_version` / `symbol_address` returns MI-typed JSON; an
-**arbitrary expression (any unknown inspector / raw expression string) is
-rejected** with a `CONFIGURATION_ERROR`-class response — no MI
-`-data-evaluate-expression` is reachable without going through a named inspector. A
-mutating `debug.*` op against a session whose live engine is gone (server restart /
-prior reap) returns `CONFIGURATION_ERROR` / `no_live_session`, never a silent
-no-op. The existing env-gated local-QEMU gdbstub coverage passes on the MI engine.
+**Acceptance — integration-only (env-gated, skipped in local CI, never counted as a passing gate when skipped).**
+Against local QEMU gdbstub: set a breakpoint by symbol, continue, hit it,
+backtrace, read a local — all returned as structured JSON via MI;
+`step`/`next`/`finish` return typed `StopRecord`/frame records; set a **watchpoint**
+(`-break-watch`), continue, and stop on the write with a typed `StopRecord`. The
+existing env-gated local-QEMU gdbstub coverage passes on the MI engine.
+
+**Acceptance — unit-level (runs in CI against the injected `FakeController`/`MiController` seam, so the state machine is verified without live hardware).**
+- A scripted deferred `*stopped` (arriving on a later `read()`, not the
+  `-exec-continue` `^running` return) yields a typed `StopRecord` from
+  `debug.continue`.
+- A continue whose wait expires issues `-exec-interrupt`, collects the
+  `*stopped (SIGINT)`, returns `timed_out=true`, and leaves the durable
+  `execution_state` HALTED.
+- `debug.read_memory` with `byte_count=4097` is rejected `CONFIGURATION_ERROR`
+  by the engine **before** any MI command (the 4096-byte cap, re-homed off the
+  deleted batch validator).
+- `debug.evaluate` with `kernel_version` / `symbol_address` returns MI-typed JSON;
+  an **arbitrary expression (any unknown inspector / raw expression string) is
+  rejected** with a `CONFIGURATION_ERROR`-class response — no MI
+  `-data-evaluate-expression` is reachable without going through a named inspector.
+- A mutating `debug.*` op against a session whose live engine is gone returns
+  `CONFIGURATION_ERROR` / `no_live_session` when the durable ownership record still
+  exists (post-restart orphan), and `legacy_session_no_ownership` when it does not
+  (the fence runs before the live lookup, ADR 0021 decision 1) — never a silent
+  no-op.
+- set/clear watchpoint issue the expected `-break-watch`/`-break-delete` MI verbs
+  and are refused when the `DebugProfile` narrows them out of `enabled_operations`.
+
+**Acceptance — static.** No batch-mode (`-batch`) gdb invocation remains anywhere
+(CI grep tripwire).
 
 ### Phase D — module symbols, robustness, serial transport
 **Scope.** Per-module section-address discovery + `add-symbol-file` at runtime
