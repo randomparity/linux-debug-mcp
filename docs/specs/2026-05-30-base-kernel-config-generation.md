@@ -23,7 +23,7 @@ QEMU gdbstub tier.
 ### `base_config`: an ordered list of make config targets
 
 `BuildProfile` and `BuildOverrides` gain `base_config: list[str]` — an ordered list of make config
-targets (e.g. `["defconfig"]`, or `["defconfig", "kvm_guest.config"]`). Each entry is validated by the
+targets (e.g. `["defconfig"]`). Each entry is validated by the
 same make-target rule as `targets` (`^[A-Za-z0-9][A-Za-z0-9_./+-]*\Z`, extracted into a shared
 `validate_make_targets` helper). When the config step needs to generate a `.config`, it runs each
 target in order as:
@@ -33,7 +33,14 @@ make -C <src> O=<out> ARCH=x86_64 <target>
 ```
 
 to a per-target log (`config-base-NN-<sanitized-target>.log`). A nonzero exit from any target aborts
-the build with a `CONFIGURATION_ERROR` carrying the log tail.
+the build with a `CONFIGURATION_ERROR` carrying the redacted log tail in `diagnostic` **and** the
+failing target's log attached as an `ArtifactRef` (kind `config-log`) so the full output is
+discoverable through the manifest, not just the tail.
+
+The list is ordered: a from-scratch generator (`defconfig`, `tinyconfig`, `allnoconfig`, …) must come
+first, since later fragment-merge targets (e.g. `kvm_guest.config`) require an existing `.config` to
+merge onto. A `base_config` consisting only of a fragment target on a clean tree therefore lands in the
+"ran but produced no `.config`" failure (below).
 
 ### Precedence ladder (backward compatible)
 
@@ -61,7 +68,7 @@ make … bzImage            # main build
 
 | Condition | Category | Detail |
 |---|---|---|
-| `base_config` target exits nonzero | `CONFIGURATION_ERROR` | `diagnostic` = redacted log tail of the failing target |
+| `base_config` target exits nonzero | `CONFIGURATION_ERROR` | `diagnostic` = redacted log tail of the failing target; failing target's log attached as a `config-log` `ArtifactRef` |
 | `base_config` ran but no `.config` resulted | `CONFIGURATION_ERROR` | `diagnostic` notes targets produced no `.config` |
 | No `.config` and empty `base_config` | `CONFIGURATION_ERROR` | `details["suggested_fix"]` = actionable remedy |
 
@@ -88,6 +95,16 @@ last-wins by `CONFIG_*` symbol; make targets are an ordered sequence of operatio
   the debug config as explicit `config_lines` (rather than relying on an upstream fragment file such as
   `kvm_guest.config`) makes the produced config deterministic and independent of the checked-out tree's
   fragment contents.
+
+#### Compatibility / behavior change
+
+Before this change, a clean tree built with `x86_64-default` failed fast with a config error — a cheap
+signal that the caller had to supply a config. After it, the same call performs real work: a full
+`make defconfig` + `bzImage` (minutes of CPU, gigabytes of output). This is the intended first-run
+behavior (a clean clone should build), but it removes the previous fast-fail. A caller that wants the
+fast-fail back selects a profile (or `build_overrides`) with an **empty** `base_config`: the precedence
+ladder's rung 4 then errors immediately with the `suggested_fix`. Existing frozen manifests are
+unaffected — the immutable `BuildProfile` keeps whatever `base_config` it was created with.
 
 #### `x86_64-debug` config_lines and rationale
 

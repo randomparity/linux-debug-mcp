@@ -61,6 +61,14 @@ gdbstub tier.
 the failure response. The no-config-no-base_config failure puts `suggested_fix` in `details` rather than
 inventing a new schema field.
 
+### 7. A failing generation target attaches its log as an artifact
+
+A nonzero `base_config` target returns the redacted log *tail* in `diagnostic` **and** attaches the
+failing target's per-target log as an `ArtifactRef` (kind `config-log`) on the FAILED result. This
+mirrors the `ReadelfUnavailable`/`BuildIdMissing` paths, which already attach produced artifacts so an
+operator can inspect a failure through the manifest without re-running the build, rather than being
+limited to the truncated tail.
+
 ## Consequences
 
 - A clean checkout builds with `kernel.create_run` + `kernel.build` and no developer config.
