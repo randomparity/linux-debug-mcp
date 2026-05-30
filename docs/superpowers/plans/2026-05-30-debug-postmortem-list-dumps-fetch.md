@@ -784,100 +784,11 @@ git commit -m "feat(store): per-run postmortem_fetch_lock"
 
 **Files:**
 - Modify: `src/linux_debug_mcp/server.py:2184` (`_resolve_probe_context` signature + timeout check at ~2226) and `:594` (`_reject_if_target_halted`)
-- Test: `tests/test_postmortem_list_dumps.py`
+- Test: `tests/test_postmortem_check_prereqs.py` (existing — proves the default-arg generalization is non-breaking)
 
-- [ ] **Step 1: Write the failing test**
+> **Phase-ordering rule (review finding 1):** this task is a **pure refactor** with no new test file. Both changes are default-arg generalizations, so the existing `tests/test_postmortem_check_prereqs.py` is the regression oracle (it exercises the unchanged-default path). The new handler test files are created in Tasks 7–8, where the handlers they import already exist — so no committed state ever has a test importing a not-yet-defined symbol (which would be a collection error, since pytest imports a module before applying `-k`). In particular `tests/test_postmortem_list_dumps.py` (Task 7) imports **only** the list handler, and the fetch timeout-band assertion lives in `tests/test_postmortem_fetch.py` (Task 8).
 
-Create `tests/test_postmortem_list_dumps.py` with the shared fakes (mirroring `tests/test_postmortem_check_prereqs.py`) and one band test:
-
-```python
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-from typing import Any
-
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import RootfsProfile
-from linux_debug_mcp.domain import (
-    DebugPostmortemFetchRequest,
-    DebugPostmortemListDumpsRequest,
-    ErrorCategory,
-    RunRequest,
-    StepResult,
-    StepStatus,
-)
-from linux_debug_mcp.providers.local_ssh_tests import SshCommandResult
-from linux_debug_mcp.server import (
-    debug_postmortem_fetch_handler,
-    debug_postmortem_list_dumps_handler,
-)
-
-SECRET_KEY_REF = "s3cr3t-key"  # pragma: allowlist secret
-
-
-def _rootfs(**over) -> dict[str, RootfsProfile]:
-    base = {
-        "name": "minimal", "source": "/img.qcow2", "access_method": "ssh",
-        "ssh_host": "127.0.0.1", "ssh_user": "root", "ssh_key_ref": SECRET_KEY_REF,
-    }
-    base.update(over)
-    return {"minimal": RootfsProfile(**base)}
-
-
-def _booted_run(tmp_path) -> str:
-    store = ArtifactStore(artifact_root=tmp_path)
-    manifest = store.create_run(
-        RunRequest(run_id="r1", source_path="/src", build_profile="x86_64-default",
-                   target_profile="local-qemu", rootfs_profile="minimal")
-    )
-    store.record_step_result(manifest.run_id,
-        StepResult(step_name="boot", status=StepStatus.SUCCEEDED, summary="ok", artifacts=[]))
-    return manifest.run_id
-
-
-def test_list_dumps_rejects_out_of_band_timeout(tmp_path) -> None:
-    run_id = _booted_run(tmp_path)
-    resp = debug_postmortem_list_dumps_handler(
-        DebugPostmortemListDumpsRequest(run_id=run_id, target_ref="local-qemu", timeout_seconds=120),
-        artifact_root=tmp_path, rootfs_profiles=_rootfs(),
-    )
-    assert resp.ok is False
-    assert resp.error.details["code"] == "invalid_timeout"
-
-
-def test_fetch_allows_large_timeout(tmp_path) -> None:
-    # 600s is out-of-band for list ([5,60]) but in-band for fetch ([5,3600]); the
-    # timeout check must not reject it (it will fail later on dump_not_found instead).
-    run_id = _booted_run(tmp_path)
-
-    @dataclass
-    class _R:
-        calls: list = field(default_factory=list)
-        def which(self, c): return f"/usr/bin/{c}"
-        def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None, max_stdout_bytes=None):
-            stdout_path.parent.mkdir(parents=True, exist_ok=True)
-            stderr_path.parent.mkdir(parents=True, exist_ok=True)
-            stdout_path.write_text('{"dump_dir": "/var/crash", "exists": true, "dumps": []}', encoding="utf-8")
-            stderr_path.write_text("", encoding="utf-8")
-            return SshCommandResult(exit_status=0, stdout="")
-
-    resp = debug_postmortem_fetch_handler(
-        DebugPostmortemFetchRequest(run_id=run_id, target_ref="local-qemu",
-                                    dump_ref="/var/crash/none", timeout_seconds=600),
-        artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=_R(),
-    )
-    assert resp.ok is False
-    assert resp.error.details["code"] == "dump_not_found"
-```
-
-(These reference handlers built in Tasks 7–8; the band generalization is exercised by the timeout assertions.)
-
-- [ ] **Step 2: Run to verify it fails**
-
-Run: `uv run python -m pytest tests/test_postmortem_list_dumps.py -q`
-Expected: FAIL (`ImportError` — handlers not yet defined).
-
-- [ ] **Step 3: Generalize the two helpers**
+- [ ] **Step 1: Generalize the two helpers**
 
 In `server.py`, change `_resolve_probe_context`'s signature to accept a band and use it. Replace the signature:
 
@@ -923,12 +834,12 @@ and in the HALTED branch replace the message string with:
 
 (The default keeps the existing kdump-prereq caller's message identical.)
 
-- [ ] **Step 4: Run to verify it still fails on ImportError only**
+- [ ] **Step 2: Run the existing tests to verify the refactor is non-breaking**
 
 Run: `uv run python -m pytest tests/test_postmortem_check_prereqs.py -q`
 Expected: PASS (existing kdump tests unaffected by the default-arg generalization).
 
-- [ ] **Step 5: Guardrails + commit**
+- [ ] **Step 3: Guardrails + commit**
 
 ```bash
 uv run ruff check && uv run ruff format && uv run ty check src && uv run python -m pytest tests/test_postmortem_check_prereqs.py -q
@@ -946,9 +857,60 @@ git commit -m "refactor(server): parametrize probe timeout band + halt-reject ac
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/test_postmortem_list_dumps.py`:
+Create `tests/test_postmortem_list_dumps.py`. It imports **only** `debug_postmortem_list_dumps_handler` and `build_scp_argv` (never the fetch handler — review finding 1):
 
 ```python
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from linux_debug_mcp.artifacts.store import ArtifactStore
+from linux_debug_mcp.config import RootfsProfile
+from linux_debug_mcp.domain import (
+    DebugPostmortemListDumpsRequest,
+    ErrorCategory,
+    RunRequest,
+    StepResult,
+    StepStatus,
+)
+from linux_debug_mcp.providers.local_ssh_tests import SshCommandResult
+from linux_debug_mcp.server import build_scp_argv, debug_postmortem_list_dumps_handler
+
+SECRET_KEY_REF = "s3cr3t-key"  # pragma: allowlist secret
+
+
+def _rootfs(**over) -> dict[str, RootfsProfile]:
+    base = {
+        "name": "minimal", "source": "/img.qcow2", "access_method": "ssh",
+        "ssh_host": "127.0.0.1", "ssh_user": "root", "ssh_key_ref": SECRET_KEY_REF,
+    }
+    base.update(over)
+    return {"minimal": RootfsProfile(**base)}
+
+
+def _booted_run(tmp_path) -> str:
+    store = ArtifactStore(artifact_root=tmp_path)
+    manifest = store.create_run(
+        RunRequest(run_id="r1", source_path="/src", build_profile="x86_64-default",
+                   target_profile="local-qemu", rootfs_profile="minimal")
+    )
+    store.record_step_result(manifest.run_id,
+        StepResult(step_name="boot", status=StepStatus.SUCCEEDED, summary="ok", artifacts=[]))
+    return manifest.run_id
+
+
+def test_list_dumps_rejects_out_of_band_timeout(tmp_path) -> None:
+    run_id = _booted_run(tmp_path)
+    resp = debug_postmortem_list_dumps_handler(
+        DebugPostmortemListDumpsRequest(run_id=run_id, target_ref="local-qemu", timeout_seconds=120),
+        artifact_root=tmp_path, rootfs_profiles=_rootfs(),
+    )
+    assert resp.ok is False
+    assert resp.error.details["code"] == "invalid_timeout"
+
+
 def _list_runner(stdout: str, exit_status: int = 0):
     @dataclass
     class _R:
@@ -1418,14 +1380,46 @@ def test_fetch_incomplete_allowed_with_force(tmp_path) -> None:
     assert resp.ok is True, resp.error
 
 
-def test_fetch_idempotent_then_force(tmp_path) -> None:
+def test_fetch_idempotent_skips_work_then_force_redoes_it(tmp_path) -> None:
+    # review finding 3: reuse ONE runner across calls and assert the cached call did
+    # NO ssh/scp work — a fresh runner per call could mask a "cached" branch that
+    # actually re-transferred. force must redo the work and update the manifest.
     _booted(tmp_path)
-    r1 = _fetch(tmp_path, _FetchRunner())
+    runner = _FetchRunner()
+    r1 = _fetch(tmp_path, runner)
     assert r1.ok is True and r1.data["already_fetched"] is False
-    r2 = _fetch(tmp_path, _FetchRunner())
+    calls_after_first = len(runner.calls)
+    assert calls_after_first > 0  # enumeration + scp(s) happened
+
+    r2 = _fetch(tmp_path, runner)
     assert r2.ok is True and r2.data["already_fetched"] is True
-    r3 = _fetch(tmp_path, _FetchRunner(), force=True)
+    # the cached path takes the fetch lock, sees the SUCCEEDED step, and returns —
+    # no further ssh/scp invocations
+    assert len(runner.calls) == calls_after_first
+
+    r3 = _fetch(tmp_path, runner, force=True)
     assert r3.ok is True and r3.data["already_fetched"] is False
+    assert len(runner.calls) > calls_after_first  # force re-enumerated + re-scp'd
+
+
+def test_force_refetch_updates_manifest(tmp_path) -> None:
+    # review finding 2: a force re-fetch must REPLACE the SUCCEEDED step, not no-op.
+    # Change the transferred sizes between calls and assert the manifest details follow.
+    run_id = _booted(tmp_path)
+    _fetch(tmp_path, _FetchRunner(sizes={"vmcore": 16, "vmcore-dmesg.txt": 4}))
+    # second listing reports a larger vmcore; force re-fetches it
+    bigger = _LISTING.replace('"size": 16', '"size": 32').replace('"vmcore": 16', '"vmcore": 32')
+    resp = _fetch(tmp_path, _FetchRunner(listing=bigger, sizes={"vmcore": 32, "vmcore-dmesg.txt": 4}), force=True)
+    assert resp.ok is True
+    assert resp.data["already_fetched"] is False
+    files = {f["name"]: f for f in resp.data["files"]}
+    assert files["vmcore"]["size_bytes"] == 32
+    # the persisted manifest step reflects the replacement (not the stale 16-byte record)
+    store = ArtifactStore(artifact_root=tmp_path)
+    manifest = store.load_manifest(run_id)
+    step = next(v for k, v in manifest.step_results.items() if k.startswith("postmortem.fetch:"))
+    persisted = {f["name"]: f for f in step.details["files"]}
+    assert persisted["vmcore"]["size_bytes"] == 32
 
 
 def test_fetch_redacts_ssh_key(tmp_path) -> None:
@@ -1593,7 +1587,7 @@ def _fetch_under_lock(
             "vmcore_ref": None, "vmlinux_ref": None, "vmcoreinfo_ref": None, "vmcore_dmesg_ref": None,
             "modules_ref": None,
         }
-        for spec in plan_fetch(entry, vmcore_name=entry.file_sizes and _core_name(entry) or "vmcore"):
+        for spec in plan_fetch(entry, vmcore_name=_core_name(entry)):
             staged, failure = _stage_one_file(
                 runner=runner, ctx=ctx, spec=spec, dest_dir=dest_dir, sensitive_dir=sensitive_dir,
                 timeout_seconds=request.timeout_seconds)
@@ -1613,8 +1607,30 @@ def _fetch_under_lock(
                           summary=f"fetched dump {dump_id} ({len(fetched)} files)",
                           artifacts=[ArtifactRef(path=str(dest_dir / "fetch.json"), kind="application/json")],
                           details=details)
-        _record_terminal_build_result(ctx.store, run_id, step, )  # reuses the retry-with-backoff helper
+        # review finding 2: MUST pass replace_succeeded so a `force` re-fetch updates the
+        # manifest. with_step_result silently no-ops on an existing SUCCEEDED step when
+        # replace_succeeded is False (manifest.py:62-63), so reusing the build recorder
+        # (which hard-codes replace_succeeded=False) would leave the manifest stale.
+        _record_fetch_result(ctx.store, run_id, step, replace_succeeded=request.force)
     return _fetch_success_response(run_id, details, already_fetched=False)
+
+
+def _record_fetch_result(
+    store: ArtifactStore, run_id: str, result: StepResult, *, replace_succeeded: bool,
+    attempts: int = 5, initial_delay_seconds: float = 0.01,
+) -> None:
+    """Record a postmortem.fetch step under the manifest-lock retry-with-backoff
+    (clone of _record_terminal_build_result, but threading replace_succeeded)."""
+    delay = initial_delay_seconds
+    for attempt in range(attempts):
+        try:
+            store.record_step_result(run_id, result, replace_succeeded=replace_succeeded)
+            return
+        except ManifestStateError as exc:
+            if "manifest is locked" not in str(exc) or attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
 
 
 def _core_name(entry: DumpEntry) -> str:
@@ -1633,9 +1649,9 @@ def _fetch_success_response(run_id: str, details: dict[str, Any], *, already_fet
                                 "debug.introspect.from_vmcore"])
 ```
 
-Add `import hashlib` and `import shutil` to `server.py`'s imports if not already present (check with `grep -n "^import hashlib\|^import shutil" src/linux_debug_mcp/server.py`). `_record_terminal_build_result` does not take a positional after `result`; call it `_record_terminal_build_result(ctx.store, run_id, step)` (remove the trailing comma artifact). `prior.status == StepStatus.SUCCEEDED` — confirm `StepResult.status` is the field name (it is, per domain.py).
+`import hashlib`, `import shutil`, `import time`, and `ManifestStateError` are already imported in `server.py` (verify with `grep -n "^import hashlib\|^import shutil\|^import time\|ManifestStateError" src/linux_debug_mcp/server.py`; add any that are missing). `StepResult.status` is the field name (per domain.py). `_record_fetch_result` threads `replace_succeeded` (review finding 2) — do **not** substitute `_record_terminal_build_result`, which hard-codes `replace_succeeded=False` and would silently drop a `force` re-fetch's new details.
 
-Note on `plan_fetch` core name: pass `vmcore_name=_core_name(entry)` so an incomplete (`vmcore-incomplete`) dump fetched under `force` scps the actual core file present. Simplify the call to:
+Note on `plan_fetch` core name: `_core_name(entry)` returns the actual core file present so an incomplete (`vmcore-incomplete`) dump fetched under `force` scps it; the local staged name stays `vmcore` (the `FetchSpec.local_name` for the core is always `VMCORE_NAME`). The call is:
 
 ```python
         for spec in plan_fetch(entry, vmcore_name=_core_name(entry)):
@@ -1894,7 +1910,9 @@ git add -A && git commit -m "style: ruff format fixups"
 
 ## Self-review notes
 
-- **Spec coverage:** list (Task 7) + fetch (Task 8) + empty-list (Task 7) + refs (Task 8) + sha256/size + truncation (Task 8) + idempotency/force (Task 8) + redaction/HALTED (Tasks 7–8, HALTED via the reused `_reject_if_target_halted` default-arg path) + env-gated test (Task 10) + capability/config (Tasks 2, 4) + docs (Task 11) + bounding (`dump_too_large`/`insufficient_disk`/`dump_incomplete`, Task 8) + scp quoting (Task 7).
+- **Spec coverage:** list (Task 7) + fetch (Task 8) + empty-list (Task 7) + refs (Task 8) + sha256/size + truncation (Task 8) + idempotency/force (Task 8, `test_fetch_idempotent_skips_work_then_force_redoes_it` + `test_force_refetch_updates_manifest`) + redaction/HALTED (Tasks 7–8, HALTED via the reused `_reject_if_target_halted` default-arg path) + env-gated test (Task 10) + capability/config (Tasks 2, 4) + docs (Task 11) + bounding (`dump_too_large`/`insufficient_disk`/`dump_incomplete`, Task 8) + scp quoting (Task 7).
 - **Type consistency:** `FetchSpec` fields (`remote_path`/`local_name`/`ref_key`/`expected_size`) are used identically in `plan_fetch` (Task 3) and `_stage_one_file` (Task 8); `ref_map` keys match `SYMBOL_REF_KEYS` values + `vmcore_ref` + `modules_ref`; `DumpEntry`/`FetchedFile` field names match across Tasks 1, 3, 7, 8.
-- **HALTED handler test:** add a HALTED-injection test to `tests/test_postmortem_fetch.py` mirroring `tests/test_postmortem_check_prereqs.py::test_halted_target_is_fast_rejected` using a `_FakeAdmission`/`_FakeRegistry(ExecutionState.HALTED)` passed via `admission=`/`session_registry=`; assert `target_halted`. (Covered by reusing the existing helper; the test makes the reuse explicit.)
-```
+- **Phase ordering (review finding 1):** Task 6 is a pure refactor (no new test file); each handler-importing test file is created only in the task that defines the handler it imports, so no committed state has a module importing a not-yet-defined symbol (pytest imports a module before applying `-k`, so such an import is a hard collection error). `tests/test_postmortem_list_dumps.py` imports only the list handler + `build_scp_argv`; fetch-handler tests live in `tests/test_postmortem_fetch.py`.
+- **Force replace (review finding 2):** the fetch step is recorded with `_record_fetch_result(..., replace_succeeded=request.force)` — never the build recorder, which hard-codes `replace_succeeded=False` and would silently no-op a `force` re-fetch (`with_step_result` returns self on an existing SUCCEEDED step). `test_force_refetch_updates_manifest` asserts the persisted step is replaced.
+- **Idempotency verification (review finding 3):** `test_fetch_idempotent_skips_work_then_force_redoes_it` reuses one runner across calls and asserts `runner.calls` is unchanged on the cached call (proving no re-transfer) and grows on the `force` call.
+- **HALTED handler test:** add a HALTED-injection test to `tests/test_postmortem_fetch.py` mirroring `tests/test_postmortem_check_prereqs.py::test_halted_target_is_fast_rejected` using a `_FakeAdmission`/`_FakeRegistry(ExecutionState.HALTED)` passed via `admission=`/`session_registry=`; assert `target_halted`.
