@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Any, Literal
 
@@ -339,6 +340,19 @@ class BackendAttachment:
     console_artifact: ArtifactRef | None = None
 
 
+@dataclass(frozen=True)
+class BreakResources:
+    """The live resources a transport hands the break-inject mechanism (#82 / ADR 0024): the
+    agent-proxy and its handle for a UART/agent break, and the ssh prefix/runner for a sysrq-g
+    write. A transport that injects no out-of-band break (gdbstub-native) returns None instead."""
+
+    proxy: object
+    proxy_handle: object
+    ssh_runner: object | None = None
+    ssh_argv_prefix: tuple[str, ...] = ()
+    work_dir: Path | None = None
+
+
 class Transport(ABC):
     """Abstract transport provider. Concrete transports (serial-local, qemu-gdbstub)
     land in Layer 3; the open() transaction (Layer 4) drives attach/close/health."""
@@ -346,6 +360,13 @@ class Transport(ABC):
     @property
     @abstractmethod
     def capability(self) -> TransportCapability: ...
+
+    def break_resources(self, session: TransportSession) -> BreakResources | None:
+        """Resolve the live proxy/ssh resources needed to inject a break over this session's
+        console, or None when the transport exposes no out-of-band break handle (the gdbstub
+        interrupts natively, or the proxy handle is gone). Default: None — a transport opts in by
+        overriding. ``inject_break_for_session`` maps None to ``break_inject_unavailable``."""
+        return None
 
     @abstractmethod
     def attach(

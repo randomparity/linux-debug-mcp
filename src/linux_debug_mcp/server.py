@@ -181,6 +181,7 @@ from linux_debug_mcp.symbols.verify import (
     verify_vmlinux_provenance,
 )
 from linux_debug_mcp.transport.base import (
+    BreakMethod,
     EndpointExposure,
     ExecutionState,
     LineRole,
@@ -4797,10 +4798,6 @@ def _engine_op_data(
         return {"frames": [frame.model_dump(mode="json") for frame in engine.backtrace(attachment)]}
     if method_name == "list_variables":
         return {"variables": [var.model_dump(mode="json") for var in engine.list_variables(attachment)]}
-    if method_name == "interrupt":
-        stop = engine.interrupt(attachment)
-        stop_payload = stop.model_dump(mode="json") if stop is not None else None
-        return {"stop": stop_payload, "current_execution_state": "stopped"}
     if method_name in _EXEC_VERBS:
         timeout = kwargs.get("timeout_seconds")
         stop = _EXEC_VERBS[method_name](engine, attachment, timeout)
@@ -4808,6 +4805,59 @@ def _engine_op_data(
     raise GdbMiError(
         "unsupported debug operation", category=ErrorCategory.CONFIGURATION_ERROR, details={"operation": method_name}
     )
+
+
+_INJECT_BREAK_STOP_TIMEOUT_SEC = 10.0
+
+
+def _break_entry_method(transport_session: TransportSession | None) -> BreakMethod:
+    """ADR 0024 decision 1: the break-entry method is whatever admission recorded in the session's
+    ``break_plan`` — the tier never chooses or hardcodes it. Absent a record or a plan, default to
+    the gdbstub's native interrupt (the loopback x86_64/QEMU path), which needs no injection."""
+    if transport_session is None or transport_session.break_plan is None:
+        return BreakMethod.GDBSTUB_NATIVE
+    return transport_session.break_plan.method
+
+
+def _lookup_transport_session(
+    *,
+    session_registry: SessionRegistry | None,
+    artifact_root: Path,
+    run_id: str,
+    transaction: TransportTransaction | None,
+) -> TransportSession | None:
+    """Resolve the live ``TransportSession`` backing this debug run: read the bound
+    ``transport_session_id`` start_session persisted into the debug step, then look the durable
+    record up in the registry. None when the registry/transaction is unwired or no transport
+    session was bound — the caller then defaults to the gdbstub-native interrupt."""
+    if session_registry is None or transaction is None:
+        return None
+    transport_session_id = _recorded_transport_session_id(artifact_root=artifact_root, run_id=run_id)
+    if transport_session_id is None:
+        return None
+    return next((r for r in session_registry.list_records() if r.session_id == transport_session_id), None)
+
+
+def _interrupt_op_data(
+    *,
+    engine: GdbMiEngine,
+    attachment: GdbMiAttachment,
+    transport_session: TransportSession | None,
+    transaction: TransportTransaction | None,
+) -> dict[str, object]:
+    """Route ``debug.interrupt`` off the admitted break plan (ADR 0024). A gdbstub-native plan (or
+    an absent record / unwired transaction) interrupts the inferior directly through the engine; any
+    other admitted method is injected over the console via the transaction, then the engine waits the
+    bounded window for the resulting stop. ``inject_break_for_session`` raises
+    ``break_inject_unavailable`` when the transport exposes no break handle — never a silent no-op."""
+    method = _break_entry_method(transport_session)
+    if method is BreakMethod.GDBSTUB_NATIVE or transaction is None or transport_session is None:
+        stop = engine.interrupt(attachment)
+    else:
+        transaction.inject_break_for_session(transport_session.session_id, method.value)
+        stop = engine.wait_for_stop(attachment, timeout_sec=_INJECT_BREAK_STOP_TIMEOUT_SEC)
+    stop_payload = stop.model_dump(mode="json") if stop is not None else None
+    return {"stop": stop_payload, "current_execution_state": "stopped"}
 
 
 def _mi_session_artifacts(*, store: ArtifactStore, run_id: str, session: DebugSession) -> list[ArtifactRef]:
@@ -4891,9 +4941,25 @@ def _debug_operation_response(
             # structured failure (defence-in-depth matching start_session's guaranteed-resume
             # teardown). A GdbMiError means gdb answered (alive) — keep the session, surface it below.
             try:
-                data = _engine_op_data(
-                    engine=gdb_mi_engine, attachment=attachment, method_name=method_name, kwargs=kwargs
-                )
+                if method_name == "interrupt":
+                    # ADR 0024: break entry routes off the admitted break_plan, not a hardcoded
+                    # method. Native (the loopback QEMU default) interrupts the inferior directly;
+                    # any other admitted method is injected over the console via the transaction.
+                    data = _interrupt_op_data(
+                        engine=gdb_mi_engine,
+                        attachment=attachment,
+                        transport_session=_lookup_transport_session(
+                            session_registry=session_registry,
+                            artifact_root=artifact_root,
+                            run_id=run_id,
+                            transaction=transaction,
+                        ),
+                        transaction=transaction,
+                    )
+                else:
+                    data = _engine_op_data(
+                        engine=gdb_mi_engine, attachment=attachment, method_name=method_name, kwargs=kwargs
+                    )
                 updated_session = session
                 if method_name in _BREAKPOINT_MUTATORS:
                     ledger = {
@@ -4926,6 +4992,17 @@ def _debug_operation_response(
                         suggested_next_actions=["debug.start_session", "debug.kdb", "debug.introspect.run"],
                     )
                 raise
+            except InjectBreakError as exc:
+                # The admitted break plan could not be injected (no break handle on this transport,
+                # or a requested method that does not match the plan). The live attachment is
+                # healthy — keep it, surface a CONFIGURATION_ERROR with the mechanism's own details.
+                return ToolResponse.failure(
+                    category=exc.category,
+                    message=redactor.redact_text(str(exc)),
+                    run_id=run_id,
+                    details=redactor.redact_value(exc.details),
+                    suggested_next_actions=["debug.kdb", "debug.introspect.run", "artifacts.get_manifest"],
+                )
             except ProviderDebugError:
                 raise
             except Exception as exc:
