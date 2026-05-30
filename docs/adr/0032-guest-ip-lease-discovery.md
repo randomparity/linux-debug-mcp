@@ -44,21 +44,42 @@ failure can turn a good boot `FAILED`. The outcome is reported as `guest_ip_disc
 `{found, no_lease, unavailable}`. `no_lease`/`unavailable` leave `guest_ip` null; `run_tests` against a
 loopback host then fails to connect exactly as today (no regression) but with a machine-readable reason.
 
-### 4. Bounded poll for lease registration, with an injectable clock
+### 4. Bounded poll for lease registration, with an injectable clock and a bounded per-call timeout
 
 The readiness marker can precede DHCP-lease registration, so discovery polls up to
 `lease_discovery_attempts` times (default 8) with `lease_discovery_interval` seconds between (default 1.0),
 stopping at the first routable IPv4. The attempt count, interval, and a `sleep` seam are
 `LibvirtQemuProvider.__init__` parameters so unit tests exercise the poll with zero real delay. A
 non-zero-exit `domifaddr` stops the poll immediately (the domain is gone — nothing to wait for) and reports
-`unavailable`.
+`unavailable`. Each `domifaddr` invocation uses its own short timeout (`lease_discovery_call_timeout`,
+default 5 s), **not** the boot `plan.timeout_seconds` (up to 300 s) the define/start/console calls use, so a
+hung `virsh` costs at most the per-call timeout per attempt and cannot stall the boot — which matters
+because the poll runs while `boot_lock` + `target_lock` are held. Worst-case wall-clock is
+`attempts × (interval + call_timeout)`.
 
-### 5. The override is in-memory only; the manifest stays immutable
+### 4a. Discovery is gated on SSH relevance
+
+`run_tests` is the only `guest_ip` consumer and rejects any non-SSH rootfs profile
+(`plan_tests` requires `access_method in {"ssh", "ssh_and_serial"}`). So discovery runs only when the
+boot's rootfs profile is SSH-relevant; for `serial`/`none` profiles it is skipped
+(`guest_ip_discovery.status = "skipped"`, `guest_ip` null) rather than spending the poll budget on a value
+nothing reads. The provider already holds `rootfs_profile` in `plan_boot`, so the gate is a plan-time
+boolean (`BootPlan.discover_guest_ip`).
+
+### 5. The override is in-memory only; the manifest stays immutable; staleness is tolerated
 
 `run_tests` applies the discovered IP with `model_copy(update={"ssh_host": ...})` on a per-invocation
 profile copy. It does not write the discovered address back into the manifest's frozen `RunRequest` or the
 boot attempt's recorded `resolved_rootfs_profile`. The discovered runtime fact (boot `details["guest_ip"]`)
 and the configured profile stay separate, and the manifest-immutability invariant is preserved.
+
+Because `guest_ip` is a point-in-time lease fact and the boot short-circuit does not re-discover (it stays
+cheap/side-effect-free), a persisted `guest_ip` can go stale across a restart or lease renewal. This is
+tolerated by design: SSH key auth + per-run empty `known_hosts` + `StrictHostKeyChecking=accept-new` means
+a stale address that now hosts a *different* VM fails to authenticate rather than running tests against the
+wrong target, so the worst case degrades to "tests fail to connect" (the same observable as `no_lease`).
+The recovery contract is `force_reboot` (re-boot re-discovers a fresh `guest_ip`). See the spec's
+"Lease staleness" section.
 
 ### 6. "Unset or loopback" is the override trigger; everything else is an explicit override
 

@@ -34,13 +34,29 @@ discovery sources. Those stay out of scope; the lease source is the documented d
 
 ### 1. Discovery lives in the boot provider, surfaced as a boot-result fact
 
-The `LibvirtQemuProvider`, on a **successful** boot (console reached the readiness marker), runs
+The `LibvirtQemuProvider`, on a **successful** boot (console reached the readiness marker) **whose rootfs
+profile uses an SSH access method** (`access_method in {"ssh", "ssh_and_serial"}`), runs
 `virsh -c <uri> domifaddr <domain> --source lease` and parses the first routable IPv4 address out of the
 tabular output. The discovered address is surfaced on `BootExecutionResult.details["guest_ip"]` together
 with `details["guest_ip_discovery"]` — a small status record (`{"status": "...", "source": "lease",
 ...}`) describing how discovery resolved. The provider does **not** know about `ssh_host` override policy;
 it reports a domain fact. The host-selection policy lives one layer up, in `target_run_tests_handler`
 (decision 3).
+
+Discovery is **gated on SSH relevance** because `run_tests` is the only consumer and it rejects any
+non-SSH rootfs profile (`plan_tests` requires `access_method in {"ssh", "ssh_and_serial"}`,
+`local_ssh_tests.py:280-281`). A `serial`/`none` profile would never read `guest_ip`, so spending the
+poll budget on it is pure waste; for those profiles discovery is skipped and `guest_ip_discovery.status`
+is `skipped` (`guest_ip` null). This keeps the common SSH path's behavior unchanged while not stalling
+serial-only boots up to the poll budget for a value nothing reads.
+
+The `domifaddr` invocation uses a **short, bounded per-call timeout** (`lease_discovery_call_timeout`, a
+`LibvirtQemuProvider.__init__` parameter, default 5 s) — **not** the boot `plan.timeout_seconds` (up to
+300 s) that the define/start/console calls use. A hung `virsh domifaddr` therefore costs at most that
+per-call timeout per attempt, not the full boot timeout, so the poll's worst-case wall-clock is
+`attempts × (interval + call_timeout)` rather than unbounded. This matters because the poll runs inside
+`boot_lock` + `target_lock`; bounding the per-call timeout keeps those locks from being held on a
+misbehaving libvirtd.
 
 `virsh domifaddr` tabular output looks like:
 
@@ -68,6 +84,8 @@ a typed status field). The `guest_ip_discovery` status is one of:
   poll; `guest_ip` is `null`.
 - `unavailable` — `virsh domifaddr` failed (non-zero exit / timed out) or `virsh` is missing;
   `guest_ip` is `null`. The (redacted) stderr snippet rides `guest_ip_discovery["detail"]`.
+- `skipped` — the rootfs profile is not SSH-relevant (decision 1), so discovery did not run; `guest_ip`
+  is `null`.
 
 In the `no_lease` / `unavailable` cases the boot still returns `SUCCEEDED`; a later `run_tests` against a
 loopback `ssh_host` will fail to connect exactly as it does today (no regression), but now the boot result
@@ -120,9 +138,11 @@ it at write time.
 | `domifaddr` non-zero / timed out / `virsh` absent | `SUCCEEDED` | `null` | `unavailable` | loopback `ssh_host` unchanged → connect fails as today |
 | Lease found, explicit non-loopback `ssh_host` set | `SUCCEEDED` | the IP | `found` | explicit `ssh_host` **preserved** (override ignored) |
 | Boot never reached marker | `FAILED` (timeout/readiness) | — (discovery skipped) | absent | n/a (run_tests requires a succeeded boot) |
+| Marker reached, non-SSH rootfs profile | `SUCCEEDED` | `null` | `skipped` | n/a (run_tests rejects non-SSH profiles) |
 | `guest_ip` present but fails re-validation in run_tests | n/a | (ignored) | n/a | original `ssh_host` used; warning logged |
 
-Discovery only runs on the success branch, so a failed boot never spends the poll budget.
+Discovery only runs on the success branch (and only for SSH-relevant profiles), so a failed or
+serial-only boot never spends the poll budget.
 
 ## Idempotency / short-circuit
 
@@ -134,11 +154,33 @@ Discovery only runs on the success branch, so a failed boot never spends the pol
 - `run_tests` reads `guest_ip` fresh from the manifest on every invocation, so a `force_rerun` after a
   re-boot picks up the latest discovered address.
 
+### Lease staleness is intentional, and a connect failure is the recovery signal
+
+`guest_ip` is a **point-in-time** lease fact, and the boot short-circuit deliberately does **not**
+re-discover (a short-circuit must stay cheap and side-effect-free — it does not touch libvirt at all).
+Across a long-lived run or a server restart the address can therefore go stale: the guest may have
+renewed to a different lease, the lease may have expired, or — worst case — that `192.168.122.x` address
+may now be held by a *different* guest. `run_tests` then SSHes to a stale/foreign address. The §4a
+re-validation only checks the address *shape*, not its *freshness*; freshness is not knowable without
+re-querying libvirt, which the short-circuit declines to do.
+
+The recovery contract is therefore: **a connection/auth failure from `run_tests` against a discovered
+`guest_ip` means "re-discover" — re-invoke `target.boot` with `force_reboot=True`**, which boots a fresh
+attempt and records a current `guest_ip`. This is safe by construction: SSH uses key auth with a
+per-run empty `known_hosts` and `StrictHostKeyChecking=accept-new`, so a stale address that now hosts a
+*different* VM fails to authenticate rather than running tests against the wrong target. The stale-IP
+failure mode degrades to "tests fail to connect" — the same observable as the `no_lease` case — never to
+"tests run against a foreign guest". Re-discovering on the short-circuit was considered and rejected
+(ADR 0032, rejected alternative 1's sibling reasoning): it would make every `run_tests` after a restart
+pay a libvirt round-trip and re-introduce provider knowledge into the short-circuit path.
+
 ## Affected code
 
 - `src/linux_debug_mcp/providers/libvirt_qemu.py`: `parse_domifaddr_ipv4` (new), `BootPlan.domifaddr_argv`
-  (new field set in `plan_boot`), `LibvirtQemuProvider.__init__` (`sleep` + poll params),
-  `execute_boot` success branch (poll + surface `guest_ip` / `guest_ip_discovery`).
+  (new field set in `plan_boot`) and `BootPlan.discover_guest_ip` (bool gate from the rootfs access
+  method), `LibvirtQemuProvider.__init__` (`sleep`, `lease_discovery_attempts`,
+  `lease_discovery_interval`, `lease_discovery_call_timeout` params), `execute_boot` success branch
+  (gated poll + surface `guest_ip` / `guest_ip_discovery`).
 - `src/linux_debug_mcp/server.py`: `target_run_tests_handler` (read `guest_ip` from boot details, apply
   override via `_ssh_host_is_unset_or_loopback` + re-validation).
 - No `domain.py` wire-model change (the new fields ride the free-form `StepResult.details` dict that
@@ -150,8 +192,10 @@ Discovery only runs on the success branch, so a failed boot never spends the pol
   loopback-only, malformed rows, empty).
 - Unit: `LibvirtQemuProvider.execute_boot` with a `FakeLibvirtRunner` extended to answer `domifaddr` —
   asserts `guest_ip`/`guest_ip_discovery` for found, no-lease (poll exhausts, sleep called N−1 times via
-  the injected seam), and `unavailable` (non-zero exit) cases; asserts boot stays `SUCCEEDED` throughout
-  and discovery is skipped on the timeout/readiness-failure branches.
+  the injected seam), `unavailable` (non-zero exit), and `skipped` (non-SSH rootfs profile, `domifaddr`
+  never called) cases; asserts boot stays `SUCCEEDED` throughout and discovery is skipped on the
+  timeout/readiness-failure branches; asserts the `domifaddr` call uses `lease_discovery_call_timeout`,
+  not `plan.timeout_seconds`.
 - Unit: `_ssh_host_is_unset_or_loopback` truth table (`None`, `""`, `127.0.0.1`, `127.0.0.2`, `::1`,
   `localhost`, `192.168.122.45`, `bastion.example`).
 - Unit: `target_run_tests_handler` with injected boot manifest details — overrides loopback/unset
