@@ -248,6 +248,11 @@ existing env-gated local-QEMU gdbstub coverage passes on the MI engine.
   no-op.
 - set/clear watchpoint issue the expected `-break-watch`/`-break-delete` MI verbs
   and are refused when the `DebugProfile` narrows them out of `enabled_operations`.
+- every new typed record (`StopRecord`, frames, `list_variables`, register values,
+  memory bytes) is routed through `Redactor` before return **and** before
+  persistence: a secret-looking local/register value is redacted in both the
+  response and the manifest, and `list_variables` output is bounded
+  (`MAX_RESPONSE_SNIPPET`) so a deep frame cannot bloat the response.
 - the shipped default `DebugProfile`s enable the new structured/watchpoint ops
   (they ride the `ALLOWED_DEBUG_OPERATIONS` default factory); a profile that
   supplied an explicit narrowed `enabled_operations` must opt the new names in —
