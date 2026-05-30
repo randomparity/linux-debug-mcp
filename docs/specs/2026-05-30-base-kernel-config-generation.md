@@ -37,10 +37,13 @@ the build with a `CONFIGURATION_ERROR` carrying the redacted log tail in `diagno
 failing target's log attached as an `ArtifactRef` (kind `config-log`) so the full output is
 discoverable through the manifest, not just the tail.
 
-The list is ordered: a from-scratch generator (`defconfig`, `tinyconfig`, `allnoconfig`, …) must come
-first, since later fragment-merge targets (e.g. `kvm_guest.config`) require an existing `.config` to
-merge onto. A `base_config` consisting only of a fragment target on a clean tree therefore lands in the
-"ran but produced no `.config`" failure (below).
+The list is ordered: a from-scratch generator (`defconfig`, `tinyconfig`, `allnoconfig`, …) should come
+first, since later fragment-merge targets (e.g. `kvm_guest.config`) are intended to merge onto an
+existing `.config`. The provider does not classify targets as generator-vs-fragment; it runs them in
+order and relies on the post-generation guard — if no `.config` exists in the output dir after the
+targets run, the build fails with "ran but produced no `.config`" (below). A fragment-only `base_config`
+on a clean tree therefore either produces a degenerate config (which the subsequent build will surface)
+or trips that guard; pairing a generator first is the supported usage.
 
 ### Precedence ladder (backward compatible)
 
