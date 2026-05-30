@@ -283,15 +283,25 @@ warning (over SOL/HMC vterm, warn that RSP may be unreliable and suggest
   `CONFIGURATION_ERROR`, never a silent skip that arms an unresolved breakpoint. A
   `loaded_modules` ledger is persisted into the `DebugSession`.
 - **RSP-stall (ADR 0023).** `attach()` sets `remotetimeout` before the RSP connect
-  and bounds the connect with a small injectable retry/backoff for transient
-  connect races only (never re-issuing an interactive verb). A timeout on an
-  established session raises a `GdbMiError` carrying `code="transport_stall"` /
-  `INFRASTRUCTURE_FAILURE`; the handler distinguishes it from a benign `^error`
-  and runs the full guaranteed-resume teardown (reap + `force_resume` +
-  transport teardown), reporting `transport_stall` and routing the agent to
-  `debug.start_session` (re-attach from scratch — never re-sync a stalled RSP,
-  §5.4/§9.3), `debug.kdb`, `debug.introspect.run`. Every other `GdbMiError` keeps
-  Phase-C contained-error behaviour.
+  and bounds the connect with a small injectable retry/backoff that retries any
+  idempotent pre-`^connected` connect error (the connect mutates no target state
+  until `^connected`; never re-issuing an interactive verb). `attach()` re-tags its
+  own connect-phase write timeouts as `DEBUG_ATTACH_FAILURE`, so `transport_stall`
+  is reached only through the per-op path (post-`^connected` by construction). A
+  stall presents two ways, both detected: a **write-path** stall (an MI write times
+  out) raises `code="transport_stall"` / `INFRASTRUCTURE_FAILURE`; a
+  **silence-path** stall (`-exec-continue` returns `^running`, the link goes silent
+  — indistinguishable from a healthy no-breakpoint timeout *until* the fallback
+  `-exec-interrupt` is issued and a reachable kernel cannot ignore the delivered
+  SIGINT) is flagged when the interrupt write is accepted but no `*stopped` arrives
+  within the bound; a benign timeout still returns `timed_out=true` (session kept).
+  On a stall the handler runs the full guaranteed-resume teardown **inside
+  `debug_lock`** (reap + `force_resume` + `_resume_debug_transport` (durable
+  EXECUTING) + `_teardown_debug_transport` (guard release)), reporting
+  `transport_stall` and routing the agent to `debug.start_session` (re-attach from
+  scratch — never re-sync a stalled RSP, §5.4/§9.3), `debug.kdb`,
+  `debug.introspect.run`. Every other `GdbMiError` keeps Phase-C contained-error
+  behaviour.
 - **Break-entry + quality warning (ADR 0024).** Break-entry routes off the
   session's recorded `break_plan.method`: `gdbstub_native` → engine
   `-exec-interrupt` (unchanged); any other method → `transport.inject_break` then

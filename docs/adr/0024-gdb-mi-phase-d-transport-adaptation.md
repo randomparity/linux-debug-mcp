@@ -17,7 +17,7 @@ A third, scoping point: the serial break/continue acceptance needs a producible 
 
 ### 1. Break-entry routes off the recorded `break_plan.method`; it is never re-derived in the tier.
 
-The break-entry path reads `TransportSession.break_plan.method` (already computed by `BreakPolicy` and persisted at open):
+The break-entry path reads `TransportSession.break_plan.method` (already computed by `BreakPolicy` and persisted at open). `debug.interrupt` flows through `_debug_operation_response`, which loads the `qemu_gdbstub.DebugSession` (carrying `transport_session_id`), **not** the Layer-4 `TransportSession` that holds `break_plan`; so the break-entry path first resolves the `TransportSession` by `transport_session_id` from the `session_registry` to read `break_plan.method`, **defaulting to native `-exec-interrupt` when the record or the plan is absent** (the Phase-C behaviour, so a missing Layer-4 record never blocks an interrupt). The routing is then:
 
 - `GDBSTUB_NATIVE` → the existing engine `interrupt()` (`-exec-interrupt`), unchanged.
 - any other method (`UART_BREAK`, `AGENT_PROXY_BREAK`, `SYSRQ_G`) → `transport.break_inject.inject_break(method=..., break_plan=..., proxy=…, ssh_runner=…)`, then `wait_for_stop` for the resulting `*stopped`.
