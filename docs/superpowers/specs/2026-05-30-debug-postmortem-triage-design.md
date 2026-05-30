@@ -113,10 +113,17 @@ class DebugPostmortemTriageRequest(Model):        # extra="forbid"
 ```
 
 There is **no** `commands`/`helpers`/section field (fixed helper set, ADR 0027 decision
-2) and **no** `target_ref`/`*_profile`/`debug_profile` (offline, never gated). `modules_ref`,
-when given, is threaded to all three sub-calls (crash `mod -S` best-effort load; the
-`modules` helper's `for_each_module` does not need it but the crash side does). The
+2) and **no** `target_ref`/`*_profile`/`debug_profile` (offline, never gated). The
 manifest is consulted only for the run-directory layout — never for a target profile.
+
+**`modules_ref` is threaded to the crash sub-call only.** Only the crash side uses it
+(the server-injected `mod -S` symbol load). The drgn `dmesg`/`modules` helpers read the
+ring buffer / `for_each_module(prog)` from the core itself and have **no** use for a
+`*.ko` directory; passing `modules_ref` to them would only add a `resolve_symbols`
+failure mode (an absent or non-directory `modules_ref` → `symbol_resolution_failed`)
+that would knock out the drgn source for a reason unrelated to dmesg/module extraction.
+So the two drgn sub-calls are invoked with `modules_ref=None`; `modules_ref` (when given)
+is validated **up front** (§4 step 2) and passed only to the crash sub-call.
 
 **Aggregate wall-clock and sequential ordering.** The three sub-calls run
 **sequentially** (crash → dmesg → modules), each bounded by `timeout_seconds`, so a
@@ -179,11 +186,14 @@ Success `data` carries:
 - `report` — the `DebugPostmortemTriageReport` (`model_dump(mode="json")`).
 - `partial` — `true` when any section's `status == "failed"`.
 - `vmcore_build_id` — the verified up-front id (also on the report).
-- `sub_call_ids` — `{crash, dmesg, modules}` → each sub-call's `call_id` (or `null` if
-  that sub-call returned no id), so an agent can fetch a sub-call's own artifacts. This
-  is also carried in the `triage_all_sources_failed` hard-failure `details` (§3.4) so a
-  sub-call that *ran* (and persisted a transcript) before the report came back empty
-  stays reachable even when triage hard-fails.
+- `sub_call_ids` — `{crash, dmesg, modules}` → each sub-call's `call_id`, read as
+  `resp.data.get("call_id")` on a successful sub-call and `(resp.error.details or {}).get("call_id")`
+  on a failed one (the crash/introspect handlers stamp the `call_id` into the failure
+  `details`, not `data`), falling back to `null` only when the sub-call failed before
+  minting an id (a config-level reject). This keeps a ran-but-failed sub-call's transcript
+  reachable. The same map is carried in the `triage_all_sources_failed` hard-failure
+  `details` (§3.4) so a sub-call that *ran* before the report came back empty stays
+  reachable even when triage hard-fails.
 - `artifacts` — an `ArtifactRef` to the redacted `report.json`.
 - timing (`started_at`, `finished_at`, `duration_ms`). `duration_ms` is the true elapsed
   time across all three sequential sub-calls (≈ up to 3 × `timeout_seconds`, §3.1).
@@ -207,7 +217,8 @@ from the crash parsers / drgn helper output models (ADR 0027 decision 8).
 | up-front vmcore truncated/unreadable | `CONFIGURATION_ERROR` | `vmcore_build_id_unreadable` |
 | up-front vmcore carries no build-id | `CONFIGURATION_ERROR` | `provenance_unverifiable` |
 | up-front vmcore ref missing/escaping | `CONFIGURATION_ERROR` | `vmcore_not_found` |
-| up-front vmlinux ref unsafe/missing | `CONFIGURATION_ERROR` | `symbol_resolution_failed` |
+| up-front vmlinux/modules ref unsafe/missing | `CONFIGURATION_ERROR` | `symbol_resolution_failed` |
+| up-front resolved `modules_path` charset-unsafe | `CONFIGURATION_ERROR` | `modules_path_unsafe` |
 | `sensitive/` missing/too-permissive | `CONFIGURATION_ERROR` | `sensitive_dir_missing` / `sensitive_dir_too_permissive` |
 | **zero `ok` sections** (both sources produced nothing usable) | `INFRASTRUCTURE_FAILURE` | `triage_all_sources_failed` (details carry redacted `sub_call_ids` + `section_reasons`) |
 | ≥1 `ok` section, ≥1 `failed` section | success, `partial=True`, failed sections carry `reason` (the sub-call `code`) | — |
@@ -224,22 +235,32 @@ A linear orchestrator:
 1. Resolve `ArtifactStore`; load manifest (missing → `run_not_found`). Validate
    `timeout_seconds ∈ [5,300]` (`invalid_timeout`). `sensitive/` mode-0700 preflight
    (reused from the crash handler; `sensitive_dir_*`).
-2. **Up-front build-id gate (ADR 0027 decision 4):** confine `vmcore_ref`, resolve
-   `vmlinux_ref` via `resolve_symbols`, then `_crash_buildid_failloud(...)`. Any failure
-   returns **before any sub-call**. On success, capture `vmcore_build_id`.
+2. **Up-front gate over the shared refs + build-id (ADR 0027 decision 4):** confine
+   `vmcore_ref`, resolve `vmlinux_ref` **and `modules_ref`** via `resolve_symbols`, and
+   — when `modules_ref` is given — run the crash handler's `validate_modules_path`
+   charset check. All three shared-ref errors hard-fail **before any sub-call** and
+   consistently (`vmcore_not_found` / `symbol_resolution_failed` / `modules_path_unsafe`),
+   so a caller-input ref error is never a degraded partial report (the partial contract is
+   reserved for genuine tier-unavailability). Then `_crash_buildid_failloud(...)`; on
+   success, capture `vmcore_build_id`.
 3. **crash sub-call:** `crash_handler(DebugPostmortemCrashRequest(run_id, vmcore_ref,
    vmlinux_ref, modules_ref, commands=["log","bt"], timeout_seconds), artifact_root=…,
-   runner=…, vmcore_build_id_reader=…, vmlinux_build_id_reader=…, clock=…)`.
+   runner=…, vmcore_build_id_reader=…, vmlinux_build_id_reader=…, clock=…)`. `modules_ref`
+   rides on this sub-call only.
 4. **drgn sub-calls:** `drgn_helper_handler(DebugIntrospectFromVmcoreHelperRequest(...,
-   name="dmesg", timeout_seconds), …)` then the same with `name="modules"`. The drgn
-   handler takes `build_id_reader=vmlinux_build_id_reader` and `runner=…`, `clock=…`.
+   modules_ref=None, name="dmesg", timeout_seconds), …)` then the same with
+   `name="modules"`. `modules_ref` is **not** passed (§3.1). The drgn handler takes
+   `build_id_reader=vmlinux_build_id_reader` and `runner=…`, `clock=…`.
 5. **Assemble** the five sections from the three responses (`postmortem/triage.py`).
-   A section's `reason` (when `failed`) is the sub-call's **stable error `code`**
-   (`resp.error.details["code"]` — e.g. `crash_timeout`, `helper_script_error`,
-   `manifest_call_budget_exhausted`), not the prose `message`, so an agent can branch on
-   a contract value rather than free text. For the per-result (within-crash) failures the
-   `reason` is the parser's `reason` token (`unknown_command` / `parse_failed` /
-   `not_captured` / `output_truncated`).
+   A section's `reason` (when `failed`) is the sub-call's **stable error `code`**, read
+   **defensively** as `(resp.error.details or {}).get("code") or "sub_call_failed"` — not
+   every `ToolResponse.failure` carries `details` (e.g. a sub-handler's `ManifestStateError`
+   branch returns a `details`-less failure), so a bare subscript would raise *inside*
+   triage and defeat the partial-report design. The fallback constant keeps a detail-less
+   failure a clean section failure. Codes seen here: `crash_timeout`,
+   `helper_script_error`, `manifest_call_budget_exhausted`, … For the per-result
+   (within-crash) failures the `reason` is the parser's `reason` token (`unknown_command`
+   / `parse_failed` / `not_captured` / `output_truncated`).
    - crash `resp.ok` → `results = resp.data["results"]`:
      - `bt = results.get("bt")`; `parsed` truthy → `backtrace.status="ok"`,
        `frames=bt["frames"]`; `faulting_task.status="ok"`, `pid=bt.get("pid")`,
@@ -393,6 +414,15 @@ convention.
 - **Hard-fail redaction:** a secret-shaped token in a sub-call's error `code`/reason is
   masked in the `triage_all_sources_failed` `details` (the hard-fail exit redacts, not
   only the success path).
+- **Detail-less sub-call failure:** a sub-handler fake returns
+  `ToolResponse.failure(category=…, message="…")` with **no `details`** → triage does not
+  raise; the section is `failed` with `reason == "sub_call_failed"` (the fallback), and a
+  detail-less *failed* crash sub-call still yields `sub_call_ids["crash"] is None` without
+  error.
+- **modules_ref up-front validation:** an unsafe/non-directory `modules_ref` →
+  hard `symbol_resolution_failed` / `modules_path_unsafe` **before any sub-call** (both
+  sub-handler seams record zero calls) — not a degraded partial report. A drgn sub-call
+  fake asserts it received `modules_ref=None`.
 - **`select_panic_reason` unit tests:** ordered signature precedence (`Kernel panic -
   not syncing` chosen over a later `BUG:`); no-match → `None`; empty list → `None`;
   a line missing `text` does not raise.

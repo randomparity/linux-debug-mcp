@@ -122,6 +122,16 @@ is a *provenance* error the agent must fix (wrong vmlinux); degrading it to a pe
 failure would bury the one error that invalidates the entire report, so it is
 deliberately outside the partial contract.
 
+The up-front gate also validates the **shared refs** consistently: it confines
+`vmcore_ref`, resolves `vmlinux_ref` **and** `modules_ref`, and runs the crash handler's
+`validate_modules_path` charset check — all hard-failing before any sub-call. This keeps
+all three caller-supplied refs in the same failure class (a bad ref is a hard
+`CONFIGURATION_ERROR`, never a degraded partial), so the partial contract is reserved for
+genuine tier-unavailability. `modules_ref` is then threaded to the **crash sub-call
+only**: the drgn `dmesg`/`modules` helpers read the ring buffer / `for_each_module(prog)`
+from the core and have no use for a `*.ko` directory, so passing it to them would add a
+`resolve_symbols` failure mode that knocks out the drgn source for an unrelated reason.
+
 The sub-handlers re-run their own build-id gates (the crash handler via the same
 readers; the drgn wrapper via drgn's `main_module().build_id`). This re-check is
 intentional and cheap: `read_vmcore_build_id` is a seek-only PT_NOTE walk, and the drgn
