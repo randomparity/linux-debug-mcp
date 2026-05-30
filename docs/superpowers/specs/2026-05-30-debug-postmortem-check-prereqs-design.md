@@ -20,9 +20,13 @@ and returns actionable fixes. It is the live-target sibling of the offline crash
 (#92) and triage (#93) tools and the readiness counterpart to
 `debug.introspect.check_prerequisites` (#84).
 
-It is **read-only and diagnostic only**: it never enables, configures, starts, or
-restarts kdump/fadump (configuration is out of scope per #14). The kdump service
-state is *reported*, never changed.
+It is **diagnostic only**: it never enables, configures, starts, or restarts
+kdump/fadump (configuration is out of scope per #14) and never modifies the kdump
+service or target configuration. It does perform one **transient, self-cleaning
+write probe** of the dump directory (create + immediately unlink a uniquely named
+temp file) — the only way to assert the dump dir is genuinely writable by the
+capture identity (see §3.2 / ADR 0028 decision 5); the service state is *reported*,
+never changed.
 
 ### In scope
 
@@ -107,6 +111,33 @@ capped SSH round-trip, JSON parsing, oversize/timeout/cancel handling, and redac
 
 ## 3. Detailed design
 
+### 3.0 Generalizing `_resolve_probe_context` (shared resolver)
+
+`_resolve_probe_context` (`server.py:2131`) is annotated
+`request: DebugIntrospectCheckPrerequisitesRequest`. Since `ty` (hard-gating in CI)
+does not structurally duck-type Pydantic models, passing the new request model is a
+type error. The resolver is generalized to accept a `Protocol` over the six fields it
+reads (`run_id`, `target_ref`, `timeout_seconds`, `debug_profile`, `target_profile`,
+`rootfs_profile`):
+
+```python
+class _SupportsProbeRequest(Protocol):
+    run_id: str
+    target_ref: str
+    timeout_seconds: int
+    debug_profile: str | None
+    target_profile: str | None
+    rootfs_profile: str | None
+```
+
+The introspect call site is unaffected (`DebugIntrospectCheckPrerequisitesRequest`
+satisfies the Protocol). The resolver's introspect-specific `host_build_id`
+computation (`server.py:2209-2210`) stays — it is unused on the kdump path but
+harmless (a build step may or may not exist; the field is just ignored by the kdump
+handler). If `ty` rejects the Protocol on attribute variance, the fallback is a shared
+base model both requests inherit; the Protocol is preferred for lower blast radius
+(ADR 0028 decision 8).
+
 ### 3.1 Request / response contract
 
 A new `DebugPostmortemCheckPrereqsRequest` (in `domain.py`), field-identical to
@@ -142,17 +173,22 @@ tuple[list[PrerequisiteCheck], str]` returning the three checks plus the mechani
 string. The builder is the unit-test surface; it never touches SSH.
 
 Raw facts the script gathers (all unconditional, each guarded so one read failing
-never aborts the others):
+never aborts the others). **Every subprocess (`systemctl`) is run with its own short
+internal timeout** (≤ 5 s, well under the outer `timeout Ns` bound) so a stalled
+`systemctl` yields `service_active=None` — a `FAILED` service check — instead of
+killing the whole probe and masking the other two facts (independence invariant):
 
 | Fact | Source | Used by |
 |---|---|---|
 | `cmdline_has_crashkernel` | `crashkernel=` substring of `/proc/cmdline` | crashkernel check |
 | `kexec_crash_size` | int of `/sys/kernel/kexec_crash_size` (or null) | crashkernel check |
 | `fadump_enabled` / `fadump_registered` | int of `/sys/kernel/fadump_{enabled,registered}` (or null) | mechanism + crashkernel check |
-| `service_active` | first of `systemctl is-active kdump\|kdump-tools` returning `active` | service check |
-| `service_units` | per-unit `is-active` raw states | service check details |
+| `service_active` | first of `systemctl is-active kdump\|kdump-tools` returning `active`; `null` if `systemctl` is absent/errors/times out | service check |
+| `service_units` | per-unit `is-active` raw states (or an error marker per unit) | service check details |
 | `dump_dir` | `/etc/kdump.conf` `path` directive when readable, else `/var/crash` | dump-path check |
-| `dump_dir_exists` / `dump_dir_writable` | `os.path.isdir` / `os.access(W_OK)` | dump-path check |
+| `dump_dir_exists` | `os.path.isdir(dump_dir)` | dump-path check |
+| `dump_dir_writable` | **transient write probe**: create + `unlink` a uniquely named temp file in `dump_dir` (returns `False` on any `OSError`; `null` if the dir is absent); cleaned up in a `finally`. NOT `os.access(W_OK)` — the probe runs as root and root bypasses mode bits, so `os.access` returns `True` for any existing dir on a writable mount and could never detect a genuinely unwritable target (ADR 0028 decision 5). | dump-path check |
+| `dump_dir_write_error` | the `OSError` class/errno when the write probe failed (e.g. `ENOSPC`, `EROFS`, `EACCES`) | dump-path check fix text |
 | `arch` | `os.uname().machine` | mechanism reporting |
 
 Mechanism resolution (host-side): `fadump` if `fadump_enabled == 1`; else `kdump`
@@ -171,10 +207,14 @@ Check verdicts:
   otherwise, fix: "enable and start the kdump service (`systemctl enable --now
   kdump`); this tool reports state only and never starts it." `details` carry the
   per-unit states so an agent sees which unit name applies.
-- **`kdump.dump_path_writable`** — `PASSED` if the dir exists and is writable;
-  `FAILED` if missing ("create `<dir>`") or present-but-unwritable ("`<dir>` is not
-  writable by the kdump capture kernel; fix ownership/permissions or free space").
-  `details` carry the resolved `dump_dir` and whether it came from `/etc/kdump.conf`.
+- **`kdump.dump_path_writable`** — `PASSED` if `dump_dir_exists` and the write probe
+  succeeded; `FAILED` if missing ("create `<dir>`") or present-but-the-write-failed
+  ("`<dir>` is not writable by the capture kernel: `<errno>`; fix the mount
+  (read-only?), free space (`ENOSPC`), or ownership/permissions"). The fix text is
+  driven by `dump_dir_write_error` so an agent gets the specific cause. `details`
+  carry the resolved `dump_dir` and whether it came from `/etc/kdump.conf`. The write
+  probe is transient and self-cleaning (§3.0 / scope note) — it is the only oracle
+  that reflects what the capture kernel will actually be able to do.
 
 `kdump_ready = all(c.status == PASSED for c in checks)`.
 
@@ -254,8 +294,11 @@ return and before persist covers that.
 
 - **`tests/test_prereqs_kdump_probe.py`** (pure, no SSH): `build_kdump_checks` over
   synthesized probe dicts — ready, missing-crashkernel, reserved-0-bytes, inactive
-  service, missing dir, unwritable dir, fadump-enabled, mechanism=none. Assert
-  independence (a probe with all three faults yields three FAILs).
+  service, missing dir, write-failed dir (with `dump_dir_write_error` → cause-specific
+  fix text), fadump-enabled, mechanism=none. Assert independence (a probe with all
+  three faults yields three FAILs) **and** the service-fact-missing case
+  (`service_active=null` from a stalled/absent `systemctl` → `kdump.service_active`
+  FAILED while the crashkernel and dump-path checks still produce their own verdicts).
 - **Handler tests** (`tests/test_postmortem_check_prereqs.py`): a fake `SshRunner`
   returning canned JSON → success with three checks; HALTED fast-reject via an
   injected session registry; config errors (run-not-found, profile mismatch, bad

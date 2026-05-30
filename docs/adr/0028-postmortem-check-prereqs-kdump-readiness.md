@@ -1,6 +1,6 @@
 # ADR 0028 — `debug.postmortem.check_prereqs`: live-target kdump readiness via the shared SSH probe, proof-only HALTED gate, mechanism-aware checks
 
-**Status:** Accepted (2026-05-30) · **Issue:** #94 · **Epic:** #9 · **Affects:** `src/linux_debug_mcp/prereqs/kdump_probe.py` (new: `KDUMP_PROBE_SCRIPT` + `build_kdump_checks`), `src/linux_debug_mcp/domain.py` (`DebugPostmortemCheckPrereqsRequest`), `src/linux_debug_mcp/server.py` (`_reject_if_target_halted`, `debug_postmortem_check_prereqs_handler`, tool registration; `_prepare_probe_dirs` parametrized), `src/linux_debug_mcp/config.py` (`ALLOWED_DEBUG_OPERATIONS`), `src/linux_debug_mcp/providers/local_drgn_introspect.py` (capability `operations`)
+**Status:** Accepted (2026-05-30) · **Issue:** #94 · **Epic:** #9 · **Affects:** `src/linux_debug_mcp/prereqs/kdump_probe.py` (new: `KDUMP_PROBE_SCRIPT` + `build_kdump_checks`), `src/linux_debug_mcp/domain.py` (`DebugPostmortemCheckPrereqsRequest`), `src/linux_debug_mcp/server.py` (`_reject_if_target_halted`, `debug_postmortem_check_prereqs_handler`, tool registration; `_resolve_probe_context` parameter generalized to a `Protocol`; `_prepare_probe_dirs` parametrized), `src/linux_debug_mcp/config.py` (`ALLOWED_DEBUG_OPERATIONS`), `src/linux_debug_mcp/providers/local_drgn_introspect.py` (capability `operations`)
 
 ## Context
 
@@ -41,6 +41,15 @@ already-collected object. Trust boundary: the target emits data, the host emits 
 contract objects (same rule as ADR 0026 decision-mirroring; the target never decides
 PASS/FAIL).
 
+The one subprocess the script shells out to (`systemctl is-active`) is run with its
+own short internal timeout (≤ 5 s, well under the outer `timeout Ns` interpreter
+bound). Without it, a stalled `systemctl` (degraded/booting systemd, blocked D-Bus)
+would let the *outer* timeout kill the whole probe → no JSON → a total
+`INFRASTRUCTURE_FAILURE` that masks the crashkernel and dump-path facts too — exactly
+the cross-check masking the independence invariant forbids. With it, a stalled
+`systemctl` yields `service_active=null` → a `FAILED` service check, and the
+file-read facts still return their own verdicts.
+
 ### 3. HALTED is a proof-only fast-reject, not a full admission promotion
 
 The handler calls a new `_reject_if_target_halted` — the front half of
@@ -70,10 +79,24 @@ kdump is the tested path; fadump is detected-and-reported but unvalidated (no PO
 hardware) and documented as such, consistent with #14's "documented, not silently
 claimed" stance.
 
-### 5. Dump-dir resolution is local-only, with the source reported
+### 5. Writability is a transient write probe, not `os.access(W_OK)`; dump-dir resolution is local-only
 
-The dump dir is the `path` directive of `/etc/kdump.conf` when that file is readable,
-else the `/var/crash` default. The check reports the resolved dir and its source in
+The probe runs as root (`_target_python_remote_argv` prefixes `sudo` for a non-root
+login; a root login is already root). Root bypasses DAC mode-bit checks, so
+`os.access(dump_dir, W_OK)` returns `True` for *any* existing directory on a writable
+mount regardless of owner/mode — it could never detect a genuinely unwritable target
+and AC#2's "unwritable dump path FAILs" would be unreachable. Instead the script
+performs a **transient write probe**: create a uniquely named temp file in `dump_dir`,
+then `unlink` it in a `finally`. `dump_dir_writable` is the success of that probe; on
+`OSError` the errno (`EROFS`, `ENOSPC`, `EACCES`, …) is captured into
+`dump_dir_write_error` and drives a cause-specific fix message. This is the only
+oracle that reflects what the kdump capture kernel (also root) will actually
+experience. The probe is self-cleaning and changes no kdump configuration or service
+state, so the tool remains diagnostic; "read-only" is narrowed to "does not modify
+kdump config/service state" (the spec scope note).
+
+The dump dir itself is the `path` directive of `/etc/kdump.conf` when that file is
+readable, else the `/var/crash` default; the resolved dir and its source are in
 `details`. A dump target on a separate block device / NFS / SSH (where `path` is
 relative to that target's mount, not the rootfs) is **not** resolved; the limitation
 is documented. This matches the issue's "default `/var/crash`" and keeps the probe a
@@ -97,11 +120,24 @@ Like `debug.introspect.check_prerequisites`, it is a read-only diagnostic and is
 **not** gated through `_ensure_debug_operation_enabled` / `DebugProfile.enabled_operations`
 — the only lifecycle gate is the §5.6 HALTED fast-reject (decision 3).
 
+### 8. `_resolve_probe_context` is generalized to a `Protocol`
+
+`_resolve_probe_context` is annotated for `DebugIntrospectCheckPrerequisitesRequest`;
+`ty` (hard-gating) does not structurally accept a different Pydantic model, so the
+"reused verbatim" claim does not hold without a change. The parameter is generalized
+to a `Protocol` (`_SupportsProbeRequest`) over the six fields the resolver reads
+(`run_id`, `target_ref`, `timeout_seconds`, `debug_profile`, `target_profile`,
+`rootfs_profile`); both request models satisfy it and the introspect call site is
+unchanged. The resolver's introspect-specific `host_build_id` computation stays —
+unused on the kdump path but harmless (the kdump handler ignores it). If `ty` rejects
+the Protocol on attribute variance, the fallback is a shared base model both requests
+inherit (equivalent, higher blast radius — see rejected #8).
+
 ## Consequences
 
 - One new pure module (`prereqs/kdump_probe.py`) and one new handler; the rest is
-  reuse. The pure builder gives full branch coverage of the verdict matrix without a
-  target.
+  reuse, plus a one-line generalization of `_resolve_probe_context`'s parameter type.
+  The pure builder gives full branch coverage of the verdict matrix without a target.
 - The three checks are guaranteed independent because the host builds them from a
   single pre-collected facts object.
 - A HALTED target is rejected without the promotion machinery; the residual
@@ -149,3 +185,18 @@ Like `debug.introspect.check_prerequisites`, it is a read-only diagnostic and is
    dump device) are out of scope; the probe resolves the local dir and documents the
    limitation. A future issue can extend it when a non-local dump target is in scope.
    (decision 5)
+8. **Generalize `_resolve_probe_context` via a shared base model instead of a
+   `Protocol`.** Equivalent for `ty`, but it changes the class hierarchy of the
+   already-shipped `DebugIntrospectCheckPrerequisitesRequest` (higher blast radius for
+   no benefit). The `Protocol` leaves both concrete models untouched. Kept as the
+   fallback only if `ty` rejects the Protocol. (decision 8)
+9. **`os.access(dump_dir, W_OK)` for the writability fact.** Rejected: the probe runs
+   as root and root bypasses DAC mode bits, so `os.access(W_OK)` returns `True` for any
+   existing dir on a writable mount — it can detect only a missing dir or a read-only
+   mount, never a genuinely misconfigured (wrong owner/mode/full) target, leaving AC#2
+   unreachable. The transient write probe is the faithful oracle. (decision 5)
+10. **Narrow the dump-path check to "exists + on a writable mount" and drop the
+    permission fix text (the reviewer's alternative b).** Rejected: it would weaken
+    AC#2 to something the root probe can technically satisfy while still missing
+    `ENOSPC`/`EROFS` distinctions an agent needs. The write probe is barely more code,
+    self-cleaning, and yields the specific errno. (decision 5)
