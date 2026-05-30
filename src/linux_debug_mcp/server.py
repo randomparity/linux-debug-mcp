@@ -2315,18 +2315,31 @@ def _read_capped(path: Path, cap: int) -> str | None:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
-def _prepare_probe_dirs(store: ArtifactStore, run_id: str, probe_id: str) -> tuple[Path, Path]:
+def _prepare_probe_dirs(
+    store: ArtifactStore,
+    run_id: str,
+    probe_id: str,
+    *,
+    category: tuple[str, ...] = ("debug", "checkprereq"),
+) -> tuple[Path, Path]:
     """Create the agent-visible and sensitive probe directories with 0o700.
 
-    Returns ``(agent_dir, sensitive_dir)``.
+    ``category`` is the path under the run dir (and under ``sensitive/``) the probe
+    writes to; defaults to the introspect ``debug/checkprereq`` layout. Postmortem
+    passes ``("debug", "postmortem", "check_prereqs")``. Returns ``(agent_dir,
+    sensitive_dir)``.
     """
-    agent_dir = store.run_dir(run_id) / "debug" / "checkprereq" / probe_id
-    sensitive_dir = store.run_dir(run_id) / "sensitive" / "debug" / "checkprereq" / probe_id
+    run_dir = store.run_dir(run_id)
+    agent_dir = run_dir.joinpath(*category, probe_id)
+    sensitive_dir = run_dir.joinpath("sensitive", *category, probe_id)
     agent_dir.mkdir(parents=True, mode=0o700)
     sensitive_dir.mkdir(parents=True, mode=0o700)
-    for _dir in (sensitive_dir, sensitive_dir.parent, sensitive_dir.parent.parent):
+    sensitive_root = run_dir / "sensitive"
+    current = sensitive_dir
+    while current != sensitive_root and current != run_dir:
         with contextlib.suppress(FileNotFoundError):
-            _dir.chmod(0o700)
+            current.chmod(0o700)
+        current = current.parent
     return agent_dir, sensitive_dir
 
 
