@@ -4,7 +4,7 @@ from conftest import make_source_tree
 
 from linux_debug_mcp import server
 from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import BootOverrides, BuildOverrides, TargetProfile
+from linux_debug_mcp.config import BootOverrides, BuildOverrides, RootfsProfile, TargetProfile
 from linux_debug_mcp.domain import ArtifactRef, StepResult, StepStatus
 from linux_debug_mcp.prereqs.checks import PortProbeResult
 from linux_debug_mcp.server import (
@@ -200,12 +200,16 @@ def test_prerequisites_handler_readiness_skipped_without_profiles(tmp_path: Path
 
 
 def test_prerequisites_handler_names_missing_rootfs_and_passes_config(tmp_path: Path) -> None:
+    # Inject a builder rootfs profile pointing at an absent path so the check is deterministic
+    # regardless of whether a real image exists at the default host location.
+    missing_image = tmp_path / "rootfs" / "minimal.qcow2"
     response = prerequisites_handler(
         artifact_root=tmp_path / "runs",
         source_path=None,
         build_profile="x86_64-debug",
         target_profile="local-qemu-debug",
         rootfs_profile="minimal",
+        rootfs_profiles={"minimal": RootfsProfile(name="minimal", source=str(missing_image), source_kind="builder")},
         port_probe=lambda h, p: PortProbeResult("free"),
     )
     by_id = {c["check_id"]: c for c in response.data["checks"]}
