@@ -5,13 +5,13 @@
 
 ## Problem
 
-`host.check_prerequisites` (`src/linux_debug_mcp/prereqs/checks.py`) validates the host *toolchain* —
+`host.check_prerequisites` (`src/kdive/prereqs/checks.py`) validates the host *toolchain* —
 Python version/packages, CLI tools, the gdb-mi behavioral probe, a C compiler, artifact-root writability,
 source-tree shape, and (optionally) the libvirt URI. It does not validate the three inputs that actually
 gate the documented local build→boot→debug roundtrip on a fresh machine:
 
 1. **Rootfs image.** The default `minimal` profile points at
-   `/var/lib/linux-debug-mcp/rootfs/minimal.qcow2`, which does not exist until `just rootfs` runs (#102).
+   `/var/lib/kdive/rootfs/minimal.qcow2`, which does not exist until `just rootfs` runs (#102).
    A missing image only surfaces at `target.boot`, inside the boot lock, after a run already exists.
 2. **Kernel `.config`.** A clean source tree has no `.config`. `kernel.build` now derives one from the
    build profile's `base_config` (#101), but a profile with an empty `base_config` and no source `.config`

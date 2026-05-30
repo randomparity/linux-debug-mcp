@@ -7,16 +7,16 @@ from __future__ import annotations
 import threading
 from types import MappingProxyType
 
-from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore, TargetSnapshot
-from linux_debug_mcp.coordination.lease import ConsoleLeaseManager
-from linux_debug_mcp.coordination.registry import SessionRegistry
-from linux_debug_mcp.coordination.transaction import TransportTransaction
-from linux_debug_mcp.safety.secret_registry import SecretRegistry
-from linux_debug_mcp.safety.secrets import SecretReferenceKind
-from linux_debug_mcp.seams.guard import InProcessStopCapableGuard
-from linux_debug_mcp.seams.secrets import EnvSecretsBackend, SecretsStore
-from linux_debug_mcp.seams.target import BreakHint, ConsoleKind, PlatformMetadata, TargetKey, TargetState
-from linux_debug_mcp.transport.base import (
+from kdive.coordination.admission import AdmissionService, SnapshotStore, TargetSnapshot
+from kdive.coordination.lease import ConsoleLeaseManager
+from kdive.coordination.registry import SessionRegistry
+from kdive.coordination.transaction import TransportTransaction
+from kdive.safety.secret_registry import SecretRegistry
+from kdive.safety.secrets import SecretReferenceKind
+from kdive.seams.guard import InProcessStopCapableGuard
+from kdive.seams.secrets import EnvSecretsBackend, SecretsStore
+from kdive.seams.target import BreakHint, ConsoleKind, PlatformMetadata, TargetKey, TargetState
+from kdive.transport.base import (
     BackendAttachment,
     BreakMethod,
     BreakPlan,
@@ -190,7 +190,7 @@ class FakeSshRunner:
         self.started = threading.Event()
 
     def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None, max_stdout_bytes=None):
-        from linux_debug_mcp.providers.local_ssh_tests import SshCommandResult
+        from kdive.providers.local_ssh_tests import SshCommandResult
 
         self.started.set()
         if cancel is not None:

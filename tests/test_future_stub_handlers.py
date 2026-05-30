@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider
-from linux_debug_mcp.providers.local_kernel_build import LocalKernelBuildProvider
-from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider
-from linux_debug_mcp.providers.registry import ProviderRegistry
-from linux_debug_mcp.providers.stubs import remote_build_stub_capability
-from linux_debug_mcp.server import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.providers.libvirt_qemu import LibvirtQemuProvider
+from kdive.providers.local_kernel_build import LocalKernelBuildProvider
+from kdive.providers.local_ssh_tests import LocalSshTestProvider
+from kdive.providers.registry import ProviderRegistry
+from kdive.providers.stubs import remote_build_stub_capability
+from kdive.server import (
     console_open_session_handler,
     console_read_handler,
     console_write_handler,
@@ -285,7 +285,7 @@ def test_future_stub_handlers_do_not_create_run_workspace_or_touch_forbidden_dep
     assert response.error.category == "not_implemented"
     assert response.error.details["provider_name"] == provider_name
     assert response.error.details["operation"] == operation
-    assert not (tmp_path / ".linux-debug-mcp" / "runs").exists()
+    assert not (tmp_path / ".kdive" / "runs").exists()
 
 
 def test_console_open_ipmi_cipher_zero_is_configuration_error() -> None:

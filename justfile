@@ -19,7 +19,7 @@ sync-dev: check-uv
 
 check-host: sync-dev
     @echo "Running host.check_prerequisites"
-    uv run python -m linux_debug_mcp.dev_setup check-host
+    uv run python -m kdive.dev_setup check-host
 
 rootfs:
     ./scripts/build-rootfs.sh
@@ -51,7 +51,7 @@ check-ipmi:
     # ipmitool invocations under src/. safety/ipmi.py is the one file allowed to
     # name the forbidden constant. Patterns are \b-anchored so -I lanplus and
     # -C 3 / -C 30 are not flagged. Default ripgrep engine (no PCRE2).
-    ! rg -n -e '-I lan\b|-C *0\b' src -g '!src/linux_debug_mcp/safety/ipmi.py'
+    ! rg -n -e '-I lan\b|-C *0\b' src -g '!src/kdive/safety/ipmi.py'
 
 audit:
     uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > /tmp/runtime-reqs.txt

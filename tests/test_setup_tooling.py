@@ -15,7 +15,7 @@ def test_justfile_defines_setup_workflow() -> None:
     assert "uv venv --allow-existing" in justfile
     assert "uv pip install -e '.[dev,test]'" in justfile
     assert "uv run pre-commit install" in justfile
-    assert "uv run python -m linux_debug_mcp.dev_setup check-host" in justfile
+    assert "uv run python -m kdive.dev_setup check-host" in justfile
     assert "python -c" not in justfile
     assert "host.check_prerequisites" in justfile
 
@@ -61,7 +61,7 @@ def test_justfile_parses_when_just_is_available() -> None:
 
 
 def test_dev_setup_formats_prerequisite_checks() -> None:
-    from linux_debug_mcp.dev_setup import format_prerequisite_checks
+    from kdive.dev_setup import format_prerequisite_checks
 
     assert format_prerequisite_checks(
         [
@@ -75,8 +75,8 @@ def test_dev_setup_formats_prerequisite_checks() -> None:
 
 
 def test_dev_setup_check_host_returns_nonzero_for_failed_checks(monkeypatch, capsys) -> None:
-    from linux_debug_mcp import dev_setup
-    from linux_debug_mcp.domain import PrerequisiteCheck, PrerequisiteStatus, ToolResponse
+    from kdive import dev_setup
+    from kdive.domain import PrerequisiteCheck, PrerequisiteStatus, ToolResponse
 
     def fake_prerequisites_handler(**_kwargs: object) -> ToolResponse:
         return ToolResponse.success(
@@ -101,7 +101,7 @@ def test_dev_setup_check_host_returns_nonzero_for_failed_checks(monkeypatch, cap
 
 
 def test_dev_setup_main_rejects_unknown_command(capsys) -> None:
-    from linux_debug_mcp.dev_setup import main
+    from kdive.dev_setup import main
 
     try:
         main(["unknown"])

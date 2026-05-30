@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from linux_debug_mcp.prereqs.checks import check_prerequisites
+from kdive.prereqs.checks import check_prerequisites
 
 _VERSION_ARGV = ["gdb", "--version"]
 _MI_ARGV = ["gdb", "-nx", "-q", "-ex", 'interpreter-exec mi3 "-list-features"', "-ex", "quit"]

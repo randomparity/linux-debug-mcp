@@ -1,6 +1,6 @@
 # ADR 0010 — `debug.introspect.from_vmcore`: run-scoped offline execution, shared wrapper body, and a shared post-runner finalizer
 
-**Status:** Accepted (2026-05-29) · **Issue:** #55 · **Epic:** #9 · **Affects:** `src/linux_debug_mcp/domain.py` (two request models), `src/linux_debug_mcp/providers/local_drgn_introspect.py` (`_WRAPPER_PROLOGUE_*`/`_WRAPPER_BODY` split, `render_vmcore_wrapper`, capability operations), `src/linux_debug_mcp/symbols/build_id.py` (new), `src/linux_debug_mcp/server.py` (`_execute_vmcore_introspect_call`, `_finalize_introspect_call` extraction, two handlers, tool registration), `src/linux_debug_mcp/config.py` (`ALLOWED_DEBUG_OPERATIONS`)
+**Status:** Accepted (2026-05-29) · **Issue:** #55 · **Epic:** #9 · **Affects:** `src/kdive/domain.py` (two request models), `src/kdive/providers/local_drgn_introspect.py` (`_WRAPPER_PROLOGUE_*`/`_WRAPPER_BODY` split, `render_vmcore_wrapper`, capability operations), `src/kdive/symbols/build_id.py` (new), `src/kdive/server.py` (`_execute_vmcore_introspect_call`, `_finalize_introspect_call` extraction, two handlers, tool registration), `src/kdive/config.py` (`ALLOWED_DEBUG_OPERATIONS`)
 
 ## Context
 
@@ -191,6 +191,6 @@ vmcore orchestrators keep their own pre-runner setup.
 spec `docs/superpowers/specs/2026-05-29-debug-introspect-from-vmcore-design.md`;
 interface contract `docs/specs/interface-contracts.md` §4.2, §5.6 rule 3;
 ADR 0008 (symbols package + run-relative confinement boundary), ADR 0009
-(shared executor + typed-result convention); `src/linux_debug_mcp/symbols/verify.py`
+(shared executor + typed-result convention); `src/kdive/symbols/verify.py`
 (`verify_build_id`), `resolve.py` (`resolve_symbols`); `providers/local_drgn_introspect.py`
 (`WRAPPER_TEMPLATE`); `providers/local_ssh_tests.py` (`SubprocessSshRunner`).

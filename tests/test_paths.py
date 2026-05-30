@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from linux_debug_mcp.safety.paths import (
+from kdive.safety.paths import (
     PathSafetyError,
     validate_artifact_root,
     validate_guest_path,
@@ -11,7 +11,7 @@ from linux_debug_mcp.safety.paths import (
     validate_secret_file_reference,
     validate_source_path,
 )
-from linux_debug_mcp.safety.secrets import SecretReference, SecretReferenceKind
+from kdive.safety.secrets import SecretReference, SecretReferenceKind
 
 
 def test_artifact_root_allows_creatable_child_of_existing_parent(tmp_path: Path) -> None:

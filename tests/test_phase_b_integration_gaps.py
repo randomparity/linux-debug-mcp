@@ -40,26 +40,26 @@ from conftest import (
     write_vmlinux_with_build_id,
 )
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import DebugProfile
-from linux_debug_mcp.coordination.admission import AdmissionService
-from linux_debug_mcp.coordination.registry import SessionRegistry
-from linux_debug_mcp.coordination.transaction import TransportTransaction
-from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from linux_debug_mcp.providers.gdb_mi import GdbMiSessionRegistry
-from linux_debug_mcp.providers.local_ssh_tests import TestExecutionResult
-from linux_debug_mcp.seams.lifecycle import LifecycleEvent, LifecycleKind
-from linux_debug_mcp.seams.target import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import DebugProfile
+from kdive.coordination.admission import AdmissionService
+from kdive.coordination.registry import SessionRegistry
+from kdive.coordination.transaction import TransportTransaction
+from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
+from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.providers.local_ssh_tests import TestExecutionResult
+from kdive.seams.lifecycle import LifecycleEvent, LifecycleKind
+from kdive.seams.target import (
     TargetKey,
     publish_ready_snapshot,
 )
-from linux_debug_mcp.server import (
+from kdive.server import (
     _halt_debug_transport,
     create_app,
     debug_start_session_handler,
     target_run_tests_handler,
 )
-from linux_debug_mcp.transport.base import (
+from kdive.transport.base import (
     ExecutionState,
     LineRole,
     RecordState,
@@ -109,7 +109,7 @@ def test_create_app_binds_lifecycle_dispatcher_and_force_drop_reaches_admission(
     # Seed the snapshot and open a session through the WIRED transaction so the subscriber is
     # registered on the WIRED dispatcher.
     publish_ready_snapshot(admission, target_key=KEY, generation=1, transports=[RSP_CHANNEL], platform=PLATFORM)
-    from linux_debug_mcp.transport.base import OpenRequest
+    from kdive.transport.base import OpenRequest
 
     request = OpenRequest(
         target_key=KEY,
@@ -143,7 +143,7 @@ def _make_test_registry(tmp_path: Path) -> SessionRegistry:
 
 
 def _seed_run_tests_admission(generation: int = 1) -> AdmissionService:
-    from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore
+    from kdive.coordination.admission import AdmissionService, SnapshotStore
 
     admission = AdmissionService(SnapshotStore())
     publish_ready_snapshot(

@@ -1,6 +1,6 @@
 # ADR 0028 — `debug.postmortem.check_prereqs`: live-target kdump readiness via the shared SSH probe, proof-only HALTED gate, mechanism-aware checks
 
-**Status:** Accepted (2026-05-30) · **Issue:** #94 · **Epic:** #9 · **Affects:** `src/linux_debug_mcp/prereqs/kdump_probe.py` (new: `KDUMP_PROBE_SCRIPT` + `build_kdump_checks`), `src/linux_debug_mcp/domain.py` (`DebugPostmortemCheckPrereqsRequest`), `src/linux_debug_mcp/server.py` (`_reject_if_target_halted`, `debug_postmortem_check_prereqs_handler`, tool registration; `_resolve_probe_context` parameter generalized to a `Protocol`; `_prepare_probe_dirs` parametrized), `src/linux_debug_mcp/config.py` (`ALLOWED_DEBUG_OPERATIONS`), `src/linux_debug_mcp/providers/local_drgn_introspect.py` (capability `operations`)
+**Status:** Accepted (2026-05-30) · **Issue:** #94 · **Epic:** #9 · **Affects:** `src/kdive/prereqs/kdump_probe.py` (new: `KDUMP_PROBE_SCRIPT` + `build_kdump_checks`), `src/kdive/domain.py` (`DebugPostmortemCheckPrereqsRequest`), `src/kdive/server.py` (`_reject_if_target_halted`, `debug_postmortem_check_prereqs_handler`, tool registration; `_resolve_probe_context` parameter generalized to a `Protocol`; `_prepare_probe_dirs` parametrized), `src/kdive/config.py` (`ALLOWED_DEBUG_OPERATIONS`), `src/kdive/providers/local_drgn_introspect.py` (capability `operations`)
 
 ## Context
 
@@ -94,12 +94,12 @@ then `unlink` it in a `finally`. `dump_dir_writable` is the success of that prob
 `OSError` the errno (`EROFS`, `ENOSPC`, `EACCES`, …) is captured into
 `dump_dir_write_error` and drives a cause-specific fix message. This is the only
 oracle that reflects what the kdump capture kernel (also root) will actually
-experience. It uses `tempfile.mkstemp(dir=dump_dir, prefix=".ldm-writecheck-")` and
+experience. It uses `tempfile.mkstemp(dir=dump_dir, prefix=".kdive-writecheck-")` and
 `unlink`s in a `finally`; it changes no kdump configuration or service state, so the
 tool remains diagnostic and "read-only" is narrowed to "does not modify kdump
 config/service state" (the spec scope note). Cleanup runs on every path **except** an
 outer-`timeout --kill-after` SIGKILL mid-probe (SIGKILL skips `finally`), which may
-leave one small uniquely-named `.ldm-writecheck-*` file in the dump dir; the
+leave one small uniquely-named `.kdive-writecheck-*` file in the dump dir; the
 recognizable prefix lets an operator/agent identify the stray. This residual is
 benign (tiny, self-identifying) and accepted rather than guarded with a signal
 handler.

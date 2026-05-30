@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from linux_debug_mcp.config import (
+from kdive.config import (
     ALLOWED_DEBUG_OPERATIONS,
     INTROSPECT_DESTRUCTIVE_PERMISSIONS,
     MAX_INTROSPECT_CALLS_PER_RUN,
@@ -20,7 +20,7 @@ from linux_debug_mcp.config import (
     TestSuiteProfile,
     missing_destructive_permissions,
 )
-from linux_debug_mcp.safety.secrets import SecretReference, SecretReferenceKind
+from kdive.safety.secrets import SecretReference, SecretReferenceKind
 
 
 def test_server_config_accepts_valid_pilot_profiles(tmp_path: Path) -> None:
@@ -96,7 +96,7 @@ def test_sprint_2_profiles_accept_libvirt_boot_fields(tmp_path: Path) -> None:
         name="local-qemu",
         architecture="x86_64",
         provider_name="local-libvirt-qemu",
-        target_ref="mcp-linux-debug-dev",
+        target_ref="kdive-dev",
         kernel_args=["nokaslr"],
         timeout_seconds=120,
         cleanup_policy="preserve_on_failure",
@@ -114,7 +114,7 @@ def test_target_profile_accepts_local_gdbstub_endpoint() -> None:
     profile = TargetProfile(
         name="local-qemu",
         architecture="x86_64",
-        target_ref="mcp-linux-debug-dev",
+        target_ref="kdive-dev",
         managed_domain=True,
         libvirt_uri="qemu:///system",
         debug_gdbstub=True,
@@ -425,14 +425,14 @@ def test_default_debug_profile_enables_new_ops() -> None:
 
 
 def test_rootfs_profile_source_kind_defaults_to_local_path() -> None:
-    from linux_debug_mcp.config import RootfsProfile
+    from kdive.config import RootfsProfile
 
     profile = RootfsProfile(name="minimal", source="/img.qcow2")
     assert profile.source_kind == "local_path"
 
 
 def test_rootfs_profile_accepts_each_source_kind() -> None:
-    from linux_debug_mcp.config import RootfsProfile
+    from kdive.config import RootfsProfile
 
     for kind in ("local_path", "builder", "prebuilt", "url"):
         profile = RootfsProfile(name="m", source="/img.qcow2", source_kind=kind)
@@ -443,7 +443,7 @@ def test_rootfs_profile_rejects_unknown_source_kind() -> None:
     import pytest
     from pydantic import ValidationError
 
-    from linux_debug_mcp.config import RootfsProfile
+    from kdive.config import RootfsProfile
 
     with pytest.raises(ValidationError):
         RootfsProfile(name="m", source="/img.qcow2", source_kind="nfs")

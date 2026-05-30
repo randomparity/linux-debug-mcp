@@ -1,8 +1,8 @@
 import subprocess
 from pathlib import Path
 
-from linux_debug_mcp.config import BuildProfile, RootfsProfile, TargetProfile
-from linux_debug_mcp.prereqs.checks import (
+from kdive.config import BuildProfile, RootfsProfile, TargetProfile
+from kdive.prereqs.checks import (
     PortProbeResult,
     check_gdbstub_port,
     check_kernel_config,

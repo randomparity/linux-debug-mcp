@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from linux_debug_mcp.domain import DebugPostmortemCrashRequest
+from kdive.domain import DebugPostmortemCrashRequest
 
 
 def test_request_defaults() -> None:

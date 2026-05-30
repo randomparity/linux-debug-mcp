@@ -1,6 +1,6 @@
 # ADR 0011 — `debug.introspect` write mode: policy-gate enforcement + cooperative wrapper write-guard
 
-**Status:** Accepted (2026-05-29) · **Issue:** #56 · **Epic:** #9 · **Supersedes (in part):** #11 · **Depends on:** #51 · **Affects:** `src/linux_debug_mcp/config.py` (`ALLOWED_DEBUG_OPERATIONS`, new `INTROSPECT_DESTRUCTIVE_PERMISSIONS` + generalised `missing_destructive_permissions`), `src/linux_debug_mcp/domain.py` (`DebugIntrospectRunRequest.acknowledged_permissions`), `src/linux_debug_mcp/providers/local_drgn_introspect.py` (`render_wrapper` `allow_write` seam, write-guard snippet), `src/linux_debug_mcp/server.py` (`_execute_introspect_call` gate, `_finalize_introspect_call` audit + `write_mode_disabled` outcome, vmcore not-applicable, MCP tool param)
+**Status:** Accepted (2026-05-29) · **Issue:** #56 · **Epic:** #9 · **Supersedes (in part):** #11 · **Depends on:** #51 · **Affects:** `src/kdive/config.py` (`ALLOWED_DEBUG_OPERATIONS`, new `INTROSPECT_DESTRUCTIVE_PERMISSIONS` + generalised `missing_destructive_permissions`), `src/kdive/domain.py` (`DebugIntrospectRunRequest.acknowledged_permissions`), `src/kdive/providers/local_drgn_introspect.py` (`render_wrapper` `allow_write` seam, write-guard snippet), `src/kdive/server.py` (`_execute_introspect_call` gate, `_finalize_introspect_call` audit + `write_mode_disabled` outcome, vmcore not-applicable, MCP tool param)
 
 ## Context
 

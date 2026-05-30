@@ -5,7 +5,7 @@ build -> boot -> debug.start_session flow) returns: attach over RSP, read one MI
 JSON (the ^connected attach proof), detach cleanly, and confirm resume returns promptly (the live
 counterpart to the unit-test mi-async-before-continue ordering proxy).
 
-Gate: LINUX_DEBUG_MCP_LIVE_GDBSTUB=1 + companion envs + virsh + gdb (mirrors
+Gate: KDIVE_LIVE_GDBSTUB=1 + companion envs + virsh + gdb (mirrors
 test_transport_open_close_integration.py). Skipped cleanly with no live env, like the sibling.
 """
 
@@ -18,18 +18,18 @@ from pathlib import Path
 import pytest
 
 _GDBSTUB_REQUIRED_ENV = [
-    "LINUX_DEBUG_MCP_LIVE_GDBSTUB",
-    "LINUX_DEBUG_MCP_SOURCE",
-    "LINUX_DEBUG_MCP_ROOTFS",
-    "LINUX_DEBUG_MCP_DOMAIN",
-    "LINUX_DEBUG_MCP_LIBVIRT_URI",
-    "LINUX_DEBUG_MCP_READINESS_MARKER",
+    "KDIVE_LIVE_GDBSTUB",
+    "KDIVE_SOURCE",
+    "KDIVE_ROOTFS",
+    "KDIVE_DOMAIN",
+    "KDIVE_LIBVIRT_URI",
+    "KDIVE_READINESS_MARKER",
 ]
-_MANAGED_DOMAIN_PREFIX = "mcp-linux-debug-"
+_MANAGED_DOMAIN_PREFIX = "kdive-"
 
 
 def _live() -> bool:
-    if os.environ.get("LINUX_DEBUG_MCP_LIVE_GDBSTUB") != "1":
+    if os.environ.get("KDIVE_LIVE_GDBSTUB") != "1":
         return False
     return all(os.environ.get(name) for name in _GDBSTUB_REQUIRED_ENV)
 
@@ -38,7 +38,7 @@ def _skip_reason() -> str:
     missing = [name for name in _GDBSTUB_REQUIRED_ENV if not os.environ.get(name)]
     return (
         "live gdbstub integration test skipped; set "
-        f"{', '.join(missing) if missing else 'LINUX_DEBUG_MCP_LIVE_GDBSTUB=1'} to run it "
+        f"{', '.join(missing) if missing else 'KDIVE_LIVE_GDBSTUB=1'} to run it "
         "(see tests/test_transport_open_close_integration.py for the full env example)."
     )
 
@@ -49,22 +49,22 @@ def test_engine_attaches_reads_one_record_and_detaches(tmp_path: Path, monkeypat
     session, then drive the real GdbMiEngine against its durable rsp_endpoint: attach, read the
     ^connected MI record as typed JSON, and resume/detach promptly."""
     env = {name: os.environ[name] for name in _GDBSTUB_REQUIRED_ENV}
-    source = Path(env["LINUX_DEBUG_MCP_SOURCE"]).expanduser()
-    rootfs_path = Path(env["LINUX_DEBUG_MCP_ROOTFS"]).expanduser()
+    source = Path(env["KDIVE_SOURCE"]).expanduser()
+    rootfs_path = Path(env["KDIVE_ROOTFS"]).expanduser()
     vmlinux = source / "vmlinux"
-    gdbstub_endpoint = os.environ.get("LINUX_DEBUG_MCP_GDBSTUB_ENDPOINT", "127.0.0.1:1234")
+    gdbstub_endpoint = os.environ.get("KDIVE_GDBSTUB_ENDPOINT", "127.0.0.1:1234")
 
-    assert source.is_dir(), f"LINUX_DEBUG_MCP_SOURCE must be a Linux source directory: {source}"
+    assert source.is_dir(), f"KDIVE_SOURCE must be a Linux source directory: {source}"
     assert vmlinux.is_file(), f"unstripped vmlinux is required at {vmlinux}"
-    assert env["LINUX_DEBUG_MCP_DOMAIN"].startswith(_MANAGED_DOMAIN_PREFIX), (
-        f"LINUX_DEBUG_MCP_DOMAIN must start with {_MANAGED_DOMAIN_PREFIX!r}: {env['LINUX_DEBUG_MCP_DOMAIN']}"
+    assert env["KDIVE_DOMAIN"].startswith(_MANAGED_DOMAIN_PREFIX), (
+        f"KDIVE_DOMAIN must start with {_MANAGED_DOMAIN_PREFIX!r}: {env['KDIVE_DOMAIN']}"
     )
 
-    from linux_debug_mcp import server
-    from linux_debug_mcp.config import RootfsProfile, TargetProfile
-    from linux_debug_mcp.providers.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiEngine, MiRecord
-    from linux_debug_mcp.seams.target import TargetKey
-    from linux_debug_mcp.server import (
+    from kdive import server
+    from kdive.config import RootfsProfile, TargetProfile
+    from kdive.providers.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiEngine, MiRecord
+    from kdive.seams.target import TargetKey
+    from kdive.server import (
         _build_transport_machinery,
         create_run_handler,
         debug_start_session_handler,
@@ -78,10 +78,10 @@ def test_engine_attaches_reads_one_record_and_detaches(tmp_path: Path, monkeypat
         TargetProfile(
             name="live-qemu-debug",
             architecture="x86_64",
-            target_ref=env["LINUX_DEBUG_MCP_DOMAIN"],
+            target_ref=env["KDIVE_DOMAIN"],
             managed_domain=True,
             managed_domain_prefix=_MANAGED_DOMAIN_PREFIX,
-            libvirt_uri=env["LINUX_DEBUG_MCP_LIBVIRT_URI"],
+            libvirt_uri=env["KDIVE_LIBVIRT_URI"],
             timeout_seconds=300,
             debug_gdbstub=True,
             gdbstub_endpoint=gdbstub_endpoint,
@@ -95,7 +95,7 @@ def test_engine_attaches_reads_one_record_and_detaches(tmp_path: Path, monkeypat
             source=str(rootfs_path),
             source_type="disk_image",
             mutability="read_only",
-            readiness_marker=env["LINUX_DEBUG_MCP_READINESS_MARKER"],
+            readiness_marker=env["KDIVE_READINESS_MARKER"],
         ),
     )
 

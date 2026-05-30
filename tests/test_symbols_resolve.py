@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from linux_debug_mcp.seams.target import KernelProvenance
-from linux_debug_mcp.symbols.resolve import (
+from kdive.seams.target import KernelProvenance
+from kdive.symbols.resolve import (
     ResolvedSymbols,
     SymbolResolutionError,
     resolve_symbols,

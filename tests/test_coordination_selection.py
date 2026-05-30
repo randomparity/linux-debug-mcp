@@ -1,14 +1,14 @@
 import pytest
 
-from linux_debug_mcp.coordination.selection import (
+from kdive.coordination.selection import (
     BreakDisproof,
     Selection,
     SelectionError,
     select_stop_capable_channel,
 )
-from linux_debug_mcp.seams.break_policy import ReferenceBreakPolicy
-from linux_debug_mcp.seams.target import ConsoleKind, PlatformMetadata, TargetKey
-from linux_debug_mcp.transport.base import BreakMethod, LineRole, TransportRef
+from kdive.seams.break_policy import ReferenceBreakPolicy
+from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetKey
+from kdive.transport.base import BreakMethod, LineRole, TransportRef
 
 _TK = TargetKey(provisioner="local-qemu", target_id="run-1")
 

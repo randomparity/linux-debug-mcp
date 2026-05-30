@@ -7,9 +7,9 @@ from xml.etree import ElementTree
 
 import pytest
 
-from linux_debug_mcp.config import RootfsProfile, TargetProfile
-from linux_debug_mcp.domain import ErrorCategory, StepStatus
-from linux_debug_mcp.providers.libvirt_qemu import (
+from kdive.config import RootfsProfile, TargetProfile
+from kdive.domain import ErrorCategory, StepStatus
+from kdive.providers.libvirt_qemu import (
     CommandResult,
     ConsoleResult,
     LibvirtQemuProvider,
@@ -18,7 +18,7 @@ from linux_debug_mcp.providers.libvirt_qemu import (
     parse_domifaddr_ipv4,
 )
 
-MCP_METADATA_NS = "urn:linux-debug-mcp:domain"
+MCP_METADATA_NS = "urn:kdive:domain"
 
 
 def make_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -38,7 +38,7 @@ def rootfs_profile(
     *,
     mutability: str = "read_only",
     source_type: str = "disk_image",
-    readiness_marker: str | None = "linux-debug-mcp-ready",
+    readiness_marker: str | None = "kdive-ready",
 ) -> RootfsProfile:
     return RootfsProfile(
         name="minimal",
@@ -127,7 +127,7 @@ def test_plan_boot_generates_complete_boot_plan(tmp_path: Path) -> None:
     assert plan.serial_device == "ttyS0"
     assert plan.kernel_args == ["panic=1", "quiet", "root=/dev/vda", "console=ttyS0"]
     assert plan.timeout_seconds == 180
-    assert plan.readiness_marker == "linux-debug-mcp-ready"
+    assert plan.readiness_marker == "kdive-ready"
     assert plan.domain_xml_path == run_dir / "boot" / "attempt-1" / "domain.xml"
     assert plan.console_log_path == run_dir / "boot" / "attempt-1" / "console.log"
     assert plan.boot_log_path == run_dir / "boot" / "attempt-1" / "boot.log"
@@ -362,7 +362,7 @@ def test_render_domain_xml_includes_direct_kernel_boot_devices_and_metadata(tmp_
     assert log is not None
     assert log.attrib == {"file": str(plan.console_log_path), "append": "off"}
     assert root.find("./devices/console[@type='pty']") is not None
-    metadata = root.find(f"metadata/{{{MCP_METADATA_NS}}}linux-debug-mcp")
+    metadata = root.find(f"metadata/{{{MCP_METADATA_NS}}}kdive")
     assert metadata is not None
     assert metadata.findtext(f"{{{MCP_METADATA_NS}}}provider") == "local-libvirt-qemu"
     assert metadata.findtext(f"{{{MCP_METADATA_NS}}}domain") == "debug-vm"
@@ -441,11 +441,11 @@ def test_validate_existing_domain_ownership_rejects_unowned_domain_before_mutati
     <domain type="kvm">
       <name>debug-vm</name>
       <metadata>
-        <ldmcp:linux-debug-mcp xmlns:ldmcp="urn:linux-debug-mcp:domain">
+        <ldmcp:kdive xmlns:ldmcp="urn:kdive:domain">
           <ldmcp:provider>other-provider</ldmcp:provider>
           <ldmcp:domain>debug-vm</ldmcp:domain>
           <ldmcp:target_profile>local-qemu</ldmcp:target_profile>
-        </ldmcp:linux-debug-mcp>
+        </ldmcp:kdive>
       </metadata>
     </domain>
     """
@@ -546,36 +546,36 @@ def test_default_runner_stream_console_detects_marker_from_log_file(tmp_path: Pa
     # libvirt writes the serial chardev to output_path via the domain <log> element; the runner
     # tails that file with no controlling TTY. A marker already present is detected on first read.
     console_log = tmp_path / "console.log"
-    console_log.write_text("booting\n" + "x" * 5000 + "\nlinux-debug-mcp-ready\n", encoding="utf-8")
+    console_log.write_text("booting\n" + "x" * 5000 + "\nkdive-ready\n", encoding="utf-8")
 
     result = SubprocessLibvirtRunner(snippet_limit=128).stream_console(
         "debug-vm",
         libvirt_uri="qemu:///system",
         output_path=console_log,
         timeout=5,
-        readiness_marker="linux-debug-mcp-ready",
+        readiness_marker="kdive-ready",
     )
 
     assert result.status == "ready"
-    assert result.matched_marker == "linux-debug-mcp-ready"
+    assert result.matched_marker == "kdive-ready"
     assert len(result.snippet) <= 128
-    assert "linux-debug-mcp-ready" in result.snippet
+    assert "kdive-ready" in result.snippet
 
 
 def test_default_runner_stream_console_detects_marker_without_trailing_newline(tmp_path: Path) -> None:
     console_log = tmp_path / "console.log"
-    console_log.write_text("partial linux-debug-mcp-ready", encoding="utf-8")
+    console_log.write_text("partial kdive-ready", encoding="utf-8")
 
     result = SubprocessLibvirtRunner().stream_console(
         "debug-vm",
         libvirt_uri="qemu:///system",
         output_path=console_log,
         timeout=5,
-        readiness_marker="linux-debug-mcp-ready",
+        readiness_marker="kdive-ready",
     )
 
     assert result.status == "ready"
-    assert result.matched_marker == "linux-debug-mcp-ready"
+    assert result.matched_marker == "kdive-ready"
 
 
 def test_default_runner_stream_console_times_out_without_marker(tmp_path: Path) -> None:
@@ -618,7 +618,7 @@ def test_default_runner_stream_console_reports_exit_when_domain_stops(
         libvirt_uri="qemu:///system",
         output_path=console_log,
         timeout=5,
-        readiness_marker="linux-debug-mcp-ready",
+        readiness_marker="kdive-ready",
     )
 
     assert result.status == "exited"
@@ -643,18 +643,18 @@ def test_default_runner_stream_console_drains_final_marker_before_reporting_exit
             self._reads += 1
             if self._reads == 1:
                 return "", position
-            return "linux-debug-mcp-ready\n", position + 1
+            return "kdive-ready\n", position + 1
 
     result = DrainingRunner().stream_console(
         "debug-vm",
         libvirt_uri="qemu:///system",
         output_path=console_log,
         timeout=5,
-        readiness_marker="linux-debug-mcp-ready",
+        readiness_marker="kdive-ready",
     )
 
     assert result.status == "ready"
-    assert result.matched_marker == "linux-debug-mcp-ready"
+    assert result.matched_marker == "kdive-ready"
 
 
 class FakeLibvirtRunner:
@@ -676,8 +676,8 @@ class FakeLibvirtRunner:
         self.destroy = destroy or CommandResult(["virsh", "destroy"], 0, stdout="destroyed\n")
         self.console = console or ConsoleResult(
             status="ready",
-            matched_marker="linux-debug-mcp-ready",
-            snippet="linux-debug-mcp-ready\n",
+            matched_marker="kdive-ready",
+            snippet="kdive-ready\n",
             started_at=datetime(2026, 1, 1, tzinfo=UTC),
             ended_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
@@ -800,7 +800,7 @@ def test_execute_boot_first_boot_domain_absent_defines_starts_and_writes_artifac
     assert runner.console_calls[0]["domain"] == "debug-vm"
     assert plan.domain_xml_path.is_file()
     assert plan.boot_plan_path.is_file()
-    assert plan.console_log_path.read_text(encoding="utf-8") == "linux-debug-mcp-ready\n"
+    assert plan.console_log_path.read_text(encoding="utf-8") == "kdive-ready\n"
     assert plan.boot_log_path.is_file()
     assert plan.boot_summary_path.is_file()
     assert {artifact.kind for artifact in result.artifacts} == {
@@ -1051,7 +1051,7 @@ def test_execute_boot_rotates_existing_console_log_on_rerun(tmp_path: Path) -> N
     rotated = list(plan.console_log_path.parent.glob("console.*.log"))
     assert len(rotated) == 1
     assert rotated[0].read_text(encoding="utf-8") == "previous\n"
-    assert plan.console_log_path.read_text(encoding="utf-8") == "linux-debug-mcp-ready\n"
+    assert plan.console_log_path.read_text(encoding="utf-8") == "kdive-ready\n"
     rotated_artifacts = [
         artifact for artifact in result.artifacts if artifact.path == str(rotated[0]) and artifact.kind == "console-log"
     ]
@@ -1188,7 +1188,7 @@ def test_render_domain_xml_copy_on_write_points_at_overlay_and_is_writable(tmp_p
 
 
 def test_capability_advertises_qemu_img() -> None:
-    from linux_debug_mcp.providers.libvirt_qemu import local_libvirt_qemu_capability
+    from kdive.providers.libvirt_qemu import local_libvirt_qemu_capability
 
     capability = local_libvirt_qemu_capability()
     assert "qemu-img" in capability.required_host_tools
@@ -1285,7 +1285,7 @@ def test_plan_boot_disables_discovery_for_serial_only_profile(tmp_path: Path) ->
         name="minimal",
         source=str(rootfs),
         access_method="serial",
-        readiness_marker="linux-debug-mcp-ready",
+        readiness_marker="kdive-ready",
     )
 
     plan = provider.plan_boot(

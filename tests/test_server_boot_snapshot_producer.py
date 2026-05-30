@@ -1,11 +1,11 @@
 import pytest
 from conftest import FakeBootProvider, create_run, profiles, record_build, target_profile
 
-from linux_debug_mcp.config import TargetProfile
-from linux_debug_mcp.coordination.admission import AdmissionError, AdmissionService, SnapshotStore
-from linux_debug_mcp.seams.target import BreakHint, ConsoleKind, PlatformMetadata, TargetKey
-from linux_debug_mcp.server import target_boot_handler
-from linux_debug_mcp.transport.base import LineRole, OpenRequest, TransportRef
+from kdive.config import TargetProfile
+from kdive.coordination.admission import AdmissionError, AdmissionService, SnapshotStore
+from kdive.seams.target import BreakHint, ConsoleKind, PlatformMetadata, TargetKey
+from kdive.server import target_boot_handler
+from kdive.transport.base import LineRole, OpenRequest, TransportRef
 
 
 def _platform() -> PlatformMetadata:

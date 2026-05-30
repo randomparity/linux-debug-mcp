@@ -2,12 +2,12 @@ from pathlib import Path
 
 from conftest import FakeTestProvider, create_booted_run, make_source_tree, rootfs
 
-from linux_debug_mcp.artifacts.manifest import BootAttempt
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import RootfsProfile, TargetProfile, TestCommand, TestSuiteProfile
-from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
-from linux_debug_mcp.providers.local_ssh_tests import LocalSshTestProvider, TestExecutionResult
-from linux_debug_mcp.server import create_run_handler, target_run_tests_handler
+from kdive.artifacts.manifest import BootAttempt
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import RootfsProfile, TargetProfile, TestCommand, TestSuiteProfile
+from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
+from kdive.providers.local_ssh_tests import LocalSshTestProvider, TestExecutionResult
+from kdive.server import create_run_handler, target_run_tests_handler
 
 
 class PlanRejectingProvider(FakeTestProvider):

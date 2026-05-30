@@ -49,39 +49,39 @@ from conftest import (
     target_profile,
 )
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import TRANSPORT_DESTRUCTIVE_PERMISSIONS
-from linux_debug_mcp.coordination.admission import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import TRANSPORT_DESTRUCTIVE_PERMISSIONS
+from kdive.coordination.admission import (
     AdmissionError,
     AdmissionOp,
     AdmissionService,
     SnapshotStore,
     TargetSnapshot,
 )
-from linux_debug_mcp.coordination.endpoint_safety import EndpointSafetyError
-from linux_debug_mcp.coordination.exec_probe import probe_execution_state
-from linux_debug_mcp.coordination.lease import ConsoleLeaseManager, LeaseOwner
-from linux_debug_mcp.coordination.registry import (
+from kdive.coordination.endpoint_safety import EndpointSafetyError
+from kdive.coordination.exec_probe import probe_execution_state
+from kdive.coordination.lease import ConsoleLeaseManager, LeaseOwner
+from kdive.coordination.registry import (
     InstanceLockError,
     RecoveryTombstone,
     SessionRegistry,
 )
-from linux_debug_mcp.coordination.transaction import TransportTransaction
-from linux_debug_mcp.domain import ErrorCategory, StepResult, StepStatus
-from linux_debug_mcp.providers.gdb_mi import GdbMiSessionRegistry
-from linux_debug_mcp.safety.redaction import REDACTION, Redactor
-from linux_debug_mcp.seams.guard import InProcessStopCapableGuard
-from linux_debug_mcp.seams.lifecycle import (
+from kdive.coordination.transaction import TransportTransaction
+from kdive.domain import ErrorCategory, StepResult, StepStatus
+from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.safety.redaction import REDACTION, Redactor
+from kdive.seams.guard import InProcessStopCapableGuard
+from kdive.seams.lifecycle import (
     InProcessLifecycleDispatcher,
     LifecycleEvent,
     LifecycleKind,
 )
-from linux_debug_mcp.seams.target import (
+from kdive.seams.target import (
     TargetKey,
     TargetState,
     publish_ready_snapshot,
 )
-from linux_debug_mcp.server import (
+from kdive.server import (
     _halt_debug_transport,
     debug_continue_handler,
     debug_read_registers_handler,
@@ -90,7 +90,7 @@ from linux_debug_mcp.server import (
     transport_inject_break_handler,
     transport_open_handler,
 )
-from linux_debug_mcp.transport.base import (
+from kdive.transport.base import (
     ExecutionState,
     LineRole,
     OpenRequest,
@@ -906,11 +906,11 @@ def test_secret_refs_never_surfaced_in_response_or_record(tmp_path: Path, monkey
     literal secret value. Neither the raw secret_ref string NOR the resolved literal secret value
     may appear in the transport.open response body OR the durable record's JSON. The resolver
     returns a non-empty dict, exercising the full happy path through resolve()."""
-    from linux_debug_mcp.safety.secrets import SecretReference, SecretReferenceKind
+    from kdive.safety.secrets import SecretReference, SecretReferenceKind
 
     # A real env var with a known literal value; the resolver returns it to the transaction, which
     # MUST hold the §3.4/§8 invariant that resolved values are never surfaced/persisted.
-    env_var_name = "LDM_CONFORMANCE_SECRET_VALUE"
+    env_var_name = "KDIVE_CONFORMANCE_SECRET_VALUE"
     raw_secret_value = "TOP_SECRET_LITERAL_xyzzy"
     monkeypatch.setenv(env_var_name, raw_secret_value)
 
@@ -1110,7 +1110,7 @@ def test_reconcile_orphan_backend_emits_lifecycle_event(tmp_path: Path) -> None:
     assert admission._bindings.get(KEY, []) != []
 
     # Wire the production reap-callback the same way `_build_transport_machinery` does it.
-    from linux_debug_mcp.coordination.registry import OrphanReap
+    from kdive.coordination.registry import OrphanReap
 
     invalidated: list[OrphanReap] = []
 
@@ -1141,7 +1141,7 @@ def test_reconcile_no_records_emits_no_lifecycle_event(tmp_path: Path) -> None:
     """Symmetric negative case: with no durable records to reap, the reap-callback is never
     invoked. A backend that hasn't been recorded — or a record without a `backend_pid` — does
     not trigger the production lifecycle source path."""
-    from linux_debug_mcp.coordination.registry import OrphanReap
+    from kdive.coordination.registry import OrphanReap
 
     invocations: list[OrphanReap] = []
 
@@ -1256,7 +1256,7 @@ def test_reconcile_with_dead_backend_does_not_lock_admission(tmp_path: Path) -> 
     None pid), the orphan-reap callback MUST NOT close admission. Otherwise a single surviving
     durable record from a prior server lifetime permanently bricks the target until process
     restart, because no production code path ever calls `reopen()`."""
-    from linux_debug_mcp.coordination.registry import OrphanReap
+    from kdive.coordination.registry import OrphanReap
 
     # Seed a record whose backend the reaper will NOT kill (FakeReapProxy default is
     # kills_live_backend=False, mirroring the dead-backend / qemu-gdbstub case).
@@ -1303,7 +1303,7 @@ def test_reconcile_with_live_orphan_closes_admission_and_recovers_via_reopen(tmp
     """Finding F1, mirror: when `stop_by_identity` DID kill a fingerprint-matched live backend,
     `close_admission=True` is required — the §4.5 cancel-fence runs against any subscriber. A
     subsequent `publish_snapshot` at a higher generation + `reopen()` re-admits cleanly."""
-    from linux_debug_mcp.coordination.registry import OrphanReap
+    from kdive.coordination.registry import OrphanReap
 
     reg = SessionRegistry(directory=tmp_path)
     reg.write_record(

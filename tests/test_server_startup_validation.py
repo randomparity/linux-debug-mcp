@@ -17,10 +17,10 @@ from datetime import UTC, datetime
 
 import pytest
 
-from linux_debug_mcp.coordination.registry import InstanceLockError, SessionRegistry
-from linux_debug_mcp.seams.target import TargetKey
-from linux_debug_mcp.server import create_app
-from linux_debug_mcp.transport.base import (
+from kdive.coordination.registry import InstanceLockError, SessionRegistry
+from kdive.seams.target import TargetKey
+from kdive.server import create_app
+from kdive.transport.base import (
     EndpointExposure,
     ExecutionState,
     RecordState,

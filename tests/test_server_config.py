@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 from conftest import make_source_tree
 
-from linux_debug_mcp.config import BootOverrides, ServerConfig
-from linux_debug_mcp.server import (
+from kdive.config import BootOverrides, ServerConfig
+from kdive.server import (
     SERVER_CONFIG_ENV_VAR,
     create_app,
     create_run_handler,

@@ -7,7 +7,7 @@
 ## Problem
 
 `target.run_tests` SSHes to the static `rootfs_profile.ssh_host`
-(`src/linux_debug_mcp/providers/local_ssh_tests.py:260`), which defaults to `127.0.0.1`
+(`src/kdive/providers/local_ssh_tests.py:260`), which defaults to `127.0.0.1`
 (`server.py:294`, the `minimal` profile). A `qemu:///system` guest on the default NAT network
 (`virbr0` / `192.168.122.0/24`) receives its address by DHCP and is reachable only at that
 `192.168.122.x` lease address — never at `127.0.0.1`, where nothing on the guest is listening from the
@@ -94,7 +94,7 @@ tells the agent *why* (`guest_ip_discovery.status`) and what to do (the failure 
 
 ### 3. Bounded poll for lease registration
 
-The readiness marker (`linux-debug-mcp-ready`) can fire a moment before the guest's DHCP lease is
+The readiness marker (`kdive-ready`) can fire a moment before the guest's DHCP lease is
 registered in the dnsmasq lease file the provider reads. So discovery polls: up to
 `lease_discovery_attempts` calls to `virsh domifaddr`, sleeping `lease_discovery_interval` seconds between
 attempts, stopping at the first `found`. Both are `LibvirtQemuProvider.__init__` parameters with
@@ -176,12 +176,12 @@ pay a libvirt round-trip and re-introduce provider knowledge into the short-circ
 
 ## Affected code
 
-- `src/linux_debug_mcp/providers/libvirt_qemu.py`: `parse_domifaddr_ipv4` (new), `BootPlan.domifaddr_argv`
+- `src/kdive/providers/libvirt_qemu.py`: `parse_domifaddr_ipv4` (new), `BootPlan.domifaddr_argv`
   (new field set in `plan_boot`) and `BootPlan.discover_guest_ip` (bool gate from the rootfs access
   method), `LibvirtQemuProvider.__init__` (`sleep`, `lease_discovery_attempts`,
   `lease_discovery_interval`, `lease_discovery_call_timeout` params), `execute_boot` success branch
   (gated poll + surface `guest_ip` / `guest_ip_discovery`).
-- `src/linux_debug_mcp/server.py`: `target_run_tests_handler` (read `guest_ip` from boot details, apply
+- `src/kdive/server.py`: `target_run_tests_handler` (read `guest_ip` from boot details, apply
   override via `_ssh_host_is_unset_or_loopback` + re-validation).
 - No `domain.py` wire-model change (the new fields ride the free-form `StepResult.details` dict that
   already carries provider details), so no JSON-schema snapshot regeneration.

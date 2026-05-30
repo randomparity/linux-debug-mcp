@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`linux-debug-mcp` is a stdio MCP server (FastMCP / `mcp>=1.9`) that exposes Linux kernel build, boot, smoke-test, artifact, and QEMU gdbstub debug workflows to coding agents. Today's implementation is local-only (x86_64 + libvirt/QEMU); ppc64le, remote build, reservation, BMC console, and real-hardware boot exist only as discoverable future-provider stubs.
+`kdive` is a stdio MCP server (FastMCP / `mcp>=1.9`) that exposes Linux kernel build, boot, smoke-test, artifact, and QEMU gdbstub debug workflows to coding agents. Today's implementation is local-only (x86_64 + libvirt/QEMU); ppc64le, remote build, reservation, BMC console, and real-hardware boot exist only as discoverable future-provider stubs.
 
-Architecture spec: `docs/specs/2026-05-22-linux-debug-mcp-architecture-design.md`.
+Architecture spec: `docs/specs/2026-05-22-kdive-architecture-design.md`.
 Future-work epics (remote interactive debug, transports, drgn/KDB/KGDB/postmortem tiers): `00-epic-remote-interactive-debug.md` and `01-…08-…md` at repo root.
 
 ## Common commands
@@ -19,7 +19,7 @@ Future-work epics (remote interactive debug, transports, drgn/KDB/KGDB/postmorte
 | Lint + format check | `just lint` |
 | Auto-fix + format | `just format` |
 | Host prerequisite check | `just check-host` |
-| Server stdio smoke | `timeout 2 uv run linux-debug-mcp \|\| test $? -eq 124` |
+| Server stdio smoke | `timeout 2 uv run kdive \|\| test $? -eq 124` |
 | Doc terminology guard | `just check-docs` (forbids "sprint*" in `README.md` and `docs/`, excluding the internal `docs/superpowers/` planning artifacts) |
 
 Python 3.11+. Ruff is the linter/formatter (line length 120, selects `E,F,I,UP,B,SIM`). `ty check src` runs in CI as a **hard-gating** job; type errors block PRs and are also surfaced in the run summary. Do not invoke `mypy` or `pyright`. The hard-fail checks per commit are ruff, the pre-commit hygiene hooks, `detect-secrets`, and `ty`. Pre-commit uses `pre-commit` (not `prek`) with `detect-secrets` against `.secrets.baseline`.
@@ -30,9 +30,9 @@ Python 3.11+. Ruff is the linter/formatter (line length 120, selects `E,F,I,UP,B
 
 `create_app()` returns a `FastMCP` instance with every tool registered via `@app.tool(name="...")`. Each registration is a thin wrapper that calls a module-level `*_handler()` function and `.model_dump(mode="json")`s the result. Handlers are the unit of testing — tests call them directly with injected providers/profiles, not through MCP.
 
-Entry point: `linux-debug-mcp` console script → `linux_debug_mcp.server:main` → `configure_logging()` + `create_app().run()`.
+Entry point: `kdive` console script → `kdive.server:main` → `configure_logging()` + `create_app().run()`.
 
-Default profiles (`x86_64-default`, `x86_64-debug`, `local-qemu`, `local-qemu-debug`, `minimal`, `smoke-basic`, `qemu-gdbstub-default`) are constants in `server.py`. `x86_64-default` and `x86_64-debug` carry `base_config=["defconfig"]` so a clean checkout builds without a developer-prepared `.config`; `x86_64-debug` adds DWARF/KASLR-off/virtio `config_lines` for the gdbstub tier. The default artifact root is `.linux-debug-mcp/runs` (gitignored).
+Default profiles (`x86_64-default`, `x86_64-debug`, `local-qemu`, `local-qemu-debug`, `minimal`, `smoke-basic`, `qemu-gdbstub-default`) are constants in `server.py`. `x86_64-default` and `x86_64-debug` carry `base_config=["defconfig"]` so a clean checkout builds without a developer-prepared `.config`; `x86_64-debug` adds DWARF/KASLR-off/virtio `config_lines` for the gdbstub tier. The default artifact root is `.kdive/runs` (gitignored).
 
 ### Run lifecycle and the manifest invariant
 
@@ -51,7 +51,7 @@ Steps (`build`, `boot`, `run_tests`, `debug`, plus `collect`) are **idempotent b
 
 ### Providers and capabilities
 
-Providers live under `src/linux_debug_mcp/providers/` and are discovered through `ProviderRegistry.with_defaults()`, which loads `built_in_provider_plugin_specs()`. Each `ProviderPluginSpec` produces one or more `ProviderCapability` objects via factories — that is what `providers.list` returns.
+Providers live under `src/kdive/providers/` and are discovered through `ProviderRegistry.with_defaults()`, which loads `built_in_provider_plugin_specs()`. Each `ProviderPluginSpec` produces one or more `ProviderCapability` objects via factories — that is what `providers.list` returns.
 
 - Implemented (`builtins.local`): `local-artifacts`, `local-prereqs`, `local-kernel-build`, `local-libvirt-qemu`, `local-ssh-tests`, `local-qemu-gdbstub`.
 - Stubs (`builtins.future-stubs`): remote/reservation/provision/hardware/console/workflow tools. Routed through `_future_stub_handler`, which validates the request against the matching `ProviderRequest` Pydantic contract, picks a provider via `select_future_provider`, and returns `not_implemented` for valid requests / `configuration_error` for malformed ones. Stubs must not open network, serial, or power-control resources.

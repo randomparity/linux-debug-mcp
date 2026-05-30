@@ -4,7 +4,7 @@ Gated on:
   - ``drgn`` installed target-side (the rootfs must include it)
   - ``qemu-system-x86_64`` on the host
   - ``virsh`` on the host
-  - ``LINUX_DEBUG_MCP_LIBVIRT_TEST=1`` environment variable
+  - ``KDIVE_LIBVIRT_TEST=1`` environment variable
 
 The bootstrap (kernel.create_run → kernel.build → target.boot) is reused
 from ``tests/test_libvirt_boot_integration.py``. Tests opt-in via the
@@ -18,15 +18,15 @@ from typing import NamedTuple
 
 import pytest
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import RootfsProfile, TargetProfile
-from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore
-from linux_debug_mcp.coordination.registry import SessionRegistry
-from linux_debug_mcp.domain import ArtifactRef, DebugIntrospectRunRequest, ErrorCategory, StepResult, StepStatus
-from linux_debug_mcp.providers.local_ssh_tests import SubprocessSshRunner, build_ssh_argv
-from linux_debug_mcp.server import create_run_handler, debug_introspect_run_handler, target_boot_handler
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import RootfsProfile, TargetProfile
+from kdive.coordination.admission import AdmissionService, SnapshotStore
+from kdive.coordination.registry import SessionRegistry
+from kdive.domain import ArtifactRef, DebugIntrospectRunRequest, ErrorCategory, StepResult, StepStatus
+from kdive.providers.local_ssh_tests import SubprocessSshRunner, build_ssh_argv
+from kdive.server import create_run_handler, debug_introspect_run_handler, target_boot_handler
 
-MANAGED_DOMAIN_PREFIX = "mcp-linux-debug-"
+MANAGED_DOMAIN_PREFIX = "kdive-"
 
 
 def _require_integration_env() -> None:
@@ -37,18 +37,18 @@ def _require_integration_env() -> None:
         missing.append("qemu-system-x86_64")
     if shutil.which("virsh") is None:
         missing.append("virsh")
-    if os.environ.get("LINUX_DEBUG_MCP_LIBVIRT_TEST") != "1":
-        missing.append("LINUX_DEBUG_MCP_LIBVIRT_TEST=1")
+    if os.environ.get("KDIVE_LIBVIRT_TEST") != "1":
+        missing.append("KDIVE_LIBVIRT_TEST=1")
     if missing:
         pytest.skip(
             "drgn introspect integration test skipped; set "
             f"{', '.join(missing)} to run it. Example: "
-            "LINUX_DEBUG_MCP_LIBVIRT_TEST=1 "
-            "LINUX_DEBUG_MCP_ROOTFS=/var/lib/linux-debug-mcp/rootfs/minimal.qcow2 "
-            "LINUX_DEBUG_MCP_SOURCE=/path/to/linux "
-            "LINUX_DEBUG_MCP_DOMAIN=mcp-linux-debug-dev "
-            "LINUX_DEBUG_MCP_LIBVIRT_URI=qemu:///system "
-            "LINUX_DEBUG_MCP_READINESS_MARKER=linux-debug-mcp-ready "
+            "KDIVE_LIBVIRT_TEST=1 "
+            "KDIVE_ROOTFS=/var/lib/kdive/rootfs/minimal.qcow2 "
+            "KDIVE_SOURCE=/path/to/linux "
+            "KDIVE_DOMAIN=kdive-dev "
+            "KDIVE_LIBVIRT_URI=qemu:///system "
+            "KDIVE_READINESS_MARKER=kdive-ready "
             "pytest tests/test_drgn_introspect_integration.py -q"
         )
 
@@ -93,16 +93,16 @@ def _bootstrap_booted_run(tmp_path: Path) -> BootstrapResult:
     invoke ``_require_integration_env()`` first will skip there, but the fallback
     skip here is a safety net.
     """
-    env_source = os.environ.get("LINUX_DEBUG_MCP_SOURCE")
-    env_rootfs = os.environ.get("LINUX_DEBUG_MCP_ROOTFS")
-    env_domain = os.environ.get("LINUX_DEBUG_MCP_DOMAIN")
-    env_libvirt_uri = os.environ.get("LINUX_DEBUG_MCP_LIBVIRT_URI")
-    env_readiness = os.environ.get("LINUX_DEBUG_MCP_READINESS_MARKER")
+    env_source = os.environ.get("KDIVE_SOURCE")
+    env_rootfs = os.environ.get("KDIVE_ROOTFS")
+    env_domain = os.environ.get("KDIVE_DOMAIN")
+    env_libvirt_uri = os.environ.get("KDIVE_LIBVIRT_URI")
+    env_readiness = os.environ.get("KDIVE_READINESS_MARKER")
     if not all([env_source, env_rootfs, env_domain, env_libvirt_uri, env_readiness]):
         pytest.skip(
-            "bootstrap helper skipped: LINUX_DEBUG_MCP_SOURCE, LINUX_DEBUG_MCP_ROOTFS, "
-            "LINUX_DEBUG_MCP_DOMAIN, LINUX_DEBUG_MCP_LIBVIRT_URI, "
-            "LINUX_DEBUG_MCP_READINESS_MARKER are all required."
+            "bootstrap helper skipped: KDIVE_SOURCE, KDIVE_ROOTFS, "
+            "KDIVE_DOMAIN, KDIVE_LIBVIRT_URI, "
+            "KDIVE_READINESS_MARKER are all required."
         )
 
     source = Path(env_source).expanduser()  # type: ignore[arg-type]
@@ -111,13 +111,13 @@ def _bootstrap_booted_run(tmp_path: Path) -> BootstrapResult:
     artifact_root = tmp_path / "runs"
     run_id = "run-introspect-integration"
 
-    assert source.is_dir(), f"LINUX_DEBUG_MCP_SOURCE must be a Linux source directory: {source}"
-    assert rootfs_path.is_file(), f"LINUX_DEBUG_MCP_ROOTFS must be a disk image file: {rootfs_path}"
+    assert source.is_dir(), f"KDIVE_SOURCE must be a Linux source directory: {source}"
+    assert rootfs_path.is_file(), f"KDIVE_ROOTFS must be a disk image file: {rootfs_path}"
     assert env_domain.startswith(MANAGED_DOMAIN_PREFIX), (  # type: ignore[union-attr]
-        f"LINUX_DEBUG_MCP_DOMAIN must start with {MANAGED_DOMAIN_PREFIX!r}: {env_domain}"
+        f"KDIVE_DOMAIN must start with {MANAGED_DOMAIN_PREFIX!r}: {env_domain}"
     )
     assert kernel_image.is_file(), (
-        f"LINUX_DEBUG_MCP_SOURCE must contain a built x86_64 kernel image at {kernel_image}; "
+        f"KDIVE_SOURCE must contain a built x86_64 kernel image at {kernel_image}; "
         "build bzImage before running this integration test"
     )
 

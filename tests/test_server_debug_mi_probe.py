@@ -16,22 +16,22 @@ import pytest
 from _layer4_fakes import FakeQemuTransport, build_txn
 from conftest import FakeMiEngine, FakeTestProvider, kernel_provenance_details, rootfs, write_vmlinux_with_build_id
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import DebugProfile, RootfsProfile
-from linux_debug_mcp.coordination.admission import AdmissionService
-from linux_debug_mcp.coordination.registry import SessionRegistry
-from linux_debug_mcp.coordination.transaction import TransportTransaction
-from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from linux_debug_mcp.providers.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiSessionRegistry
-from linux_debug_mcp.seams.target import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import DebugProfile, RootfsProfile
+from kdive.coordination.admission import AdmissionService
+from kdive.coordination.registry import SessionRegistry
+from kdive.coordination.transaction import TransportTransaction
+from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
+from kdive.providers.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiSessionRegistry
+from kdive.seams.target import (
     BreakHint,
     ConsoleKind,
     PlatformMetadata,
     TargetKey,
     publish_ready_snapshot,
 )
-from linux_debug_mcp.server import debug_start_session_handler, target_run_tests_handler
-from linux_debug_mcp.transport.base import ExecutionState, LineRole, TransportRef
+from kdive.server import debug_start_session_handler, target_run_tests_handler
+from kdive.transport.base import ExecutionState, LineRole, TransportRef
 
 RUN_ID = "run-1"
 KEY = TargetKey(provisioner="local-qemu", target_id=RUN_ID)
@@ -336,7 +336,7 @@ def test_probe_fault_releases_guard_even_if_unhalt_write_raises(
     (e.g. an OSError on a full disk), the teardown must still run -- the StopCapableGuard is released,
     the kernel is not left HALTED, and the handler returns a failure rather than letting the
     exception escape."""
-    import linux_debug_mcp.server as server
+    import kdive.server as server
 
     def _boom(**_kwargs):
         raise OSError("disk full while un-halting")

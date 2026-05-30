@@ -1,9 +1,9 @@
 # ADR 0032 — guest-IP discovery from the libvirt lease for SSH tests
 
 **Status:** Accepted (2026-05-30) · **Issue:** #103 · **Epic:** #100 · **Depends on:** #102 (ADR 0031) ·
-**Affects:** `src/linux_debug_mcp/providers/libvirt_qemu.py` (`parse_domifaddr_ipv4`,
+**Affects:** `src/kdive/providers/libvirt_qemu.py` (`parse_domifaddr_ipv4`,
 `BootPlan.domifaddr_argv`, `LibvirtQemuProvider.__init__` poll/sleep params, `execute_boot` success
-branch), `src/linux_debug_mcp/server.py` (`target_run_tests_handler` override gate,
+branch), `src/kdive/server.py` (`target_run_tests_handler` override gate,
 `_ssh_host_is_unset_or_loopback`).
 Spec: [2026-05-30-guest-ip-lease-discovery.md](../specs/2026-05-30-guest-ip-lease-discovery.md).
 

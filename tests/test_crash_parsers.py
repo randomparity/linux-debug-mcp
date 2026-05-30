@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from linux_debug_mcp.postmortem.crash_parsers import parse_command
+from kdive.postmortem.crash_parsers import parse_command
 
 BT = """PID: 0      TASK: ffffffff81c1a8c0  CPU: 0   COMMAND: "swapper/0"
  #0 [ffff8881] machine_kexec at ffffffff81051d4e
@@ -67,7 +67,7 @@ def test_unknown_command_raw() -> None:
 
 
 def test_parser_exception_falls_back_to_raw(monkeypatch) -> None:
-    import linux_debug_mcp.postmortem.crash_parsers as mod
+    import kdive.postmortem.crash_parsers as mod
 
     def boom(_text: str) -> dict:
         raise ValueError("kaboom")

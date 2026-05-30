@@ -3,9 +3,9 @@ import sys
 
 import pytest
 
-from linux_debug_mcp.safety.secret_registry import SecretRegistry
-from linux_debug_mcp.safety.secrets import SecretReference, SecretReferenceKind
-from linux_debug_mcp.seams.secrets import (
+from kdive.safety.secret_registry import SecretRegistry
+from kdive.safety.secrets import SecretReference, SecretReferenceKind
+from kdive.seams.secrets import (
     EnvSecretsBackend,
     ExternalSecretsBackend,
     KeyringSecretsBackend,

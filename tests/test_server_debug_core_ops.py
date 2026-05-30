@@ -14,14 +14,14 @@ from pathlib import Path
 from _layer4_fakes import FakeQemuTransport, build_txn
 from conftest import kernel_provenance_details, write_vmlinux_with_build_id
 
-import linux_debug_mcp.server as server_module
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import DebugProfile
-from linux_debug_mcp.coordination.admission import AdmissionService
-from linux_debug_mcp.coordination.registry import SessionRegistry
-from linux_debug_mcp.coordination.transaction import TransportTransaction
-from linux_debug_mcp.domain import ErrorCategory, RunRequest, StepResult, StepStatus
-from linux_debug_mcp.providers.gdb_mi import (
+import kdive.server as server_module
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import DebugProfile
+from kdive.coordination.admission import AdmissionService
+from kdive.coordination.registry import SessionRegistry
+from kdive.coordination.transaction import TransportTransaction
+from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus
+from kdive.providers.gdb_mi import (
     CANONICAL_PROBE_SYMBOL,
     BreakpointRef,
     Frame,
@@ -33,20 +33,20 @@ from linux_debug_mcp.providers.gdb_mi import (
     StopRecord,
     Variable,
 )
-from linux_debug_mcp.seams.target import (
+from kdive.seams.target import (
     BreakHint,
     ConsoleKind,
     PlatformMetadata,
     TargetKey,
     publish_ready_snapshot,
 )
-from linux_debug_mcp.server import (
+from kdive.server import (
     _end_mi_debug_session,
     debug_continue_handler,
     debug_set_breakpoint_handler,
     debug_start_session_handler,
 )
-from linux_debug_mcp.transport.base import ExecutionState, LineRole, TransportRef
+from kdive.transport.base import ExecutionState, LineRole, TransportRef
 
 RUN_ID = "run-1"
 KEY = TargetKey(provisioner="local-qemu", target_id=RUN_ID)
@@ -227,7 +227,7 @@ def _create_debug_ready_run(tmp_path: Path) -> Path:
 
 
 def _artifact(path: str, kind: str):
-    from linux_debug_mcp.domain import ArtifactRef
+    from kdive.domain import ArtifactRef
 
     return ArtifactRef(path=path, kind=kind, sensitive=kind == "vmlinux")
 
@@ -452,7 +452,7 @@ def test_end_session_bookkeeping_fault_does_not_resume_before_recording(tmp_path
 def test_end_session_record_fault_does_not_resume_before_recording(tmp_path: Path, monkeypatch) -> None:
     """Same invariant for the manifest-record write: a ManifestStateError after the (successful)
     persist must still leave the kernel HALTED and the attachment registered, not reaped+resumed."""
-    from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
+    from kdive.artifacts.store import ArtifactStore, ManifestStateError
 
     artifact_root, session_id, engine, sessions, registry = _start_for_end(tmp_path)
     real_record = ArtifactStore.record_step_result
@@ -590,7 +590,7 @@ def test_mutator_ledger_rebuild_fault_reaps_and_returns_structured_failure(tmp_p
 
 # --- Task 3: per-op transport_stall teardown (ADR 0023) -------------------------------------------
 
-from linux_debug_mcp.server import debug_read_registers_handler  # noqa: E402
+from kdive.server import debug_read_registers_handler  # noqa: E402
 
 
 class _StallEngine(FakeMiEngine):

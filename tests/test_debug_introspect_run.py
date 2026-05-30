@@ -14,22 +14,22 @@ from typing import Any
 
 import pytest
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import DebugProfile, RootfsProfile, TargetProfile
-from linux_debug_mcp.coordination.admission import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import DebugProfile, RootfsProfile, TargetProfile
+from kdive.coordination.admission import (
     AdmissionError,
     TargetSnapshot,
 )
-from linux_debug_mcp.domain import (
+from kdive.domain import (
     DebugIntrospectRunRequest,
     ErrorCategory,
     RunRequest,
     StepResult,
     StepStatus,
 )
-from linux_debug_mcp.providers.local_ssh_tests import SshCommandResult
-from linux_debug_mcp.seams.target import ConsoleKind, PlatformMetadata, TargetState
-from linux_debug_mcp.server import RUN_STDOUT_CAP, debug_introspect_run_handler
+from kdive.providers.local_ssh_tests import SshCommandResult
+from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetState
+from kdive.server import RUN_STDOUT_CAP, debug_introspect_run_handler
 
 VALID_BUILD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
@@ -181,7 +181,7 @@ def _profiles():
         {
             "minimal": RootfsProfile(
                 name="minimal",
-                source="/var/lib/linux-debug-mcp/rootfs/minimal.qcow2",
+                source="/var/lib/kdive/rootfs/minimal.qcow2",
                 access_method="ssh_and_serial",
                 ssh_host="127.0.0.1",
                 ssh_port=22,
@@ -279,7 +279,7 @@ _WRITE_PERMS = ["mutate live kernel state via drgn write APIs"]
 def test_run_tool_exposes_acknowledged_permissions() -> None:
     import inspect
 
-    from linux_debug_mcp.server import create_app
+    from kdive.server import create_app
 
     app = create_app()
     tool = app._tool_manager._tools["debug.introspect.run"]
@@ -634,7 +634,7 @@ def test_malformed_build_id_rejected_as_provenance_corrupt(tmp_path: Path) -> No
 
 
 def test_call_budget_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("linux_debug_mcp.server.MAX_INTROSPECT_CALLS_PER_RUN", 4)
+    monkeypatch.setattr("kdive.server.MAX_INTROSPECT_CALLS_PER_RUN", 4)
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     for _ in range(4):
         store.record_step_result(
@@ -1088,7 +1088,7 @@ def test_redactor_applied_to_emits(tmp_path: Path) -> None:
     rootfs_with_secret = {
         "minimal": RootfsProfile(
             name="minimal",
-            source="/var/lib/linux-debug-mcp/rootfs/minimal.qcow2",
+            source="/var/lib/kdive/rootfs/minimal.qcow2",
             access_method="ssh_and_serial",
             ssh_host="127.0.0.1",
             ssh_port=22,
@@ -1139,12 +1139,12 @@ def test_wrapper_render_error_rolls_back_admission(tmp_path: Path, monkeypatch: 
     # admission handle, (b) clean up the orphan agent_dir + sensitive_dir,
     # and (c) leave a forensic FAILED StepResult under introspect:<call_id>
     # so the operator can trace via `artifacts.get_manifest`.
-    from linux_debug_mcp.providers.local_drgn_introspect import WrapperRenderError
+    from kdive.providers.local_drgn_introspect import WrapperRenderError
 
     def _boom(**_kwargs):
         raise WrapperRenderError("test forced render failure")
 
-    monkeypatch.setattr("linux_debug_mcp.server.render_wrapper", _boom)
+    monkeypatch.setattr("kdive.server.render_wrapper", _boom)
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1502,7 +1502,7 @@ def test_root_ssh_user_omits_sudo_from_remote_argv(tmp_path: Path) -> None:
 
 
 def test_run_uses_runner_default_caps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import linux_debug_mcp.server as server
+    import kdive.server as server
 
     captured: dict = {}
     orig = server.render_wrapper
@@ -1585,8 +1585,8 @@ def _helper_script_error_ssh_result() -> SshCommandResult:
 
 
 def test_helper_success_returns_typed_result(tmp_path: Path) -> None:
-    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
-    from linux_debug_mcp.server import debug_introspect_helper_handler
+    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.server import debug_introspect_helper_handler
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1618,8 +1618,8 @@ def test_helper_success_returns_typed_result(tmp_path: Path) -> None:
 
 
 def test_helper_malformed_emit_records_failed_step(tmp_path: Path) -> None:
-    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
-    from linux_debug_mcp.server import debug_introspect_helper_handler
+    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.server import debug_introspect_helper_handler
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1640,8 +1640,8 @@ def test_helper_malformed_emit_records_failed_step(tmp_path: Path) -> None:
 
 
 def test_helper_script_error_records_failed_step(tmp_path: Path) -> None:
-    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
-    from linux_debug_mcp.server import debug_introspect_helper_handler
+    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.server import debug_introspect_helper_handler
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1662,9 +1662,9 @@ def test_helper_script_error_records_failed_step(tmp_path: Path) -> None:
 
 
 def test_helper_gating_enforced(tmp_path: Path) -> None:
-    from linux_debug_mcp.config import DebugProfile
-    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
-    from linux_debug_mcp.server import debug_introspect_helper_handler
+    from kdive.config import DebugProfile
+    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.server import debug_introspect_helper_handler
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, _ = _profiles()
@@ -1683,8 +1683,8 @@ def test_helper_gating_enforced(tmp_path: Path) -> None:
 
 
 def test_helper_unknown_name(tmp_path: Path) -> None:
-    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
-    from linux_debug_mcp.server import debug_introspect_helper_handler
+    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.server import debug_introspect_helper_handler
 
     resp = debug_introspect_helper_handler(
         DebugIntrospectHelperRequest(run_id="missing", target_ref="t", name="nope"),
@@ -1695,8 +1695,8 @@ def test_helper_unknown_name(tmp_path: Path) -> None:
 
 
 def test_helper_args_invalid(tmp_path: Path) -> None:
-    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
-    from linux_debug_mcp.server import debug_introspect_helper_handler
+    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.server import debug_introspect_helper_handler
 
     resp = debug_introspect_helper_handler(
         DebugIntrospectHelperRequest(run_id="missing", target_ref="t", name="tasks", args={"limit": "lots"}),
@@ -1707,9 +1707,9 @@ def test_helper_args_invalid(tmp_path: Path) -> None:
 
 
 def test_helper_passes_cap_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import linux_debug_mcp.server as server
-    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
-    from linux_debug_mcp.server import debug_introspect_helper_handler
+    import kdive.server as server
+    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.server import debug_introspect_helper_handler
 
     captured: dict = {}
     orig = server.render_wrapper
@@ -1746,16 +1746,16 @@ def test_helper_passes_cap_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 def test_helper_redacts_secret_in_emit(tmp_path: Path) -> None:
-    from linux_debug_mcp.domain import DebugIntrospectHelperRequest
-    from linux_debug_mcp.safety.redaction import REDACTION
-    from linux_debug_mcp.server import debug_introspect_helper_handler
+    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.safety.redaction import REDACTION
+    from kdive.server import debug_introspect_helper_handler
 
     _, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, _rootfs, debug = _profiles()
     rootfs_with_secret = {
         "minimal": RootfsProfile(
             name="minimal",
-            source="/var/lib/linux-debug-mcp/rootfs/minimal.qcow2",
+            source="/var/lib/kdive/rootfs/minimal.qcow2",
             access_method="ssh_and_serial",
             ssh_host="127.0.0.1",
             ssh_port=22,

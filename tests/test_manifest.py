@@ -1,8 +1,8 @@
 import pytest
 
-from linux_debug_mcp.artifacts.manifest import BootAttempt, RunManifest
-from linux_debug_mcp.config import RootfsProfile, TargetProfile
-from linux_debug_mcp.domain import RunRequest, StepResult, StepStatus
+from kdive.artifacts.manifest import BootAttempt, RunManifest
+from kdive.config import RootfsProfile, TargetProfile
+from kdive.domain import RunRequest, StepResult, StepStatus
 
 
 def _request():

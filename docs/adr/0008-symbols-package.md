@@ -1,6 +1,6 @@
 # ADR 0008 — a dedicated `symbols/` package for build_id verification and vmlinux/modules resolution
 
-**Status:** Accepted (2026-05-28) · **Issue:** #53 · **Epic:** #9 · **Affects:** `src/linux_debug_mcp/symbols/` (new package), `safety/paths.py` (`confine_run_relative`), `server.py` (`_capture_kernel_provenance`, `debug.introspect.run` re-point), `providers/local_drgn_introspect.py` (shared `BUILD_ID_RE`)
+**Status:** Accepted (2026-05-28) · **Issue:** #53 · **Epic:** #9 · **Affects:** `src/kdive/symbols/` (new package), `safety/paths.py` (`confine_run_relative`), `server.py` (`_capture_kernel_provenance`, `debug.introspect.run` re-point), `providers/local_drgn_introspect.py` (shared `BUILD_ID_RE`)
 
 ## Context
 
@@ -10,7 +10,7 @@ The two callers are asymmetric. On the **live path** the running kernel's `build
 
 ## Decision
 
-Place both units in a new `src/linux_debug_mcp/symbols/` package as pure functions (`verify.py`: `BUILD_ID_RE`, `ProvenanceMismatch`, `verify_build_id`; `resolve.py`: `resolve_symbols` and its result/warning/error types), with no IO or manifest coupling. Path confinement lives in the existing leaf `safety/paths.py` as a public `confine_run_relative(ref, *, run_dir) -> Path`; the resolver imports it and wraps `PathSafetyError` as its own `SymbolResolutionError`. Keep the boot-capture adapter (`_capture_kernel_provenance`) in `server.py` next to the existing boot-snapshot adapter; synthesizing a `KernelProvenance` is provisioning's job (#17), and keeping it out of `symbols/` lets #17 relocate it without touching the library. `BUILD_ID_RE` is defined once in `verify.py` and replaces the duplicate `_BUILD_ID_RE` definitions formerly in `local_drgn_introspect.py` and `server.py`.
+Place both units in a new `src/kdive/symbols/` package as pure functions (`verify.py`: `BUILD_ID_RE`, `ProvenanceMismatch`, `verify_build_id`; `resolve.py`: `resolve_symbols` and its result/warning/error types), with no IO or manifest coupling. Path confinement lives in the existing leaf `safety/paths.py` as a public `confine_run_relative(ref, *, run_dir) -> Path`; the resolver imports it and wraps `PathSafetyError` as its own `SymbolResolutionError`. Keep the boot-capture adapter (`_capture_kernel_provenance`) in `server.py` next to the existing boot-snapshot adapter; synthesizing a `KernelProvenance` is provisioning's job (#17), and keeping it out of `symbols/` lets #17 relocate it without touching the library. `BUILD_ID_RE` is defined once in `verify.py` and replaces the duplicate `_BUILD_ID_RE` definitions formerly in `local_drgn_introspect.py` and `server.py`.
 
 ## Consequences
 
@@ -29,4 +29,4 @@ Place both units in a new `src/linux_debug_mcp/symbols/` package as pure functio
 
 ## References
 
-design `docs/superpowers/specs/2026-05-28-kernelprovenance-verification-symbol-resolution-design.md`; plan `docs/superpowers/plans/2026-05-28-kernelprovenance-verification-symbol-resolution.md`; interface contract `docs/specs/interface-contracts.md` §4.2; `src/linux_debug_mcp/symbols/verify.py`, `resolve.py`; `safety/paths.py` (`confine_run_relative`); `server.py` (`_capture_kernel_provenance`, `debug.introspect.run`); `seams/target.py` (`KernelProvenance`).
+design `docs/superpowers/specs/2026-05-28-kernelprovenance-verification-symbol-resolution-design.md`; plan `docs/superpowers/plans/2026-05-28-kernelprovenance-verification-symbol-resolution.md`; interface contract `docs/specs/interface-contracts.md` §4.2; `src/kdive/symbols/verify.py`, `resolve.py`; `safety/paths.py` (`confine_run_relative`); `server.py` (`_capture_kernel_provenance`, `debug.introspect.run`); `seams/target.py` (`KernelProvenance`).

@@ -2,13 +2,13 @@ import threading
 
 import pytest
 
-from linux_debug_mcp.coordination.lease import (
+from kdive.coordination.lease import (
     ConsoleLease,
     ConsoleLeaseManager,
     LeaseConflict,
     LeaseOwner,
 )
-from linux_debug_mcp.seams.target import TargetKey
+from kdive.seams.target import TargetKey
 
 
 def _lease() -> ConsoleLease:

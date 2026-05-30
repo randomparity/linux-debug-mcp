@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from linux_debug_mcp.domain import (
+from kdive.domain import (
     BacktraceSection,
     DebugPostmortemTriageReport,
     DebugPostmortemTriageRequest,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from linux_debug_mcp.safety.paths import PathSafetyError, confine_run_relative
+from kdive.safety.paths import PathSafetyError, confine_run_relative
 
 
 def test_resolves_existing_relative_file(tmp_path):

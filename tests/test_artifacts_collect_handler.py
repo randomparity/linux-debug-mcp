@@ -3,9 +3,9 @@ from pathlib import Path
 
 from conftest import make_source_tree
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.domain import ArtifactRef, StepResult, StepStatus
-from linux_debug_mcp.server import artifacts_collect_handler, create_run_handler
+from kdive.artifacts.store import ArtifactStore
+from kdive.domain import ArtifactRef, StepResult, StepStatus
+from kdive.server import artifacts_collect_handler, create_run_handler
 
 
 def create_run(tmp_path: Path) -> Path:

@@ -7,21 +7,21 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import RootfsProfile
-from linux_debug_mcp.domain import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import RootfsProfile
+from kdive.domain import (
     DebugPostmortemCheckPrereqsRequest,
     ErrorCategory,
     RunRequest,
     StepResult,
     StepStatus,
 )
-from linux_debug_mcp.providers.local_ssh_tests import SshCommandResult
-from linux_debug_mcp.server import (
+from kdive.providers.local_ssh_tests import SshCommandResult
+from kdive.server import (
     _reject_if_target_halted,
     debug_postmortem_check_prereqs_handler,
 )
-from linux_debug_mcp.transport.base import ExecutionState
+from kdive.transport.base import ExecutionState
 
 
 def test_request_defaults_and_fields() -> None:

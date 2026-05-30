@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from linux_debug_mcp.providers.local_drgn_introspect import (
+from kdive.providers.local_drgn_introspect import (
     VMCORE_WRAPPER_TEMPLATE,
     WRAPPER_TEMPLATE,
     WrapperRenderError,
@@ -32,7 +32,7 @@ def test_live_wrapper_template_byte_identical_after_split() -> None:
 
 
 def test_vmcore_wrapper_shares_body_with_live() -> None:
-    from linux_debug_mcp.providers.local_drgn_introspect import _WRAPPER_BODY
+    from kdive.providers.local_drgn_introspect import _WRAPPER_BODY
 
     assert _WRAPPER_BODY in VMCORE_WRAPPER_TEMPLATE.template
     assert _WRAPPER_BODY in WRAPPER_TEMPLATE.template

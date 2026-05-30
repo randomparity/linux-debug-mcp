@@ -7,7 +7,7 @@ See docs/superpowers/specs/2026-05-29-session-guard-design.md / docs/adr/0013-*.
 
 import pytest
 
-from linux_debug_mcp.seams.guard import (
+from kdive.seams.guard import (
     PostAttachPrecondition,
     PreAttachPrecondition,
     PreconditionError,
@@ -16,8 +16,8 @@ from linux_debug_mcp.seams.guard import (
     TeardownReport,
     TeardownStep,
 )
-from linux_debug_mcp.seams.target import TargetKey
-from linux_debug_mcp.transport.base import ExecutionState
+from kdive.seams.target import TargetKey
+from kdive.transport.base import ExecutionState
 
 
 def _ctx(reason: str = "ended", session_id: str | None = "sess-1") -> SessionGuardContext:

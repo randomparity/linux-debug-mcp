@@ -1,7 +1,7 @@
 # Installation
 
-Linux Debug MCP is a Python package named `linux-debug-mcp`. Its console script
-is `linux-debug-mcp`, which starts the stdio MCP server.
+KDIVE is a Python package named `kdive`. Its console script
+is `kdive`, which starts the stdio MCP server.
 
 ## Prerequisites
 
@@ -68,8 +68,8 @@ preparation details.
 For a new development checkout:
 
 ```bash
-git clone git@github.com:randomparity/linux-debug-mcp.git linux-debug-mcp
-cd linux-debug-mcp
+git clone git@github.com:randomparity/kdive.git kdive
+cd kdive
 just setup
 ```
 
@@ -82,7 +82,7 @@ To run the core `uv` environment setup and host check directly:
 ```bash
 uv venv --allow-existing
 uv pip install -e '.[test,dev]'
-uv run python -m linux_debug_mcp.dev_setup check-host
+uv run python -m kdive.dev_setup check-host
 ```
 
 This direct sequence does not refresh the secrets baseline, install pre-commit
@@ -117,7 +117,7 @@ The console script starts the MCP server with `create_app(load_server_config()).
 and stays attached to stdio. Use `timeout` for a local startup smoke check:
 
 ```bash
-timeout 2 uv run linux-debug-mcp || test $? -eq 124
+timeout 2 uv run kdive || test $? -eq 124
 ```
 
 Exit `124` is acceptable because the server stayed running until `timeout`
@@ -126,12 +126,12 @@ failure.
 
 ## Default Artifact Root
 
-Runs are written under `.linux-debug-mcp/runs` by default. Override the artifact
+Runs are written under `.kdive/runs` by default. Override the artifact
 root only when you want run outputs outside the repository checkout.
 
 ## Operator Configuration
 
-Set `LINUX_DEBUG_MCP_CONFIG` to the path of a JSON `ServerConfig` file to enforce
+Set `KDIVE_CONFIG` to the path of a JSON `ServerConfig` file to enforce
 operator-configured sensitive paths. When set, a `rootfs_source` override (passed
 to `kernel.create_run` or `target.boot`) that resolves inside any configured
 `sensitive_paths` entry is rejected with a configuration error. When the variable
@@ -139,7 +139,7 @@ is unset, only the built-in path-safety guards apply.
 
 ```json
 {
-  "artifact_root": "/var/lib/linux-debug-mcp/runs",
+  "artifact_root": "/var/lib/kdive/runs",
   "sensitive_paths": ["/etc", "/var/lib/secrets"]
 }
 ```

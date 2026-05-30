@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from linux_debug_mcp.coordination.admission import (
+from kdive.coordination.admission import (
     AdmissionError,
     AdmissionOp,
     AdmissionService,
@@ -13,16 +13,16 @@ from linux_debug_mcp.coordination.admission import (
     SnapshotStore,
     TargetSnapshot,
 )
-from linux_debug_mcp.domain import ErrorCategory
-from linux_debug_mcp.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleEvent, LifecycleKind
-from linux_debug_mcp.seams.target import (
+from kdive.domain import ErrorCategory
+from kdive.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleEvent, LifecycleKind
+from kdive.seams.target import (
     ConsoleKind,
     LeaseInfo,
     PlatformMetadata,
     TargetKey,
     TargetState,
 )
-from linux_debug_mcp.transport.base import ExecutionState, LineRole, OpenRequest, TransportRef
+from kdive.transport.base import ExecutionState, LineRole, OpenRequest, TransportRef
 
 
 def _key() -> TargetKey:

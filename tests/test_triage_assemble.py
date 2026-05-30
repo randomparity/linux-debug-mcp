@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from linux_debug_mcp.domain import DebugPostmortemTriageReport
-from linux_debug_mcp.postmortem.triage import (
+from kdive.domain import DebugPostmortemTriageReport
+from kdive.postmortem.triage import (
     CrashOutcome,
     DrgnOutcome,
     any_section_ok,

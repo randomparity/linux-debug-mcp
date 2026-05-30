@@ -1,6 +1,6 @@
 # ADR 0009 — introspect helper layer: shared executor, typed-result convention, and `${ARGS_B64}` seam
 
-**Status:** Accepted (2026-05-28) · **Issue:** #54 · **Affects:** `src/linux_debug_mcp/server.py` (`_execute_introspect_call`, `_make_helper_post_validator`, `debug_introspect_helper_handler`), `src/linux_debug_mcp/introspect_helpers/` (new package), `src/linux_debug_mcp/config.py` (`ALLOWED_DEBUG_OPERATIONS`)
+**Status:** Accepted (2026-05-28) · **Issue:** #54 · **Affects:** `src/kdive/server.py` (`_execute_introspect_call`, `_make_helper_post_validator`, `debug_introspect_helper_handler`), `src/kdive/introspect_helpers/` (new package), `src/kdive/config.py` (`ALLOWED_DEBUG_OPERATIONS`)
 
 ## Context
 
@@ -58,4 +58,4 @@ Per-call arguments are injected into the shared drgn wrapper via a `${ARGS_B64}`
 
 ## References
 
-spec `docs/superpowers/specs/2026-05-28-debug-introspect-helper-design.md`; `src/linux_debug_mcp/server.py` (`_execute_introspect_call`, `_make_helper_post_validator`, `HELPER_CAP_PROFILE`); `src/linux_debug_mcp/introspect_helpers/` (package); `src/linux_debug_mcp/config.py` (`ALLOWED_DEBUG_OPERATIONS`); `tests/test_introspect_helpers.py` (`test_default_list_helpers_fit_helper_cap_profile`).
+spec `docs/superpowers/specs/2026-05-28-debug-introspect-helper-design.md`; `src/kdive/server.py` (`_execute_introspect_call`, `_make_helper_post_validator`, `HELPER_CAP_PROFILE`); `src/kdive/introspect_helpers/` (package); `src/kdive/config.py` (`ALLOWED_DEBUG_OPERATIONS`); `tests/test_introspect_helpers.py` (`test_default_list_helpers_fit_helper_cap_profile`).

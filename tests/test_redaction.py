@@ -1,4 +1,4 @@
-from linux_debug_mcp.safety.redaction import Redactor
+from kdive.safety.redaction import Redactor
 
 
 def test_redacts_registered_secret_values_from_text() -> None:

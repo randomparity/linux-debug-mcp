@@ -7,23 +7,23 @@ from pathlib import Path
 
 import pytest
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.domain import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.domain import (
     DebugIntrospectFromVmcoreRequest,
     DebugPostmortemTriageRequest,
     RunRequest,
 )
-from linux_debug_mcp.server import (
+from kdive.server import (
     debug_introspect_from_vmcore_handler,
     debug_postmortem_triage_handler,
 )
 
-_VMCORE = os.environ.get("LDM_VMCORE")
-_VMLINUX = os.environ.get("LDM_VMLINUX")
+_VMCORE = os.environ.get("KDIVE_VMCORE")
+_VMLINUX = os.environ.get("KDIVE_VMLINUX")
 _HAS_DRGN = importlib.util.find_spec("drgn") is not None
 pytestmark = pytest.mark.skipif(
     not (_VMCORE and _VMLINUX and shutil.which("crash") and _HAS_DRGN),
-    reason="set LDM_VMCORE + LDM_VMLINUX and install crash AND drgn to run (triage exercises both tiers)",
+    reason="set KDIVE_VMCORE + KDIVE_VMLINUX and install crash AND drgn to run (triage exercises both tiers)",
 )
 
 
@@ -80,5 +80,5 @@ def test_triage_real_core_consistency(tmp_path) -> None:
     assert report["recent_dmesg"]["entries"]
 
     # Optional: a known-modular fixture asserts a non-empty module list.
-    if os.environ.get("LDM_VMCORE_MODULAR") == "1":
+    if os.environ.get("KDIVE_VMCORE_MODULAR") == "1":
         assert report["modules"]["modules"]

@@ -6,12 +6,12 @@ from _layer4_fakes import (
 )
 from _secrets_helpers import make_env_secrets as EnvSecretsResolver
 
-from linux_debug_mcp.coordination.lease import ConsoleLeaseManager
-from linux_debug_mcp.coordination.registry import SessionRegistry
-from linux_debug_mcp.coordination.transaction import TransportTransaction
-from linux_debug_mcp.domain import ErrorCategory
-from linux_debug_mcp.seams.guard import InProcessStopCapableGuard
-from linux_debug_mcp.server import transport_open_handler
+from kdive.coordination.lease import ConsoleLeaseManager
+from kdive.coordination.registry import SessionRegistry
+from kdive.coordination.transaction import TransportTransaction
+from kdive.domain import ErrorCategory
+from kdive.seams.guard import InProcessStopCapableGuard
+from kdive.server import transport_open_handler
 
 
 def test_stale_handle_category_value():
@@ -58,9 +58,9 @@ def test_endpoint_unsafe_maps_to_transport_conflict(tmp_path):
     # Build txn with broker transport; we register snapshot using its provider name so handler picks it.
     from _layer4_fakes import CHANNEL, PLATFORM
 
-    from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore, TargetSnapshot
-    from linux_debug_mcp.seams.target import TargetState
-    from linux_debug_mcp.transport.base import LineRole, TransportRef
+    from kdive.coordination.admission import AdmissionService, SnapshotStore, TargetSnapshot
+    from kdive.seams.target import TargetState
+    from kdive.transport.base import LineRole, TransportRef
 
     store = SnapshotStore()
     broker_channel = TransportRef(

@@ -1,7 +1,7 @@
 import threading
 import time
 
-from linux_debug_mcp.seams.lifecycle import (
+from kdive.seams.lifecycle import (
     InProcessLifecycleDispatcher,
     LifecycleDispatcher,
     LifecycleEvent,
@@ -9,7 +9,7 @@ from linux_debug_mcp.seams.lifecycle import (
     LifecycleSubscriber,
     OverdueSubscriber,
 )
-from linux_debug_mcp.seams.target import TargetKey
+from kdive.seams.target import TargetKey
 
 
 def _key(target_id: str = "run-1", provisioner: str = "local-qemu") -> TargetKey:
@@ -125,7 +125,7 @@ def test_force_drop_releases_externally_held_resources_when_invalidate_wedges():
     # The contract requirement (§4.5): a subscriber whose invalidate() is stuck must still
     # have its line dropped. force_drop releases the lease the subscriber recorded out-of-band
     # (in shared state), independently of the wedged invalidate() frame, before emit returns.
-    from linux_debug_mcp.coordination.lease import ConsoleLease, LeaseOwner
+    from kdive.coordination.lease import ConsoleLease, LeaseOwner
 
     lease = ConsoleLease(_key())
     lease.acquire(LeaseOwner.TRANSPORT)
@@ -207,7 +207,7 @@ def test_subscriber_teardown_side_effect_is_token_fenced():
     # A subscriber forcibly releases its resource (revoke) inside its bounded invalidate; a
     # later stale-token release by any actor is a no-op, so resource state cannot be corrupted
     # after the transition (§4.4/§4.5 fencing, defense-in-depth over the supervised contract).
-    from linux_debug_mcp.coordination.lease import ConsoleLease, LeaseOwner
+    from kdive.coordination.lease import ConsoleLease, LeaseOwner
 
     lease = ConsoleLease(_key())
     stale_token = lease.acquire(LeaseOwner.TRANSPORT)

@@ -16,10 +16,10 @@ from test_server_debug_core_ops import (
     _start,
 )
 
-from linux_debug_mcp.config import DebugProfile
-from linux_debug_mcp.domain import ErrorCategory
-from linux_debug_mcp.providers.gdb_mi import GdbMiSessionRegistry, LoadedModule
-from linux_debug_mcp.server import debug_load_module_symbols_handler
+from kdive.config import DebugProfile
+from kdive.domain import ErrorCategory
+from kdive.providers.gdb_mi import GdbMiSessionRegistry, LoadedModule
+from kdive.server import debug_load_module_symbols_handler
 
 
 @dataclass

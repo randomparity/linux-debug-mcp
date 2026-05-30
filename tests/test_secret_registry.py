@@ -1,4 +1,4 @@
-from linux_debug_mcp.safety.secret_registry import SecretRegistry
+from kdive.safety.secret_registry import SecretRegistry
 
 
 def test_register_snapshot_and_version():

@@ -15,20 +15,20 @@ from _layer4_fakes import (
 )
 from _secrets_helpers import make_env_secrets as EnvSecretsResolver
 
-from linux_debug_mcp.config import TRANSPORT_DESTRUCTIVE_PERMISSIONS
-from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore
-from linux_debug_mcp.coordination.lease import ConsoleLeaseManager
-from linux_debug_mcp.coordination.registry import RecoveryTombstone, SessionRegistry
-from linux_debug_mcp.coordination.transaction import TransportTransaction
-from linux_debug_mcp.domain import ErrorCategory
-from linux_debug_mcp.seams.guard import InProcessStopCapableGuard
-from linux_debug_mcp.server import (
+from kdive.config import TRANSPORT_DESTRUCTIVE_PERMISSIONS
+from kdive.coordination.admission import AdmissionService, SnapshotStore
+from kdive.coordination.lease import ConsoleLeaseManager
+from kdive.coordination.registry import RecoveryTombstone, SessionRegistry
+from kdive.coordination.transaction import TransportTransaction
+from kdive.domain import ErrorCategory
+from kdive.seams.guard import InProcessStopCapableGuard
+from kdive.server import (
     transport_close_handler,
     transport_inject_break_handler,
     transport_open_handler,
 )
-from linux_debug_mcp.transport.base import BreakMethod, BreakPlan, ExecutionState, LineRole, TransportRef
-from linux_debug_mcp.transport.break_inject import InjectBreakError
+from kdive.transport.base import BreakMethod, BreakPlan, ExecutionState, LineRole, TransportRef
+from kdive.transport.break_inject import InjectBreakError
 
 # `KEY` is TargetKey(provisioner="local-qemu", target_id="run-1"); the handlers derive the
 # TargetKey from `run_id`, so every test addresses the seeded snapshot with this run id.
@@ -371,7 +371,7 @@ def test_inject_break_refused_when_profile_does_not_enable_it(tmp_path):
     """F14: inject_break is destructive — a `DebugProfile` whose `enabled_operations` omits
     `transport.inject_break` MUST refuse the call before the break mechanism runs, before the
     durable record is updated. The kernel stays EXECUTING."""
-    from linux_debug_mcp.config import DebugProfile
+    from kdive.config import DebugProfile
 
     response, txn, admission, reg = _open(tmp_path)
     session_id = response.data["session_id"]

@@ -4,14 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.domain import (
+from kdive.artifacts.store import ArtifactStore
+from kdive.domain import (
     DebugPostmortemCrashRequest,
     ErrorCategory,
     RunRequest,
 )
-from linux_debug_mcp.providers.local_ssh_tests import SshCommandResult
-from linux_debug_mcp.server import debug_postmortem_crash_handler
+from kdive.providers.local_ssh_tests import SshCommandResult
+from kdive.server import debug_postmortem_crash_handler
 
 GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
@@ -143,7 +143,7 @@ def _raising_reader(exc: Exception):
     ],
 )
 def test_vmcore_reader_failures_fail_loud(tmp_path, exc_name, expected_code) -> None:
-    import linux_debug_mcp.symbols as symbols
+    import kdive.symbols as symbols
 
     _run(tmp_path)
     runner = _FakeRunner(outputs={})
@@ -166,7 +166,7 @@ def test_vmcore_reader_failures_fail_loud(tmp_path, exc_name, expected_code) -> 
 
 
 def test_vmlinux_build_id_unreadable_fails_loud(tmp_path) -> None:
-    from linux_debug_mcp.symbols import BuildIdReadError
+    from kdive.symbols import BuildIdReadError
 
     _run(tmp_path)
     runner = _FakeRunner(outputs={})
@@ -301,7 +301,7 @@ def test_timeout_beats_partial_files(tmp_path) -> None:
 
 def test_redaction_masks_secret_in_output(tmp_path) -> None:
     _run(tmp_path)
-    # The default Redactor (src/linux_debug_mcp/safety/redaction.py) masks
+    # The default Redactor (src/kdive/safety/redaction.py) masks
     # `key=value` pairs whose key matches password|passwd|token|api_key|secret.
     secret_value = "hunter2trustno1xyz"  # pragma: allowlist secret
     runner = _FakeRunner(outputs={0: f"[ 0.1] db_password={secret_value} loaded\n"})
@@ -326,7 +326,7 @@ def test_redaction_masks_secret_in_output(tmp_path) -> None:
 
 
 def test_argv_carries_prlimit_disk_bound(tmp_path) -> None:
-    from linux_debug_mcp.config import CRASH_PER_CMD_CAP
+    from kdive.config import CRASH_PER_CMD_CAP
 
     _run(tmp_path)
 
@@ -353,8 +353,8 @@ def test_argv_carries_prlimit_disk_bound(tmp_path) -> None:
 
 
 def test_modules_path_unsafe_rejected_no_run(tmp_path, monkeypatch) -> None:
-    import linux_debug_mcp.server as server
-    from linux_debug_mcp.symbols import ResolvedSymbols
+    import kdive.server as server
+    from kdive.symbols import ResolvedSymbols
 
     store = _run(tmp_path)
     rd = store.run_dir("r1")
@@ -388,8 +388,8 @@ def test_modules_path_unsafe_rejected_no_run(tmp_path, monkeypatch) -> None:
 
 
 def test_module_symbols_status_reported(tmp_path, monkeypatch) -> None:
-    import linux_debug_mcp.server as server
-    from linux_debug_mcp.symbols import ResolvedSymbols
+    import kdive.server as server
+    from kdive.symbols import ResolvedSymbols
 
     store = _run(tmp_path)
     rd = store.run_dir("r1")
@@ -433,8 +433,8 @@ def test_module_symbols_status_reported(tmp_path, monkeypatch) -> None:
 
 
 def test_module_symbols_load_failed(tmp_path, monkeypatch) -> None:
-    import linux_debug_mcp.server as server
-    from linux_debug_mcp.symbols import ResolvedSymbols
+    import kdive.server as server
+    from kdive.symbols import ResolvedSymbols
 
     store = _run(tmp_path)
     rd = store.run_dir("r1")

@@ -5,9 +5,9 @@ import threading
 
 import pytest
 
-from linux_debug_mcp.domain import ErrorCategory
-from linux_debug_mcp.seams.target import ConsoleKind, PlatformMetadata, TargetKey
-from linux_debug_mcp.transport.base import (
+from kdive.domain import ErrorCategory
+from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetKey
+from kdive.transport.base import (
     BackendAttachment,
     LineRole,
     OpenRequest,
@@ -15,8 +15,8 @@ from linux_debug_mcp.transport.base import (
     TransportRef,
     UnixSocketEndpoint,
 )
-from linux_debug_mcp.transport.bounded import Deadline
-from linux_debug_mcp.transport.serial_local import SerialLocalConfigError, SerialLocalTransport
+from kdive.transport.bounded import Deadline
+from kdive.transport.serial_local import SerialLocalConfigError, SerialLocalTransport
 
 
 def _read_until(fd: int, needle: bytes, timeout: float = 2.0) -> bytes:
@@ -307,7 +307,7 @@ def test_stop_joins_the_pump_before_closing_the_source_fd(tmp_path, monkeypatch)
     import pty
     import time as _time
 
-    from linux_debug_mcp.transport import serial_local
+    from kdive.transport import serial_local
 
     controller_fd, peripheral_fd = pty.openpty()
     peripheral_name = os.ttyname(peripheral_fd)
@@ -360,7 +360,7 @@ def test_write_client_retries_on_ewouldblock(tmp_path):
     """`_write_client` honors non-blocking socket semantics: EWOULDBLOCK is a retry (CONTINUE,
     buffer unchanged), a real OSError is a client departure (CLIENT_GONE), and a partial send
     trims only the bytes actually written so the unsent tail is retried (plan §F1)."""
-    from linux_debug_mcp.transport.serial_local import SerialConsoleBridge, _PumpStep
+    from kdive.transport.serial_local import SerialConsoleBridge, _PumpStep
 
     bridge = SerialConsoleBridge(socket_path=str(tmp_path / "c.sock"), session_dir=str(tmp_path), source_fd=-1)
 
@@ -384,7 +384,7 @@ def test_write_client_retries_on_ewouldblock(tmp_path):
 def test_read_source_eof_is_source_death(tmp_path):
     """`_read_source` maps a source EOF (`os.read` → b"") to SOURCE_DEAD so a genuinely dead
     line stops the pump rather than spinning re-accepting (plan §F1)."""
-    from linux_debug_mcp.transport.serial_local import SerialConsoleBridge, _PumpStep
+    from kdive.transport.serial_local import SerialConsoleBridge, _PumpStep
 
     read_fd, write_fd = os.pipe()
     os.close(write_fd)  # the source end is gone → EOF on the next read
@@ -398,7 +398,7 @@ def test_read_source_eof_is_source_death(tmp_path):
 def test_write_source_eagain_retries(tmp_path):
     """`_write_source` treats EAGAIN on a full non-blocking device as a retry (CONTINUE, buffer
     unchanged) — never SOURCE_DEAD — so device backpressure does not tear the line down (plan §F1)."""
-    from linux_debug_mcp.transport.serial_local import SerialConsoleBridge, _PumpStep
+    from kdive.transport.serial_local import SerialConsoleBridge, _PumpStep
 
     read_fd, write_fd = os.pipe()
     os.set_blocking(write_fd, False)
@@ -482,7 +482,7 @@ def test_console_only_open_failure_after_listen_leaves_no_socket_or_session_dir(
     no leaked listener fd, no orphan socket inode, no leftover session dir, not registered."""
     import pty
 
-    from linux_debug_mcp.transport import serial_local
+    from kdive.transport import serial_local
 
     controller_fd, peripheral_fd = pty.openpty()
     peripheral_name = os.ttyname(peripheral_fd)
@@ -542,7 +542,7 @@ def test_console_only_attach_cleans_up_when_console_socket_partial_raises(tmp_pa
 
 class _RecordingProxy:
     def __init__(self):
-        from linux_debug_mcp.transport.proxy import ProxyHandle
+        from kdive.transport.proxy import ProxyHandle
 
         self.handle = ProxyHandle(
             process=object(), backend_pid=9100, backend_start_time="3", console_port=5001, gdb_port=5002
@@ -628,7 +628,7 @@ def test_concurrent_attach_to_the_same_source_is_refused(tmp_path):
     TRANSPORT_CONFLICT, never double-driven (spec §4.7, round-7 F2)."""
     import pty
 
-    from linux_debug_mcp.transport.serial_local import SerialLocalConflictError
+    from kdive.transport.serial_local import SerialLocalConflictError
 
     master, slave = pty.openpty()
     name = os.ttyname(slave)
@@ -662,7 +662,7 @@ def test_same_device_different_socket_dir_still_conflicts(tmp_path):
     though the socket_dirs differ — the cross-run guarantee F1 regressed on (spec §4.7)."""
     import pty
 
-    from linux_debug_mcp.transport.serial_local import SerialLocalConflictError
+    from kdive.transport.serial_local import SerialLocalConflictError
 
     master, slave = pty.openpty()
     name = os.ttyname(slave)
@@ -696,7 +696,7 @@ def test_symlinked_device_alias_conflicts_with_canonical_path(tmp_path):
     line is double-driven (spec §4.7). The lock key is os.path.realpath(device)."""
     import pty
 
-    from linux_debug_mcp.transport.serial_local import SerialLocalConflictError
+    from kdive.transport.serial_local import SerialLocalConflictError
 
     master, slave = pty.openpty()
     name = os.ttyname(slave)

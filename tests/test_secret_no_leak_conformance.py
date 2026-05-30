@@ -6,10 +6,10 @@ exercised at the seam where credentials enter the process."""
 
 import logging
 
-from linux_debug_mcp.safety.redaction import REDACTION, Redactor, SecretRedactionFilter
-from linux_debug_mcp.safety.secret_registry import PROCESS_SECRET_REGISTRY, SecretRegistry
-from linux_debug_mcp.safety.secrets import SecretReference, SecretReferenceKind
-from linux_debug_mcp.seams.secrets import EnvSecretsBackend, SecretsStore
+from kdive.safety.redaction import REDACTION, Redactor, SecretRedactionFilter
+from kdive.safety.secret_registry import PROCESS_SECRET_REGISTRY, SecretRegistry
+from kdive.safety.secrets import SecretReference, SecretReferenceKind
+from kdive.seams.secrets import EnvSecretsBackend, SecretsStore
 
 LEAK = "LEAKME-9f3xQ"  # pragma: allowlist secret
 

@@ -1,6 +1,6 @@
 # ADR 0027 — `debug.postmortem.triage`: handler-level composition, single up-front build-id gate, per-section partial-failure contract
 
-**Status:** Accepted (2026-05-30) · **Issue:** #93 · **Epic:** #9 · **Supersedes (in part):** #14 · **Depends on:** #92 (`debug.postmortem.crash`), #54/#55 (`debug.introspect.from_vmcore_helper` + curated drgn helpers) · **Affects:** `src/linux_debug_mcp/domain.py` (triage request + `DebugPostmortemTriageReport`), `src/linux_debug_mcp/postmortem/triage.py` (new: section assembly + panic-line selection), `src/linux_debug_mcp/server.py` (`debug_postmortem_triage_handler`, tool registration), `src/linux_debug_mcp/config.py` (`ALLOWED_DEBUG_OPERATIONS`, triage caps), `src/linux_debug_mcp/providers/local_crash_postmortem.py` (capability `operations`)
+**Status:** Accepted (2026-05-30) · **Issue:** #93 · **Epic:** #9 · **Supersedes (in part):** #14 · **Depends on:** #92 (`debug.postmortem.crash`), #54/#55 (`debug.introspect.from_vmcore_helper` + curated drgn helpers) · **Affects:** `src/kdive/domain.py` (triage request + `DebugPostmortemTriageReport`), `src/kdive/postmortem/triage.py` (new: section assembly + panic-line selection), `src/kdive/server.py` (`debug_postmortem_triage_handler`, tool registration), `src/kdive/config.py` (`ALLOWED_DEBUG_OPERATIONS`, triage caps), `src/kdive/providers/local_crash_postmortem.py` (capability `operations`)
 
 ## Context
 
@@ -234,5 +234,5 @@ first-reaction), §5.6 rule 3 (never gated), §4.2 (fail-loud);
 ADR 0026 (`debug.postmortem.crash`: build-id reader, framing, parsers),
 ADR 0010 (offline execution model, host-authoritative build-id, never-gated),
 ADR 0009 (introspect helper layer), ADR 0008 (symbols package leaf);
-`src/linux_debug_mcp/server.py` (`debug_postmortem_crash_handler`,
+`src/kdive/server.py` (`debug_postmortem_crash_handler`,
 `debug_introspect_from_vmcore_helper_handler`, `_crash_buildid_failloud`).

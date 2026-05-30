@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from linux_debug_mcp.providers.local_crash_postmortem import local_crash_postmortem_capability
-from linux_debug_mcp.providers.plugins import local_provider_plugin_specs
+from kdive.providers.local_crash_postmortem import local_crash_postmortem_capability
+from kdive.providers.plugins import local_provider_plugin_specs
 
 
 def test_capability_advertises_operation() -> None:

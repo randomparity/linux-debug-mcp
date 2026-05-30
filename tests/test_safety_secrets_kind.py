@@ -1,4 +1,4 @@
-from linux_debug_mcp.safety.secrets import SecretReference, SecretReferenceKind
+from kdive.safety.secrets import SecretReference, SecretReferenceKind
 
 
 def test_keyring_kind_exists_and_constructs():

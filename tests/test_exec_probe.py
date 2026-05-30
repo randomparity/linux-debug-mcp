@@ -2,18 +2,18 @@ import socket
 import threading
 from datetime import UTC, datetime
 
-from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore, TargetSnapshot
-from linux_debug_mcp.coordination.exec_probe import probe_execution_state, probe_rsp_halted
-from linux_debug_mcp.coordination.registry import SessionRegistry
-from linux_debug_mcp.seams.target import ConsoleKind, PlatformMetadata, TargetKey, TargetState
-from linux_debug_mcp.transport.base import (
+from kdive.coordination.admission import AdmissionService, SnapshotStore, TargetSnapshot
+from kdive.coordination.exec_probe import probe_execution_state, probe_rsp_halted
+from kdive.coordination.registry import SessionRegistry
+from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetKey, TargetState
+from kdive.transport.base import (
     ExecutionState,
     RecordState,
     TcpEndpoint,
     TransportSession,
     new_session_id,
 )
-from linux_debug_mcp.transport.rsp_probe import rsp_frame
+from kdive.transport.rsp_probe import rsp_frame
 
 
 def _platform() -> PlatformMetadata:

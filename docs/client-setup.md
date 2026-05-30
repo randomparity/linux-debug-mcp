@@ -1,13 +1,13 @@
 # Client Setup
 
-Linux Debug MCP runs as a stdio MCP server. Client examples should use an
+KDIVE runs as a stdio MCP server. Client examples should use an
 absolute repository path so the client can start the server reliably from any
 workspace.
 
 The examples below assume the repository is checked out at:
 
 ```text
-/home/dave/src/linux-debug-mcp
+/home/dave/src/kdive
 ```
 
 Replace that path with your local checkout path.
@@ -18,16 +18,16 @@ Add the server to the current project. Project scope is the recommended default
 because this server exposes local build, libvirt, SSH, and gdb-related tools:
 
 ```bash
-claude mcp add --transport stdio --scope project linux-debug-mcp -- \
-  uv --directory /home/dave/src/linux-debug-mcp run linux-debug-mcp
+claude mcp add --transport stdio --scope project kdive -- \
+  uv --directory /home/dave/src/kdive run kdive
 ```
 
 Add the server to your user configuration only when you intentionally want it
 available across Claude Code projects:
 
 ```bash
-claude mcp add --transport stdio --scope user linux-debug-mcp -- \
-  uv --directory /home/dave/src/linux-debug-mcp run linux-debug-mcp
+claude mcp add --transport stdio --scope user kdive -- \
+  uv --directory /home/dave/src/kdive run kdive
 ```
 
 Verify the registration from the shell:
@@ -50,15 +50,15 @@ intend the server to be available to Codex sessions that use that user
 configuration:
 
 ```bash
-codex mcp add linux-debug-mcp -- \
-  uv --directory /home/dave/src/linux-debug-mcp run linux-debug-mcp
+codex mcp add kdive -- \
+  uv --directory /home/dave/src/kdive run kdive
 ```
 
 Verify the registration:
 
 ```bash
 codex mcp list
-codex mcp get linux-debug-mcp
+codex mcp get kdive
 ```
 
 ## Codex TOML Configuration
@@ -67,9 +67,9 @@ You can also configure the server directly in `~/.codex/config.toml` with the
 same cross-workspace availability:
 
 ```toml
-[mcp_servers.linux-debug-mcp]
+[mcp_servers.kdive]
 command = "uv"
-args = ["--directory", "/home/dave/src/linux-debug-mcp", "run", "linux-debug-mcp"]
+args = ["--directory", "/home/dave/src/kdive", "run", "kdive"]
 enabled = true
 ```
 
@@ -78,8 +78,8 @@ enabled = true
 Use an absolute repository path in client configuration. Absolute paths avoid
 startup failures when a client launches from a different working directory.
 
-If `linux-debug-mcp` is installed into a stable environment, you may set
-`command` to the absolute path of the `linux-debug-mcp` console script instead
+If `kdive` is installed into a stable environment, you may set
+`command` to the absolute path of the `kdive` console script instead
 of running it through `uv`.
 
 ## Safety Notes

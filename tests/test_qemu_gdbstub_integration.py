@@ -3,37 +3,37 @@ from pathlib import Path
 
 import pytest
 
-from linux_debug_mcp import server
-from linux_debug_mcp.config import RootfsProfile, TargetProfile
-from linux_debug_mcp.providers.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
-from linux_debug_mcp.server import workflow_build_boot_debug_handler
+from kdive import server
+from kdive.config import RootfsProfile, TargetProfile
+from kdive.providers.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
+from kdive.server import workflow_build_boot_debug_handler
 
-MANAGED_DOMAIN_PREFIX = "mcp-linux-debug-"
+MANAGED_DOMAIN_PREFIX = "kdive-"
 REQUIRED_ENV = [
-    "LINUX_DEBUG_MCP_LIVE_GDBSTUB",
-    "LINUX_DEBUG_MCP_SOURCE",
-    "LINUX_DEBUG_MCP_ROOTFS",
-    "LINUX_DEBUG_MCP_DOMAIN",
-    "LINUX_DEBUG_MCP_LIBVIRT_URI",
-    "LINUX_DEBUG_MCP_READINESS_MARKER",
+    "KDIVE_LIVE_GDBSTUB",
+    "KDIVE_SOURCE",
+    "KDIVE_ROOTFS",
+    "KDIVE_DOMAIN",
+    "KDIVE_LIBVIRT_URI",
+    "KDIVE_READINESS_MARKER",
 ]
 
 
 def require_live_gdbstub_env() -> dict[str, str]:
     values = {name: value for name in REQUIRED_ENV if (value := os.environ.get(name))}
     missing = [name for name in REQUIRED_ENV if name not in values]
-    if "LINUX_DEBUG_MCP_LIVE_GDBSTUB" in values and values["LINUX_DEBUG_MCP_LIVE_GDBSTUB"] != "1":
-        missing.append("LINUX_DEBUG_MCP_LIVE_GDBSTUB=1")
+    if "KDIVE_LIVE_GDBSTUB" in values and values["KDIVE_LIVE_GDBSTUB"] != "1":
+        missing.append("KDIVE_LIVE_GDBSTUB=1")
     if missing:
         pytest.skip(
             "live gdbstub integration test skipped; set "
             f"{', '.join(missing)} to run it. Example: "
-            "LINUX_DEBUG_MCP_LIVE_GDBSTUB=1 "
-            "LINUX_DEBUG_MCP_SOURCE=/path/to/linux "
-            "LINUX_DEBUG_MCP_ROOTFS=/var/lib/linux-debug-mcp/rootfs/minimal.qcow2 "
-            "LINUX_DEBUG_MCP_DOMAIN=mcp-linux-debug-dev-debug "
-            "LINUX_DEBUG_MCP_LIBVIRT_URI=qemu:///system "
-            "LINUX_DEBUG_MCP_READINESS_MARKER=linux-debug-mcp-ready "
+            "KDIVE_LIVE_GDBSTUB=1 "
+            "KDIVE_SOURCE=/path/to/linux "
+            "KDIVE_ROOTFS=/var/lib/kdive/rootfs/minimal.qcow2 "
+            "KDIVE_DOMAIN=kdive-dev-debug "
+            "KDIVE_LIBVIRT_URI=qemu:///system "
+            "KDIVE_READINESS_MARKER=kdive-ready "
             "pytest tests/test_qemu_gdbstub_integration.py -q"
         )
     return values
@@ -41,19 +41,19 @@ def require_live_gdbstub_env() -> dict[str, str]:
 
 def test_live_build_boot_debug_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env = require_live_gdbstub_env()
-    source = Path(env["LINUX_DEBUG_MCP_SOURCE"]).expanduser()
-    rootfs = Path(env["LINUX_DEBUG_MCP_ROOTFS"]).expanduser()
+    source = Path(env["KDIVE_SOURCE"]).expanduser()
+    rootfs = Path(env["KDIVE_ROOTFS"]).expanduser()
     kernel_image = source / "arch" / "x86" / "boot" / "bzImage"
     vmlinux = source / "vmlinux"
-    gdbstub_endpoint = os.environ.get("LINUX_DEBUG_MCP_GDBSTUB_ENDPOINT", "127.0.0.1:1234")
+    gdbstub_endpoint = os.environ.get("KDIVE_GDBSTUB_ENDPOINT", "127.0.0.1:1234")
 
-    assert source.is_dir(), f"LINUX_DEBUG_MCP_SOURCE must be a Linux source directory: {source}"
-    assert rootfs.is_file(), f"LINUX_DEBUG_MCP_ROOTFS must be a disk image file: {rootfs}"
+    assert source.is_dir(), f"KDIVE_SOURCE must be a Linux source directory: {source}"
+    assert rootfs.is_file(), f"KDIVE_ROOTFS must be a disk image file: {rootfs}"
     assert kernel_image.is_file(), f"built kernel image is required at {kernel_image}"
     assert vmlinux.is_file(), f"unstripped vmlinux is required at {vmlinux}"
-    assert env["LINUX_DEBUG_MCP_DOMAIN"].startswith(MANAGED_DOMAIN_PREFIX), (
-        "LINUX_DEBUG_MCP_DOMAIN must be a dedicated managed domain starting with "
-        f"{MANAGED_DOMAIN_PREFIX!r}: {env['LINUX_DEBUG_MCP_DOMAIN']}"
+    assert env["KDIVE_DOMAIN"].startswith(MANAGED_DOMAIN_PREFIX), (
+        "KDIVE_DOMAIN must be a dedicated managed domain starting with "
+        f"{MANAGED_DOMAIN_PREFIX!r}: {env['KDIVE_DOMAIN']}"
     )
 
     monkeypatch.setitem(
@@ -62,10 +62,10 @@ def test_live_build_boot_debug_workflow(tmp_path: Path, monkeypatch: pytest.Monk
         TargetProfile(
             name="live-qemu-debug",
             architecture="x86_64",
-            target_ref=env["LINUX_DEBUG_MCP_DOMAIN"],
+            target_ref=env["KDIVE_DOMAIN"],
             managed_domain=True,
             managed_domain_prefix=MANAGED_DOMAIN_PREFIX,
-            libvirt_uri=env["LINUX_DEBUG_MCP_LIBVIRT_URI"],
+            libvirt_uri=env["KDIVE_LIBVIRT_URI"],
             timeout_seconds=300,
             debug_gdbstub=True,
             gdbstub_endpoint=gdbstub_endpoint,
@@ -79,7 +79,7 @@ def test_live_build_boot_debug_workflow(tmp_path: Path, monkeypatch: pytest.Monk
             source=str(rootfs),
             source_type="disk_image",
             mutability="read_only",
-            readiness_marker=env["LINUX_DEBUG_MCP_READINESS_MARKER"],
+            readiness_marker=env["KDIVE_READINESS_MARKER"],
         ),
     )
 
@@ -118,8 +118,8 @@ def test_live_frozen_boot_hits_early_breakpoint(tmp_path: Path, monkeypatch: pyt
     Gated behind the same live-gdbstub env guard as test_live_build_boot_debug_workflow; skipped
     in CI. Requires a real QEMU+KVM guest, a built kernel, and a managed debug domain.
     """
-    from linux_debug_mcp.config import BootOverrides
-    from linux_debug_mcp.server import (
+    from kdive.config import BootOverrides
+    from kdive.server import (
         create_run_handler,
         debug_continue_handler,
         debug_read_symbol_handler,
@@ -130,16 +130,16 @@ def test_live_frozen_boot_hits_early_breakpoint(tmp_path: Path, monkeypatch: pyt
     )
 
     env = require_live_gdbstub_env()
-    source = Path(env["LINUX_DEBUG_MCP_SOURCE"]).expanduser()
-    rootfs = Path(env["LINUX_DEBUG_MCP_ROOTFS"]).expanduser()
+    source = Path(env["KDIVE_SOURCE"]).expanduser()
+    rootfs = Path(env["KDIVE_ROOTFS"]).expanduser()
     vmlinux = source / "vmlinux"
-    gdbstub_endpoint = os.environ.get("LINUX_DEBUG_MCP_GDBSTUB_ENDPOINT", "127.0.0.1:1234")
-    early_symbol = os.environ.get("LINUX_DEBUG_MCP_EARLY_SYMBOL", "start_kernel")
+    gdbstub_endpoint = os.environ.get("KDIVE_GDBSTUB_ENDPOINT", "127.0.0.1:1234")
+    early_symbol = os.environ.get("KDIVE_EARLY_SYMBOL", "start_kernel")
 
-    assert source.is_dir(), f"LINUX_DEBUG_MCP_SOURCE must be a Linux source directory: {source}"
-    assert rootfs.is_file(), f"LINUX_DEBUG_MCP_ROOTFS must be a disk image file: {rootfs}"
+    assert source.is_dir(), f"KDIVE_SOURCE must be a Linux source directory: {source}"
+    assert rootfs.is_file(), f"KDIVE_ROOTFS must be a disk image file: {rootfs}"
     assert vmlinux.is_file(), f"unstripped vmlinux is required at {vmlinux}"
-    assert env["LINUX_DEBUG_MCP_DOMAIN"].startswith(MANAGED_DOMAIN_PREFIX)
+    assert env["KDIVE_DOMAIN"].startswith(MANAGED_DOMAIN_PREFIX)
 
     monkeypatch.setitem(
         server.DEFAULT_TARGET_PROFILES,
@@ -147,10 +147,10 @@ def test_live_frozen_boot_hits_early_breakpoint(tmp_path: Path, monkeypatch: pyt
         TargetProfile(
             name="live-qemu-debug",
             architecture="x86_64",
-            target_ref=env["LINUX_DEBUG_MCP_DOMAIN"],
+            target_ref=env["KDIVE_DOMAIN"],
             managed_domain=True,
             managed_domain_prefix=MANAGED_DOMAIN_PREFIX,
-            libvirt_uri=env["LINUX_DEBUG_MCP_LIBVIRT_URI"],
+            libvirt_uri=env["KDIVE_LIBVIRT_URI"],
             timeout_seconds=300,
             debug_gdbstub=True,
             gdbstub_endpoint=gdbstub_endpoint,
@@ -164,7 +164,7 @@ def test_live_frozen_boot_hits_early_breakpoint(tmp_path: Path, monkeypatch: pyt
             source=str(rootfs),
             source_type="disk_image",
             mutability="read_only",
-            readiness_marker=env["LINUX_DEBUG_MCP_READINESS_MARKER"],
+            readiness_marker=env["KDIVE_READINESS_MARKER"],
         ),
     )
 

@@ -1,9 +1,9 @@
 import pytest
 from pydantic import ValidationError
 
-from linux_debug_mcp import __version__
-from linux_debug_mcp.config import BootOverrides, BuildOverrides
-from linux_debug_mcp.domain import (
+from kdive import __version__
+from kdive.config import BootOverrides, BuildOverrides
+from kdive.domain import (
     ArtifactRef,
     DebugIntrospectRunRequest,
     ErrorCategory,

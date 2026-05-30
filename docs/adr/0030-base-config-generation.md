@@ -1,10 +1,10 @@
 # ADR 0030 — base kernel config generation for a clean source tree
 
 **Status:** Accepted (2026-05-30) · **Issue:** #101 · **Epic:** #100 · **Affects:**
-`src/linux_debug_mcp/config.py` (`validate_make_targets` helper, `BuildProfile.base_config`,
-`BuildOverrides.base_config`), `src/linux_debug_mcp/providers/local_kernel_build.py` (`BuildPlan.base_config`,
+`src/kdive/config.py` (`validate_make_targets` helper, `BuildProfile.base_config`,
+`BuildOverrides.base_config`), `src/kdive/providers/local_kernel_build.py` (`BuildPlan.base_config`,
 `plan_build`, `ConfigGenerationError`, `MissingConfigError`, `_generate_base_config`, `prepare_config`
-precedence ladder, `execute_build` error mapping), `src/linux_debug_mcp/server.py`
+precedence ladder, `execute_build` error mapping), `src/kdive/server.py`
 (`DEFAULT_BUILD_PROFILES` — `x86_64-default` gains `base_config`, new `x86_64-debug`; `_resolve_initial_profiles`
 override replacement). Spec: [2026-05-30-base-kernel-config-generation.md](../specs/2026-05-30-base-kernel-config-generation.md).
 

@@ -1,7 +1,7 @@
 # ADR 0035 — headless serial-console capture via a libvirt `<log>` file
 
 **Status:** Accepted (2026-05-30) · **Epic:** #100 · **Affects:**
-`src/linux_debug_mcp/providers/libvirt_qemu.py` (`render_domain_xml` adds a serial `<log>`;
+`src/kdive/providers/libvirt_qemu.py` (`render_domain_xml` adds a serial `<log>`;
 `SubprocessLibvirtRunner.stream_console` tails the log file instead of running `virsh console`).
 
 ## Context

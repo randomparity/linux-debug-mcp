@@ -1,5 +1,5 @@
-from linux_debug_mcp.domain import PrerequisiteStatus
-from linux_debug_mcp.prereqs.checks import check_prerequisites
+from kdive.domain import PrerequisiteStatus
+from kdive.prereqs.checks import check_prerequisites
 
 
 class _Runner:

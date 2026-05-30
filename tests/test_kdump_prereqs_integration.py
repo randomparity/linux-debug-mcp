@@ -1,6 +1,6 @@
 """Env-gated live-SSH kdump readiness probe against a managed libvirt guest.
 
-Skipped unless ``LINUX_DEBUG_MCP_LIBVIRT_TEST=1`` (plus the source/rootfs/domain env)
+Skipped unless ``KDIVE_LIBVIRT_TEST=1`` (plus the source/rootfs/domain env)
 is set and virsh/qemu are present — identical gating to
 ``tests/test_drgn_introspect_integration.py``, whose bootstrap helpers this reuses.
 Never un-gated in CI. The CI-runnable script-structure cross-check lives in
@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from linux_debug_mcp.domain import DebugPostmortemCheckPrereqsRequest, PrerequisiteStatus
-from linux_debug_mcp.providers.local_ssh_tests import SubprocessSshRunner
-from linux_debug_mcp.server import debug_postmortem_check_prereqs_handler
+from kdive.domain import DebugPostmortemCheckPrereqsRequest, PrerequisiteStatus
+from kdive.providers.local_ssh_tests import SubprocessSshRunner
+from kdive.server import debug_postmortem_check_prereqs_handler
 from tests.test_drgn_introspect_integration import _bootstrap_booted_run, _require_integration_env
 
 

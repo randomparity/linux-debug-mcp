@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from linux_debug_mcp.coordination.transaction import TransportTransaction
-from linux_debug_mcp.providers.gdb_mi import StopRecord
-from linux_debug_mcp.seams.target import TargetKey
-from linux_debug_mcp.server import _break_entry_method, _interrupt_op_data
-from linux_debug_mcp.transport.base import BreakMethod, BreakPlan, TransportSession
-from linux_debug_mcp.transport.break_inject import InjectBreakError
+from kdive.coordination.transaction import TransportTransaction
+from kdive.providers.gdb_mi import StopRecord
+from kdive.seams.target import TargetKey
+from kdive.server import _break_entry_method, _interrupt_op_data
+from kdive.transport.base import BreakMethod, BreakPlan, TransportSession
+from kdive.transport.break_inject import InjectBreakError
 
 KEY = TargetKey(provisioner="local-qemu", target_id="run-xyz")
 

@@ -3,7 +3,7 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "linux-debug-mcp"
+name = "kdive"
 version = "0.1.0"
 description = "MCP server foundation for Linux kernel build-boot-debug workflows"
 readme = "README.md"
@@ -38,7 +38,7 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.coverage.run]
-source = ["src/linux_debug_mcp"]
+source = ["src/kdive"]
 branch = true
 
 [tool.coverage.report]
@@ -54,7 +54,7 @@ exclude_also = [
 unresolved-import = "warn"
 
 [project.scripts]
-linux-debug-mcp = "linux_debug_mcp.server:main"
+kdive = "kdive.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
