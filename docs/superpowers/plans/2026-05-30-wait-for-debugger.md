@@ -555,7 +555,10 @@ def test_frozen_boot_publishes_admission_snapshot(tmp_path: Path) -> None:
     artifact_root = create_run(tmp_path)
     record_build(artifact_root)
     debug_target = target_profile().model_copy(update={"debug_gdbstub": True})
-    admission = AdmissionService(SnapshotStore())
+    # Hold our own SnapshotStore reference — AdmissionService keeps it as a private
+    # attribute (admission.py:253), so assert on the store we constructed, not on the service.
+    snapshots = SnapshotStore()
+    admission = AdmissionService(snapshots)
     provider = FakeBootProvider(details={"console_status": "frozen"})
 
     response = boot(
@@ -570,10 +573,10 @@ def test_frozen_boot_publishes_admission_snapshot(tmp_path: Path) -> None:
     # The published snapshot is what debug.start_session/run_tests resolve via _require_snapshot.
     # SnapshotStore.get(target_key) is the verified read API (admission.py:233).
     target_key = TargetKey(provisioner="local-qemu", target_id="run-abc123")
-    assert admission.snapshot_store.get(target_key) is not None
+    assert snapshots.get(target_key) is not None
 ```
 
-The snapshot store is reachable as `admission.snapshot_store` (the `AdmissionService` is constructed with `AdmissionService(SnapshotStore())`); if the attribute name differs, grep `self._store`/`snapshot_store` in `coordination/admission.py` and adjust — the contract under test is "a `TargetSnapshot` for `run-abc123` exists after the frozen boot". `TargetKey` is imported from `linux_debug_mcp.seams.target` (see `tests/test_server_boot_snapshot_producer.py:6`).
+`TargetKey` is imported from `linux_debug_mcp.seams.target` and `SnapshotStore`/`AdmissionService` from `linux_debug_mcp.coordination.admission` (see `tests/test_server_boot_snapshot_producer.py:5-6`). The contract under test is "a `TargetSnapshot` for `run-abc123` exists after the frozen boot".
 
 - [ ] **Step 2: Run the guards honestly**
 
