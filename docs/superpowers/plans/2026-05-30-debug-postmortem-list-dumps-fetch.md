@@ -1686,13 +1686,12 @@ Append to `tests/test_postmortem_list_dumps.py`:
 def test_tools_registered() -> None:
     from linux_debug_mcp.server import create_app
 
-    app = create_app()
-    names = {t.name for t in app._tool_manager.list_tools()}
+    # access pattern verified against tests/test_server.py:40 — the registry is the
+    # `_tool_manager._tools` dict keyed by tool name.
+    names = set(create_app()._tool_manager._tools)
     assert "debug.postmortem.list_dumps" in names
     assert "debug.postmortem.fetch" in names
 ```
-
-(If `_tool_manager.list_tools()` is not the access pattern used elsewhere, mirror the existing tool-registration test — check `grep -rn "list_tools\|_tool_manager\|get_tools" tests/ | head`.)
 
 - [ ] **Step 2: Run to verify it fails**
 
