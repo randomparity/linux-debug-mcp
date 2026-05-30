@@ -703,7 +703,8 @@ parser's.
 from __future__ import annotations
 
 import re
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 _BT_HEADER = re.compile(r'PID:\s*(\d+).*?COMMAND:\s*"([^"]*)"')
 _BT_FRAME = re.compile(r"#(\d+)\s+\[\w+\]\s+(\S+)\s+at\s+(\S+)")
@@ -817,11 +818,13 @@ def parse_command(command: str, raw_text: str) -> dict[str, Any]:
         return {"parsed": False, "reason": "unknown_command", "raw": raw_text}
     try:
         return parser(raw_text)
-    except Exception:  # noqa: BLE001 - best-effort: any parser failure -> raw passthrough
+    except Exception:
+        # Best-effort: any parser failure -> raw passthrough. Parser totality
+        # (never raising out of parse_command) is the contract (ADR 0026 decision
+        # 3); a narrower except would let an unforeseen parser bug crash the
+        # handler. (BLE is not in the repo's ruff select set, so no noqa needed.)
         return {"parsed": False, "reason": "parse_failed", "raw": raw_text}
 ```
-
-Note: the `noqa: BLE001` is justified — parser totality (never raising out of `parse_command`) is the contract (ADR 0026 decision 3); a narrower except would let an unforeseen parser bug crash the handler.
 
 - [ ] **Step 4: Run to verify pass**
 
