@@ -16,6 +16,7 @@ from linux_debug_mcp.providers.local_kernel_build import (
     LocalKernelBuildProvider,
     MissingConfigError,
     ReadelfUnavailable,
+    _default_job_count,
     _extract_build_id,
 )
 
@@ -56,7 +57,8 @@ def test_plan_build_appends_make_variables_after_provider_owned_args(tmp_path: P
         make_variables={"LLVM": "1", "CC": "clang"},
     )
 
-    plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
+    with patch("linux_debug_mcp.providers.local_kernel_build._default_job_count", return_value=4):
+        plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
 
     assert plan.argv == [
         "make",
@@ -64,11 +66,60 @@ def test_plan_build_appends_make_variables_after_provider_owned_args(tmp_path: P
         str(source),
         f"O={output}",
         "ARCH=x86_64",
+        "-j4",
         "LLVM=1",
         "CC=clang",
         "bzImage",
         "modules",
     ]
+
+
+def test_plan_build_defaults_jobs_to_half_cpus_when_unset(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    output = tmp_path / "runs" / "run-1" / "build"
+    provider = LocalKernelBuildProvider()
+    profile = BuildProfile(name="x86_64-default", architecture="x86_64")
+
+    with patch("linux_debug_mcp.providers.local_kernel_build._default_job_count", return_value=24):
+        plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
+
+    assert plan.argv == ["make", "-C", str(source), f"O={output}", "ARCH=x86_64", "-j24", "bzImage"]
+
+
+def test_plan_build_explicit_jobs_overrides_the_default(tmp_path: Path) -> None:
+    source = tmp_path / "linux"
+    output = tmp_path / "runs" / "run-1" / "build"
+    provider = LocalKernelBuildProvider()
+    profile = BuildProfile(name="x86_64-default", architecture="x86_64", jobs=3)
+
+    with patch("linux_debug_mcp.providers.local_kernel_build._default_job_count", return_value=24):
+        plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
+
+    assert "-j3" in plan.argv
+    assert "-j24" not in plan.argv
+
+
+@pytest.mark.parametrize(
+    ("usable", "expected"),
+    [(48, 24), (47, 24), (3, 2), (2, 1), (1, 1)],
+)
+def test_default_job_count_is_at_least_half_of_usable_cpus(usable: int, expected: int) -> None:
+    with patch(
+        "linux_debug_mcp.providers.local_kernel_build.os.sched_getaffinity",
+        return_value=set(range(usable)),
+    ):
+        assert _default_job_count() == expected
+
+
+def test_default_job_count_falls_back_to_cpu_count_without_affinity() -> None:
+    with (
+        patch(
+            "linux_debug_mcp.providers.local_kernel_build.os.sched_getaffinity",
+            side_effect=AttributeError,
+        ),
+        patch("linux_debug_mcp.providers.local_kernel_build.os.cpu_count", return_value=8),
+    ):
+        assert _default_job_count() == 4
 
 
 def test_plan_build_carries_base_config(tmp_path: Path) -> None:
