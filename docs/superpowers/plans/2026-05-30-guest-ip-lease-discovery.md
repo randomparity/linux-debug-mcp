@@ -496,10 +496,21 @@ with:
 Run: `uv run python -m pytest tests/test_libvirt_qemu_provider.py -k "guest_ip or call_timeout or polls_until or no_lease or unavailable or skips_discovery or timeout_skips" -q`
 Expected: PASS (7 tests).
 
-- [ ] **Step 5: Run the full provider module**
+- [ ] **Step 5: Fix the four success-boot `runner.commands` exact-list assertions**
+
+The success branch now issues `virsh domifaddr` through `self.runner.run(...)`, and `FakeLibvirtRunner.run` appends **every** argv to `self.commands` before dispatching (test file ~line 771). So each test that boots to SUCCEEDED and asserts an exact `runner.commands` list gains a trailing `plan.domifaddr_argv`. Update exactly these four assertions (the only SUCCEEDED-boot exact-list assertions) to append `plan.domifaddr_argv`:
+
+- `test_execute_boot_first_boot_domain_absent_defines_starts_and_writes_artifacts` (~:858):
+  `assert runner.commands == [plan.dumpxml_argv, plan.define_argv, plan.start_argv, plan.domifaddr_argv]`
+- `test_execute_boot_retry_stops_matching_domain_before_define_start` (~:914):
+  `assert runner.commands == [plan.dumpxml_argv, plan.destroy_argv, plan.define_argv, plan.start_argv, plan.domifaddr_argv]`
+- `test_execute_boot_stops_existing_matching_domain_before_fresh_run_start` (~:925): same 5-element list as :914.
+- `test_execute_boot_continues_when_existing_matching_domain_is_already_inactive` (~:939): same 5-element list as :914.
+
+Do **not** touch the failure/timeout-branch assertions — discovery is success-only, so they are unaffected. Specifically leave unchanged: `:451` (missing-tools, `== []`), `:882`/`:903` (early-return failures, `== [plan.dumpxml_argv]`), `:986` (define-failure), `:1027`/`:1047` (post-start cleanup/destroy), and `:1064` (console-timeout → FAILED, no discovery). Likewise, if any pre-existing success test asserts an exact `details` dict *equality*, relax it to subset checks (details now also carry `guest_ip`/`guest_ip_discovery`); a quick scan shows the success tests assert on individual keys (`kernel_args`, artifacts), so none are expected to need this.
 
 Run: `uv run python -m pytest tests/test_libvirt_qemu_provider.py -q`
-Expected: PASS. The existing `test_execute_boot_success_*` tests now also exercise `_discover_guest_ip` via the default `FakeLibvirtRunner` (returns a lease), and they assert on `kernel_args`/artifacts which are unaffected. If any pre-existing success test asserts an exact `details` dict equality, relax it to subset checks (it will now also carry `guest_ip`).
+Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
