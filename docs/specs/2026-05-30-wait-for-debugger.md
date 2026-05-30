@@ -97,6 +97,20 @@ override cannot set `debug_gdbstub`, so the override can only *add* `wait_for_de
 - **Normal (`wait_for_debugger=False`):** unchanged — `stream_console`, readiness/timeout branches, and
   guest-IP discovery on success exactly as today.
 
+##### Load-bearing assumption: `virsh start` returns while the vCPU is frozen
+
+The frozen branch depends on `virsh start` **returning** even though `wait=on` blocks the guest vCPU.
+This holds because `wait=on` blocks only QEMU's vCPU thread at the gdbstub, while QEMU's main loop and
+QMP monitor — which `virsh start` waits on — come up independently; libvirt considers the domain started
+once the monitor handshake completes, not once the guest CPU runs. This is the single assumption the
+whole feature rests on, and it is QEMU/libvirt-version-dependent, so it is called out here rather than
+left implicit. **Failure mode if it is wrong on some host:** `start = self.runner.run(plan.start_argv,
+timeout=plan.timeout_seconds, …)` is already bounded by the boot timeout, so a `virsh start` that blocked
+would `timed_out` and return a `FAILED` command-failure (the existing `start` failure path) — a bounded
+stall ending in `FAILED`, never an unbounded hang. The gated integration test (§Verification) is tasked
+with confirming `virsh start` returns *promptly* (well under `timeout_seconds`) for a `wait=on` domain,
+which is what distinguishes the intended fast frozen `SUCCEEDED` from this degenerate timeout.
+
 The frozen branch returns the **same artifact set** as the normal success branch — the boot/console
 log artifacts are created (the console log exists but is empty, the vCPU having printed nothing) and the
 rotated-console-log handling runs unchanged — so the returned `artifacts` list shape is invariant across
@@ -231,9 +245,11 @@ the guest to readiness through a debug session.
   log artifacts present), so the artifact list is invariant across frozen/normal success.
 - Integration (env-gated, **skipped in CI**, new test in `test_qemu_gdbstub_integration.py`): the
   acceptance scenario end-to-end — boot a `debug_gdbstub` target with `wait_for_debugger=True`, assert
-  the boot returns `SUCCEEDED`/`console_status="frozen"` without a readiness wait; `debug.start_session`
-  attaches to the reset-vector CPU; set a breakpoint at an early-init symbol (`dcache_init` /
-  `start_kernel`); `debug.continue`; assert the breakpoint is hit and an early symbol is inspectable.
+  the boot returns `SUCCEEDED`/`console_status="frozen"` without a readiness wait **and promptly** (well
+  under `timeout_seconds`, confirming `virsh start` returns while the vCPU is frozen — the load-bearing
+  assumption in §4); `debug.start_session` attaches to the reset-vector CPU; set a breakpoint at an
+  early-init symbol (`dcache_init` / `start_kernel`); `debug.continue`; assert the breakpoint is hit and
+  an early symbol is inspectable.
   This is the only place the headline acceptance criterion (deterministic early breakpoint) is provable;
   it requires a real QEMU+KVM guest and stays gated behind the existing tool/env guard.
 - The env-gated `test_libvirt_boot_integration.py` / `test_qemu_gdbstub_integration.py` stay gated; no
