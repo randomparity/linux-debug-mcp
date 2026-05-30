@@ -317,3 +317,26 @@ def test_end_session_closes_transaction_and_frees_guard(tmp_path: Path) -> None:
         session_registry=registry,
     )
     assert reattach.ok is True
+
+
+def test_debug_open_request_carries_gdbstub_endpoint_in_transport_opts() -> None:
+    # The qemu-gdbstub transport reads host/port from transport_ref.opts (see its unit test), so the
+    # open-request builder must populate opts — not only target_ref — or a real attach raises
+    # KeyError: 'port'. This guards the live debug-attach path the gated integration test cannot in CI.
+    from linux_debug_mcp.coordination.admission import SnapshotStore
+    from linux_debug_mcp.server import _debug_open_request
+
+    admission = AdmissionService(SnapshotStore())
+    publish_ready_snapshot(
+        admission,
+        target_key=KEY,
+        generation=7,
+        transports=(RSP_CHANNEL,),
+        platform=PLATFORM_WITH_SSH,
+    )
+
+    request = _debug_open_request(run_id=RUN_ID, gdbstub_endpoint=GDBSTUB_ENDPOINT, admission=admission)
+
+    assert request.transport_ref.opts == GDBSTUB_ENDPOINT
+    assert request.transport_ref.opts["port"] == 1234
+    assert request.generation == 7
