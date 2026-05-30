@@ -1234,16 +1234,17 @@ def test_start_session_keeps_engine_attached_and_registered(tmp_path, monkeypatc
 - [ ] **Step 3: Implement.**
   1. Add a module-level `GdbMiSessionRegistry` import and a `gdb_mi_sessions: GdbMiSessionRegistry | None = None` param to `debug_start_session_handler`.
   2. In `create_app`, construct `gdb_mi_sessions = GdbMiSessionRegistry()` next to `gdb_mi_engine = GdbMiEngine()` and pass it into the `debug.start_session` tool wrapper.
-  3. Replace `_run_mi_attach_probe`'s `engine.resume_and_detach(attachment)` with: on success, `gdb_mi_sessions.register(session_id, attachment)` and return the probe details **without** detaching. The function gains `session_id` and `gdb_mi_sessions` params. The fault path still calls `force_resume` + teardown + (now) `gdb_mi_sessions.reap(session_id)`.
-  4. Remove the batch `provider.start_session(...)` call; build the `DebugSession`/`StepResult` from the MI attach. The handler now owns the run-relative paths the deleted provider used to mint (`<run>/debug/attempt-NNN/...`). Add a small `_build_mi_debug_session(...)` helper in `server.py` that populates **every required `DebugSession` field**:
+  3. **Mint `session_id` once, before the probe.** Inside the locked section, immediately before the `gdb_mi_engine is not None` probe branch, mint `session_id = f"debug-{uuid4().hex}"`. This single id is threaded into BOTH the probe (which registers the live attachment under it) and `_build_mi_debug_session` (which persists it as `DebugSession.session_id`), so the registry key and the persisted id are identical — the per-op lookup in Task 13 finds the right attachment. The probe registering earlier than the DebugSession is built is exactly why the id cannot be minted inside the helper.
+  4. Replace `_run_mi_attach_probe`'s `engine.resume_and_detach(attachment)` with: on success, `gdb_mi_sessions.register(session_id, attachment)` and return the probe details **without** detaching. The function gains `session_id` and `gdb_mi_sessions` params. The fault path still calls `force_resume` + teardown + (now) `gdb_mi_sessions.reap(session_id)`.
+  5. Remove the batch `provider.start_session(...)` call; build the `DebugSession`/`StepResult` from the MI attach with the **already-minted `session_id`**. The handler now owns the run-relative paths the deleted provider used to mint. Add a small `_build_mi_debug_session(...)` helper in `server.py` that takes `session_id` as a parameter (it does NOT mint one) and populates **every required `DebugSession` field**:
 
 ```python
-def _build_mi_debug_session(*, run_id: str, run_dir: Path, vmlinux_path: Path,
+def _build_mi_debug_session(*, session_id: str, run_id: str, vmlinux_path: Path,
                             gdbstub_endpoint: dict[str, object], profile_name: str,
                             transcript_path: Path, started_at: str) -> DebugSession:
     attempt_dir = transcript_path.parent  # <run>/debug/mi-probe.log lives in <run>/debug; keep paths under it
     return DebugSession(
-        session_id=f"debug-{uuid4().hex}",
+        session_id=session_id,  # minted once in the handler before the probe; same id the registry holds
         run_id=run_id,
         provider_name="local-qemu-gdbstub",
         gdbstub_endpoint=gdbstub_endpoint,
@@ -1265,7 +1266,7 @@ def _build_mi_debug_session(*, run_id: str, run_dir: Path, vmlinux_path: Path,
     )
 ```
 
-  The handler mints `session_id` once and uses the SAME id to `gdb_mi_sessions.register(session_id, attachment)` (step 3.3) so the per-op lookup key matches the persisted `DebugSession.session_id`. The legacy `controller_mode`/`active_controller_pid` fields are retained on the model (other code reads them) but are inert — the live registry is the liveness source. Persist `transport_session_id` and `mi_probe` into the step details as today. Add `from uuid import uuid4` if not already imported.
+  The legacy `controller_mode`/`active_controller_pid` fields are retained on the model (other code reads them) but are inert — the live registry is the liveness source. Persist `transport_session_id` and `mi_probe` into the step details as today. Add `from uuid import uuid4` if not already imported. (The existing `_run_mi_attach_probe` builds its own `mi-probe.log` transcript path from `run_dir`; pass that same path into `_build_mi_debug_session` so the persisted `transcript_path` is the live session's transcript.)
 
 - [ ] **Step 4: Run — expect PASS**; migrate `test_server_debug_mi_probe.py` (the probe now leaves the session attached: drop assertions that the engine `resume_and_detach`'d; keep the guard-refusal and guaranteed-resume-on-fault assertions, which now also assert `registry.get(session_id) is None` after a fault).
 
