@@ -9,10 +9,11 @@ from conftest import (
     profiles,
     record_build,
     rootfs_profile,
+    target_profile,
 )
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import BootOverrides, RootfsOverrides, TargetProfile
+from linux_debug_mcp.config import BootOverrides, RootfsOverrides, RootfsProfile, TargetProfile
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
 from linux_debug_mcp.providers.libvirt_qemu import BootExecutionResult, ProviderBootError
 from linux_debug_mcp.server import target_boot_handler
@@ -556,3 +557,47 @@ def test_boot_rootfs_source_override_allowed_without_sensitive_paths(tmp_path: P
     )
 
     assert response.ok is True
+
+
+def _booted_run_with_rootfs(tmp_path: Path, rootfs: RootfsProfile):
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    return target_boot_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=FakeBootProvider(),
+        target_profiles={"local-qemu": target_profile()},
+        rootfs_profiles={"minimal": rootfs},
+    ), artifact_root
+
+
+def test_boot_builder_missing_image_returns_configuration_error(tmp_path: Path) -> None:
+    rootfs = RootfsProfile(
+        name="minimal",
+        source=str(tmp_path / "absent.qcow2"),
+        source_kind="builder",
+        mutability="copy_on_write",
+        readiness_marker="ready",
+    )
+    response, artifact_root = _booted_run_with_rootfs(tmp_path, rootfs)
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert "just rootfs" in response.error.details["suggested_fix"]
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
+    assert manifest.step_results["boot"].status == StepStatus.FAILED
+
+
+def test_boot_prebuilt_kind_returns_not_implemented(tmp_path: Path) -> None:
+    image = tmp_path / "minimal.qcow2"
+    image.write_text("qcow2\n", encoding="utf-8")
+    rootfs = RootfsProfile(
+        name="minimal",
+        source=str(image),
+        source_kind="prebuilt",
+        mutability="read_only",
+        readiness_marker="ready",
+    )
+    response, _ = _booted_run_with_rootfs(tmp_path, rootfs)
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.NOT_IMPLEMENTED
+    assert "#106" in response.error.message

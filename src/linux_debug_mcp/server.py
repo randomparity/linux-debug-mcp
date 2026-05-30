@@ -171,6 +171,7 @@ from linux_debug_mcp.providers.stubs import (
     future_not_implemented_response,
     select_future_provider,
 )
+from linux_debug_mcp.rootfs.sources import RootfsSourceError, resolve_rootfs_source
 from linux_debug_mcp.safety.paths import (
     PathSafetyError,
     confine_run_relative,
@@ -1969,6 +1970,7 @@ def target_boot_handler(
                     store.record_step_result(run_id, stale_failed)
                     retrying_after_failure = True
                 try:
+                    resolve_rootfs_source(resolved_rootfs_profile)
                     plan = provider.plan_boot(
                         run_id=run_id,
                         run_dir=store.run_dir(run_id),
@@ -1976,6 +1978,22 @@ def target_boot_handler(
                         target_profile=resolved_target_profile,
                         rootfs_profile=resolved_rootfs_profile,
                         attempt=next_attempt,
+                    )
+                except RootfsSourceError as exc:
+                    fix_details = {"suggested_fix": exc.suggested_fix} if exc.suggested_fix else {}
+                    failed = StepResult(
+                        step_name="boot",
+                        status=StepStatus.FAILED,
+                        summary=str(exc),
+                        details=fix_details,
+                    )
+                    store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded or force_reboot)
+                    return ToolResponse.failure(
+                        category=exc.category,
+                        message=str(exc),
+                        run_id=run_id,
+                        details=fix_details,
+                        suggested_next_actions=["artifacts.get_manifest"],
                     )
                 except ProviderBootError as exc:
                     failed = StepResult(
