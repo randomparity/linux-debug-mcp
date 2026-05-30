@@ -245,7 +245,23 @@ logger = logging.getLogger(__name__)
 DEFAULT_ARTIFACT_ROOT = Path(".linux-debug-mcp/runs")
 SERVER_CONFIG_ENV_VAR = "LINUX_DEBUG_MCP_CONFIG"
 DEFAULT_BUILD_PROFILES = {
-    "x86_64-default": BuildProfile(name="x86_64-default", architecture="x86_64"),
+    "x86_64-default": BuildProfile(name="x86_64-default", architecture="x86_64", base_config=["defconfig"]),
+    "x86_64-debug": BuildProfile(
+        name="x86_64-debug",
+        architecture="x86_64",
+        base_config=["defconfig"],
+        config_lines=[
+            "CONFIG_VIRTIO=y",
+            "CONFIG_VIRTIO_PCI=y",
+            "CONFIG_VIRTIO_BLK=y",
+            "CONFIG_VIRTIO_NET=y",
+            "CONFIG_VIRTIO_CONSOLE=y",
+            "CONFIG_SERIAL_8250=y",
+            "CONFIG_SERIAL_8250_CONSOLE=y",
+            "CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y",
+            "# CONFIG_RANDOMIZE_BASE is not set",
+        ],
+    ),
 }
 DEFAULT_TARGET_PROFILES = {
     "local-qemu": TargetProfile(
@@ -1062,8 +1078,10 @@ def _resolve_initial_profiles(
 
     # model_copy(update=...) skips field validators, which is safe here: both base and
     # override values were validated at construction (BuildProfile/BootOverrides), and the
-    # merges only union dicts, de-dup kernel-arg tokens by key, or merge config_lines by
-    # symbol (last wins) over already-validated values, so the result stays valid.
+    # merges only union dicts, de-dup kernel-arg tokens by key, merge config_lines by
+    # symbol (last wins), or replace base_config wholesale (ordered make targets have no
+    # symbol identity to merge on — ADR 0030 decision 3) over already-validated values, so
+    # the result stays valid.
     resolved_build = base_build
     if build_overrides is not None:
         build_update: dict[str, object] = {}
@@ -1071,6 +1089,8 @@ def _resolve_initial_profiles(
             build_update["make_variables"] = {**base_build.make_variables, **build_overrides.make_variables}
         if build_overrides.config_lines:
             build_update["config_lines"] = merge_config_lines(base_build.config_lines, build_overrides.config_lines)
+        if build_overrides.base_config:
+            build_update["base_config"] = list(build_overrides.base_config)
         if build_update:
             resolved_build = base_build.model_copy(update=build_update)
 

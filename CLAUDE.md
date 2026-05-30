@@ -32,7 +32,7 @@ Python 3.11+. Ruff is the linter/formatter (line length 120, selects `E,F,I,UP,B
 
 Entry point: `linux-debug-mcp` console script → `linux_debug_mcp.server:main` → `configure_logging()` + `create_app().run()`.
 
-Default profiles (`x86_64-default`, `local-qemu`, `local-qemu-debug`, `minimal`, `smoke-basic`, `qemu-gdbstub-default`) are constants in `server.py`. The default artifact root is `.linux-debug-mcp/runs` (gitignored).
+Default profiles (`x86_64-default`, `x86_64-debug`, `local-qemu`, `local-qemu-debug`, `minimal`, `smoke-basic`, `qemu-gdbstub-default`) are constants in `server.py`. `x86_64-default` and `x86_64-debug` carry `base_config=["defconfig"]` so a clean checkout builds without a developer-prepared `.config`; `x86_64-debug` adds DWARF/KASLR-off/virtio `config_lines` for the gdbstub tier. The default artifact root is `.linux-debug-mcp/runs` (gitignored).
 
 ### Run lifecycle and the manifest invariant
 
