@@ -4101,7 +4101,15 @@ def _run_mi_attach_probe(
         # guaranteed-resume (best-effort continue + disconnect + kill).
         resume_confirmed = engine.force_resume(attachment) if attachment is not None else True
         if resume_confirmed:
-            _resume_debug_transport(session=transport_session, admission=admission, session_registry=session_registry)
+            # Best-effort: the un-halt is a durable write that could raise (e.g. OSError on a full
+            # disk). It MUST NOT be able to skip the teardown below, or the guaranteed-resume
+            # invariant would be defeated (guard left held, kernel left HALTED). If the EXECUTING
+            # write fails, teardown's close(force=False) then leaves a closed_while_halted recovery
+            # tombstone -- the conservative fallback -- and still releases the guard.
+            with contextlib.suppress(Exception):
+                _resume_debug_transport(
+                    session=transport_session, admission=admission, session_registry=session_registry
+                )
         _teardown_debug_transport(
             transport_session=transport_session,
             transaction=transaction,

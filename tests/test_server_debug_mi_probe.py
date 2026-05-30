@@ -299,6 +299,51 @@ def test_non_gdbmi_engine_exception_still_resumes_and_frees_guard(tmp_path: Path
     assert registry.read_tombstone(KEY) is None
 
 
+def test_probe_fault_releases_guard_even_if_unhalt_write_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guaranteed-resume robustness: if the durable un-halt write (`_resume_debug_transport`) raises
+    (e.g. an OSError on a full disk), the teardown must still run -- the StopCapableGuard is released,
+    the kernel is not left HALTED, and the handler returns a failure rather than letting the
+    exception escape."""
+    import linux_debug_mcp.server as server
+
+    def _boom(**_kwargs):
+        raise OSError("disk full while un-halting")
+
+    monkeypatch.setattr(server, "_resume_debug_transport", _boom)
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+    resp = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        provider=FakeDebugProvider(),
+        debug_profiles=_profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=FakeEngine(fail_on="probe", resume_confirmed=True),
+    )
+    assert resp.ok is False  # the exception did not escape the handler
+    assert registry.read_record(KEY) is None  # teardown released the guard / deleted the record
+    # a fresh attach on the same target is admitted (the guard was freed), via recovery since the
+    # un-halt failure left a closed_while_halted tombstone.
+    reattach = debug_start_session_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        new_session=True,
+        provider=FakeDebugProvider(),
+        debug_profiles=_profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=FakeEngine(),
+        recovery=True,
+    )
+    assert reattach.ok is True
+
+
 def test_run_tests_rejected_while_target_halted(tmp_path: Path) -> None:
     """The 'during the stop' half of the §5.6 contract: while a debug session holds the kernel
     (durable record HALTED), a concurrently-issued ssh-tier op is fast-rejected with target_halted."""
