@@ -4172,6 +4172,22 @@ def _run_mi_attach_probe(
         return failure, {}
 
 
+_LOSSY_OUT_OF_BAND_CONSOLES = frozenset({ConsoleKind.HVC, ConsoleKind.VIRTIO})
+_TRANSPORT_QUALITY_WARNING = (
+    "gdb/MI RSP is riding a lossy out-of-band console ({console_kind}); break-in and live"
+    " transcripts may be dropped or corrupted. Prefer the in-guest/postmortem tiers for"
+    " reliable inspection."
+)
+_LOSSY_TRANSPORT_NEXT_ACTIONS = ("debug.kdb", "debug.introspect.run")
+
+
+def is_lossy_out_of_band(console_kind: ConsoleKind) -> bool:
+    """True when the RSP travels over a console whose framing can silently drop or corrupt bytes
+    (paravirtual HVC, virtio-console) rather than a dedicated UART line. ADR 0024 decision 2: the
+    warning is keyed on console framing quality, never on the selected line's role."""
+    return console_kind in _LOSSY_OUT_OF_BAND_CONSOLES
+
+
 def _build_mi_debug_session(
     *,
     session_id: str,
@@ -4555,12 +4571,22 @@ def debug_start_session_handler(
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
 
+    next_actions = ["debug.interrupt", "debug.read_registers", "artifacts.get_manifest"]
+    snapshot = admission.current_snapshot(target_key)
+    if snapshot is not None and is_lossy_out_of_band(snapshot.platform.console_kind):
+        # ADR 0024 decision 2: the RSP rides a console whose framing can silently drop bytes, so
+        # break-in and live transcripts are unreliable. Surface the warning and steer the agent at
+        # the in-guest/postmortem tiers, which do not depend on the lossy out-of-band path.
+        details["transport_quality_warning"] = _TRANSPORT_QUALITY_WARNING.format(
+            console_kind=snapshot.platform.console_kind.value
+        )
+        next_actions = [*_LOSSY_TRANSPORT_NEXT_ACTIONS, *next_actions]
     return ToolResponse.success(
         summary="gdb/MI debug session started",
         run_id=run_id,
         data=redactor.redact_value(details),
         artifacts=_redacted_artifacts(artifacts, redactor),
-        suggested_next_actions=["debug.interrupt", "debug.read_registers", "artifacts.get_manifest"],
+        suggested_next_actions=next_actions,
     )
 
 

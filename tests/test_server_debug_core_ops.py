@@ -165,7 +165,7 @@ def _make_registry(directory: Path) -> SessionRegistry:
 
 
 def _build_transaction(
-    *, registry: SessionRegistry, generation: int = 1
+    *, registry: SessionRegistry, generation: int = 1, platform: PlatformMetadata = PLATFORM_WITH_SSH
 ) -> tuple[TransportTransaction, AdmissionService]:
     txn, admission = build_txn(FakeQemuTransport(), registry=registry, generation=generation)
     publish_ready_snapshot(
@@ -173,7 +173,7 @@ def _build_transaction(
         target_key=KEY,
         generation=generation,
         transports=[RSP_CHANNEL],
-        platform=PLATFORM_WITH_SSH,
+        platform=platform,
     )
     return txn, admission
 
