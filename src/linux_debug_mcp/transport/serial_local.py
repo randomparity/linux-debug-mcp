@@ -21,6 +21,7 @@ from linux_debug_mcp.domain import ErrorCategory
 from linux_debug_mcp.safety.runtime_locks import RuntimeLockError, device_lock_filename, private_runtime_lock_dir
 from linux_debug_mcp.transport.base import (
     BackendAttachment,
+    BreakResources,
     EndpointExposure,
     LineRole,
     OpenRequest,
@@ -548,6 +549,19 @@ class SerialLocalTransport(Transport):
             if bridge is not None and bridge.is_alive():
                 return "ready"
         return "degraded"
+
+    def break_resources(self, session) -> BreakResources | None:
+        """Resolve the live agent-proxy + handle for this demuxed session so the break mechanism can
+        send an agent-proxy/UART break over the console (#82 / ADR 0024). A console-only session, or
+        a session whose proxy handle is no longer held, exposes no break handle -> None, which
+        ``inject_break_for_session`` maps to ``break_inject_unavailable`` (never a silent no-op)."""
+        pid = getattr(session, "backend_pid", None)
+        if pid is None:
+            return None
+        handle = self._proxy_handles.get((pid, getattr(session, "backend_start_time", None)))
+        if handle is None:
+            return None
+        return BreakResources(proxy=self._proxy, proxy_handle=handle)
 
     @staticmethod
     def _close_fd(fd: int | None) -> None:

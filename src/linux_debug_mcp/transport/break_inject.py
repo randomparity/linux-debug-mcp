@@ -52,6 +52,16 @@ def inject_break(
         proxy.send_break(proxy_handle)
         return
     if resolved is BreakMethod.SYSRQ_G:
+        if ssh_runner is None:
+            # The transport admitted a sysrq_g plan but handed no ssh runner (e.g. serial-local
+            # break_resources, which wires only the agent-proxy). Fail with a structured
+            # break_inject_unavailable rather than dereferencing None into an AttributeError that a
+            # caller would misclassify as an engine fault.
+            raise InjectBreakError(
+                "sysrq_g break requires an ssh runner, but none is wired for this transport",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"code": "break_inject_unavailable"},
+            )
         base = work_dir or Path(".")
         # sh -c SCRIPT $0 $1 ...: pass "g" as a discrete argv token ($1), not embedded in the
         # script string, so the trigger char is never shell-interpolated. $0 is just a label.

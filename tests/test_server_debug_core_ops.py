@@ -165,7 +165,7 @@ def _make_registry(directory: Path) -> SessionRegistry:
 
 
 def _build_transaction(
-    *, registry: SessionRegistry, generation: int = 1
+    *, registry: SessionRegistry, generation: int = 1, platform: PlatformMetadata = PLATFORM_WITH_SSH
 ) -> tuple[TransportTransaction, AdmissionService]:
     txn, admission = build_txn(FakeQemuTransport(), registry=registry, generation=generation)
     publish_ready_snapshot(
@@ -173,7 +173,7 @@ def _build_transaction(
         target_key=KEY,
         generation=generation,
         transports=[RSP_CHANNEL],
-        platform=PLATFORM_WITH_SSH,
+        platform=platform,
     )
     return txn, admission
 
@@ -586,3 +586,132 @@ def test_mutator_ledger_rebuild_fault_reaps_and_returns_structured_failure(tmp_p
     assert response.error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert sessions.get(session_id) is None
     assert engine.forced is True
+
+
+# --- Task 3: per-op transport_stall teardown (ADR 0023) -------------------------------------------
+
+from linux_debug_mcp.server import debug_read_registers_handler  # noqa: E402
+
+
+class _StallEngine(FakeMiEngine):
+    def continue_(self, attachment, *, timeout_sec: float):
+        raise GdbMiError(
+            "gdb/MI RSP went silent; the link stalled",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"code": "transport_stall"},
+        )
+
+
+def test_transport_stall_reaps_resumes_and_tears_down(tmp_path: Path) -> None:
+    """A transport_stall during a stateful op runs the full teardown INSIDE debug_lock: reap the live
+    attachment, force_resume the guest, resume the durable record to EXECUTING, and close the
+    transport (guard release) so target.run_tests is ungated and re-attach starts clean."""
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+    engine = _StallEngine()
+    sessions = GdbMiSessionRegistry()
+    start = _start(artifact_root, registry=registry, txn=txn, admission=admission, engine=engine, sessions=sessions)
+    assert start.ok is True, start
+    session_id = start.data["debug_session_id"]
+
+    response = debug_continue_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        timeout_seconds=5,
+        debug_session_id=session_id,
+        debug_profiles=_profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
+
+    assert response.ok is False
+    assert response.error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert response.error.details.get("code") == "transport_stall"
+    for action in ("debug.start_session", "debug.kdb", "debug.introspect.run"):
+        assert action in response.suggested_next_actions
+    # The session was reaped, the guest resumed, and the durable transport record torn down.
+    assert sessions.get(session_id) is None
+    assert engine.forced is True
+    assert registry.read_record(KEY) is None
+
+
+def test_read_op_transport_stall_also_tears_down(tmp_path: Path) -> None:
+    """A read op (debug.read_registers) over a stalled link runs the same reap+resume teardown — a
+    dead link is dead regardless of op kind."""
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+
+    class _StallReadEngine(FakeMiEngine):
+        def read_registers(self, attachment, register_names: list[str]) -> dict[str, object]:
+            raise GdbMiError(
+                "RSP write timed out",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"code": "transport_stall"},
+            )
+
+    engine = _StallReadEngine()
+    sessions = GdbMiSessionRegistry()
+    start = _start(artifact_root, registry=registry, txn=txn, admission=admission, engine=engine, sessions=sessions)
+    assert start.ok is True, start
+    session_id = start.data["debug_session_id"]
+
+    response = debug_read_registers_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        registers=["pc"],
+        debug_session_id=session_id,
+        debug_profiles=_profiles(),
+        transaction=txn,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
+
+    assert response.ok is False
+    assert response.error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert response.error.details.get("code") == "transport_stall"
+    assert sessions.get(session_id) is None
+    assert engine.forced is True
+
+
+def test_benign_gdbmi_error_keeps_session(tmp_path: Path) -> None:
+    """A non-stall GdbMiError (bad symbol) stays contained: the session is kept, not reaped, and the
+    guest is not resumed — Phase-C behaviour unchanged."""
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+
+    class _BadSymbolEngine(FakeMiEngine):
+        def set_breakpoint(self, attachment, location: str):
+            raise GdbMiError(
+                "no symbol matches", category=ErrorCategory.DEBUG_ATTACH_FAILURE, details={"location": location}
+            )
+
+    engine = _BadSymbolEngine()
+    sessions = GdbMiSessionRegistry()
+    start = _start(artifact_root, registry=registry, txn=txn, admission=admission, engine=engine, sessions=sessions)
+    assert start.ok is True, start
+    session_id = start.data["debug_session_id"]
+
+    response = debug_set_breakpoint_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        symbol="do_sys_open",
+        debug_session_id=session_id,
+        debug_profiles=_profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
+
+    assert response.ok is False
+    assert response.error.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert sessions.get(session_id) is not None  # session kept (contained error)
+    assert engine.forced is False

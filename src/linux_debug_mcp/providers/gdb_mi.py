@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -25,6 +26,16 @@ MIN_GDB_VERSION = (9, 1)
 # uses ASYNC continue (mi-async on), so `-exec-continue` returns `^running` immediately rather than
 # blocking until a stop that a free-running kernel never produces.
 _MI_COMMAND_TIMEOUT_SEC = 10.0
+
+# gdb's RSP read timeout (`set remotetimeout`). Generous-but-finite (ADR 0023 decision 1): every RSP
+# packet gdb waits on is bounded and gdb owns the wait, so a slow/silent serial stub yields a clean
+# gdb-reported disconnect rather than an opaque hang under the MI write timeout.
+RSP_REMOTE_TIMEOUT_SEC = 30
+# Bounded retry for the RSP connect (`-target-select remote`). The connect is idempotent until
+# `^connected` (no target state mutates), so retrying ANY connect error a fixed small number of times
+# is sound without classifying gdb's error text (ADR 0023 decision 2).
+_CONNECT_RETRY_COUNT = 3
+_CONNECT_RETRY_BACKOFF_SEC = 0.5
 
 # The literal MI prompt terminator gdb emits between command results; not a record.
 _MI_PROMPT = "(gdb)"
@@ -58,6 +69,13 @@ _REGISTER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _BREAK_LOCATION_RE = _SYMBOL_NAME_RE
 # A gdb breakpoint id is a bare integer.
 _BREAK_ID_RE = re.compile(r"^[0-9]+$")
+# A runtime section base address: a 0x-prefixed hex literal (ADR 0022). Re-validated in the engine
+# (defence in depth) before it is interpolated into the add-symbol-file console command.
+_HEX_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]+$")
+# An ELF section name as it appears under /sys/module/<name>/sections/ (e.g. .text, .data, .bss).
+_SECTION_NAME_RE = re.compile(r"^\.[A-Za-z0-9_.]+$")
+# The mandatory section: add-symbol-file's positional load address.
+_MODULE_TEXT_SECTION = ".text"
 
 
 class MiRecord(Model):
@@ -90,6 +108,16 @@ class ResolvedSymbol(Model):
 
     name: str
     value: str
+
+
+class LoadedModule(Model):
+    """One module whose symbols were loaded at runtime addresses via ``add-symbol-file`` (ADR 0022).
+    ``sections`` maps the loaded ELF section names to their relocated base addresses (``.text`` is
+    mandatory; the value is the redacted address string). Frozen wire shape (``Model`` =>
+    extra="forbid")."""
+
+    name: str
+    sections: dict[str, str]
 
 
 class Frame(Model):
@@ -161,6 +189,18 @@ class GdbMiError(Exception):
         self.details = details or {}
 
 
+def _timeout_error(command: str, timeout_sec: float) -> GdbMiError:
+    """The error an MI write timeout raises (ADR 0023 decision 3). Tagged `transport_stall` /
+    INFRASTRUCTURE_FAILURE: a timeout reached through the per-op path (post-`^connected` by
+    construction) means the RSP link stalled. `attach()` re-tags its own connect-phase timeouts as
+    DEBUG_ATTACH_FAILURE, so this `transport_stall` tag only ever surfaces on an established session."""
+    return GdbMiError(
+        f"gdb/MI command timed out after {timeout_sec}s: {command}",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details={"code": "transport_stall", "command": command, "timeout_seconds": timeout_sec},
+    )
+
+
 @runtime_checkable
 class MiController(Protocol):
     """The injectable subprocess seam. The real impl drives a ``gdb --interpreter=mi3`` child via
@@ -190,11 +230,7 @@ class PygdbmiController:
         try:
             return self._controller.write(command, timeout_sec=timeout_sec, raise_error_on_timeout=True)
         except GdbTimeoutError as exc:
-            raise GdbMiError(
-                f"gdb/MI command timed out after {timeout_sec}s: {command}",
-                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={"command": command, "timeout_seconds": timeout_sec},
-            ) from exc
+            raise _timeout_error(command, timeout_sec) from exc
 
     def read(self, *, timeout_sec: float) -> list[dict[str, object]]:
         try:
@@ -227,10 +263,13 @@ class GdbMiEngine:
         controller_factory: Callable[[list[str]], MiController] | None = None,
         gdb_path_finder: Callable[[str], str | None] = shutil.which,
         redactor: Redactor | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._controller_factory = controller_factory or (lambda command: PygdbmiController(command))
         self._gdb_path_finder = gdb_path_finder
         self._redactor = redactor or Redactor()
+        # Injectable backoff sleep (ADR 0023 decision 2) so the connect retry is wall-clock-free in tests.
+        self._sleep = sleep
 
     def attach(self, *, rsp_endpoint: Endpoint | None, vmlinux_path: Path, transcript_path: Path) -> GdbMiAttachment:
         host, port = self._validate_endpoint(rsp_endpoint)
@@ -260,12 +299,48 @@ class GdbMiEngine:
             # hang).
             self._run(attachment, "-gdb-set mi-async on")
             self._run(attachment, f"-file-exec-and-symbols {self._mi_path(resolved_vmlinux)}")
-            self._run(attachment, f"-target-select remote {host}:{port}")
-        except GdbMiError:
+            # `remotetimeout` is set BEFORE the connect so the RSP wait is finite from the first packet.
+            self._run(attachment, f"-gdb-set remotetimeout {RSP_REMOTE_TIMEOUT_SEC}")
+            self._connect_with_retry(attachment, host, port)
+        except GdbMiError as exc:
             with contextlib.suppress(Exception):
                 controller.exit()
-            raise
+            # Every attach-phase fault (including a connect-phase timeout) is an attach failure, never a
+            # mid-session `transport_stall`: the session never reached `^connected`.
+            raise self._as_attach_failure(exc) from exc
         return attachment
+
+    def _connect_with_retry(self, attachment: GdbMiAttachment, host: str, port: int) -> None:
+        """Issue `-target-select remote` with a bounded retry/backoff (ADR 0023 decision 2). The
+        connect is idempotent until `^connected`, so any connect error is retried up to
+        `_CONNECT_RETRY_COUNT` times; the last failure propagates. A connect-phase write timeout
+        surfaces as a `transport_stall` GdbMiError; attach re-tags it `DEBUG_ATTACH_FAILURE` so a
+        never-attached session is reported as an attach failure, not a mid-session stall (ADR 0023
+        "established session is structural")."""
+        command = f"-target-select remote {host}:{port}"
+        last_exc: GdbMiError | None = None
+        for attempt in range(_CONNECT_RETRY_COUNT):
+            try:
+                self._run(attachment, command)
+                return
+            except GdbMiError as exc:
+                last_exc = self._as_attach_failure(exc)
+                if attempt + 1 < _CONNECT_RETRY_COUNT:
+                    self._sleep(_CONNECT_RETRY_BACKOFF_SEC)
+        raise (
+            last_exc
+            if last_exc is not None
+            else GdbMiError("gdb/MI RSP connect failed", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
+        )
+
+    def _as_attach_failure(self, exc: GdbMiError) -> GdbMiError:
+        """Re-tag a connect-phase fault as DEBUG_ATTACH_FAILURE. A connect-phase write timeout would
+        otherwise carry `transport_stall` (the per-op tag), but a session that never reached
+        `^connected` is an attach failure, not a mid-session link stall."""
+        if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE and exc.details.get("code") != "transport_stall":
+            return exc
+        details = {key: value for key, value in exc.details.items() if key != "code"}
+        return GdbMiError(str(exc), category=ErrorCategory.DEBUG_ATTACH_FAILURE, details=details)
 
     def probe_read(self, attachment: GdbMiAttachment) -> MiRecord:
         """Return the one MI record that PROVES the RSP attach reached the target: the ``^connected``
@@ -306,6 +381,51 @@ class GdbMiEngine:
                 details={"symbol": symbol_name},
             )
         return ResolvedSymbol(name=symbol_name, value=value)
+
+    # --- Phase D: module symbol loading ---------------------------------------------------------
+
+    def load_module_symbols(
+        self, attachment: GdbMiAttachment, *, name: str, ko_path: Path, sections: dict[str, str]
+    ) -> LoadedModule:
+        """Load a loadable module's symbols at their runtime addresses (ADR 0022) via
+        ``-interpreter-exec console "add-symbol-file <ko> <text> -s <sec> <addr> ..."``. ``.text`` is
+        the mandatory positional load address; the other sections follow as ``-s`` arguments in a
+        deterministic order. Every address is re-validated as a 0x-hex literal and the ``.ko`` path is
+        rejected if it carries whitespace or quotes, so the console string is non-injectable. An MI
+        ``^error`` (bad address / unreadable object) is a DEBUG_ATTACH_FAILURE."""
+        if _MODULE_TEXT_SECTION not in sections:
+            raise GdbMiError(
+                "module symbol load requires a .text section address",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"module": name},
+            )
+        for section, address in sections.items():
+            if not _SECTION_NAME_RE.match(section) or not _HEX_ADDRESS_RE.match(address):
+                raise GdbMiError(
+                    f"module section/address must be a valid ELF section + 0x-hex address, got {section}={address!r}",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                    details={"module": name, "section": section},
+                )
+        text_address = sections[_MODULE_TEXT_SECTION]
+        extra = "".join(
+            f" -s {section} {sections[section]}" for section in sorted(sections) if section != _MODULE_TEXT_SECTION
+        )
+        command = f'-interpreter-exec console "add-symbol-file {self._console_ko(ko_path)} {text_address}{extra}"'
+        self._run(attachment, command)
+        return LoadedModule.model_validate(self._redactor.redact_value({"name": name, "sections": sections}))
+
+    def _console_ko(self, ko_path: Path) -> str:
+        """The module object path for the add-symbol-file console command. Rejected (not escaped) if
+        it carries whitespace or a double-quote: a kernel build-tree path has neither, and refusing
+        keeps the console string trivially non-injectable (gdb's console splits on whitespace)."""
+        text = str(ko_path)
+        if any(char in text for char in ' \t\r\n"'):
+            raise GdbMiError(
+                "module object path must not contain whitespace or quotes",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"ko_path": text},
+            )
+        return text
 
     # --- Phase C: interactive execution control -------------------------------------------------
 
@@ -380,8 +500,19 @@ class GdbMiEngine:
         stop = self.wait_for_stop(attachment, timeout_sec=bounded)
         if stop is not None:
             return self._redact_stop(stop)
+        # The wait timed out. Fall back to -exec-interrupt: a reachable kernel CANNOT ignore a
+        # delivered SIGINT, so if the interrupt write is accepted but no *stopped arrives, the link is
+        # dead (silence-path stall, ADR 0023 decision 3) — distinct from a benign no-breakpoint timeout
+        # where the SIGINT stop DOES arrive. A write-path stall on the interrupt itself raises
+        # transport_stall straight from interrupt().
         interrupted = self.interrupt(attachment)
-        return self._redact_stop((interrupted or StopRecord()).model_copy(update={"timed_out": True}))
+        if interrupted is None:
+            raise GdbMiError(
+                "gdb/MI RSP went silent: interrupt issued but no *stopped arrived; the link stalled",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"code": "transport_stall", "verb": verb},
+            )
+        return self._redact_stop(interrupted.model_copy(update={"timed_out": True}))
 
     def continue_(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> StopRecord:
         return self.resume(attachment, "-exec-continue", timeout_sec=timeout_sec)

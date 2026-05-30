@@ -12,6 +12,7 @@ from linux_debug_mcp.coordination.endpoint_safety import assert_loopback_endpoin
 from linux_debug_mcp.coordination.lease import ConsoleLeaseManager, LeaseOwner
 from linux_debug_mcp.coordination.registry import RecoveryTombstone, SessionRegistry
 from linux_debug_mcp.coordination.selection import select_stop_capable_channel
+from linux_debug_mcp.domain import ErrorCategory
 from linux_debug_mcp.seams.break_policy import BreakPolicy
 from linux_debug_mcp.seams.guard import GuardToken, StopCapableGuard
 from linux_debug_mcp.seams.lifecycle import LifecycleDispatcher, LifecycleEvent
@@ -25,6 +26,7 @@ from linux_debug_mcp.transport.base import (
     TransportSession,
     new_session_id,
 )
+from linux_debug_mcp.transport.break_inject import InjectBreakError, inject_break
 
 _ATTACH_DEADLINE_SECONDS = 30.0
 
@@ -474,6 +476,38 @@ class TransportTransaction:
         self._registry.delete_record(record.target_key, expected_session_id=record.session_id)
         if self._dispatcher is not None:
             self._dispatcher.unsubscribe(record.target_key, session_id)
+
+    def inject_break_for_session(self, session_id: str, requested_method: str) -> None:
+        """Execute the session's admitted break plan over the owning transport's live break handle
+        (#82 / ADR 0024). Resolves the durable record by session_id, asks the transport for its
+        live ``BreakResources``, and delegates to ``inject_break``. When no record/plan exists, or
+        the transport exposes no break handle (a gdbstub-qemu transport, or the handle is gone),
+        raises ``InjectBreakError(break_inject_unavailable)`` — never a silent no-op. The
+        ``gdbstub_native`` guard lives in ``inject_break`` itself."""
+        record = next((r for r in self._registry.list_records() if r.session_id == session_id), None)
+        if record is None or record.break_plan is None:
+            raise InjectBreakError(
+                f"no admitted break plan for session {session_id}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"code": "break_inject_unavailable"},
+            )
+        transport = self._transports.get(record.provider)
+        resources = transport.break_resources(record) if transport is not None else None
+        if resources is None:
+            raise InjectBreakError(
+                f"transport {record.provider!r} exposes no break-injection handle for session {session_id}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"code": "break_inject_unavailable"},
+            )
+        inject_break(
+            method=requested_method,
+            break_plan=record.break_plan,
+            proxy=resources.proxy,
+            proxy_handle=resources.proxy_handle,
+            ssh_runner=resources.ssh_runner,
+            ssh_argv_prefix=resources.ssh_argv_prefix,
+            work_dir=resources.work_dir,
+        )
 
     def _mark_recovery(self, target_key: TargetKey, generation: int, *, reason: str) -> None:
         """Single source of truth is the durable tombstone; admission's `_recovery_required` is a

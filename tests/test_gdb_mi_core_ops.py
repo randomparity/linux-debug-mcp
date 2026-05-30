@@ -50,7 +50,9 @@ class FakeController:
 _DONE: list[dict[str, object]] = [{"type": "result", "message": "done", "payload": None, "token": None}]
 _CONNECTED: list[dict[str, object]] = [{"type": "result", "message": "connected", "payload": None, "token": None}]
 _RUNNING: list[dict[str, object]] = [{"type": "result", "message": "running", "payload": None, "token": None}]
-_ATTACH_OK = [_DONE, _DONE, _DONE, _DONE, _CONNECTED]
+# attach() issues six commands: confirm off, pagination off, mi-async on, file-exec-and-symbols,
+# remotetimeout (ADR 0023), then the connect (^connected).
+_ATTACH_OK = [_DONE, _DONE, _DONE, _DONE, _DONE, _CONNECTED]
 
 
 def _stopped(reason: str) -> list[dict[str, object]]:
@@ -154,12 +156,14 @@ def test_continue_waits_for_deferred_stopped_record(tmp_path: Path) -> None:
 
 
 def test_continue_timeout_interrupts_and_marks_timed_out(tmp_path: Path) -> None:
-    # No *stopped is ever scripted, so the continue wait drains to None (timeout); resume then issues
-    # -exec-interrupt and reports timed_out=True with the target back at a known stop.
+    # No breakpoint fires, so the continue wait drains to None (timeout) after its 3 read slices
+    # (timeout_sec=1); resume then issues -exec-interrupt and the kernel answers with a SIGINT stop,
+    # so it reports timed_out=True (benign) with the target back at a known stop. The SIGINT stop is
+    # placed AFTER the continue wait's empties so only the interrupt wait observes it.
     engine, controller, attachment = _attached(
         tmp_path,
         writes=[_RUNNING, _DONE],  # continue ^running, then interrupt ^done
-        reads=[],
+        reads=[[], [], [], _stopped("signal-received")],
     )
     stop = engine.resume(attachment, "-exec-continue", timeout_sec=1)
     assert stop.timed_out is True

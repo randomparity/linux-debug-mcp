@@ -1,6 +1,6 @@
 # `debug.gdb` KGDB/RSP tier (gdb/MI) — design & decomposition
 
-**Type:** Design spec · **Issue:** #13 (epic #9) · **ADR:** [0019](../../adr/0019-debug-gdb-mi-tier-decomposition.md), [0020](../../adr/0020-gdb-mi-symbol-resolution-mechanism.md), [0021](../../adr/0021-gdb-mi-phase-c-session-registry-and-execution-state.md) · **Status:** Phases A–B implemented (2026-05-29); C designed (2026-05-29), D proposed
+**Type:** Design spec · **Issue:** #13 (epic #9) · **ADR:** [0019](../../adr/0019-debug-gdb-mi-tier-decomposition.md), [0020](../../adr/0020-gdb-mi-symbol-resolution-mechanism.md), [0021](../../adr/0021-gdb-mi-phase-c-session-registry-and-execution-state.md), [0022](../../adr/0022-gdb-mi-phase-d-module-symbol-loading.md), [0023](../../adr/0023-gdb-mi-phase-d-rsp-stall-detect-and-report.md), [0024](../../adr/0024-gdb-mi-phase-d-transport-adaptation.md) · **Status:** Phases A–C implemented (2026-05-29); D designed (2026-05-29)
 
 ## Summary
 
@@ -261,13 +261,66 @@ existing env-gated local-QEMU gdbstub coverage passes on the MI engine.
 **Acceptance — static.** No batch-mode (`-batch`) gdb invocation remains anywhere
 (CI grep tripwire).
 
-### Phase D — module symbols, robustness, serial transport
+### Phase D — module symbols, robustness, serial transport *(designed 2026-05-29, #82; ADRs [0022](../../adr/0022-gdb-mi-phase-d-module-symbol-loading.md), [0023](../../adr/0023-gdb-mi-phase-d-rsp-stall-detect-and-report.md), [0024](../../adr/0024-gdb-mi-phase-d-transport-adaptation.md))*
 **Scope.** Per-module section-address discovery + `add-symbol-file` at runtime
 addresses. `set remotetimeout`, retry/backoff, transport-stall detect-and-report
 (never hang the tool call). Break entry via `transport.inject_break` using ADR
 0018's `BreakPolicy`. Serial-KGDB (demuxed) smoke test + transport-quality
 warning (over SOL/HMC vterm, warn that RSP may be unreliable and suggest
 `debug.kdb` / `debug.introspect`). `docs/debug-gdb.md` incl. ppc64le caveats.
+
+**Decided (Phase D).** Four decisions land the open points above:
+
+- **Module symbols (ADR 0022).** A new `debug.load_module_symbols` op reads the
+  per-module section bases from guest `/sys/module/<name>/sections/{.text,.data,
+  .rodata,.bss}` over the already-wired injectable `SshRunner` seam (not a live
+  drgn program contending for the HALTED target, not the agent), resolves the
+  module `.ko`/`.ko.debug` under the recorded build tree via an injectable finder
+  confined by `safety/paths.py`, and the engine issues
+  `-interpreter-exec console "add-symbol-file <ko> <text> -s .data <addr> …"`. The
+  module name is gated to a C identifier and every address to a `0x` hex literal
+  before interpolation; a missing object or unreachable SSH is a loud
+  `CONFIGURATION_ERROR`, never a silent skip that arms an unresolved breakpoint. A
+  `loaded_modules` ledger is persisted into the `DebugSession`.
+- **RSP-stall (ADR 0023).** `attach()` sets `remotetimeout` before the RSP connect
+  and bounds the connect with a small injectable retry/backoff that retries any
+  idempotent pre-`^connected` connect error (the connect mutates no target state
+  until `^connected`; never re-issuing an interactive verb). `attach()` re-tags its
+  own connect-phase write timeouts as `DEBUG_ATTACH_FAILURE`, so `transport_stall`
+  is reached only through the per-op path (post-`^connected` by construction). A
+  stall presents two ways, both detected: a **write-path** stall (an MI write times
+  out) raises `code="transport_stall"` / `INFRASTRUCTURE_FAILURE`; a
+  **silence-path** stall (`-exec-continue` returns `^running`, the link goes silent
+  — indistinguishable from a healthy no-breakpoint timeout *until* the fallback
+  `-exec-interrupt` is issued and a reachable kernel cannot ignore the delivered
+  SIGINT) is flagged when the interrupt write is accepted but no `*stopped` arrives
+  within the bound; a benign timeout still returns `timed_out=true` (session kept).
+  On a stall the handler runs the full guaranteed-resume teardown **inside
+  `debug_lock`** (reap + `force_resume` + `_resume_debug_transport` (durable
+  EXECUTING) + `_teardown_debug_transport` (guard release)), reporting
+  `transport_stall` and routing the agent to `debug.start_session` (re-attach from
+  scratch — never re-sync a stalled RSP, §5.4/§9.3), `debug.kdb`,
+  `debug.introspect.run`. Every other `GdbMiError` keeps Phase-C contained-error
+  behaviour.
+- **Break-entry + quality warning (ADR 0024).** Break-entry routes off the
+  session's recorded `break_plan.method`: `gdbstub_native` → engine
+  `-exec-interrupt` (unchanged); any other method → `transport.inject_break` then
+  `wait_for_stop`. The tier never re-derives the method. A transport-quality
+  warning (`data["transport_quality_warning"]` + `debug.kdb` /
+  `debug.introspect.run` in `suggested_next_actions`; `ToolResponse` has no
+  `warnings` field) fires on the session-wide `PlatformMetadata.console_kind in
+  {HVC, VIRTIO}` (a demuxed RSP channel is `line_role == RSP`/`DEDICATED_DEBUG`,
+  never `SHARED_CONSOLE`, so keying on `line_role` would never fire) and is silent
+  on the clean QEMU `console_kind == UART` path. The non-native break-entry
+  inject-execution seam (resolving the live proxy handle for an open session) is
+  exercised by the gated serial test, not local CI; Phase D lands the pure
+  routing decision + the `gdbstub_native` path that local CI covers.
+- **Serial fixture (ADR 0024, path b).** The serial break/continue test
+  (`tests/test_gdb_mi_serial_kgdb_integration.py`) is gated exactly like
+  `test_serial_local_transport_integration.py` (skipped without `agent-proxy`/the
+  PTY fixture, requirable with `LDM_REQUIRE_AGENT_PROXY=1`). No false green: in
+  local-only CI it is reported **skipped** with the prerequisite named, never a
+  passing gate. The QEMU-gdbstub criteria ship as the unit-testable core.
 **Serial-KGDB fixture prerequisite.** The serial break/continue criterion needs a
 producible target: a PTY-backed `serial-local` transport plus `agent-proxy`/`kdmx`
 demux yielding an RSP endpoint + break signal, gated exactly like

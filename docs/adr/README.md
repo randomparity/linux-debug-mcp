@@ -24,6 +24,9 @@ Each ADR captures one non-trivial design decision — especially decisions the s
 | [0018](0018-break-injection-policy-mapping.md) | Break-injection policy: an injectable `BreakPolicy` seam mapping the selected channel's topology + platform facts to a break method | Accepted |
 | [0019](0019-debug-gdb-mi-tier-decomposition.md) | `debug.gdb` KGDB/RSP tier: a persistent gdb/MI engine (replacing the batch text-scraper), delivered as a phased sub-issue series | Accepted |
 | [0020](0020-gdb-mi-symbol-resolution-mechanism.md) | gdb/MI Phase B symbol resolution: address-of a validated symbol name via `-data-evaluate-expression`, provenance reused from ADR 0017 | Accepted |
-| [0021](0021-gdb-mi-phase-c-session-registry-and-execution-state.md) | gdb/MI Phase C: an in-process live-session registry keyed by debug session id + a HALTED-for-the-window execution-state model; batch paths deleted | Proposed |
+| [0021](0021-gdb-mi-phase-c-session-registry-and-execution-state.md) | gdb/MI Phase C: an in-process live-session registry keyed by debug session id + a HALTED-for-the-window execution-state model; batch paths deleted | Accepted |
+| [0022](0022-gdb-mi-phase-d-module-symbol-loading.md) | gdb/MI Phase D: module symbol loading via SSH-sourced sysfs section addresses + `add-symbol-file` | Accepted |
+| [0023](0023-gdb-mi-phase-d-rsp-stall-detect-and-report.md) | gdb/MI Phase D: RSP stall is detect-and-report with guaranteed resume, not a contained error | Accepted |
+| [0024](0024-gdb-mi-phase-d-transport-adaptation.md) | gdb/MI Phase D: break-entry routes off the admitted plan; transport-quality warning for lossy out-of-band consoles | Accepted |
 
 **Layer-4 plan amendments (2026-05-27, addressing the `/challenge` review findings):** ADR 0002 amended with the in-process fenced guard token + post-restart `revoke()` soundness (Finding #4); ADR 0005 amended with the `on_partial` `backend_pid` write-through invariant (Finding #1) and the `recovery_required` single-source-of-truth / write-through-cache rule (Finding #5); ADR 0006 amended with the halt→runner cancel-bridge delivery mechanism + RUNNING-step terminalization (Finding #2).

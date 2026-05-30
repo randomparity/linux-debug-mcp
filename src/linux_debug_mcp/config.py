@@ -111,6 +111,9 @@ ALLOWED_DEBUG_OPERATIONS = [
     "debug.read_symbol",
     "debug.read_memory",
     "debug.evaluate",
+    # Phase D (#82): load a loadable module's symbols at runtime addresses (sysfs sections +
+    # add-symbol-file) so a breakpoint in the module resolves.
+    "debug.load_module_symbols",
     "debug.end_session",
     # Finding F14: transport.inject_break is destructive (halts the kernel) — gate it through the
     # same DebugProfile.enabled_operations contract as every other halting/mutating debug op so a

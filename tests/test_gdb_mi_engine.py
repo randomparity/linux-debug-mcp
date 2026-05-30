@@ -54,8 +54,9 @@ _DONE: list[dict[str, object]] = [{"type": "result", "message": "done", "payload
 _CONNECTED: list[dict[str, object]] = [{"type": "result", "message": "connected", "payload": None, "token": None}]
 # With mi-async on, `-exec-continue` returns `^running` immediately (no terminal stop follows).
 _RUNNING: list[dict[str, object]] = [{"type": "result", "message": "running", "payload": None, "token": None}]
-# The attach sequence is 4 setup commands (confirm/pagination/mi-async/file) + target-select.
-_ATTACH_OK = [_DONE, _DONE, _DONE, _DONE, _CONNECTED]
+# The attach sequence is 5 setup commands (confirm/pagination/mi-async/file/remotetimeout) +
+# target-select.
+_ATTACH_OK = [_DONE, _DONE, _DONE, _DONE, _DONE, _CONNECTED]
 
 
 def _endpoint() -> TcpEndpoint:
@@ -113,7 +114,8 @@ def test_attach_raises_on_error_record_and_exits(tmp_path: Path) -> None:
     vmlinux = tmp_path / "vmlinux"
     vmlinux.write_text("elf", encoding="utf-8")
     error = [{"type": "result", "message": "error", "payload": {"msg": "boom"}, "token": None}]
-    controller = FakeController([_DONE, _DONE, _DONE, _DONE, error])  # target-select errors
+    # 5 setup commands answer ^done; the connect is retried 3 times (ADR 0023), each ^error.
+    controller = FakeController([_DONE, _DONE, _DONE, _DONE, _DONE, error, error, error])
     engine = _engine(controller)
     with pytest.raises(GdbMiError) as exc:
         engine.attach(rsp_endpoint=_endpoint(), vmlinux_path=vmlinux, transcript_path=tmp_path / "mi.log")
@@ -137,8 +139,9 @@ def test_probe_read_returns_the_connected_attach_proof(tmp_path: Path) -> None:
 def test_probe_read_without_connected_record_raises(tmp_path: Path) -> None:
     vmlinux = tmp_path / "vmlinux"
     vmlinux.write_text("elf", encoding="utf-8")
-    # target-select returns ^done instead of ^connected (stub answered but did not connect).
-    controller = FakeController([_DONE, _DONE, _DONE, _DONE, _DONE])
+    # target-select returns ^done instead of ^connected (stub answered but did not connect). ^done is
+    # not an error, so the connect is not retried; 5 setup ^done + the connect ^done.
+    controller = FakeController([_DONE, _DONE, _DONE, _DONE, _DONE, _DONE])
     engine = _engine(controller)
     attachment = engine.attach(rsp_endpoint=_endpoint(), vmlinux_path=vmlinux, transcript_path=tmp_path / "mi.log")
     with pytest.raises(GdbMiError) as exc:
