@@ -867,7 +867,7 @@ Expected: FAIL with `ImportError` (`debug_postmortem_triage_handler` undefined).
 
 - [ ] **Step 3: Add imports + the handler**
 
-In `src/linux_debug_mcp/server.py`, extend the `domain` import block (line 62) with `DebugPostmortemTriageReport` and `DebugPostmortemTriageRequest`, and extend the `postmortem.triage` import (new line after line 82):
+In `src/linux_debug_mcp/server.py`, extend the `domain` import block (line 62) with **`DebugPostmortemTriageRequest` only** (the handler never names `DebugPostmortemTriageReport` — it receives the report from `assemble_report()` and calls `.model_dump()`; importing the unused `DebugPostmortemTriageReport` here would trip ruff `F401` and fail this task's guardrail). Add the `postmortem.triage` import (new line after line 82):
 
 ```python
 from linux_debug_mcp.postmortem.triage import (
@@ -1257,6 +1257,7 @@ well-formedness, drgn-side well-formedness.
 # tests/test_postmortem_triage_integration.py
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 from pathlib import Path
@@ -1276,9 +1277,10 @@ from linux_debug_mcp.server import (
 
 _VMCORE = os.environ.get("LDM_VMCORE")
 _VMLINUX = os.environ.get("LDM_VMLINUX")
+_HAS_DRGN = importlib.util.find_spec("drgn") is not None
 pytestmark = pytest.mark.skipif(
-    not (_VMCORE and _VMLINUX and shutil.which("crash")),
-    reason="set LDM_VMCORE + LDM_VMLINUX and install crash (and drgn) to run",
+    not (_VMCORE and _VMLINUX and shutil.which("crash") and _HAS_DRGN),
+    reason="set LDM_VMCORE + LDM_VMLINUX and install crash AND drgn to run (triage exercises both tiers)",
 )
 
 
