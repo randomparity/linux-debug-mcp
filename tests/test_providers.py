@@ -65,7 +65,7 @@ def test_default_registry_exposes_sprint_1_providers() -> None:
 
     libvirt_qemu = providers["local-libvirt-qemu"]
     assert libvirt_qemu.operations == ["target.boot"]
-    assert libvirt_qemu.required_host_tools == ["virsh"]
+    assert libvirt_qemu.required_host_tools == ["virsh", "qemu-img"]
     assert libvirt_qemu.target_kinds == [TargetKind.VIRTUAL]
     assert libvirt_qemu.access_methods == ["libvirt", "serial-console", "filesystem"]
     assert libvirt_qemu.destructive_permissions == [

@@ -288,7 +288,8 @@ DEFAULT_ROOTFS_PROFILES = {
     "minimal": RootfsProfile(
         name="minimal",
         source="/var/lib/linux-debug-mcp/rootfs/minimal.qcow2",
-        mutability="read_only",
+        source_kind="builder",
+        mutability="copy_on_write",
         readiness_marker="linux-debug-mcp-ready",
         ssh_host="127.0.0.1",
         ssh_port=22,

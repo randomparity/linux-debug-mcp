@@ -530,3 +530,11 @@ def test_introspect_tool_is_registered() -> None:
     assert tool.fn.__name__ == "debug_introspect_run"
     assert "script" in tool.parameters["properties"]
     assert "timeout_seconds" in tool.parameters["properties"]
+
+
+def test_default_minimal_rootfs_is_builder_copy_on_write() -> None:
+    from linux_debug_mcp.server import DEFAULT_ROOTFS_PROFILES
+
+    minimal = DEFAULT_ROOTFS_PROFILES["minimal"]
+    assert minimal.source_kind == "builder"
+    assert minimal.mutability == "copy_on_write"

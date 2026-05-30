@@ -91,10 +91,15 @@ def test_target_boot_public_defaults_resolve_manifest_profile_names(tmp_path: Pa
     record_build(artifact_root)
     provider = FakeBootProvider()
 
+    # The default `minimal` rootfs is source_kind="builder" pointing at an image the test
+    # host does not have, so it gates before plan_boot. Inject a resolvable local_path
+    # rootfs while leaving the target profile to resolve from the default registry — this
+    # still exercises manifest-name resolution for both profiles.
     response = target_boot_handler(
         artifact_root=artifact_root,
         run_id="run-abc123",
         provider=provider,
+        rootfs_profiles={"minimal": rootfs_profile(tmp_path)},
     )
 
     assert response.ok is True
