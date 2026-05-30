@@ -14,8 +14,10 @@ from conftest import (
 
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import BootOverrides, RootfsOverrides, RootfsProfile, TargetProfile
+from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore
 from linux_debug_mcp.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
 from linux_debug_mcp.providers.libvirt_qemu import BootExecutionResult, ProviderBootError
+from linux_debug_mcp.seams.target import TargetKey
 from linux_debug_mcp.server import target_boot_handler
 
 
@@ -626,3 +628,49 @@ def test_target_boot_frozen_override_yields_debug_next_action(tmp_path: Path) ->
     assert response.data["console_status"] == "frozen"
     assert response.suggested_next_actions == ["debug.start_session"]
     assert provider.plans[-1]["target_profile"].wait_for_debugger is True
+
+
+def test_frozen_boot_stays_on_success_path_for_provenance_capture(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    debug_target = target_profile().model_copy(update={"debug_gdbstub": True})
+    provider = FakeBootProvider(details={"console_status": "frozen"})
+
+    boot(
+        artifact_root,
+        tmp_path,
+        provider=provider,
+        target=debug_target,
+        boot_overrides=BootOverrides(wait_for_debugger=True),
+    )
+
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
+    boot_details = manifest.step_results["boot"].details
+    # record_build records no build_id, so capture records the error variant -- but it RAN,
+    # which proves the frozen boot stayed on the handler's SUCCEEDED path (server.py:1884).
+    assert "kernel_provenance" in boot_details or "kernel_provenance_capture_error" in boot_details
+
+
+def test_frozen_boot_publishes_admission_snapshot(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    debug_target = target_profile().model_copy(update={"debug_gdbstub": True})
+    # Hold our own SnapshotStore reference -- AdmissionService keeps it private, so assert
+    # on the store we constructed, not on the service.
+    snapshots = SnapshotStore()
+    admission = AdmissionService(snapshots)
+    provider = FakeBootProvider(details={"console_status": "frozen"})
+
+    response = boot(
+        artifact_root,
+        tmp_path,
+        provider=provider,
+        target=debug_target,
+        boot_overrides=BootOverrides(wait_for_debugger=True),
+        admission=admission,
+    )
+
+    assert response.ok is True
+    # The published snapshot is what debug.start_session/run_tests resolve via _require_snapshot.
+    target_key = TargetKey(provisioner="local-qemu", target_id="run-abc123")
+    assert snapshots.get(target_key) is not None
