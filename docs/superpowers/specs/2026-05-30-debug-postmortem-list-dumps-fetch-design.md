@@ -129,9 +129,9 @@ vmcore mtime), `size_bytes` (int — the vmcore's size), `incomplete` (bool — 
 | `run_id` | str | As above. |
 | `target_ref` | str | As above. |
 | `dump_ref` | str | A `path` from `list_dumps`; re-validated against a fresh enumeration (decision 2). |
-| `force` | bool | Default false; true re-transfers and replaces (decision 6). |
+| `force` | bool | Default false; true re-transfers and replaces (decision 6) **and** overrides the `incomplete`-dump refusal (§3.4 step 2.5). |
 | `dump_dir` | str \| null | Same override as `list_dumps`; the re-enumeration uses it. |
-| `max_bytes` | int \| null | When set, refuse a dump whose vmcore exceeds it (`dump_too_large`) before any transfer. |
+| `max_bytes` | int \| null | Per-call override of the default ceiling `DEFAULT_FETCH_MAX_BYTES`; refuse a dump whose total fetch size exceeds the effective ceiling (`dump_too_large`) before any transfer. `null` ⇒ the default ceiling still applies. |
 | `timeout_seconds` | int | Handler-bounded `[5, 3600]` (default 300). |
 | `debug_profile` / `target_profile` / `rootfs_profile` | str \| null | As above. |
 
@@ -161,10 +161,14 @@ Mirrors `prereqs/kdump_probe.py`'s split.
 | `kernel` | first-line kernel version from a readable `vmcore-dmesg.txt`, else null |
 | `incomplete` | true when only `vmcore-incomplete`/`vmcore.flat` is present (no finished `vmcore`) |
 | `present` | which of `vmcore-dmesg.txt`/`vmlinux`/`vmcoreinfo` exist in the dir |
+| `file_sizes` | `{name: st_size}` for the core file **and** every co-located file in `present` — the per-file expected size used by the §3.4 truncation guard (review finding 3) |
 
 Emits one JSON object `{"dump_dir": str, "exists": bool, "dumps": [record…]}`. A missing
 or empty dir → `dumps: []`. Each read is guarded so one unreadable dir never aborts the
-walk.
+walk. The `incomplete`/`vmcore.flat` distinction: `vmcore-incomplete` is makedumpfile's
+in-progress/failed marker (renamed to `vmcore` only on success), and `vmcore.flat` is the
+flattened format crash cannot read directly; both make a dir not directly fetchable, so
+both set `incomplete=true`.
 
 **`parse_dump_listing(probe) -> list[DumpEntry]`** (pure): turn each record into a
 `DumpEntry`. `capture_time` is `datetime.fromtimestamp(mtime, UTC).isoformat()` when
@@ -178,39 +182,72 @@ stability and collision-resistance.
 **`plan_fetch(entry: DumpEntry) -> list[FetchSpec]`** (pure): the ordered list of files
 to scp — always the core file; plus `vmcore-dmesg.txt`/`vmlinux`/`vmcoreinfo` when in
 `entry.available_files`. Each `FetchSpec` carries the remote path, the local name, the
-result-ref key (`vmcore_ref`/`vmlinux_ref`/…), and the expected remote size (vmcore
-only; the small symbol files are size-checked against their own re-stat). The unit of
-testing for which files map to which refs.
+result-ref key (`vmcore_ref`/`vmlinux_ref`/…), and the **expected size** for that file
+(from `entry.file_sizes`), so **every** staged file — not just the vmcore — gets the
+§3.4 size-match truncation guard (review finding 3). The unit of testing for which files
+map to which refs.
 
 ### 3.3 `build_scp_argv` (server.py)
 
-Mirrors `build_ssh_argv` (single source of truth for the SSH option shape) with scp's
+Mirrors `build_ssh_argv` for the `-o` option shape (single source of truth) with scp's
 spellings: same `-o BatchMode=yes / UserKnownHostsFile / ConnectTimeout /
 StrictHostKeyChecking` plus any extra `ssh_options`, uppercase `-P {port}`, `-i {key}`
-when set, then `user@host:remote_path` and the local dest path. The same
-`ConnectTimeout ≤ command_timeout` guard applies. Driven through `SshRunner.run` like
-any bounded subprocess.
+when set, then the `user@host:remote_path` source and the local dest path. The same
+`ConnectTimeout ≤ command_timeout` guard applies. Driven through `SshRunner.run` like any
+bounded subprocess.
+
+**Remote-path quoting (review finding 4).** Unlike `build_ssh_argv` (which `shlex.quote`s
+the whole remote command), scp's `host:remote_path` argument is expanded by a **remote**
+shell, and default kdump dirs contain `:` (`<host>-YYYY-MM-DD-HH:MM:SS`) — and hostnames
+can carry spaces/metacharacters. `build_scp_argv` therefore passes `scp -T` (disable the
+remote-side wildcard/strict filename check) **and** `shlex.quote`s the remote path
+*after* the `user@host:` prefix, so the remote shell receives the path literally. A test
+fetches from a dump dir containing `:` and a space to lock this in.
 
 ### 3.4 Fetch staging + idempotency loop
 
-Under `store.postmortem_fetch_lock(run_id)` (a new per-run file lock):
+The pre-transfer admission checks (run after `dump_ref` is matched in §3, **before** the
+lock):
+
+- **`incomplete` refusal (review finding 2):** if the matched `entry.incomplete` is true,
+  refuse with `READINESS_FAILURE / dump_incomplete` unless `force` — an
+  in-progress/`vmcore.flat` dir is not a directly-analyzable core, and its size races a
+  still-writing file so the size guard below would be unreliable.
+- **Size ceiling (review finding 1):** the effective ceiling is `max_bytes` when set,
+  else `DEFAULT_FETCH_MAX_BYTES` (a config constant). Refuse with `CONFIGURATION_ERROR /
+  dump_too_large` when `sum(entry.file_sizes.values())` exceeds it.
+- **Free-space precheck (review finding 1):** refuse with `INFRASTRUCTURE_FAILURE /
+  insufficient_disk` when `shutil.disk_usage(dest_parent).free` is below the total fetch
+  size plus a headroom margin. The total is known from `entry.file_sizes`, so the host is
+  never filled by a transfer it could have predicted would not fit.
+
+Then, under `store.postmortem_fetch_lock(run_id)` (a new per-run file lock):
 
 1. Load manifest; `step = step_results.get(f"postmortem.fetch:{dump_id}")`.
-2. If `step` is SUCCEEDED and not `force`: return the recorded refs unchanged,
-   `already_fetched=true`, **no** re-transfer (AC#4 "refuse to overwrite").
+2. If `step` is SUCCEEDED and not `force`: return the recorded refs/files unchanged
+   (read from the step's `details`), `already_fetched=true`, **no** re-transfer (AC#4
+   "refuse to overwrite").
 3. Else: clear the dest dir (`<run>/debug/postmortem/dumps/<dump_id>/`) if present
    (a partial prior attempt), recreate it 0o700.
 4. For each `FetchSpec`: build scp argv, `runner.run(..., timeout=timeout_seconds)`;
    on non-zero exit / timeout / cancel → `incomplete_transfer` failure (clean dest,
-   no success step). For the vmcore, require `local_size == expected_remote_size`
-   (decision 4); a mismatch is `incomplete_transfer`.
+   no success step). For **every** file, require `local_size == spec.expected_size`
+   (decision 4 / review finding 3); a mismatch is `incomplete_transfer`.
 5. Compute `sha256` + size of each staged file (`FetchedFile`).
 6. Persist a redacted `fetch.json` manifest in the dest dir; record a SUCCEEDED
-   `postmortem.fetch:<dump_id>` `StepResult` (replace when `force`). Return refs.
+   `postmortem.fetch:<dump_id>` `StepResult` whose `details` carry the refs + `files`
+   (so step 2 can return them) (replace when `force`). Return refs.
 
 The lock + load-under-lock + re-check mirrors the build/boot step pattern (CLAUDE.md).
 A `ManifestStateError` on record uses the `_record_terminal_*` retry-with-backoff
 pattern.
+
+**Latency budget note (review finding 3).** `timeout_seconds` bounds each scp subprocess
+(step 4). The post-transfer local `sha256` (step 5) is a full re-read of each staged file
+on local disk and is **not** covered by that timeout; for a multi-GB vmcore it adds a
+local-disk-bound pass whose cost the `DEFAULT_FETCH_MAX_BYTES` ceiling caps. This is
+local I/O (fast, predictable) rather than network, and the size ceiling bounds it; a
+future opt-in could skip the local hash for very large cores (ADR 0029 decision 4).
 
 ### 3.5 Failure contract
 
@@ -228,7 +265,9 @@ pattern.
 | no python3 on target (enumeration, exit 127) | INFRASTRUCTURE_FAILURE | `probe_no_python` |
 | enumeration emitted no parseable JSON dict | INFRASTRUCTURE_FAILURE | `probe_unparseable` |
 | `dump_ref` not in the fresh listing (fetch) | CONFIGURATION_ERROR | `dump_not_found` |
-| vmcore exceeds `max_bytes` (fetch) | CONFIGURATION_ERROR | `dump_too_large` |
+| matched dump is `incomplete` and not `force` (fetch) | READINESS_FAILURE | `dump_incomplete` |
+| total fetch size exceeds the effective ceiling (fetch) | CONFIGURATION_ERROR | `dump_too_large` |
+| host free space below total fetch size + headroom (fetch) | INFRASTRUCTURE_FAILURE | `insufficient_disk` |
 | scp transferred a short/partial file (fetch) | INFRASTRUCTURE_FAILURE | `incomplete_transfer` |
 
 `list_dumps` returning JSON (including an empty `dumps`) is always a `success`. Only an
@@ -247,7 +286,8 @@ Raw enumeration stdout/stderr and scp stdout/stderr stay under
 |---|---|
 | `list_dumps` per-dump `path`/`kernel`/`time`/`size`; empty list when none | §3.2 `parse_dump_listing`; pure unit tests (empty, one, many, incomplete-only) + env-gated integration |
 | `fetch` stages vmcore (+ symbols) and returns run-relative refs the analyzers accept | §3.4 staging; handler test asserts refs resolve under the run dir and feed `confine_run_relative` |
-| each retrieved file reports `sha256` + size; truncation detected, not silently accepted | §3.4 step 4–5 (size match) + ADR 0029 decision 4; handler test with a fake runner that writes a short file → `incomplete_transfer` |
+| each retrieved file reports `sha256` + size; truncation detected, not silently accepted | §3.4 step 4–5 (per-file size match) + ADR 0029 decision 4; handler tests: a short vmcore **and** a short symbol file each → `incomplete_transfer` |
+| bounded transfer (issue scope) | §3.4 pre-transfer `dump_too_large` (ceiling) + `insufficient_disk` (free-space precheck) + `dump_incomplete` refusal; handler tests for each |
 | re-fetch without `force` refused; with `force` replaces | §3.4 step 2 idempotency; handler test (second call cached `already_fetched=true`; `force` re-transfers) |
 | captured metadata redacted; HALTED fast-rejected | §3.6 + §3.0/§3.1 HALTED reject; handler tests (seeded secret absent; injected HALTED session record) |
 | live-target test env-gated | integration test guarded on an env var + reachable guest with a captured dump, like `test_kdump_prereqs_integration.py`; never un-gated in CI |
@@ -261,11 +301,13 @@ Raw enumeration stdout/stderr and scp stdout/stderr stay under
 - **Handler tests** (`tests/test_postmortem_list_dumps.py`,
   `tests/test_postmortem_fetch.py`): fake `SshRunner` returning canned enumeration JSON
   and writing staged files; list success (incl. empty); fetch success with refs +
-  sha256 + size; truncated transfer → `incomplete_transfer`; `dump_not_found`;
-  `dump_too_large`; idempotent re-fetch (cached) and `force` re-transfer; HALTED
-  fast-reject; config errors (run-not-found, profile mismatch, bad timeout, bad
-  dump_dir, non-ssh rootfs); python3-absent (exit 127); unparseable stdout; redaction of
-  a seeded secret. Handlers called directly with injected providers/profiles.
+  sha256 + size; truncated vmcore **and** truncated symbol file → `incomplete_transfer`;
+  `dump_not_found`; `dump_incomplete` (and `force` override); `dump_too_large`;
+  `insufficient_disk`; remote path with `:`/space (scp quoting); idempotent re-fetch
+  (cached) and `force` re-transfer; HALTED fast-reject; config errors (run-not-found,
+  profile mismatch, bad timeout, bad dump_dir, non-ssh rootfs); python3-absent (exit
+  127); unparseable stdout; redaction of a seeded secret. Handlers called directly with
+  injected providers/profiles.
 - **Capability / config tests**: both ops in `ALLOWED_DEBUG_OPERATIONS` and in
   `local_vmcore_retrieval_capability().operations`; `required_host_tools` includes scp.
 - **Env-gated integration** (`tests/test_postmortem_fetch_integration.py`): real SSH/scp

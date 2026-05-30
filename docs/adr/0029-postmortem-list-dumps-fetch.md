@@ -55,21 +55,30 @@ scp's concern, not the pipe's. A new `build_scp_argv` mirrors `build_ssh_argv` (
 `-o BatchMode/UserKnownHostsFile/ConnectTimeout/StrictHostKeyChecking` options and key
 selection) with scp's spellings: uppercase `-P` for the port and a
 `user@host:remote_path` source plus a local dest path. scp is driven through the
-existing `SshRunner.run` (it is just another bounded, cancelable subprocess).
+existing `SshRunner.run` (it is just another bounded, cancelable subprocess). Because
+scp's `host:remote_path` is expanded by a **remote** shell (unlike `build_ssh_argv`,
+which `shlex.quote`s the whole remote command) and default kdump dirs contain `:` while
+hostnames can carry spaces, `build_scp_argv` passes `scp -T` and `shlex.quote`s the
+remote path after the `user@host:` prefix so the remote shell receives it literally.
 
 ### 4. Truncation detection is a remote-size vs local-size comparison; sha256 is reported
 
 The integrity oracle that AC#3 requires ("a truncated/partial transfer is detected and
-reported, not silently accepted") is: record the **expected remote size** (the
-`st_size` the re-enumeration in decision 2 stat'd), transfer via scp, then require scp
-exit 0 **and** `local_size == expected_remote_size`. A short file (dropped connection
-mid-transfer, ENOSPC on the host) fails the size check → `INFRASTRUCTURE_FAILURE /
-incomplete_transfer`, the partial dest dir is removed, and **no** SUCCEEDED step is
-recorded. Each retrieved file additionally reports its local `sha256` + `size_bytes`
-(for provenance and the agent's own end-to-end verification). A full **remote** sha256
-is *not* computed by default: hashing a multi-GB vmcore on the target reads the whole
-file an extra time, and size + scp's own exit status already detect truncation. (A
-future opt-in remote-hash verification is noted as a rejected-for-now alternative.)
+reported, not silently accepted") is: record the **expected remote size** for **every**
+file the enumeration lists (the script reports `file_sizes` for the core file and each
+co-located symbol file, not just the vmcore), transfer via scp, then require scp exit 0
+**and** `local_size == expected_size` for each staged file. A short file (dropped
+connection mid-transfer, ENOSPC on the host) fails the size check →
+`INFRASTRUCTURE_FAILURE / incomplete_transfer`, the partial dest dir is removed, and
+**no** SUCCEEDED step is recorded. Each retrieved file additionally reports its local
+`sha256` + `size_bytes` (for provenance and the agent's own end-to-end verification);
+the local hash is a local-disk-bound re-read whose cost the decision-7 size ceiling
+bounds (it is not covered by the scp `timeout_seconds`, which bounds only the transfer
+subprocess). A full **remote** sha256 is *not* computed by default: hashing a multi-GB
+vmcore on the target reads the whole file an extra time, and size + scp's own exit
+status already detect truncation. (A future opt-in remote-hash verification — and a
+future opt-out of the local hash for very large cores — are noted as rejected-for-now
+alternatives.)
 
 ### 5. Staging layout and a deterministic `dump_id`
 
@@ -100,16 +109,30 @@ dest dir is cleared and the dump re-transferred, replacing the step
 left a partial dir but no SUCCEEDED step) does not short-circuit: the dest dir is
 cleared and re-fetched. The manifest step — not dir existence — is the source of truth.
 
-### 7. `fetch` gets its own timeout band `[5, 3600]`; `list_dumps` keeps the probe band `[5, 60]`
+### 7. `fetch` is bounded three ways before a byte moves: timeout band, size ceiling, free-space precheck
 
 A bulk multi-GB scp cannot complete inside the probe's `[5, 60]` band. `fetch`'s
 `timeout_seconds` defaults to 300 and is bounded `[5, 3600]`; `list_dumps` keeps the
 probe `[5, 60]` (default 20). `_resolve_probe_context`'s hard-coded `[5, 60]` check is
 generalized to a `(min, max)` parameter (default `(5, 60)`), so the shared resolver
 serves both ops — the same low-blast-radius generalization #94 applied to the request
-type (ADR 0028 decision 8). An optional request `max_bytes` lets an agent refuse a dump
-larger than a ceiling up front (`CONFIGURATION_ERROR / dump_too_large` before any
-transfer), reading the size `list_dumps` already reported.
+type (ADR 0028 decision 8).
+
+"Bounded transfer" is an explicit issue-scope item, so the size bound is **not** opt-in.
+Because the enumeration (decision 2) stat'd the exact total fetch size before any
+transfer, `fetch` enforces, before taking the lock: (a) a **default ceiling**
+`DEFAULT_FETCH_MAX_BYTES` (a config constant), which the request's `max_bytes` overrides
+when set — a dump whose total exceeds the effective ceiling is refused
+`CONFIGURATION_ERROR / dump_too_large`; and (b) a **free-space precheck** —
+`shutil.disk_usage(dest).free` below the total plus a headroom margin is refused
+`INFRASTRUCTURE_FAILURE / insufficient_disk`. The host is therefore never filled by a
+transfer it could have predicted would not fit, and the unbounded-by-default
+disk-consumption failure mode is closed.
+
+`fetch` also refuses an `incomplete` dump (the enumeration's `incomplete` fact:
+`vmcore-incomplete`/`vmcore.flat` with no finished `vmcore`) with `READINESS_FAILURE /
+dump_incomplete` unless `force` — an in-progress core is not directly analyzable and its
+size races a still-writing file, which would make the decision-4 size guard unreliable.
 
 ### 8. HALTED fast-reject on both ops (reuse #94, generalized message)
 
