@@ -615,13 +615,20 @@ def _redacted_boot_data(data: dict[str, Any]) -> dict[str, Any]:
     return Redactor().redact_value(data)
 
 
+def _boot_success_next_actions(details: dict[str, Any]) -> list[str]:
+    """A frozen boot steers the agent to attach; a normal boot to the manifest."""
+    if details.get("console_status") == "frozen":
+        return ["debug.start_session"]
+    return ["artifacts.get_manifest"]
+
+
 def _recorded_boot_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
     return ToolResponse.success(
         summary=result.summary,
         run_id=run_id,
         data=_redacted_boot_data(result.details),
         artifacts=result.artifacts,
-        suggested_next_actions=["artifacts.get_manifest"],
+        suggested_next_actions=_boot_success_next_actions(result.details),
     )
 
 
@@ -1927,17 +1934,12 @@ def target_boot_handler(
                 rootfs_profile=resolved_rootfs_profile,
             )
         if execution.status == StepStatus.SUCCEEDED:
-            next_actions = (
-                ["debug.start_session"]
-                if terminal.details.get("console_status") == "frozen"
-                else ["artifacts.get_manifest"]
-            )
             return ToolResponse.success(
                 summary=execution.summary,
                 run_id=run_id,
                 data=_redacted_boot_data(terminal.details),
                 artifacts=execution.artifacts,
-                suggested_next_actions=next_actions,
+                suggested_next_actions=_boot_success_next_actions(terminal.details),
             )
         return ToolResponse.failure(
             category=execution.error_category or ErrorCategory.INFRASTRUCTURE_FAILURE,

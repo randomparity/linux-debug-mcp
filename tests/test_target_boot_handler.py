@@ -630,6 +630,27 @@ def test_target_boot_frozen_override_yields_debug_next_action(tmp_path: Path) ->
     assert provider.plans[-1]["target_profile"].wait_for_debugger is True
 
 
+def test_target_boot_frozen_short_circuit_preserves_debug_next_action(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    debug_target = target_profile().model_copy(update={"debug_gdbstub": True})
+    provider = FakeBootProvider(details={"console_status": "frozen"})
+
+    first = boot(
+        artifact_root,
+        tmp_path,
+        provider=provider,
+        target=debug_target,
+        boot_overrides=BootOverrides(wait_for_debugger=True),
+    )
+    # Re-invoke without force/override: short-circuits on the recorded SUCCEEDED frozen boot.
+    second = boot(artifact_root, tmp_path, provider=provider, target=debug_target)
+
+    assert first.suggested_next_actions == ["debug.start_session"]
+    assert second.suggested_next_actions == ["debug.start_session"]
+    assert len(provider.executions) == 1
+
+
 def test_frozen_boot_stays_on_success_path_for_provenance_capture(tmp_path: Path) -> None:
     artifact_root = create_run(tmp_path)
     record_build(artifact_root)
