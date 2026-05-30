@@ -928,11 +928,13 @@ git commit -m "feat(postmortem): register crash operation + caps + allowlist"
 
 **Files:**
 - Modify: `src/linux_debug_mcp/domain.py`
-- Test: `tests/test_debug_postmortem_crash.py` (create — first tests)
+- Test: `tests/test_crash_request_model.py` (create) — model tests only; the handler
+  tests live in their own file (Task 9), so this file has no forward dependency on the
+  not-yet-existing handler.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/test_debug_postmortem_crash.py`:
+Create `tests/test_crash_request_model.py`:
 
 ```python
 from __future__ import annotations
@@ -964,7 +966,7 @@ def test_request_forbids_extra() -> None:
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/test_debug_postmortem_crash.py -q`
+Run: `uv run python -m pytest tests/test_crash_request_model.py -q`
 Expected: FAIL — `ImportError: DebugPostmortemCrashRequest`.
 
 - [ ] **Step 3: Implement**
@@ -993,14 +995,14 @@ class DebugPostmortemCrashRequest(Model):
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `uv run python -m pytest tests/test_debug_postmortem_crash.py -q`
+Run: `uv run python -m pytest tests/test_crash_request_model.py -q`
 Expected: PASS (2 passed).
 
 - [ ] **Step 5: Guardrails + commit**
 
 ```bash
-uv run ruff check && uv run ruff format && uv run ty check src && uv run python -m pytest tests/test_debug_postmortem_crash.py -q
-git add src/linux_debug_mcp/domain.py tests/test_debug_postmortem_crash.py
+uv run ruff check && uv run ruff format && uv run ty check src && uv run python -m pytest tests/test_crash_request_model.py -q
+git add src/linux_debug_mcp/domain.py tests/test_crash_request_model.py
 git commit -m "feat(postmortem): add DebugPostmortemCrashRequest model"
 ```
 
@@ -1212,19 +1214,31 @@ template.
 
 **Files:**
 - Modify: `src/linux_debug_mcp/server.py`
-- Test: `tests/test_debug_postmortem_crash.py` (extend Task 6's file)
+- Test: `tests/test_debug_postmortem_crash.py` (**create** — a new file separate from
+  the Task 6 model-test file, so all imports sit at the top and there is no `E402`
+  mid-file-import violation)
 
 - [ ] **Step 1: Write the failing handler tests**
 
-Append to `tests/test_debug_postmortem_crash.py`:
+Create `tests/test_debug_postmortem_crash.py` (all imports at the top of the file):
 
 ```python
+from __future__ import annotations
+
 from pathlib import Path
 
+import pytest
+
 from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.domain import ErrorCategory, RunRequest, StepStatus
+from linux_debug_mcp.domain import (
+    DebugPostmortemCrashRequest,
+    ErrorCategory,
+    RunRequest,
+)
 from linux_debug_mcp.providers.local_ssh_tests import SshCommandResult
 from linux_debug_mcp.server import debug_postmortem_crash_handler
+
+GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
 
 def _run(tmp_path: Path) -> ArtifactStore:
@@ -1244,9 +1258,6 @@ def _run(tmp_path: Path) -> ArtifactStore:
     (rd / "inputs" / "vmcore").write_bytes(b"core")
     (rd / "build" / "vmlinux").write_bytes(b"elf")
     return store
-
-
-GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
 
 class _FakeRunner:
