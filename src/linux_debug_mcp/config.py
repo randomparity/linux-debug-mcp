@@ -133,6 +133,10 @@ ALLOWED_DEBUG_OPERATIONS = [
     # Composite triage (#93). Listed for enumerability; never gated (§5.6 rule 3) —
     # composes the crash + drgn offline tiers, no DebugProfile in the request.
     "debug.postmortem.triage",
+    # Live-target kdump readiness probe (#94 / ADR 0028). An ssh-tier diagnostic;
+    # gated only by the §5.6 HALTED fast-reject, not by DebugProfile.enabled_operations
+    # (like debug.introspect.check_prerequisites). Listed for enumerability.
+    "debug.postmortem.check_prereqs",
     # ADR 0011 / #56: capability token (NOT an MCP tool) gating allow_write=true on the live
     # introspect path. Only ever passed to `_ensure_debug_operation_enabled`, never registered
     # as a tool. A read-only profile narrows `enabled_operations` to exclude it to refuse writes.
