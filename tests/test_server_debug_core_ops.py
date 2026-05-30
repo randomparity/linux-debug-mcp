@@ -39,7 +39,11 @@ from linux_debug_mcp.seams.target import (
     TargetKey,
     publish_ready_snapshot,
 )
-from linux_debug_mcp.server import debug_start_session_handler
+from linux_debug_mcp.server import (
+    debug_continue_handler,
+    debug_set_breakpoint_handler,
+    debug_start_session_handler,
+)
 from linux_debug_mcp.transport.base import ExecutionState, LineRole, TransportRef
 
 RUN_ID = "run-1"
@@ -291,3 +295,115 @@ def test_start_session_fault_reaps_live_session(tmp_path: Path) -> None:
     # The guaranteed-resume teardown reaped the live session and freed the durable record.
     assert registry.read_record(KEY) is None
     assert all(sessions.get(sid) is None for sid in [response.data.get("debug_session_id", "")] if sid)
+
+
+def _debug_step_details(artifact_root: Path) -> dict[str, object]:
+    store = ArtifactStore(artifact_root, create_root=False)
+    debug = store.load_manifest(RUN_ID).step_results.get("debug")
+    assert debug is not None and debug.status is StepStatus.SUCCEEDED
+    return debug.details
+
+
+def _load_persisted_session(artifact_root: Path, session_id: str) -> dict[str, object]:
+    import json
+
+    session_path = artifact_root / RUN_ID / "debug" / "sessions" / f"{session_id}.json"
+    return json.loads(session_path.read_text(encoding="utf-8"))
+
+
+def test_set_breakpoint_dispatches_and_refreshes_persisted_ledger(tmp_path: Path) -> None:
+    """A stateful mutator runs on the registered live attachment, rebuilds the breakpoint ledger from
+    the engine's authoritative -break-list, and persists it to the durable session."""
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+    engine = FakeMiEngine()
+    sessions = GdbMiSessionRegistry()
+    start = _start(artifact_root, registry=registry, txn=txn, admission=admission, engine=engine, sessions=sessions)
+    assert start.ok is True, start
+    session_id = start.data["debug_session_id"]
+
+    response = debug_set_breakpoint_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        symbol="do_sys_open",
+        debug_session_id=session_id,
+        debug_profiles=_profiles(),
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
+
+    assert response.ok is True, response
+    # The op dispatched onto the live attachment, then refreshed the ledger via -break-list.
+    assert ("set_breakpoint", ("do_sys_open",)) in engine.calls
+    assert ("list_breakpoints", ()) in engine.calls
+    assert response.data["breakpoint"]["number"] == "1"
+    # The authoritative ledger (keyed by gdb breakpoint number) is persisted to the durable session.
+    persisted = _load_persisted_session(artifact_root, session_id)
+    assert "1" in persisted["breakpoints"]
+    assert persisted["breakpoints"]["1"]["func"] == "do_sys_open"
+
+
+def test_stateful_op_preserves_transport_binding_and_mi_probe(tmp_path: Path) -> None:
+    """A persisted op re-records the debug step; it must carry forward start_session's
+    transport_session_id and mi_probe, else a later debug.end_session cannot close the transport and
+    the attach probe record is lost from the manifest."""
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+    engine = FakeMiEngine()
+    sessions = GdbMiSessionRegistry()
+    start = _start(artifact_root, registry=registry, txn=txn, admission=admission, engine=engine, sessions=sessions)
+    assert start.ok is True, start
+    session_id = start.data["debug_session_id"]
+    before = _debug_step_details(artifact_root)
+    assert "transport_session_id" in before and "mi_probe" in before
+
+    response = debug_set_breakpoint_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        symbol="do_sys_open",
+        debug_session_id=session_id,
+        debug_profiles=_profiles(),
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
+    assert response.ok is True, response
+
+    after = _debug_step_details(artifact_root)
+    assert after["transport_session_id"] == before["transport_session_id"]
+    assert after["mi_probe"] == before["mi_probe"]
+
+
+def test_continue_dispatches_onto_live_attachment(tmp_path: Path) -> None:
+    """An interactive resume verb (continue) drives the live attachment and surfaces the typed stop
+    record; it persists without disturbing the breakpoint ledger."""
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+    engine = FakeMiEngine()
+    sessions = GdbMiSessionRegistry()
+    start = _start(artifact_root, registry=registry, txn=txn, admission=admission, engine=engine, sessions=sessions)
+    assert start.ok is True, start
+    session_id = start.data["debug_session_id"]
+
+    response = debug_continue_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        timeout_seconds=5,
+        debug_session_id=session_id,
+        debug_profiles=_profiles(),
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
+
+    assert response.ok is True, response
+    assert ("continue_", (5,)) in engine.calls
+    assert response.data["stop"]["reason"] == "breakpoint-hit"
+    assert response.data["current_execution_state"] == "stopped"
