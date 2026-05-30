@@ -92,6 +92,7 @@ from linux_debug_mcp.providers.contracts import (
     ReservationRequest,
     ReserveProvisionBootRequest,
 )
+from linux_debug_mcp.providers.gdb_mi import GdbMiEngine, GdbMiError
 from linux_debug_mcp.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from linux_debug_mcp.providers.local_drgn_introspect import (
     SCRIPT_BYTE_CAP,
@@ -4010,6 +4011,122 @@ def _halt_debug_transport(
     admission.cancel_ssh_tier(session.target_key, session.generation, halt_epoch=halt_epoch)
 
 
+def _resume_debug_transport(
+    *,
+    session: TransportSession,
+    admission: AdmissionService,
+    session_registry: SessionRegistry,
+) -> None:
+    """Inverse of `_halt_debug_transport` for the guaranteed-resume path: once the MI engine confirms
+    the kernel is EXECUTING again (best-effort continue + RSP disconnect), persist HALTED->EXECUTING
+    and bump the execution epoch so a fresh ssh-tier proof at the new epoch is accepted. Writing the
+    durable record EXECUTING also makes a subsequent transaction.close() leave NO closed_while_halted
+    recovery tombstone, so a fresh ssh-tier operation succeeds with the target back in EXECUTING
+    (interface-contracts §5.6)."""
+    session_registry.write_record(session.model_copy(update={"execution_state": ExecutionState.EXECUTING}))
+    admission.note_execution_transition(session.target_key, session.generation)
+
+
+def _teardown_debug_transport(
+    *,
+    transport_session: TransportSession,
+    transaction: TransportTransaction,
+    session_registry: SessionRegistry | None,
+    session_guard: SessionGuard | None,
+) -> None:
+    """Tear down an open transport session after a failed attach: SessionGuard-supervised close when
+    the guard is wired, else a guarded transaction.close(force=False). Shared by the legacy batch
+    attach-failure path and the Phase-A MI probe-failure path."""
+    sid = transport_session.session_id
+    tkey = transport_session.target_key
+    if session_guard is not None and session_registry is not None:
+        session_guard.teardown(
+            SessionGuardContext(
+                target_key=tkey, generation=transport_session.generation, session_id=sid, reason="attach_error"
+            ),
+            close=lambda: transaction.close(sid, force=False),
+            read_record=lambda: session_registry.read_record(tkey),
+            force_reap=lambda: transaction.force_release(sid),
+        )
+    else:
+        with contextlib.suppress(Exception):
+            transaction.close(sid, force=False)
+
+
+def _run_mi_attach_probe(
+    *,
+    engine: GdbMiEngine,
+    transport_session: TransportSession,
+    vmlinux_path: Path,
+    run_dir: Path,
+    run_id: str,
+    transaction: TransportTransaction,
+    admission: AdmissionService,
+    session_registry: SessionRegistry,
+    session_guard: SessionGuard | None,
+    redactor: Redactor,
+) -> tuple[ToolResponse | None, dict[str, object]]:
+    """Phase-A gdb/MI foundation probe: attach over the guard-protected TransportSession.rsp_endpoint,
+    read one MI record as typed JSON, detach cleanly. Returns ``(None, {"mi_probe": ...})`` on success
+    (the typed record is merged into the debug step details; the legacy batch start_session then runs
+    as the session-of-record), or ``(failure_response, {})`` after a guaranteed-resume teardown that
+    never leaves the kernel HALTED. The probe and the batch attach are sequential (QEMU's gdbstub
+    takes one connection at a time); Phase C collapses them by moving the session-of-record onto the
+    engine."""
+    transcript_path = run_dir / "debug" / "mi-probe.log"
+    attachment = None
+    try:
+        attachment = engine.attach(
+            rsp_endpoint=transport_session.rsp_endpoint, vmlinux_path=vmlinux_path, transcript_path=transcript_path
+        )
+        record = engine.probe_read(attachment)
+        engine.resume_and_detach(attachment)
+        mi_probe: dict[str, object] = {
+            "mi_probe": redactor.redact_value(
+                {"record": record.model_dump(mode="json"), "transcript_path": str(transcript_path)}
+            )
+        }
+        return None, mi_probe
+    except Exception as exc:  # noqa: BLE001 - the guaranteed-resume invariant is unconditional
+        # The invariant is "the target is NEVER left HALTED on a tool error" (engine crash, RSP
+        # timeout, AND a raised tool exception). So this catch is intentionally broad: a non-GdbMiError
+        # (e.g. an unwrapped pygdbmi error) must still trigger resume + teardown, not escape and strand
+        # the kernel HALTED with the guard held. KeyboardInterrupt/SystemExit (BaseException, not
+        # Exception) still propagate. The error is re-reported as a failure response, never swallowed.
+        category = exc.category if isinstance(exc, GdbMiError) else ErrorCategory.INFRASTRUCTURE_FAILURE
+        base_details = exc.details if isinstance(exc, GdbMiError) else {}
+        # If attach failed before connecting (bad endpoint / missing gdb / missing vmlinux), no RSP
+        # connection was made, so the engine never halted the target -> treat resume as confirmed so
+        # the durable record is un-halted and no recovery tombstone is left. Otherwise run the
+        # guaranteed-resume (best-effort continue + disconnect + kill).
+        resume_confirmed = engine.force_resume(attachment) if attachment is not None else True
+        if resume_confirmed:
+            # Best-effort: the un-halt is a durable write that could raise (e.g. OSError on a full
+            # disk). It MUST NOT be able to skip the teardown below, or the guaranteed-resume
+            # invariant would be defeated (guard left held, kernel left HALTED). If the EXECUTING
+            # write fails, teardown's close(force=False) then leaves a closed_while_halted recovery
+            # tombstone -- the conservative fallback -- and still releases the guard.
+            with contextlib.suppress(Exception):
+                _resume_debug_transport(
+                    session=transport_session, admission=admission, session_registry=session_registry
+                )
+        _teardown_debug_transport(
+            transport_session=transport_session,
+            transaction=transaction,
+            session_registry=session_registry,
+            session_guard=session_guard,
+        )
+        details = redactor.redact_value({**base_details, "transport_session_id": transport_session.session_id})
+        failure = ToolResponse.failure(
+            category=category,
+            message=redactor.redact_text(str(exc)),
+            run_id=run_id,
+            details=details,
+            suggested_next_actions=["host.check_prerequisites", "artifacts.get_manifest"],
+        )
+        return failure, {}
+
+
 def _verify_gdb_symbol_version_lock(
     *,
     boot_result: StepResult,
@@ -4097,6 +4214,7 @@ def debug_start_session_handler(
     session_guard: SessionGuard | None = None,
     recovery: bool = False,
     build_id_reader: Callable[[Path], str] = read_elf_build_id,
+    gdb_mi_engine: GdbMiEngine | None = None,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -4179,6 +4297,7 @@ def debug_start_session_handler(
                 return version_lock_failure
             transport_enabled = transaction is not None and admission is not None and session_registry is not None
             transport_session: TransportSession | None = None
+            mi_probe_details: dict[str, object] = {}
             if transport_enabled:
                 # mypy/ty narrowing: transport_enabled proves these are not None.
                 assert transaction is not None and admission is not None and session_registry is not None
@@ -4225,6 +4344,25 @@ def debug_start_session_handler(
                 # Persist HALTED + bump the execution epoch BEFORE the gdb attach halts the kernel,
                 # so target.run_tests rejects with target_halted for the debugger's whole window.
                 _halt_debug_transport(session=transport_session, admission=admission, session_registry=session_registry)
+                if gdb_mi_engine is not None:
+                    # Phase-A gdb/MI foundation probe over the guard-protected RSP endpoint, BEFORE the
+                    # legacy batch attach (the session-of-record until Phase C). A probe fault runs the
+                    # guaranteed-resume teardown and returns; success merges the typed record into the
+                    # debug step details.
+                    probe_failure, mi_probe_details = _run_mi_attach_probe(
+                        engine=gdb_mi_engine,
+                        transport_session=transport_session,
+                        vmlinux_path=Path(vmlinux.path),
+                        run_dir=store.run_dir(run_id),
+                        run_id=run_id,
+                        transaction=transaction,
+                        admission=admission,
+                        session_registry=session_registry,
+                        session_guard=session_guard,
+                        redactor=redactor,
+                    )
+                    if probe_failure is not None:
+                        return probe_failure
             try:
                 result = provider.start_session(
                     run_id=run_id,
@@ -4246,23 +4384,12 @@ def debug_start_session_handler(
                 # tombstone semantics (a future recovery=True reattach clears it). Guarded so a
                 # close hiccup never masks the original ProviderDebugError.
                 if transport_session is not None and transaction is not None:
-                    if session_guard is not None and session_registry is not None:
-                        sid = transport_session.session_id
-                        tkey = transport_session.target_key
-                        session_guard.teardown(
-                            SessionGuardContext(
-                                target_key=tkey,
-                                generation=transport_session.generation,
-                                session_id=sid,
-                                reason="attach_error",
-                            ),
-                            close=lambda: transaction.close(sid, force=False),
-                            read_record=lambda: session_registry.read_record(tkey),
-                            force_reap=lambda: transaction.force_release(sid),
-                        )
-                    else:
-                        with contextlib.suppress(Exception):
-                            transaction.close(transport_session.session_id, force=False)
+                    _teardown_debug_transport(
+                        transport_session=transport_session,
+                        transaction=transaction,
+                        session_registry=session_registry,
+                        session_guard=session_guard,
+                    )
                 exc_details = dict(exc.details)
                 if transport_session is not None:
                     exc_details["transport_session_id"] = transport_session.session_id
@@ -4283,6 +4410,9 @@ def debug_start_session_handler(
                     suggested_next_actions=["artifacts.get_manifest"],
                 )
             details = _debug_session_manifest_details(store=store, run_id=run_id, session=result.session)
+            if mi_probe_details:
+                # surface the typed gdb/MI probe record (AC#1: "one MI record returned as typed JSON").
+                details.update(mi_probe_details)
             if transport_session is not None:
                 # bind the DebugSession to the transport-ownership record so close() can tear it down.
                 details["transport_session_id"] = transport_session.session_id
@@ -6085,6 +6215,9 @@ def create_app(
     admission_service = machinery.admission
     durable_registry = machinery.session_registry
     session_guard = machinery.session_guard
+    # The persistent gdb/MI engine (#79). One instance is fine: attach() spawns a fresh gdb -i=mi3
+    # subprocess per call and detaches within debug.start_session, so it holds no per-session state.
+    gdb_mi_engine = GdbMiEngine()
     # Stash the assembled machinery on the FastMCP instance so test-injection and any future
     # in-process lifecycle event source can reach the SAME admission/transaction/dispatcher trio
     # the tool wrappers close over (rather than constructing a parallel set that would not share
@@ -6634,6 +6767,7 @@ def create_app(
             admission=admission_service,
             session_registry=durable_registry,
             session_guard=session_guard,
+            gdb_mi_engine=gdb_mi_engine,
         ).model_dump(mode="json")
 
     @app.tool(name="debug.read_registers")

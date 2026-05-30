@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -24,11 +25,15 @@ class SubprocessPrerequisiteRunner:
         return shutil.which(command)
 
     def run(self, command: list[str], timeout: int) -> tuple[int, str, str]:
+        # errors="replace": tool output (e.g. gdb's banner) is not guaranteed clean UTF-8, and a
+        # strict decode would raise UnicodeDecodeError out of a prerequisite probe. Replacement keeps
+        # the output usable for the substring/version checks the callers perform.
         completed = subprocess.run(
             command,
             check=False,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
         )
         return completed.returncode, completed.stdout, completed.stderr
@@ -47,6 +52,7 @@ def check_prerequisites(
     checks.extend(_python_package_checks())
     for tool in ["make", "bash", "git", "qemu-system-x86_64", "virsh", "gdb"]:
         checks.append(_tool_check(tool, runner))
+    checks.append(_gdb_mi_capability_check(runner))
     checks.append(_agent_proxy_check(runner))
     checks.append(_compiler_check(runner))
     checks.append(_artifact_root_check(artifact_root, source_path))
@@ -79,6 +85,80 @@ def _tool_check(tool: str, runner: PrerequisiteRunner) -> PrerequisiteCheck:
         status=PrerequisiteStatus.FAILED,
         message=f"{tool} was not found",
         suggested_fix=f"Install {tool} with your distribution package manager.",
+    )
+
+
+_GDB_VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.\d+)?")
+_MI_MIN_VERSION = (9, 1)
+
+
+def _parse_gdb_version(text: str) -> tuple[int, int] | None:
+    """Parse gdb's OWN version from ``gdb --version``. gdb prints it as the last whitespace-delimited
+    token of the first line -- ``GNU gdb (Ubuntu 8.0.1-1ubuntu1) 12.1`` -- so take the LAST
+    version-shaped match on the first line, not the first (which may be a distro/package version in
+    the parenthetical)."""
+    lines = text.splitlines()
+    if not lines:
+        return None
+    matches = list(_GDB_VERSION_RE.finditer(lines[0]))
+    if not matches:
+        return None
+    match = matches[-1]
+    return (int(match.group(1)), int(match.group(2)))
+
+
+def _gdb_mi_capability_check(runner: PrerequisiteRunner) -> PrerequisiteCheck:
+    """Verify gdb supports the mi3 machine interface the debug.gdb tier requires: gdb must be
+    present, at least 9.1 (the GDB manual's documented mi3 introduction), and must answer one mi3
+    command with a well-formed ``^done`` record -- not merely accept the ``mi3`` interpreter name."""
+    required = f"{_MI_MIN_VERSION[0]}.{_MI_MIN_VERSION[1]}"
+    if runner.which("gdb") is None:
+        return PrerequisiteCheck(
+            check_id="tool.gdb_mi",
+            status=PrerequisiteStatus.FAILED,
+            message=f"gdb was not found; the debug.gdb tier requires gdb >= {required} with mi3 support",
+            suggested_fix=f"Install gdb >= {required} with your distribution package manager.",
+        )
+    try:
+        _code, version_out, _err = runner.run(["gdb", "--version"], 10)
+        # Run a real mi3 MI command and require a well-formed `^done`, not merely that the `mi3` name
+        # is accepted. `-ex "interpreter-exec mi3 ..."` runs the MI command from CLI mode and prints
+        # its MI records to stdout, so no stdin is needed (the runner has no stdin channel). On a gdb
+        # without a working mi3 interpreter, interpreter-exec errors and no `^done` is produced.
+        mi_code, mi_out, _mi_err = runner.run(
+            ["gdb", "-nx", "-q", "-ex", 'interpreter-exec mi3 "-list-features"', "-ex", "quit"], 10
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
+        return PrerequisiteCheck(
+            check_id="tool.gdb_mi",
+            status=PrerequisiteStatus.FAILED,
+            message=f"could not probe gdb mi3 capability: {exc}",
+            suggested_fix=f"Confirm gdb >= {required} is installed and runnable.",
+        )
+    version = _parse_gdb_version(version_out)
+    if version is None or version < _MI_MIN_VERSION:
+        detected = f"{version[0]}.{version[1]}" if version is not None else "unknown"
+        return PrerequisiteCheck(
+            check_id="tool.gdb_mi",
+            status=PrerequisiteStatus.FAILED,
+            message=f"gdb {detected} is too old for the mi3 interface; the debug.gdb tier requires gdb >= {required}",
+            suggested_fix=f"Upgrade gdb to >= {required}.",
+        )
+    if mi_code != 0 or "^done" not in mi_out:
+        return PrerequisiteCheck(
+            check_id="tool.gdb_mi",
+            status=PrerequisiteStatus.FAILED,
+            message=(
+                f"gdb {version[0]}.{version[1]} did not return a valid mi3 ^done record; the debug.gdb "
+                f"tier requires a working mi3 interpreter (gdb >= {required})"
+            ),
+            suggested_fix=f"Confirm gdb >= {required} was built with mi3 support.",
+        )
+    return PrerequisiteCheck(
+        check_id="tool.gdb_mi",
+        status=PrerequisiteStatus.PASSED,
+        message=f"gdb {version[0]}.{version[1]} supports the mi3 machine interface",
+        details={"version": f"{version[0]}.{version[1]}"},
     )
 
 
