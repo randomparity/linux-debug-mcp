@@ -27,7 +27,16 @@
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/test_config.py` (import `TargetProfile`, `BootOverrides`, and `pytest` / `pydantic.ValidationError` as the module already does):
+Add to `tests/test_config.py`. `tests/test_config.py` does **not** currently import the config models, so add the imports at the top of the file:
+
+```python
+import pytest
+from pydantic import ValidationError
+
+from linux_debug_mcp.config import BootOverrides, TargetProfile
+```
+
+Then add the tests:
 
 ```python
 def test_target_profile_wait_for_debugger_defaults_false() -> None:
@@ -371,38 +380,70 @@ git commit -m "feat(boot): return SUCCEEDED-frozen and skip readiness wait when 
 ## Task 5: handler — effective `wait_for_debugger` merge, new-override gate, frozen next-action
 
 **Files:**
+- Modify: `tests/conftest.py` (`FakeBootProvider`, ~110-205) — add a `details` injection hook
 - Modify: `src/linux_debug_mcp/server.py` (`target_boot_handler`: override merge ~1741-1768, `has_new_boot_overrides` ~1787-1790, success `ToolResponse` ~1924-1931)
 - Test: `tests/test_target_boot_handler.py`
 
-- [ ] **Step 1: Write the failing test**
+**Harness facts (verified):** `tests/test_target_boot_handler.py` imports shared fixtures from `tests/conftest.py` — `FakeBootProvider`, `create_run`, `record_build`, `profiles`, `target_profile`, `rootfs_profile` — and a local `boot(artifact_root, tmp_path, *, provider=None, target=None, **kwargs)` helper. `ToolResponse` fields are `response.ok` (bool), `response.data` (dict), `response.suggested_next_actions` (list), `response.error` (ErrorInfo|None) — there is **no** `response.status`. A debug target is `target_profile().model_copy(update={"debug_gdbstub": True})`. The seeding sequence is `artifact_root = create_run(tmp_path)` then `record_build(artifact_root)`.
 
-Inspect an existing frozen-capable test in `tests/test_target_boot_handler.py` for the fixture style (a `debug_gdbstub=True` target profile already appears at line ~126, and the module injects a fake provider + profiles). Add a test that drives a frozen boot through the handler with a `BootOverrides(wait_for_debugger=True)` and asserts the response:
+- [ ] **Step 1a: Extend `conftest.FakeBootProvider` to inject details (prerequisite)**
+
+`conftest.FakeBootProvider.execute_boot` returns a **fixed** details dict with no `console_status` key, so a frozen handler result cannot be simulated without this change. Add a `details` param that is merged into the returned dict. In `tests/conftest.py`, change the `__init__` signature to add (after `raise_on_execute`):
 
 ```python
-def test_target_boot_handler_frozen_override_yields_debug_next_action(tmp_path: Path) -> None:
-    # Arrange a run whose build SUCCEEDED and a debug_gdbstub target profile, mirroring the
-    # existing handler tests in this module (reuse their _seed_run / fake-provider helpers).
-    run_id = _seed_built_run(tmp_path, target_profile_name="local-qemu-debug")
-    response = target_boot_handler(
-        artifact_root=tmp_path,
-        run_id=run_id,
-        provider=_FrozenFakeBootProvider(),  # returns a SUCCEEDED-frozen BootExecutionResult
-        target_profiles={"local-qemu-debug": _debug_gdbstub_profile()},
-        rootfs_profiles={"minimal": _minimal_rootfs()},
+        details: dict[str, object] | None = None,
+```
+and store it:
+```python
+        self.extra_details = details or {}
+```
+Then in `execute_boot`, merge it into the returned `details=` dict (spread `**self.extra_details` last so a test can set `console_status`):
+
+```python
+            details={
+                "domain": plan.domain_name,
+                "provider_call": len(self.executions),
+                "debug_boot": plan.debug_gdbstub,
+                "gdbstub_endpoint": plan.gdbstub_endpoint,
+                "nokaslr_source": plan.nokaslr_source,
+                **self.extra_details,
+            },
+```
+
+Run the existing suites to confirm the additive change is non-breaking:
+Run: `uv run python -m pytest tests/test_target_boot_handler.py tests/test_server_boot_snapshot_producer.py -q`
+Expected: PASS (no behavior change when `details` is unset).
+
+- [ ] **Step 1b: Write the failing handler test**
+
+Add to `tests/test_target_boot_handler.py` (it already imports `BootOverrides`, `create_run`, `record_build`, `profiles`, `target_profile`, `FakeBootProvider` via the `conftest` import and module imports):
+
+```python
+def test_target_boot_frozen_override_yields_debug_next_action(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    debug_target = target_profile().model_copy(update={"debug_gdbstub": True})
+    provider = FakeBootProvider(details={"console_status": "frozen"})
+
+    response = boot(
+        artifact_root,
+        tmp_path,
+        provider=provider,
+        target=debug_target,
         boot_overrides=BootOverrides(wait_for_debugger=True),
     )
 
-    assert response.status == "success"
-    assert response.suggested_next_actions == ["debug.start_session"]
+    assert response.ok is True
     assert response.data["console_status"] == "frozen"
+    assert response.suggested_next_actions == ["debug.start_session"]
+    # the override reached the provider's plan_boot:
+    assert provider.plans[-1]["target_profile"].wait_for_debugger is True
 ```
-
-Match the actual helper/fixture names already in `tests/test_target_boot_handler.py`; the asserts (frozen `console_status`, `["debug.start_session"]`) are the behavior contract. The fake provider's `execute_boot` returns a `BootExecutionResult(status=SUCCEEDED, details={"console_status": "frozen", "wait_for_debugger": True, "debug_boot": True, "gdbstub_endpoint": {...}, ...})`.
 
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `uv run python -m pytest tests/test_target_boot_handler.py -k frozen -q`
-Expected: FAIL — the override is not applied to the resolved profile (so the provider sees `wait_for_debugger=False`) and/or `suggested_next_actions` is the default `["artifacts.get_manifest"]`.
+Expected: FAIL — `suggested_next_actions` is the default `["artifacts.get_manifest"]` and/or the override is not applied so `provider.plans[-1]["target_profile"].wait_for_debugger` is `False`.
 
 - [ ] **Step 3a: Apply the effective override**
 
@@ -464,7 +505,7 @@ Run: `uv run ruff check src tests && uv run ruff format src tests && uv run ty c
 Expected: clean.
 
 ```bash
-git add src/linux_debug_mcp/server.py tests/test_target_boot_handler.py
+git add src/linux_debug_mcp/server.py tests/conftest.py tests/test_target_boot_handler.py
 git commit -m "feat(server): apply wait_for_debugger override and steer to debug.start_session"
 ```
 
@@ -473,55 +514,75 @@ git commit -m "feat(server): apply wait_for_debugger override and steer to debug
 ## Task 6: version-lock + admission-snapshot regression guards (frozen path)
 
 **Files:**
-- Test: `tests/test_target_boot_handler.py` (or the handler test module that already injects `AdmissionService`)
+- Test: `tests/test_target_boot_handler.py`
 
-These guard the §4 spec dependencies: a frozen `SUCCEEDED` boot must still record `kernel_provenance` and publish the admission `TargetSnapshot`, because both are gated on `SUCCEEDED` (not `console_status`) at `server.py:1884` / `server.py:1916`.
+These guard the §4 spec dependencies: a frozen `SUCCEEDED` boot must stay on the handler's `SUCCEEDED` path so the **provenance capture** runs (`server.py:1884`) and the **admission snapshot** is published (`server.py:1916`) — both gated on status, **not** on `console_status`. If a refactor ever gates the frozen branch on `console_status == "ready"`, these guards fail and flag that `debug.start_session` would reject frozen boots.
 
-- [ ] **Step 1: Write the failing tests**
+**Harness facts (verified):** the admission-snapshot pattern is established in `tests/test_server_boot_snapshot_producer.py:49-58` — seed with `create_run` + `record_build`, build `AdmissionService(SnapshotStore())` (imported from `linux_debug_mcp.coordination.admission`), pass `admission=` to the handler, then prove publication by binding an RSP request: `admission.admit(key, request)` returns a non-None handle. **Provenance caveat:** `conftest.record_build` records build details with **no `build_id`**, so `_capture_kernel_provenance` records `kernel_provenance_capture_error` (code `build_id_unavailable`) rather than `kernel_provenance`. The regression guard therefore asserts the capture **ran** (one of the two keys is present), which is exactly what distinguishes "frozen boot stayed on the SUCCEEDED path" from "frozen branch skipped capture". The unambiguous proof that the SUCCEEDED path executed is the snapshot test.
+
+- [ ] **Step 1: Write the failing/guard tests**
+
+Add to `tests/test_target_boot_handler.py`. Add the admission imports at the top if absent:
 
 ```python
-def test_frozen_boot_records_kernel_provenance(tmp_path: Path) -> None:
-    run_id = _seed_built_run(tmp_path, target_profile_name="local-qemu-debug")
-    target_boot_handler(
-        artifact_root=tmp_path,
-        run_id=run_id,
-        provider=_FrozenFakeBootProvider(),
-        target_profiles={"local-qemu-debug": _debug_gdbstub_profile()},
-        rootfs_profiles={"minimal": _minimal_rootfs()},
+from linux_debug_mcp.coordination.admission import AdmissionService, SnapshotStore
+from linux_debug_mcp.seams.target import TargetKey
+```
+
+```python
+def test_frozen_boot_stays_on_success_path_for_provenance_capture(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    debug_target = target_profile().model_copy(update={"debug_gdbstub": True})
+    provider = FakeBootProvider(details={"console_status": "frozen"})
+
+    boot(
+        artifact_root,
+        tmp_path,
+        provider=provider,
+        target=debug_target,
         boot_overrides=BootOverrides(wait_for_debugger=True),
     )
-    manifest = ArtifactStore(tmp_path, create_root=False).load_manifest(run_id)
-    boot = manifest.step_results["boot"]
-    assert "kernel_provenance" in boot.details
+
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
+    boot_details = manifest.step_results["boot"].details
+    # record_build records no build_id, so capture records the error variant — but it RAN,
+    # which proves the frozen boot stayed on the handler's SUCCEEDED path (server.py:1884).
+    assert "kernel_provenance" in boot_details or "kernel_provenance_capture_error" in boot_details
 
 
 def test_frozen_boot_publishes_admission_snapshot(tmp_path: Path) -> None:
-    admission = _new_admission_service()  # same factory the existing handler tests use
-    run_id = _seed_built_run(tmp_path, target_profile_name="local-qemu-debug")
-    target_boot_handler(
-        artifact_root=tmp_path,
-        run_id=run_id,
-        provider=_FrozenFakeBootProvider(),
-        target_profiles={"local-qemu-debug": _debug_gdbstub_profile()},
-        rootfs_profiles={"minimal": _minimal_rootfs()},
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    debug_target = target_profile().model_copy(update={"debug_gdbstub": True})
+    admission = AdmissionService(SnapshotStore())
+    provider = FakeBootProvider(details={"console_status": "frozen"})
+
+    response = boot(
+        artifact_root,
+        tmp_path,
+        provider=provider,
+        target=debug_target,
         boot_overrides=BootOverrides(wait_for_debugger=True),
         admission=admission,
     )
+    assert response.ok is True
     # The published snapshot is what debug.start_session/run_tests resolve via _require_snapshot.
-    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    # SnapshotStore.get(target_key) is the verified read API (admission.py:233).
+    target_key = TargetKey(provisioner="local-qemu", target_id="run-abc123")
     assert admission.snapshot_store.get(target_key) is not None
 ```
 
-Match `_new_admission_service` / snapshot-store accessor names to whatever the existing handler tests use (grep `AdmissionService(` / `_require_snapshot` in `tests/`). The `_seed_built_run` helper must record a `build` `StepResult` carrying a `build_id` (provenance capture reads it) — reuse the module's existing build-seeding helper.
+The snapshot store is reachable as `admission.snapshot_store` (the `AdmissionService` is constructed with `AdmissionService(SnapshotStore())`); if the attribute name differs, grep `self._store`/`snapshot_store` in `coordination/admission.py` and adjust — the contract under test is "a `TargetSnapshot` for `run-abc123` exists after the frozen boot". `TargetKey` is imported from `linux_debug_mcp.seams.target` (see `tests/test_server_boot_snapshot_producer.py:6`).
 
-- [ ] **Step 2: Run to verify they fail (or pass) honestly**
+- [ ] **Step 2: Run the guards honestly**
 
 Run: `uv run python -m pytest tests/test_target_boot_handler.py -k "provenance or snapshot" -q`
-Expected: these may PASS immediately because the handler captures provenance + publishes the snapshot on the `SUCCEEDED` branch regardless of `console_status`. That is the point — they are **regression guards** that lock the behavior so a later refactor cannot gate those steps on `console_status == "ready"` and silently break `debug.start_session` for frozen boots. If either FAILS, the frozen branch is not on the handler's `SUCCEEDED` path; fix Task 4/5 before proceeding.
+Expected: both PASS — the handler captures provenance and publishes the snapshot on the `SUCCEEDED` branch regardless of `console_status` (Tasks 4–5 route the frozen boot through that branch). They are **regression guards** that lock the behavior so a later refactor cannot gate those steps on `console_status == "ready"` and silently break `debug.start_session` for frozen boots. If either FAILS, the frozen branch is not on the handler's `SUCCEEDED` path; fix Task 4/5 before proceeding.
 
-- [ ] **Step 3: No implementation change**
+- [ ] **Step 3: No implementation change expected**
 
-If Step 2 passes, no code change is needed (Tasks 4–5 already route the frozen boot through the `SUCCEEDED` path). If it fails, the frozen branch returned a non-`SUCCEEDED` status or the handler short-circuited provenance/snapshot on `console_status`; correct that in the relevant earlier task.
+These are guards over behavior Tasks 4–5 already produce; no new source change. If Step 2 failed, return to Task 4 (frozen branch must return `SUCCEEDED`) / Task 5, not here.
 
 - [ ] **Step 4: Guardrails + commit**
 
@@ -553,23 +614,25 @@ Mirroring the module's existing fixtures (real `virsh` + `gdb`, real build/boot)
 @<existing_integration_gate>
 def test_frozen_boot_hits_early_breakpoint_deterministically(<existing fixtures>) -> None:
     # 1. Boot a debug_gdbstub target with wait_for_debugger=True.
-    boot = target_boot_handler(..., boot_overrides=BootOverrides(wait_for_debugger=True))
-    assert boot.status == "success"
-    assert boot.data["console_status"] == "frozen"
+    boot_resp = target_boot_handler(..., boot_overrides=BootOverrides(wait_for_debugger=True))
+    assert boot_resp.ok is True
+    assert boot_resp.data["console_status"] == "frozen"
     # virsh start returned promptly while the vCPU is frozen (the §4 load-bearing assumption):
     # the handler returned without spending the readiness timeout.
 
     # 2. Attach to the reset-vector CPU.
     session = debug_start_session_handler(...)
-    assert session.status == "success"
+    assert session.ok is True
 
     # 3. Break at an early-init symbol, continue, assert the stop + inspectability.
     debug_set_breakpoint_handler(..., symbol="dcache_init")  # or "start_kernel"
     cont = debug_continue_handler(...)
-    assert cont.status == "success"
+    assert cont.ok is True
     # assert the session reports HALTED at the breakpoint and an early symbol reads back,
     # using whatever read/inspect handler the module already exercises.
 ```
+
+The `ToolResponse` API is `.ok`/`.data`/`.suggested_next_actions`/`.error` (`domain.py:470-478`) — there is no `.status`. Match the exact `debug_*` handler signatures the module already calls.
 
 Keep this test behind the gate; it needs a real QEMU+KVM guest and a real kernel build and MUST stay skipped in CI. It is the only place the headline acceptance criterion is proven.
 
@@ -614,5 +677,5 @@ Run: `git status --porcelain` — expect no unexpected modifications under `src/
   - Decision 6 (frozen-domain lifetime) → reuses existing destroy-on-reboot path; no new code, exercised by Task 5/7.
   - Failure contract rows → Task 1 (validation), Task 4 (frozen success, start-fail), Task 7 (e2e).
   - Verification list → Tasks 2,3,4,5,6,7 map 1:1.
-- **Placeholder scan:** Tasks 5–7 intentionally defer exact fixture/helper *names* to the existing test modules (the behavior asserts are concrete); every source change shows full code. The fixture-name deferral is because those helpers already exist in-repo and must be matched, not invented.
+- **Placeholder scan:** Tasks 5–6 now use the real `conftest` harness (`create_run`, `record_build`, `profiles`, `boot()`, `FakeBootProvider(details=...)`, `AdmissionService(SnapshotStore())`, `response.ok`/`.data`) verified against `tests/conftest.py` and `tests/test_server_boot_snapshot_producer.py`. Task 7 is the only remaining placeholdered task — it defers the integration gate decorator and the exact `debug_*` handler call signatures to the existing `tests/test_qemu_gdbstub_integration.py`, because that test must run against a real QEMU+KVM guest and reuse the module's established fixtures rather than invent them; its behavior asserts (`console_status == "frozen"`, breakpoint hit) are concrete.
 - **Type consistency:** `wait_for_debugger` is `bool` on `TargetProfile`/`BootPlan` and `bool | None` on `BootOverrides` throughout; `console_status == "frozen"` string used identically in provider (Task 4) and handler next-action (Task 5) and tests.
