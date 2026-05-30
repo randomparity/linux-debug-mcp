@@ -540,7 +540,11 @@ git commit -m "feat(libvirt): copy_on_write rootfs via per-boot qemu-img overlay
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to the existing `tests/test_target_boot_handler.py` (it already imports `create_run`, `record_build`, `FakeBootProvider` from `conftest`, and `RootfsProfile`, `ErrorCategory`, `StepStatus` are imported there; add `target_profile` to the `conftest` import list and `ArtifactStore` is already imported):
+First fix the imports in `tests/test_target_boot_handler.py`. It already imports `create_run`, `record_build`, `FakeBootProvider` from `conftest`, and `ErrorCategory`/`StepStatus`/`ArtifactStore` from the package — but **not** `RootfsProfile`, and **not** `target_profile`. Add both:
+- Add `target_profile` to the `from conftest import (...)` block.
+- Change the config import to `from linux_debug_mcp.config import BootOverrides, RootfsOverrides, RootfsProfile, TargetProfile`.
+
+Then append (the new tests construct `RootfsProfile(...)` directly and call `target_profile()`):
 
 ```python
 def _booted_run_with_rootfs(tmp_path: Path, rootfs: RootfsProfile):
