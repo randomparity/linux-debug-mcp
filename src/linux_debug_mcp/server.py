@@ -2132,6 +2132,18 @@ def target_run_tests_handler(
                 run_id=run_id,
                 message=f"unknown rootfs profile: {manifest.request.rootfs_profile}",
             )
+
+    boot_details = boot_result.details if isinstance(boot_result.details, dict) else {}
+    guest_ip = _validated_guest_ip(boot_details.get("guest_ip"))
+    if guest_ip is not None and _ssh_host_is_unset_or_loopback(resolved_rootfs_profile.ssh_host):
+        resolved_rootfs_profile = resolved_rootfs_profile.model_copy(update={"ssh_host": guest_ip})
+    elif boot_details.get("guest_ip") is not None and guest_ip is None:
+        logger.warning(
+            "run %s: discarding invalid persisted guest_ip %r; using configured ssh_host",
+            run_id,
+            boot_details.get("guest_ip"),
+        )
+
     try:
         suite_profile = test_suites[requested_suite] if requested_suite is not None else None
     except KeyError:
