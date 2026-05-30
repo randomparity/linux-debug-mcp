@@ -137,6 +137,11 @@ ALLOWED_DEBUG_OPERATIONS = [
     # gated only by the §5.6 HALTED fast-reject, not by DebugProfile.enabled_operations
     # (like debug.introspect.check_prerequisites). Listed for enumerability.
     "debug.postmortem.check_prereqs",
+    # Live-target vmcore retrieval (#95 / ADR 0029). ssh-tier diagnostics gated only
+    # by the §5.6 HALTED fast-reject, not by DebugProfile.enabled_operations. Listed
+    # for enumerability.
+    "debug.postmortem.list_dumps",
+    "debug.postmortem.fetch",
     # ADR 0011 / #56: capability token (NOT an MCP tool) gating allow_write=true on the live
     # introspect path. Only ever passed to `_ensure_debug_operation_enabled`, never registered
     # as a tool. A read-only profile narrows `enabled_operations` to exclude it to refuse writes.
@@ -146,6 +151,15 @@ ALLOWED_DEBUG_OPERATIONS = [
 # Spec §5.2 step 4a: soft cap on introspect step records per run. The handler enforces this
 # once, without holding the manifest lock — see spec §5.3 "Soft-cap semantics".
 MAX_INTROSPECT_CALLS_PER_RUN = 1000
+
+# debug.postmortem.fetch bounds (#95 / ADR 0029 decision 7).
+# Default transfer ceiling: a dump whose total fetch size exceeds this is refused
+# (dump_too_large) before any byte moves, unless the request overrides max_bytes.
+DEFAULT_FETCH_MAX_BYTES = 32 * 1024 * 1024 * 1024  # 32 GiB
+# Free space the host must retain beyond the fetch total, else insufficient_disk.
+FETCH_DISK_HEADROOM_BYTES = 1 * 1024 * 1024 * 1024  # 1 GiB
+# fetch timeout band; bulk scp cannot fit the probe's [5, 60].
+FETCH_TIMEOUT_BAND = (5, 3600)
 
 # debug.postmortem.crash bounds (#92 / spec §10).
 MAX_POSTMORTEM_CRASH_CALLS_PER_RUN = 1000

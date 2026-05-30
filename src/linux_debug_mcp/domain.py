@@ -241,6 +241,71 @@ class DebugPostmortemTriageRequest(Model):
     timeout_seconds: int = 60
 
 
+class DebugPostmortemListDumpsRequest(Model):
+    """Request payload for ``debug.postmortem.list_dumps``. #95 / ADR 0029.
+
+    Live-target SSH enumeration of captured vmcores. ``timeout_seconds`` is
+    handler-bounded to ``[5, 60]`` (default 20); ``dump_dir`` overrides the
+    ``/var/crash`` default and must be an absolute path (handler-validated).
+    """
+
+    run_id: str
+    target_ref: str
+    dump_dir: str | None = None
+    timeout_seconds: int = 20
+    debug_profile: str | None = None
+    target_profile: str | None = None
+    rootfs_profile: str | None = None
+
+
+class DebugPostmortemFetchRequest(Model):
+    """Request payload for ``debug.postmortem.fetch``. #95 / ADR 0029.
+
+    Stages a dump enumerated by ``list_dumps`` into the run dir. ``dump_ref`` is a
+    ``path`` from ``list_dumps`` re-validated against a fresh enumeration.
+    ``timeout_seconds`` is handler-bounded to ``[5, 3600]`` (default 300) and bounds
+    each scp subprocess. ``max_bytes`` overrides the default size ceiling; ``force``
+    re-transfers and overrides the incomplete-dump refusal.
+    """
+
+    run_id: str
+    target_ref: str
+    dump_ref: str
+    force: bool = False
+    dump_dir: str | None = None
+    max_bytes: int | None = None
+    timeout_seconds: int = 300
+    debug_profile: str | None = None
+    target_profile: str | None = None
+    rootfs_profile: str | None = None
+
+
+class DumpEntry(Model):
+    """One captured vmcore enumerated by ``debug.postmortem.list_dumps``. #95.
+
+    ``path`` is the remote dump directory (the ``dump_ref`` fetch accepts).
+    ``file_sizes`` maps each present file name to its remote ``st_size`` and drives
+    the per-file truncation guard in fetch.
+    """
+
+    path: str
+    kernel: str | None
+    capture_time: str | None
+    size_bytes: int
+    incomplete: bool = False
+    available_files: list[str] = Field(default_factory=list)
+    file_sizes: dict[str, int] = Field(default_factory=dict)
+
+
+class FetchedFile(Model):
+    """One file staged into the run dir by ``debug.postmortem.fetch``. #95."""
+
+    name: str
+    ref: str
+    sha256: str
+    size_bytes: int
+
+
 class _TriageSectionBase(Model):
     """Shared per-section status. Spec §3.3 / ADR 0027 decision 3."""
 
