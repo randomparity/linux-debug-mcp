@@ -62,7 +62,11 @@ cleanup() { sudo rm -rf "${work}"; }
 trap cleanup EXIT
 
 echo "Installing Fedora ${RELEASEVER} into ${work} ..."
+# dnf5 (Fedora 41+) loads no repositories from a fresh installroot, so the
+# transaction resolves nothing without --use-host-config, which sources the
+# host's repo definitions and vars (substituting the releasever set below).
 sudo dnf --installroot="${work}" \
+  --use-host-config \
   --releasever="${RELEASEVER}" \
   --setopt=install_weak_deps=False \
   --setopt=tsflags=nodocs \
