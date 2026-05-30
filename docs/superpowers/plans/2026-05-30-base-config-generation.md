@@ -104,6 +104,18 @@ rewritten to build a `BuildPlan` (via `plan_build`) and pass `plan`/`log_dir`.
     `artifacts` includes an `ArtifactRef(kind="config-log")` for the failing target's log.
   - no `.config` + empty base_config → `FAILED`, `CONFIGURATION_ERROR`,
     `details["suggested_fix"]` present.
+
+  Test-construction notes (verified against the current provider):
+  - The SUCCEEDED defconfig test must satisfy the existing required-artifacts gate
+    (`_assemble_build_result` requires both `.config` and `bzImage`): pre-create `bzImage` (as
+    `_make_run_dir` does) in addition to having the fake runner create `<out>/.config` on the
+    defconfig call. The success path calls `_extract_build_id(vmlinux)`, which the conftest autouse
+    `_stub_extract_build_id` fixture already neutralizes — no real `vmlinux` needed.
+  - Command-ordering depends on whether `config_lines` are present. Assert the full
+    `defconfig → merge_config.sh → olddefconfig → bzImage` sequence only against a profile that has
+    **both** `base_config` and `config_lines` (the `x86_64-debug` shape). Against a `base_config`-only
+    profile (e.g. `x86_64-default`), `_apply_config_lines` returns early, so the order is just
+    `defconfig → bzImage` — assert that separately.
 - [ ] **GREEN** —
   - Update the `prepare_config` call site: `self.prepare_config(plan=plan, log_dir=log_path.parent)`.
   - Add `except ConfigGenerationError` → `CONFIGURATION_ERROR`, `diagnostic=exc.diagnostic`,
@@ -124,9 +136,13 @@ rewritten to build a `BuildPlan` (via `plan_build`) and pass `plan`/`log_dir`.
   - End-to-end: `create_run_handler(build_overrides=BuildOverrides(base_config=["tinyconfig"]))` then
     `_build_profile_from_manifest` (or build) shows `base_config == ["tinyconfig"]` (replacement, not
     merged with `["defconfig"]`).
-  - Re-point `test_kernel_build_fails_without_developer_config`: create the run with a
-    `build_profile_spec` whose `base_config=[]`, unlink source `.config`, assert `CONFIGURATION_ERROR`
-    and `suggested_fix` in the failure details.
+  - Re-point `test_kernel_build_fails_without_developer_config`: the local `create_run` helper
+    (`test_kernel_build_handler.py:99`) creates a source `.config` via `with_config=True`, which would
+    stop the ladder at rung 2. The re-pointed test must therefore use a source tree with **no**
+    `.config` **and** a `build_profile_spec` with `base_config=[]`, so the ladder reaches rung 4.
+    Rung 4 raises `MissingConfigError` inside `prepare_config` *before* any runner/`make` call, so no
+    provider injection and no real `make` is involved. Assert `CONFIGURATION_ERROR`, `suggested_fix` in
+    the failure `details`, and the recorded build step is `FAILED`.
 - [ ] **GREEN** —
   - `x86_64-default`: `base_config=["defconfig"]`.
   - Add `x86_64-debug` `BuildProfile(name="x86_64-debug", architecture="x86_64",
