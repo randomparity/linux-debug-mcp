@@ -235,15 +235,31 @@ ps > <sensitive_call_dir>/cmd-0001.out
 exit
 ```
 
-The redirect targets are **server-generated** (zero-padded index under the call's
-`sensitive/` dir — see §6), never caller input, so they carry no injection surface; and
-caller commands cannot contain `>` (denied by §3.4), so appending ` > <path>` is
-unambiguous. `crash` writes each command's output to its file and **closes that file
-before processing the next command**, so the per-command boundary is established by the
-filesystem, not by parsing a shared stream. This is **race-free by construction**: it
-does not depend on crash flushing libc stdio between commands, nor on the ordering of a
-forked `!echo` child's writes relative to crash's own block-buffered pipe output (the
-hazard that sinks the in-band-sentinel approach — ADR 0026 §2, rejected alternative).
+The redirect targets are **server-generated absolute paths** (zero-padded index under
+the call's `sensitive/` dir — see §6; absolute so placement never depends on crash's
+CWD), never caller input, so they carry no injection surface; and caller commands
+cannot contain `>` (denied by §3.4), so appending ` > <path>` is unambiguous. `crash`
+writes each command's output to its file and **closes that file before processing the
+next command**, so the per-command boundary is established by the filesystem, not by
+parsing a shared stream. This is **race-free by construction**: it does not depend on
+crash flushing libc stdio between commands, nor on the ordering of a forked `!echo`
+child's writes relative to crash's own block-buffered pipe output (the hazard that
+sinks the in-band-sentinel approach — ADR 0026 §2, rejected alternative).
+
+**Write-time disk bound (the redirect files are not on the runner-capped pipe).**
+Because command output is redirected to files written **directly by crash to disk**, the
+runner's `max_stdout_bytes` cap (which bounds only crash's own session stdout) does
+**not** bound this output — `CRASH_PER_CMD_CAP`/`CRASH_STDOUT_CAP` below are *read-time*
+limits applied after the bytes exist. So a single command (`rd` over a wide range, `log`
+on a huge ring) could otherwise fill the host disk before the handler reads anything,
+with `timeout` bounding only wall-clock. To bound writes at the source, crash runs under
+an `RLIMIT_FSIZE` file-size limit set to `CRASH_PER_CMD_CAP` (via `prlimit --fsize=`,
+prepended to the argv — §6 step 8): the kernel `SIGXFSZ`-kills crash the moment any
+single `cmd-NNNN.out` would exceed the cap, so no redirect file can grow past
+`CRASH_PER_CMD_CAP` on disk, and the aggregate is bounded by `MAX_CRASH_COMMANDS ×
+CRASH_PER_CMD_CAP`. A command killed at the limit yields a `cmd-NNNN.out` at exactly the
+cap → recorded `output_truncated` (the crash session then dies, so later commands are
+`not_captured`).
 
 `collect_command_outputs(call_dir, commands)` reads `cmd-NNNN.out` for each command.
 Boundary rules, fail-closed:
@@ -256,12 +272,20 @@ Boundary rules, fail-closed:
   typed-parsed** (a half-`kmem`/`bt` report must not become confidently-wrong typed
   JSON). The aggregate of all files is also bounded by `CRASH_STDOUT_CAP`; exceeding it
   sets the response `truncated` flag and marks the remaining files `output_truncated`.
-- **"crash opened the pair" boundary.** crash's own session stdout/stderr (banner,
-  open errors, the prompt stream) is still captured to `stdout.raw`/`stderr.raw`. If
-  **no** `cmd-NNNN.out` file was created **and** crash exited nonzero, crash could not
-  open the pair → `INFRASTRUCTURE_FAILURE` / `crash_open_failure` for the whole call. If
-  at least one output file exists, the call is a success with per-command markers,
-  independent of crash's exit code.
+- **Runner-failure precedence (terminal, beats the file-count rule).** A runner-level
+  terminal failure — `timed_out` / `exit==124`, `oversized_output`, `stdin_failed`,
+  `cancelled` — is a whole-call `INFRASTRUCTURE_FAILURE` (`crash_timeout` /
+  `oversized_output` / …) **regardless of how many `cmd-NNNN.out` files exist**. A
+  `timeout --kill-after` that fires after some commands wrote files is still a
+  `crash_timeout`, not a partial success — the session was severed externally and the
+  result set is untrustworthy. The "≥1 file ⇒ success" rule below applies **only** when
+  the runner reports a *clean* completion (crash exited on its own, zero or nonzero).
+- **"crash opened the pair" boundary (clean completion only).** crash's own session
+  stdout/stderr (banner, open errors) is captured to `stdout.raw`/`stderr.raw`. On a
+  clean completion: if **no** `cmd-NNNN.out` was created **and** crash exited nonzero,
+  crash could not open the pair → `INFRASTRUCTURE_FAILURE` / `crash_open_failure`. If at
+  least one output file exists, the call is a success with per-command markers,
+  independent of crash's own exit code.
 
 A command whose output `crash` rejects (e.g. an allowlisted verb with a bad argument)
 produces an empty or error-bearing `cmd-NNNN.out`; the parser falls back to raw
@@ -385,10 +409,12 @@ A linear orchestrator mirroring `_execute_vmcore_introspect_call`. Steps:
    script (`build_command_script`), which assigns each command a server-minted
    redirect target `<sensitive_call_dir>/cmd-NNNN.out` (§4.1); write the redacted
    `request.json` (with the resolved paths recorded as their run-relative refs).
-8. Run locally: `runner.run(["timeout","--kill-after=2s", f"{t}s","crash","-s",
-   vmlinux_path, vmcore_path], timeout=t+10, stdin=cmd_script,
-   stdout_path=sensitive/stdout.raw, stderr_path=sensitive/stderr.raw,
-   cancel=<unused event>, max_stdout_bytes=CRASH_STDOUT_CAP)`. No sudo, no SSH argv,
+8. Run locally: `runner.run(["prlimit", f"--fsize={CRASH_PER_CMD_CAP}", "timeout",
+   "--kill-after=2s", f"{t}s","crash","-s", vmlinux_path, vmcore_path], timeout=t+10,
+   stdin=cmd_script, stdout_path=sensitive/stdout.raw, stderr_path=sensitive/stderr.raw,
+   cancel=<unused event>, max_stdout_bytes=CRASH_STDOUT_CAP)`. The `prlimit --fsize`
+   prefix imposes the `RLIMIT_FSIZE` write-time disk bound (§4.1) so no redirect file
+   can exceed `CRASH_PER_CMD_CAP` on disk. No sudo, no SSH argv,
    no admission watcher — `cancel` is an event that never fires (the runner timeout +
    `timeout(1)` bound the call). The `vmlinux`/`vmcore` paths ride in `argv` (execve —
    no shell), so they need no escaping. `modules_ref`, when given, is loaded by a
@@ -499,7 +525,7 @@ added (no speculative multi-tenant feature). Documented so the agent can self-li
   curated read-only verb set) so the whole bounded surface is reviewable in one place.
 - `providers/local_crash_postmortem.py`: `local_crash_postmortem_capability()` →
   `ProviderCapability(provider_name="local-crash-postmortem", provider_family="debug",
-  operations=["debug.postmortem.crash"], required_host_tools=["crash"],
+  operations=["debug.postmortem.crash"], required_host_tools=["crash", "timeout", "prlimit"],
   transports=["filesystem"], access_methods=["subprocess","filesystem"],
   semantics=OperationSemantics(concurrent_safe=True, idempotent=False, retryable=True,
   destructive=False, cancelable=True))`. Registered in `local_provider_plugin_specs`.
@@ -553,9 +579,18 @@ Handler tests instantiate the handler directly with injected fakes (`runner=`,
 - **Framing/boundary (§4.1):** a fake runner that writes only `cmd-0000.out` and
   `cmd-0001.out` of three commands → command 2 is `not_captured`; an over-cap
   `cmd-0000.out` → `output_truncated` (never typed-parsed) + response `truncated:true`;
-  **no** output files + nonzero exit → `crash_open_failure`; ≥1 output file + nonzero
-  exit → success with markers. **Command normalisation:** `"bt"` and `"bt "` rejected
-  as `duplicate_command`; `results` keyed by the stripped form.
+  **no** output files + nonzero *clean* exit → `crash_open_failure`; ≥1 output file +
+  nonzero clean exit → success with markers. **Runner-failure precedence:** a fake
+  runner reporting `timed_out`/`exit==124` **with** one `cmd-NNNN.out` present still →
+  `crash_timeout` (the file-count rule does not override a runner-terminal failure).
+  **Command normalisation:** `"bt"` and `"bt "` rejected as `duplicate_command`;
+  `results` keyed by the stripped form.
+- **Write-time disk bound (§4.1):** assert the argv the handler hands the runner begins
+  with `prlimit --fsize=<CRASH_PER_CMD_CAP>` (the rlimit is applied to crash); a focused
+  test confirms `CRASH_PER_CMD_CAP` is threaded into the prefix so the bound cannot
+  silently regress. (Real `SIGXFSZ` enforcement is exercised by the env-gated
+  integration test, which need not fill a disk to assert a single command's redirect
+  file is capped at `CRASH_PER_CMD_CAP`.)
 - **AC#1 framing is proven only end-to-end (§11 integration):** the unit tests above
   feed pre-written `cmd-NNNN.out` files, so they prove `collect_command_outputs`/parsing
   but **not** that real `crash` actually honours ` > file` redirection per command. The

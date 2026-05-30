@@ -66,11 +66,20 @@ and crash exited nonzero (it could not open the pair).
 This is **race-free by construction**: it does not depend on `crash` flushing libc
 stdio between commands, nor on the ordering of a forked `!echo` child's writes relative
 to crash's own block-buffered pipe stdout. The redirect targets are server-generated
-(never caller input) and caller commands cannot contain `>` (denied by decision 2a), so
-appending ` > <path>` is unambiguous and injection-free. `-s` (silent) suppresses the
-banner/scroll noise. The same mechanism frames the server-injected `mod -S … >
-mod-load.out` so module-load status is detectable from its own file (reported in the
-top-level `module_symbols` response field, not the command-keyed `results`).
+**absolute** paths (never caller input) and caller commands cannot contain `>` (denied
+by decision 2a), so appending ` > <path>` is unambiguous and injection-free. `-s`
+(silent) suppresses the banner/scroll noise. The same mechanism frames the
+server-injected `mod -S … > mod-load.out` so module-load status is detectable from its
+own file (reported in the top-level `module_symbols` response field, not the
+command-keyed `results`).
+
+Because the redirected output is written **directly to disk** (not the runner-capped
+stdout pipe), crash runs under `prlimit --fsize=CRASH_PER_CMD_CAP`: `RLIMIT_FSIZE`
+`SIGXFSZ`-kills crash if any single `cmd-NNNN.out` would exceed the cap, so the
+read-time caps are backed by a kernel write-time bound and aggregate disk is bounded by
+`MAX_CRASH_COMMANDS × CRASH_PER_CMD_CAP`. A runner-terminal failure (timeout, oversized,
+stdin-failure, cancel) is a whole-call `INFRASTRUCTURE_FAILURE` regardless of how many
+output files exist; the "≥1 file ⇒ success" rule applies only to a clean crash exit.
 
 ### 2a. Command content is validated (sanitise + allowlist) — the only trust boundary
 
@@ -138,6 +147,10 @@ at — exactly the split #55 uses (`sensitive/stdout.raw` vs `debug/.../stdout.j
   exists.
 - A compressed-kdump core fails loud today; adding support is one magic-keyed branch in
   `read_vmcore_build_id` with the rest of the path unchanged.
+- Routing output to redirect files removed the runner's stdout byte cap from the data
+  path, so a kernel `RLIMIT_FSIZE` bound (`prlimit`) is the replacement write-time guard;
+  the call now depends on `prlimit`/`timeout` (util-linux/coreutils baseline) in addition
+  to `crash`, advertised in `required_host_tools`.
 
 ## Considered & rejected
 
