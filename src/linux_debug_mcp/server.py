@@ -4100,6 +4100,12 @@ def debug_postmortem_crash_handler(
     sensitive_call_dir = run_dir / "sensitive" / "debug" / "postmortem" / "crash" / call_id
     agent_dir.mkdir(parents=True, mode=0o700)
     sensitive_call_dir.mkdir(parents=True, mode=0o700)
+    # mkdir(mode=) applies only to the leaf; tighten the intermediate sensitive
+    # dirs to 0700 too so the raw output tree never relies solely on the
+    # sensitive/ ancestor (mirrors _execute_vmcore_introspect_call).
+    sensitive_call_dir.chmod(0o700)
+    sensitive_call_dir.parent.chmod(0o700)
+    sensitive_call_dir.parent.parent.chmod(0o700)
 
     stripped_commands = [c.strip() for c in request.commands]
     cmd_script = build_command_script(stripped_commands, sensitive_call_dir, modules_path)
@@ -4133,7 +4139,14 @@ def debug_postmortem_crash_handler(
         stdin=cmd_script,
         max_stdout_bytes=CRASH_STDOUT_CAP,
     )
-    for raw_path in (stdout_path, stderr_path):
+    # The per-command output files are written by the crash child at its own
+    # umask (commonly 0644) and carry raw, unredacted guest memory; tighten them
+    # (and stdout/stderr) to 0600 so they match the sensitive/ 0700 discipline.
+    raw_files = [stdout_path, stderr_path, *sensitive_call_dir.glob("cmd-*.out")]
+    mod_load_path = sensitive_call_dir / "mod-load.out"
+    if mod_load_path.exists():
+        raw_files.append(mod_load_path)
+    for raw_path in raw_files:
         with contextlib.suppress(FileNotFoundError):
             raw_path.chmod(0o600)
     duration_ms = int((time.monotonic() - started_monotonic) * 1000)

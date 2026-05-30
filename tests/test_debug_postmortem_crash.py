@@ -83,6 +83,29 @@ def test_happy_path_keys_results_by_command(tmp_path) -> None:
     assert any(name.startswith("postmortem.crash:") for name in store.load_manifest("r1").step_results)
 
 
+def test_raw_output_files_are_mode_0600(tmp_path) -> None:
+    store = _run(tmp_path)
+    runner = _FakeRunner(outputs={0: "RELEASE: 6.1.0\n"})
+    debug_postmortem_crash_handler(
+        DebugPostmortemCrashRequest(
+            run_id="r1",
+            vmcore_ref="inputs/vmcore",
+            vmlinux_ref="build/vmlinux",
+            commands=["sys"],
+        ),
+        artifact_root=tmp_path,
+        runner=runner,
+        vmcore_build_id_reader=lambda _p: GOOD_ID,
+        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+    )
+    crash_dir = store.run_dir("r1") / "sensitive" / "debug" / "postmortem" / "crash"
+    call_dir = next(crash_dir.iterdir())
+    raw_files = list(call_dir.glob("cmd-*.out")) + [call_dir / "stdout.raw", call_dir / "stderr.raw"]
+    assert raw_files
+    for raw in raw_files:
+        assert raw.stat().st_mode & 0o777 == 0o600, raw
+
+
 def test_build_id_mismatch_fails_loud_no_run(tmp_path) -> None:
     _run(tmp_path)
     runner = _FakeRunner(outputs={})
