@@ -115,7 +115,7 @@ class DebugPostmortemCrashRequest(Model):       # extra="forbid"
     vmcore_ref: str          # run-relative path to the captured vmcore file
     vmlinux_ref: str         # run-relative path to the uncompressed ELF vmlinux+symbols
     modules_ref: str | None = None   # optional run-relative directory of *.ko[.debug]
-    commands: list[str]      # crash command lines; handler-bounded (§6 step 2)
+    commands: list[str]      # crash command lines; allowlisted + sanitised (§3.4 / §6 step 2)
     timeout_seconds: int = 60        # handler-bounded to [5, 300]
 ```
 
@@ -162,6 +162,46 @@ Duplicate command strings: if the caller supplies the same command twice, the ke
 entries (`invalid_commands` / `duplicate_command`) so the keyed response is
 unambiguous; an agent that wants the same command twice issues two calls.
 
+### 3.4 Command validation is the load-bearing security control
+
+This path is **offline and deliberately never gated** (§3.2): there is no admission
+tier, no `DebugProfile`, and no profile `enabled_operations` between the caller and the
+host. Command-content validation is therefore the *only* trust boundary, and it is
+mandatory — not a nicety.
+
+`crash`'s command interpreter is **not a sandbox**. Its command language reaches the
+agent host directly: a line beginning with `!` runs a host shell command; `cmd | prog`
+pipes a command's output to a host shell program; `cmd > file` / `cmd >> file`
+redirect output to an arbitrary **host file**. Passing an unvalidated command string
+to `crash` is equivalent to handing the caller `sh` on the agent host (read `!cat
+/etc/shadow`, write `sys > ~/.ssh/authorized_keys`, exec `!curl …`). A "read-only
+postmortem analyzer" must not expose that.
+
+The handler validates **every** command in `commands` before any crash invocation
+(reject-the-whole-call on the first violation), with a two-layer control:
+
+1. **Sanitisation (security-critical denylist).** Reject a command that:
+   - contains any newline, carriage-return, NUL, or other ASCII control character
+     (an embedded newline would split into multiple `crash` commands, both desyncing
+     the `!echo` sentinel framing and smuggling a second command past the allowlist);
+   - has `!` as its first non-space character (shell escape);
+   - contains any of `|`, `>`, `<`, `` ` ``, `$(`, `;`, `&` (pipe-to-shell, file
+     redirection, command substitution, chaining/backgrounding).
+2. **Allowlist (curated vocabulary).** The command's leading verb (first whitespace-
+   delimited token, lower-cased) must be in `CRASH_COMMAND_ALLOWLIST` — a static set of
+   read-only analysis verbs: `bt, ps, log, kmem, sys, mod, struct, union, p, rd, vtop,
+   task, files, vm, net, dev, irq, mach, runq, mount, swap, timer, dis, sym, list,
+   tree, search, foreach, help`. `mod -S` (module symbol load) is server-injected
+   (§6 step 8), not caller-supplied, so `mod` is allowed for inspection but the
+   redirection/shell denylist still applies to any caller `mod` use.
+
+Either layer failing → `CONFIGURATION_ERROR` / `command_not_permitted` with the
+offending command and the failed layer in `details` (no crash run). The denylist is
+the security control (a leading-verb allowlist alone would not stop `bt | sh` or
+`sys > file`, since the verb is benign); the allowlist keeps the surface curated and
+is defence-in-depth. `CRASH_COMMAND_ALLOWLIST` lives in `config.py` beside the other
+caps so the vocabulary is reviewable in one place.
+
 ## 4. Driving `crash` non-interactively (ADR 0026 §2)
 
 `crash` is invoked once per call with the vmlinux + vmcore as positional arguments
@@ -193,12 +233,24 @@ session deterministically.
 
 `split_transcript(raw, token, commands)` splits the captured stdout on the sentinel
 lines. The segment after sentinel `i` (up to sentinel `i+1` or EOF) is command `i`'s
-output. **Missing-sentinel handling:** if `crash` aborts mid-batch (e.g. a command
-faults the session), the trailing sentinels never appear; every command whose
-sentinel is absent is recorded with `parsed: false`, `reason: not_captured` — never
-silently dropped (AC: unknown/unparseable command never dropped, generalised to
-not-captured). The sentinel carries the command index so a gap is detectable rather
-than mis-attributing one command's output to another.
+output. Three boundary rules make the split unambiguous and fail-closed:
+
+- **Missing sentinel (crash aborted mid-batch).** If a command faults the session, the
+  trailing sentinels never appear; every command whose sentinel is absent is recorded
+  `parsed:false`, `reason:not_captured` — never silently dropped (AC generalised). The
+  sentinel carries the command index, so a gap is detectable rather than
+  mis-attributing one command's output to another.
+- **Truncation (output cap hit).** When `CRASH_STDOUT_CAP` truncates the stream
+  mid-transcript, the segment that contains the truncation offset is **partial**; it is
+  recorded `parsed:false`, `reason:output_truncated` and is **never typed-parsed** (a
+  half-`kmem`/`bt` report must not be fed to a parser that would emit confidently wrong
+  typed JSON). Commands after the truncation point are `not_captured`. The response
+  `truncated` flag is set.
+- **"Usable transcript" boundary.** A transcript is *usable* iff sentinel `0` appears
+  in stdout. Zero sentinels ⇒ `crash` produced nothing parseable (it could not open the
+  pair) ⇒ `INFRASTRUCTURE_FAILURE` / `crash_open_failure` for the whole call. ≥1
+  sentinel ⇒ success with per-command markers (some commands ran). This is the crisp
+  test the §8 taxonomy refers to, independent of `crash`'s exit code.
 
 **Why not one `crash` per command:** re-opening a multi-GB vmcore N times is the cost
 the issue's "batch runner" framing rejects (ADR 0026 §2, rejected alternative). **Why
@@ -229,9 +281,10 @@ def read_vmcore_build_id(path: Path) -> str:
     """Return the lower-case hex kernel build-id embedded in an ELF vmcore.
 
     Parses the ELF header → program headers → PT_NOTE segments and reads the
-    kernel build-id from the VMCOREINFO note's ``BUILD-ID=<hex>`` line (the
-    source drgn and crash use), falling back to an ``NT_GNU_BUILD_ID`` note if
-    one is present. Pure-Python struct parse — no drgn/crash/pyelftools
+    kernel build-id from the ``VMCOREINFO`` note's ``BUILD-ID=<hex>`` line.
+    This is the **same** source drgn exposes as ``main_module().build_id`` for a
+    vmcore (#55 verifies against exactly that), so the two offline tiers compare
+    the same value. Pure-Python struct parse — no drgn/crash/pyelftools
     dependency. Reuses the seek-only PT_NOTE walk from ``build_id.py`` (notes
     live in early segments; the file is never slurped).
     """
@@ -239,6 +292,20 @@ def read_vmcore_build_id(path: Path) -> str:
 
 Lives in `symbols/` beside `build_id.py` (ADR 0008 keeps symbol/provenance logic in
 one leaf). It is the **host-authoritative** observed build-id.
+
+**The build-id source is `VMCOREINFO BUILD-ID` only — no `NT_GNU_BUILD_ID` fallback.**
+A core's own `NT_GNU_BUILD_ID` note (if any) is not reliably the *kernel's* id (it may
+be absent, or belong to the dump producer), so verifying against it could compare the
+wrong value. `VMCOREINFO BUILD-ID` is the canonical kernel id and is exactly what #55's
+drgn path compares, keeping the two tiers consistent.
+
+**Capture-path precondition (stated, not assumed).** `VMCOREINFO BUILD-ID` is present
+only when the captured kernel was built with `CONFIG_BUILD_ID` *and* registered
+VMCOREINFO at capture (kdump `/proc/vmcore`, or a QEMU `dump-guest-memory` of a guest
+with VMCOREINFO wired). This is the **same** precondition #55 already relies on for
+`main_module().build_id`; a core lacking it fails loud as `provenance_unverifiable`
+(below), never silently passing. The §11 integration fixture must be such a core; the
+unit tests craft VMCOREINFO blobs directly.
 
 Failure modes (distinct, fail-closed — never a silent skip):
 
@@ -249,11 +316,11 @@ Failure modes (distinct, fail-closed — never a silent skip):
   follow-on (§5.3). The agent can re-capture as ELF.
 - **ELF but truncated / unreadable** → `VmcoreBuildIdError` → `CONFIGURATION_ERROR` /
   `vmcore_build_id_unreadable`.
-- **ELF, readable, but no build-id present** (no `BUILD-ID=` in VMCOREINFO and no
-  `NT_GNU_BUILD_ID`) → `VmcoreBuildIdAbsent` → `CONFIGURATION_ERROR` /
-  `provenance_unverifiable` (distinct from a *mismatch*: the agent cannot fix it by
-  hunting for a different vmlinux; it must capture from a `CONFIG_BUILD_ID` kernel).
-  This mirrors ADR 0010's "core carries no embedded build-id" decision.
+- **ELF, readable, but no `VMCOREINFO BUILD-ID`** → `VmcoreBuildIdAbsent` →
+  `CONFIGURATION_ERROR` / `provenance_unverifiable` (distinct from a *mismatch*: the
+  agent cannot fix it by hunting for a different vmlinux; it must capture from a
+  `CONFIG_BUILD_ID` kernel with VMCOREINFO). This mirrors ADR 0010's "core carries no
+  embedded build-id" decision.
 
 The reader is injectable as a `vmcore_build_id_reader: Callable[[Path], str]` seam
 (default `read_vmcore_build_id`), alongside `vmlinux_build_id_reader`
@@ -278,7 +345,9 @@ A linear orchestrator mirroring `_execute_vmcore_introspect_call`. Steps:
    `run_not_found`).
 2. Request invariants: `commands` non-empty, `len(commands) ≤ MAX_CRASH_COMMANDS`,
    each command non-empty after strip, no duplicates, combined script `≤
-   CRASH_SCRIPT_BYTE_CAP` (`invalid_commands` with a `reason`); `timeout_seconds` in
+   CRASH_SCRIPT_BYTE_CAP` (`invalid_commands` with a `reason`); **every command passes
+   the §3.4 sanitisation + allowlist** (`command_not_permitted` — the load-bearing
+   security check, applied before any crash invocation); `timeout_seconds` in
    `[5, 300]` (`invalid_timeout`).
 3. Per-run call-budget: count `postmortem.crash:` steps; `≥
    MAX_POSTMORTEM_CRASH_CALLS_PER_RUN` → `CONFIGURATION_ERROR`
@@ -304,10 +373,18 @@ A linear orchestrator mirroring `_execute_vmcore_introspect_call`. Steps:
    stdout_path=sensitive/stdout.raw, stderr_path=sensitive/stderr.raw,
    cancel=<unused event>, max_stdout_bytes=CRASH_STDOUT_CAP)`. No sudo, no SSH argv,
    no admission watcher — `cancel` is an event that never fires (the runner timeout +
-   `timeout(1)` bound the call). `modules_ref`, when given, is loaded via the crash
-   command stream (`mod -S <modules_path>` prepended to the batch) **best-effort**: a
-   failed module load is a non-fatal note in `results`, never a hard failure, matching
-   `resolve_symbols`'s non-fatal modules stance. chmod 0600 the raw files.
+   `timeout(1)` bound the call). The `vmlinux`/`vmcore` paths ride in `argv` (execve —
+   no shell), so they need no escaping. `modules_ref`, when given, is loaded via the
+   crash command stream (a server-injected `mod -S <modules_path>` line, before
+   sentinel 0 so its output lands in the preamble) **best-effort**: a failed module
+   load is a non-fatal note in `results`, never a hard failure. **Path-injection
+   guard:** `confine_run_relative` enforces containment, *not* character safety (ADR
+   0010 item 8) — a confined `modules_path` may contain a space or newline that would
+   break the `mod -S` command line or inject a second crash command. So the resolved
+   `modules_path` is validated against a strict `[A-Za-z0-9._/-]+` charset before
+   interpolation; a violation is `CONFIGURATION_ERROR` / `modules_path_unsafe` (no
+   crash run). `vmlinux_path`/`vmcore_path` need no such guard — they are argv, not
+   command-stream, text. chmod 0600 the raw files.
 9. Triage the runner result (mirrors `_finalize_introspect_call`'s
    `oversized_output` / `cancelled` / `stdin_failed` / `timed_out` / `exit==124`
    branches). On a clean run, `split_transcript` + `parse_command` per segment,
@@ -342,7 +419,10 @@ parser, yields `{"parsed": False, "reason": ..., "raw": <text>}`. Typed parsers:
 
 Parsers operate purely on text (no crash dependency) and are unit-tested against
 captured-output fixtures. They never raise out of `parse_command`; a parse exception
-is caught and converted to the raw-passthrough form. Each parsed value is redacted by
+is caught and converted to the raw-passthrough form. `parse_command` is **only called
+for fully-captured segments** — a segment marked `not_captured` or `output_truncated`
+by `split_transcript` (§4) is recorded as-is and never typed-parsed, so a partial
+report can never become confidently-wrong typed JSON. Each parsed value is redacted by
 the handler before it is returned/persisted (the parser does not redact — redaction
 is the handler's single responsibility, applied uniformly to typed and raw values).
 
@@ -352,6 +432,8 @@ is the handler's single responsibility, applied uniformly to typed and raw value
 |---|---|---|
 | run not found | `CONFIGURATION_ERROR` | `run_not_found` |
 | empty/oversized/duplicate/blank command list; bad timeout | `CONFIGURATION_ERROR` | `invalid_commands` (+ `reason`) / `invalid_timeout` |
+| command fails §3.4 sanitisation or allowlist (shell escape `!`, pipe `\|`, redirect `>`/`<`, newline, non-allowlisted verb) | `CONFIGURATION_ERROR` | `command_not_permitted` |
+| resolved `modules_path` contains command-stream-unsafe characters | `CONFIGURATION_ERROR` | `modules_path_unsafe` |
 | budget exhausted | `CONFIGURATION_ERROR` | `manifest_call_budget_exhausted` |
 | `sensitive/` missing/too-permissive | `CONFIGURATION_ERROR` | `sensitive_dir_missing` / `sensitive_dir_too_permissive` |
 | vmcore ref missing/escaping | `CONFIGURATION_ERROR` | `vmcore_not_found` |
@@ -392,7 +474,8 @@ added (no speculative multi-tenant feature). Documented so the agent can self-li
 
 - `config.py`: add `"debug.postmortem.crash"` to `ALLOWED_DEBUG_OPERATIONS`; add
   `MAX_POSTMORTEM_CRASH_CALLS_PER_RUN`, `MAX_CRASH_COMMANDS`, `CRASH_SCRIPT_BYTE_CAP`,
-  `CRASH_STDOUT_CAP`.
+  `CRASH_STDOUT_CAP`, and `CRASH_COMMAND_ALLOWLIST` (§3.4, the curated read-only verb
+  set) so the whole bounded surface is reviewable in one place.
 - `providers/local_crash_postmortem.py`: `local_crash_postmortem_capability()` →
   `ProviderCapability(provider_name="local-crash-postmortem", provider_family="debug",
   operations=["debug.postmortem.crash"], required_host_tools=["crash"],
@@ -433,6 +516,19 @@ Handler tests instantiate the handler directly with injected fakes (`runner=`,
   `provenance_unverifiable` (vmcore reader raises `VmcoreBuildIdAbsent`),
   `vmcore_format_unsupported`, and `vmlinux_build_id_unreadable` (AC: mismatch fails
   loud, no crash run).
+- **Command validation (security-critical, §3.4):** each of `!cat /etc/shadow`,
+  `bt | sh`, `sys > /tmp/x`, `log < /etc/passwd`, `ps; quit`, a command with an
+  embedded `\n`, and a non-allowlisted verb (`gdb foo`) → `command_not_permitted`,
+  **runner never called** (assert no invocation). A batch with one bad command among
+  good ones rejects the whole call. Allowlisted read-only verbs (`bt`, `ps`, `log`,
+  `kmem -i`, `sys`) pass validation.
+- **`modules_path_unsafe` (§6 step 8):** a fake `resolve_symbols` returning a
+  `modules_path` containing a space / newline → `modules_path_unsafe`, runner never
+  called; a clean `[A-Za-z0-9._/-]+` path passes.
+- **Truncation segment (§4):** a fake runner returns a transcript truncated inside a
+  command's segment with `oversized`/cap hit → that command is `output_truncated`
+  (never typed-parsed), later commands `not_captured`, response `truncated:true`; a
+  transcript with **zero** sentinels → `crash_open_failure`.
 - Unknown/unparseable command not dropped: a command with no parser and a command
   whose parser raises both appear in `results` as `parsed:false` (AC).
 - Timeout/oversized: fake runner reports `exit 124` → `crash_timeout`; oversized output

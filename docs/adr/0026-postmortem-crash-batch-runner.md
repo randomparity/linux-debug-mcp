@@ -64,6 +64,27 @@ index in the sentinel makes a gap detectable rather than mis-attributing output.
 The token is server-generated, not caller input, so `!echo` carries no injection
 surface. `-s` (silent) suppresses the banner/prompt/scroll noise for a clean stream.
 
+### 2a. Command content is validated (sanitise + allowlist) — the only trust boundary
+
+Because the path is offline and **never gated** (decision 8 / §5.6 rule 3), there is no
+admission tier or `DebugProfile` between the caller and the host. `crash`'s command
+interpreter is not a sandbox: `!` runs a host shell command, `cmd | prog` pipes to a
+host shell, `cmd > file` redirects to a **host file**. Accepting unvalidated command
+strings would hand the caller arbitrary host read/write/exec. Command-content
+validation is therefore the load-bearing security control, applied to every command
+before any crash invocation, in two layers: (1) a security-critical denylist —
+rejecting embedded newline/control chars, a leading `!`, and `|`/`>`/`<`/`` ` ``/`$(`/
+`;`/`&`; (2) an allowlist of curated read-only leading verbs
+(`CRASH_COMMAND_ALLOWLIST`). The denylist is the security boundary (a benign verb like
+`bt` still reaches the host via `bt | sh`); the allowlist keeps the surface curated and
+is defence-in-depth. A violation is `CONFIGURATION_ERROR` / `command_not_permitted`,
+no crash run. The server-injected `mod -S <modules_path>` line (decision 1 reuse) is
+**not** caller text, but its interpolated path is validated against a strict
+`[A-Za-z0-9._/-]+` charset (`modules_path_unsafe`) because `confine_run_relative`
+guarantees containment, not character safety — the same path-injection class ADR 0010
+item 8 base64-defended against, here closed by charset validation since the path enters
+a `crash` command line rather than a Python literal.
+
 ### 3. Parsing is best-effort and total; failure is raw passthrough
 
 `parse_command(command, raw_text)` dispatches on the command's leading token(s) to
@@ -157,7 +178,14 @@ at — exactly the split #55 uses (`sensitive/stdout.raw` vs `debug/.../stdout.j
    `_ensure_debug_operation_enabled` is not called — no profile in the request, no
    admission tier to narrow.
 
-9. **Write the raw transcript under `debug/` as the issue's text literally says.**
+9. **Accept arbitrary `crash` command strings (rely on it being "read-only").**
+   Rejected: `crash`'s language is not read-only — `!`, `|`, and `>` reach the host
+   shell and filesystem. On a never-gated offline path with no admission tier, that is
+   arbitrary host read/write/exec. A leading-verb allowlist *alone* was also rejected as
+   insufficient (it does not stop `bt | sh` or `sys > file`); the metacharacter/newline
+   denylist is the actual security control, with the allowlist as defence-in-depth.
+
+10. **Write the raw transcript under `debug/` as the issue's text literally says.**
    Rejected: `crash log`/`bt` surface guest memory and strings; the CLAUDE.md contract
    requires every persisted artifact through `Redactor()`. Raw goes to `sensitive/`
    (0600, never returned) and a redacted transcript under `debug/` carries the
