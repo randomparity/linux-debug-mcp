@@ -4824,7 +4824,28 @@ def _debug_operation_response(
             )
             _ensure_debug_operation_enabled(profile, DEBUG_METHOD_OPERATIONS[method_name])
             attachment = gdb_mi_sessions.require(session.session_id)
-            data = _engine_op_data(engine=gdb_mi_engine, attachment=attachment, method_name=method_name, kwargs=kwargs)
+            try:
+                data = _engine_op_data(
+                    engine=gdb_mi_engine, attachment=attachment, method_name=method_name, kwargs=kwargs
+                )
+            except (GdbMiError, ProviderDebugError):
+                raise  # gdb answered (alive); keep the session and surface the typed failure below.
+            except Exception as exc:
+                # A non-protocol fault — a dead gdb pipe / crashed engine. The attachment is unusable;
+                # reap it and best-effort un-halt so the kernel is not stranded HALTED behind a dead
+                # engine, then return a structured failure (defence-in-depth matching start_session's
+                # guaranteed-resume teardown). end_session is the next action to release the transport.
+                reaped = gdb_mi_sessions.reap(session.session_id)
+                if reaped is not None:
+                    with contextlib.suppress(Exception):
+                        gdb_mi_engine.force_resume(reaped)
+                return ToolResponse.failure(
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    message=redactor.redact_text(f"the gdb/MI engine faulted during debug.{method_name}: {exc}"),
+                    run_id=run_id,
+                    details={"code": "debug_engine_faulted"},
+                    suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
+                )
             updated_session = session
             if method_name in _BREAKPOINT_MUTATORS:
                 ledger = {ref.number: ref.model_dump(mode="json") for ref in gdb_mi_engine.list_breakpoints(attachment)}
@@ -4864,6 +4885,16 @@ def _debug_operation_response(
             run_id=run_id,
             details=redactor.redact_value(exc.details),
             suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+        )
+    except OSError as exc:
+        # The engine op already ran (the live session is healthy); only the persist/record bookkeeping
+        # faulted. Surface a structured failure WITHOUT reaping — the caller can retry the op.
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            message=redactor.redact_text(f"failed to record debug.{method_name}: {exc}"),
+            run_id=run_id,
+            details={"code": "debug_session_op_record_failed"},
+            suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
         )
 
     op_artifacts = _mi_session_artifacts(store=store, run_id=run_id, session=updated_session)

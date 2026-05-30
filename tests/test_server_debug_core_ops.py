@@ -476,3 +476,77 @@ def test_end_session_record_fault_does_not_resume_before_recording(tmp_path: Pat
     assert engine.forced is False
     assert sessions.get(session_id) is not None
     assert registry.read_record(KEY).execution_state == ExecutionState.HALTED
+
+
+def test_op_raw_engine_fault_reaps_and_returns_structured_failure(tmp_path: Path) -> None:
+    """A live op that raises a NON-GdbMiError fault (e.g. a dead gdb pipe) must not escape the
+    handler. The dead attachment is reaped + best-effort resumed and a redacted INFRASTRUCTURE_FAILURE
+    is returned, so the kernel is not stranded HALTED behind an unusable engine."""
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+
+    class _DeadPipeEngine(FakeMiEngine):
+        def continue_(self, attachment, *, timeout_sec: float):
+            raise BrokenPipeError("gdb is gone")
+
+    engine = _DeadPipeEngine()
+    sessions = GdbMiSessionRegistry()
+    start = _start(artifact_root, registry=registry, txn=txn, admission=admission, engine=engine, sessions=sessions)
+    assert start.ok is True, start
+    session_id = start.data["debug_session_id"]
+
+    response = debug_continue_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        timeout_seconds=5,
+        debug_session_id=session_id,
+        debug_profiles=_profiles(),
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
+
+    assert response.ok is False
+    assert response.error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    # The unusable attachment was reaped and best-effort resumed (guaranteed-resume defence in depth).
+    assert sessions.get(session_id) is None
+    assert engine.forced is True
+    assert "debug.end_session" in response.suggested_next_actions
+
+
+def test_op_persist_fault_keeps_healthy_session_registered(tmp_path: Path, monkeypatch) -> None:
+    """A persist fault on the stateful op path (engine healthy, op already ran) must surface a
+    structured failure WITHOUT reaping the live session — the user can retry. Contrast with a raw
+    engine fault, which reaps the dead attachment."""
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+    engine = FakeMiEngine()
+    sessions = GdbMiSessionRegistry()
+    start = _start(artifact_root, registry=registry, txn=txn, admission=admission, engine=engine, sessions=sessions)
+    assert start.ok is True, start
+    session_id = start.data["debug_session_id"]
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(server_module, "_persist_mi_debug_session", _boom)
+    response = debug_set_breakpoint_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        symbol="do_sys_open",
+        debug_session_id=session_id,
+        debug_profiles=_profiles(),
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
+
+    assert response.ok is False
+    assert response.error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    # Engine is healthy; the session stays registered and was NOT resumed.
+    assert sessions.get(session_id) is not None
+    assert engine.forced is False
