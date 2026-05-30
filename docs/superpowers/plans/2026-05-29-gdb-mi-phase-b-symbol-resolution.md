@@ -160,7 +160,8 @@ Add this method to `GdbMiEngine`, placed after `probe_read`:
             )
         records = self._run(attachment, f'-data-evaluate-expression "&{symbol_name}"')
         result = MiRecord.first_result(records)
-        value = result.payload.get("value") if result is not None and isinstance(result.payload, dict) else None
+        payload = result.payload if result is not None else None
+        value = payload.get("value") if isinstance(payload, dict) else None
         if not isinstance(value, str):
             raise GdbMiError(
                 f"gdb/MI returned no value resolving symbol {symbol_name!r}",
