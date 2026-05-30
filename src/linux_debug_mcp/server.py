@@ -596,6 +596,7 @@ def _reject_if_target_halted(
     run_id: str,
     admission: AdmissionService | None,
     session_registry: SessionRegistry | None,
+    action: str = "probing kdump prerequisites",
 ) -> ToolResponse | None:
     """§5.6 rule 2 proof-only fast-reject for the read-only kdump prereq probe.
 
@@ -618,7 +619,7 @@ def _reject_if_target_halted(
         return ToolResponse.failure(
             category=ErrorCategory.READINESS_FAILURE,
             run_id=run_id,
-            message="target halted in debugger; resume or detach before probing kdump prerequisites",
+            message=f"target halted in debugger; resume or detach before {action}",
             details={"code": "target_halted"},
             suggested_next_actions=["debug.continue", "debug.end_session"],
         )
@@ -2186,6 +2187,7 @@ def _resolve_probe_context(
     *,
     artifact_root: Path,
     rootfs_profiles: dict[str, RootfsProfile],
+    timeout_band: tuple[int, int] = (5, 60),
 ) -> tuple[_ProbeContext | None, ToolResponse | None]:
     """Spec §6: all pre-SSH validation. Returns (context, None) on success or
     (None, failure-response) on any short-circuit."""
@@ -2223,10 +2225,11 @@ def _resolve_probe_context(
                 "code": "manifest_profile_mismatch",
             },
         )
-    if not (5 <= request.timeout_seconds <= 60):
+    lo, hi = timeout_band
+    if not (lo <= request.timeout_seconds <= hi):
         return None, _configuration_failure(
             run_id=run_id,
-            message=f"timeout_seconds must be in [5, 60]; got {request.timeout_seconds}",
+            message=f"timeout_seconds must be in [{lo}, {hi}]; got {request.timeout_seconds}",
             details={"code": "invalid_timeout"},
         )
 
