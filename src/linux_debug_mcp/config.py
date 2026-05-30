@@ -376,6 +376,7 @@ class RootfsProfile(ConfigModel):
     name: str
     source: str
     source_type: Literal["disk_image", "directory"] = "disk_image"
+    source_kind: Literal["local_path", "builder", "prebuilt", "url"] = "local_path"
     mutability: Literal["read_only", "copy_on_write", "mutable"] = "copy_on_write"
     access_method: Literal["ssh", "serial", "ssh_and_serial", "none"] = "ssh"
     credential_refs: list[SecretReference] = Field(default_factory=list)

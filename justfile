@@ -21,6 +21,9 @@ check-host: sync-dev
     @echo "Running host.check_prerequisites"
     uv run python -m linux_debug_mcp.dev_setup check-host
 
+rootfs:
+    ./scripts/build-rootfs.sh
+
 install-hooks: sync-dev
     uv run detect-secrets scan > .secrets.baseline
     uv run pre-commit install

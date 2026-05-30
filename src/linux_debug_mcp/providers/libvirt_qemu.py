@@ -48,6 +48,8 @@ class BootPlan:
     kernel_image_path: Path
     rootfs_path: Path
     rootfs_mutability: str
+    rootfs_backing_path: Path | None
+    overlay_create_argv: list[str] | None
     root_device: str
     serial_device: str
     kernel_args: list[str]
@@ -344,6 +346,23 @@ class LibvirtQemuProvider:
             raise self._configuration_error("target_ref, libvirt_uri, and readiness_marker are required")
 
         attempt_dir = resolved_run_dir / "boot" / f"attempt-{attempt}"
+        rootfs_backing_path: Path | None = None
+        overlay_create_argv: list[str] | None = None
+        if rootfs_profile.mutability == "copy_on_write":
+            rootfs_backing_path = rootfs_path
+            overlay_path = attempt_dir / "rootfs-overlay.qcow2"
+            overlay_create_argv = [
+                "qemu-img",
+                "create",
+                "-f",
+                "qcow2",
+                "-F",
+                "qcow2",
+                "-b",
+                str(rootfs_backing_path),
+                str(overlay_path),
+            ]
+            rootfs_path = overlay_path
         domain_xml_path = attempt_dir / "domain.xml"
         console_log_path = attempt_dir / "console.log"
         boot_log_path = attempt_dir / "boot.log"
@@ -361,6 +380,8 @@ class LibvirtQemuProvider:
             kernel_image_path=kernel_path,
             rootfs_path=rootfs_path,
             rootfs_mutability=rootfs_profile.mutability,
+            rootfs_backing_path=rootfs_backing_path,
+            overlay_create_argv=overlay_create_argv,
             root_device=self.root_device,
             serial_device=self.serial_device,
             kernel_args=kernel_args,
@@ -396,13 +417,17 @@ class LibvirtQemuProvider:
     ) -> BootExecutionResult:
         self._ensure_artifact_dirs(plan)
         artifacts = self._artifact_refs(plan)
-        if self.runner.which("virsh") is None:
+        required_tools = ["virsh"]
+        if plan.overlay_create_argv is not None:
+            required_tools.append("qemu-img")
+        missing_tools = [tool for tool in required_tools if self.runner.which(tool) is None]
+        if missing_tools:
             return self._boot_result(
                 plan=plan,
                 status=StepStatus.FAILED,
                 summary="missing required libvirt tools",
                 error_category=ErrorCategory.MISSING_DEPENDENCY,
-                details={"missing_tools": ["virsh"]},
+                details={"missing_tools": missing_tools},
                 artifacts=[],
             )
 
@@ -436,6 +461,15 @@ class LibvirtQemuProvider:
             destroy = self.runner.run(plan.destroy_argv, timeout=plan.timeout_seconds, log_path=plan.boot_log_path)
             if (destroy.exit_status != 0 or destroy.timed_out) and not self._is_inactive_destroy_failure(destroy):
                 return self._command_failure_result(plan=plan, command="destroy", result=destroy, artifacts=artifacts)
+
+        if plan.overlay_create_argv is not None:
+            overlay = self.runner.run(
+                plan.overlay_create_argv, timeout=plan.timeout_seconds, log_path=plan.boot_log_path
+            )
+            if overlay.exit_status != 0 or overlay.timed_out:
+                return self._command_failure_result(
+                    plan=plan, command="qemu-img create", result=overlay, artifacts=artifacts
+                )
 
         define = self.runner.run(plan.define_argv, timeout=plan.timeout_seconds, log_path=plan.boot_log_path)
         if define.exit_status != 0 or define.timed_out:
@@ -583,7 +617,7 @@ class LibvirtQemuProvider:
             raise self._configuration_error(f"cleanup policy is not supported: {target_profile.cleanup_policy}")
         if rootfs_profile.source_type != "disk_image":
             raise self._configuration_error("directory rootfs sources are not supported")
-        if rootfs_profile.mutability not in {"read_only", "mutable"}:
+        if rootfs_profile.mutability not in {"read_only", "mutable", "copy_on_write"}:
             raise self._configuration_error(f"{rootfs_profile.mutability} rootfs mutability is not supported")
         if not rootfs_profile.readiness_marker:
             raise self._configuration_error("readiness_marker is required")
@@ -814,7 +848,7 @@ def local_libvirt_qemu_capability() -> ProviderCapability:
         target_kinds=[TargetKind.VIRTUAL],
         transports=["libvirt", "serial-console", "filesystem"],
         operations=["target.boot"],
-        required_host_tools=["virsh"],
+        required_host_tools=["virsh", "qemu-img"],
         destructive_permissions=[
             "define MCP-owned libvirt domains",
             "update MCP-owned libvirt domains",

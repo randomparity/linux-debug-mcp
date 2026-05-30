@@ -213,6 +213,36 @@ sudo chown "$USER":"$USER" /var/lib/linux-debug-mcp/rootfs
 export LINUX_DEBUG_MCP_ROOTFS=/var/lib/linux-debug-mcp/rootfs/minimal.qcow2
 ```
 
+### One command: `just rootfs`
+
+The fastest path is the bundled builder, which produces the marker + sshd +
+authorized-key image at the default path:
+
+```bash
+sudo mkdir -p /var/lib/linux-debug-mcp/rootfs
+sudo chown "$USER":"$USER" /var/lib/linux-debug-mcp/rootfs
+just rootfs
+```
+
+Override defaults via environment: `LINUX_DEBUG_MCP_ROOTFS` (output path),
+`LINUX_DEBUG_MCP_ROOTFS_RELEASEVER`, `LINUX_DEBUG_MCP_ROOTFS_SIZE`,
+`LINUX_DEBUG_MCP_ROOTFS_SSH_USER`, `LINUX_DEBUG_MCP_ROOTFS_AUTHORIZED_KEY`.
+
+The default `minimal` rootfs profile is `source_kind="builder"` and
+`mutability="copy_on_write"`: a missing image makes `target.boot` fail with a
+`configuration_error` whose `suggested_fix` names `just rootfs`, and each boot runs
+from a throwaway qcow2 overlay so the base image stays pristine. `copy_on_write`
+requires `qemu-img` on the host and a qcow2 base image.
+
+Under `qemu:///system`, the libvirt qemu user must be able to read the kernel image,
+the rootfs base image, and the per-run overlay (under the artifact root). This is the
+same access the kernel image already requires; place the artifact root and source tree
+on a libvirt-readable, correctly-labeled path, or use `qemu:///session`. SSH login
+additionally requires that the guest not mislabel `authorized_keys` — the builder image
+has no SELinux policy and carries `.autorelabel`, so this holds without action.
+
+The manual recipe below remains valid as an explanation of what the script does.
+
 If you already have a compatible rootfs image, copy it to that path and make
 sure it writes this exact marker to `ttyS0`:
 
