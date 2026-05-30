@@ -9,6 +9,7 @@ from linux_debug_mcp.config import (
     MAX_INTROSPECT_CALLS_PER_RUN,
     PRELUDE_WARNING_FRACTION_PCT,
     ArtifactPolicy,
+    BootOverrides,
     BuildOverrides,
     BuildProfile,
     DebugProfile,
@@ -446,3 +447,24 @@ def test_rootfs_profile_rejects_unknown_source_kind() -> None:
 
     with pytest.raises(ValidationError):
         RootfsProfile(name="m", source="/img.qcow2", source_kind="nfs")
+
+
+def test_target_profile_wait_for_debugger_defaults_false() -> None:
+    profile = TargetProfile(name="t", architecture="x86_64")
+    assert profile.wait_for_debugger is False
+
+
+def test_target_profile_wait_for_debugger_requires_debug_gdbstub() -> None:
+    with pytest.raises(ValidationError, match="wait_for_debugger requires debug_gdbstub"):
+        TargetProfile(name="t", architecture="x86_64", wait_for_debugger=True)
+
+
+def test_target_profile_wait_for_debugger_accepts_with_gdbstub() -> None:
+    profile = TargetProfile(name="t", architecture="x86_64", debug_gdbstub=True, wait_for_debugger=True)
+    assert profile.wait_for_debugger is True
+
+
+def test_boot_overrides_wait_for_debugger_is_tristate() -> None:
+    assert BootOverrides().wait_for_debugger is None
+    assert BootOverrides(wait_for_debugger=True).wait_for_debugger is True
+    assert BootOverrides(wait_for_debugger=False).wait_for_debugger is False
