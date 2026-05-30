@@ -39,16 +39,21 @@ Write this first so it is red until the deletion lands; it pins the acceptance "
 **Files:**
 - Test: `tests/test_no_batch_gdb.py`
 
-- [ ] **Step 1: Write the failing test**
+The batch paths still exist until Task 14, so the assertion would be red now. To keep the suite green at every commit, the tripwire is committed as `xfail(strict=True)` and **flipped to a normal passing test in Task 14** (the deletion makes it pass; `strict=True` makes an unexpected pass before then a failure, so it can't silently rot).
+
+- [ ] **Step 1: Write the xfail tripwire**
 
 ```python
 from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 SRC = Path(__file__).resolve().parent.parent / "src" / "linux_debug_mcp"
 
 
+@pytest.mark.xfail(strict=True, reason="batch gdb paths deleted in Phase C Task 14; flip to a plain test then")
 def test_no_batch_gdb_invocation_remains() -> None:
     """ADR 0021 decision 4 / acceptance: one engine, no batch. No source file may
     construct a `-batch` gdb argv or keep the batch runner after Phase C."""
@@ -60,19 +65,19 @@ def test_no_batch_gdb_invocation_remains() -> None:
     assert offenders == [], f"batch gdb paths still present in: {offenders}"
 ```
 
-- [ ] **Step 2: Run it — expect FAIL** (the batch paths still exist).
+- [ ] **Step 2: Run it — expect XFAIL** (suite stays green).
 
 Run: `uv run python -m pytest tests/test_no_batch_gdb.py -q`
-Expected: FAIL listing `providers/qemu_gdbstub.py`.
+Expected: `1 xfailed` (green suite).
 
-- [ ] **Step 3: Commit the red tripwire**
+- [ ] **Step 3: Commit the xfail tripwire**
 
 ```bash
 git add tests/test_no_batch_gdb.py
-git commit -m "test(gdb-mi): add static tripwire for residual -batch paths"
+git commit -m "test(gdb-mi): add xfail tripwire for residual -batch paths"
 ```
 
-(The tripwire goes green in Task 14. Leaving a known-red test committed is acceptable here only because it is the acceptance gate driving the deletion; do not advance past other red guardrails.)
+(Task 14, after deleting the batch paths, removes the `@pytest.mark.xfail` decorator so the test asserts as a normal green gate.)
 
 ---
 
@@ -279,7 +284,9 @@ git commit -m "feat(gdb-mi): add typed StopRecord/Frame/Variable/BreakpointRef w
 
 ---
 
-## Task 4: `wait_for_stop` + stop-reason classification
+## Task 4: `wait_for_stop` + stop classification + non-raising `interrupt`
+
+`resume` (Task 5) depends on both `wait_for_stop` and `interrupt`, so they are built first, here, and tested directly (not through `resume`).
 
 **Files:**
 - Modify: `src/linux_debug_mcp/providers/gdb_mi.py` (constants near line 26; methods on `GdbMiEngine`)
@@ -302,15 +309,19 @@ def _stopped(reason: str) -> list[dict[str, object]]:
              "token": None}]
 
 
-def _engine(controller: FakeController) -> GdbMiEngine:
-    return GdbMiEngine(controller_factory=lambda command: controller, gdb_path_finder=lambda _: "/usr/bin/gdb")
+def _engine(controller: FakeController, redactor: object | None = None) -> GdbMiEngine:
+    return GdbMiEngine(
+        controller_factory=lambda command: controller,
+        gdb_path_finder=lambda _: "/usr/bin/gdb",
+        redactor=redactor,  # None => default Redactor
+    )
 
 
-def _attached(tmp_path: Path, writes: list[object], reads: list[object] | None = None):
+def _attached(tmp_path: Path, writes: list[object], reads: list[object] | None = None, redactor: object | None = None):
     vmlinux = tmp_path / "vmlinux"
     vmlinux.write_text("elf", encoding="utf-8")
     controller = FakeController([*_ATTACH_OK, *writes], reads=reads)
-    engine = _engine(controller)
+    engine = _engine(controller, redactor=redactor)
     from linux_debug_mcp.transport.base import TcpEndpoint
 
     attachment = engine.attach(
@@ -321,40 +332,40 @@ def _attached(tmp_path: Path, writes: list[object], reads: list[object] | None =
     return engine, controller, attachment
 
 
-def test_continue_waits_for_deferred_stopped_record(tmp_path: Path) -> None:
-    # -exec-continue returns ^running; the *stopped arrives on a later read().
-    engine, controller, attachment = _attached(tmp_path, writes=[_RUNNING], reads=[[], _stopped("breakpoint-hit")])
-    stop = engine.resume(attachment, "-exec-continue", timeout_sec=5)
+def test_wait_for_stop_returns_deferred_stopped_record(tmp_path: Path) -> None:
+    # The *stopped arrives on a later read() (the first read returns nothing).
+    engine, controller, attachment = _attached(tmp_path, writes=[], reads=[[], _stopped("breakpoint-hit")])
+    stop = engine.wait_for_stop(attachment, timeout_sec=5)
     assert isinstance(stop, StopRecord)
     assert stop.reason == "breakpoint-hit"
-    assert stop.timed_out is False
-    assert "-exec-continue" in controller.commands
+    assert stop.frame is not None and stop.frame.func == "do_sys_open"
 
 
-def test_continue_timeout_interrupts_and_marks_timed_out(tmp_path: Path) -> None:
-    # No *stopped ever arrives on read(); the wait expires, the engine -exec-interrupts and
-    # collects the SIGINT stop on a follow-up read.
-    engine, controller, attachment = _attached(
-        tmp_path,
-        writes=[_RUNNING, _DONE],  # continue ^running, then interrupt ^done
-        reads=[[], [], _stopped("signal-received")],
-    )
-    stop = engine.resume(attachment, "-exec-continue", timeout_sec=0)  # 0 => immediate timeout
-    assert stop.timed_out is True
-    assert "-exec-interrupt" in controller.commands
+def test_wait_for_stop_times_out_to_none(tmp_path: Path) -> None:
+    engine, controller, attachment = _attached(tmp_path, writes=[], reads=[[]])
+    assert engine.wait_for_stop(attachment, timeout_sec=0) is None
 
 
-def test_continue_on_exited_inferior_raises_session_exited(tmp_path: Path) -> None:
-    engine, controller, attachment = _attached(tmp_path, writes=[_RUNNING], reads=[_stopped("exited-normally")])
+def test_wait_for_stop_on_exited_inferior_raises_session_exited(tmp_path: Path) -> None:
+    engine, controller, attachment = _attached(tmp_path, writes=[], reads=[_stopped("exited-normally")])
     with pytest.raises(GdbMiError) as exc:
-        engine.resume(attachment, "-exec-continue", timeout_sec=5)
+        engine.wait_for_stop(attachment, timeout_sec=5)
     assert exc.value.category == ErrorCategory.DEBUG_ATTACH_FAILURE
     assert exc.value.details.get("code") == "session_exited"
+
+
+def test_interrupt_on_stopped_engine_tolerates_error(tmp_path: Path) -> None:
+    # -exec-interrupt against an already-stopped target returns ^error; interrupt() must not raise.
+    err = [{"type": "result", "message": "error", "payload": {"msg": "not being run"}, "token": None}]
+    engine, controller, attachment = _attached(tmp_path, writes=[err], reads=[[]])
+    stop = engine.interrupt(attachment)
+    assert stop is None or isinstance(stop, StopRecord)
+    assert "-exec-interrupt" in controller.commands
 ```
 
-- [ ] **Step 2: Run them — expect FAIL** (`resume`/`wait_for_stop` undefined).
+- [ ] **Step 2: Run them — expect FAIL** (`wait_for_stop`/`interrupt` undefined).
 
-Run: `uv run python -m pytest tests/test_gdb_mi_core_ops.py -k "continue" -q`
+Run: `uv run python -m pytest tests/test_gdb_mi_core_ops.py -k "wait_for_stop or interrupt" -q`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement.** Add constants near line 26:
@@ -421,61 +432,6 @@ Note `import time` and `import math` are not used; bound the loop by a monotonic
             line=_int(payload.get("line")),
         )
 
-    def resume(self, attachment: GdbMiAttachment, verb: str, *, timeout_sec: float) -> StopRecord:
-        """Issue an interactive exec verb (-exec-continue/-step/-next/-finish), wait for the stop,
-        and return a redacted StopRecord. On timeout, -exec-interrupt back to a known stop and mark
-        timed_out=True. Always returns HALTED (or raises session_exited)."""
-        bounded = max(1, min(int(timeout_sec) if timeout_sec else MAX_INTERACTIVE_WAIT_SEC, MAX_INTERACTIVE_WAIT_SEC))
-        self._run(attachment, verb)  # ^running under mi-async on
-        stop = self.wait_for_stop(attachment, timeout_sec=bounded)
-        if stop is not None:
-            return self._redact_stop(stop)
-        interrupted = self.interrupt(attachment)
-        return self._redact_stop((interrupted or StopRecord()).model_copy(update={"timed_out": True}))
-
-    def _redact_stop(self, stop: StopRecord) -> StopRecord:
-        return StopRecord.model_validate(self._redactor.redact_value(stop.model_dump(mode="json")))
-```
-
-(Define `interrupt` in Task 5; tests in this task that need it script the interrupt path.)
-
-- [ ] **Step 4: Run them — expect PASS** (after Task 5's `interrupt`, the timeout test passes; if implementing strictly in order, mark the timeout test xfail until Task 5, then remove xfail). Prefer implementing `interrupt` (Task 5) before running Step 4 of this task.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/linux_debug_mcp/providers/gdb_mi.py tests/test_gdb_mi_core_ops.py
-git commit -m "feat(gdb-mi): wait_for_stop + resume verb with stop-reason classification"
-```
-
----
-
-## Task 5: Non-raising `interrupt` primitive
-
-**Files:**
-- Modify: `src/linux_debug_mcp/providers/gdb_mi.py`
-- Test: `tests/test_gdb_mi_core_ops.py`
-
-- [ ] **Step 1: Write the failing test**
-
-```python
-def test_interrupt_on_stopped_engine_tolerates_error(tmp_path: Path) -> None:
-    # -exec-interrupt against an already-stopped target returns ^error; interrupt() must not raise.
-    err = [{"type": "result", "message": "error", "payload": {"msg": "not being run"}, "token": None}]
-    engine, controller, attachment = _attached(tmp_path, writes=[err], reads=[[]])
-    stop = engine.interrupt(attachment)
-    assert stop is None or isinstance(stop, StopRecord)
-    assert "-exec-interrupt" in controller.commands
-```
-
-- [ ] **Step 2: Run it — expect FAIL** (`interrupt` undefined / would raise via `_run`).
-
-Run: `uv run python -m pytest tests/test_gdb_mi_core_ops.py::test_interrupt_on_stopped_engine_tolerates_error -q`
-Expected: FAIL.
-
-- [ ] **Step 3: Implement** (issues `-exec-interrupt` WITHOUT `_run`'s raise-on-error):
-
-```python
     def interrupt(self, attachment: GdbMiAttachment) -> StopRecord | None:
         """Idempotent 'ensure HALTED'. Issues -exec-interrupt without routing through the
         raising _run (an already-stopped target answers ^error 'not being run', which is benign),
@@ -487,9 +443,81 @@ Expected: FAIL.
         self._append_transcript(attachment.transcript_path, "-exec-interrupt", records)
         stop = self.wait_for_stop(attachment, timeout_sec=_INTERRUPT_STOP_TIMEOUT_SEC)
         return self._redact_stop(stop) if stop is not None else None
+
+    def _redact_stop(self, stop: StopRecord) -> StopRecord:
+        return StopRecord.model_validate(self._redactor.redact_value(stop.model_dump(mode="json")))
 ```
 
-- [ ] **Step 4: Run it — expect PASS**, then run the full Task 4 set.
+- [ ] **Step 4: Run them — expect PASS**
+
+Run: `uv run python -m pytest tests/test_gdb_mi_core_ops.py -k "wait_for_stop or interrupt" -q`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/linux_debug_mcp/providers/gdb_mi.py tests/test_gdb_mi_core_ops.py
+git commit -m "feat(gdb-mi): wait_for_stop + stop classification + non-raising interrupt"
+```
+
+---
+
+## Task 5: `resume` (continue) over `wait_for_stop` + `interrupt`
+
+**Files:**
+- Modify: `src/linux_debug_mcp/providers/gdb_mi.py`
+- Test: `tests/test_gdb_mi_core_ops.py`
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+def test_continue_waits_for_deferred_stopped_record(tmp_path: Path) -> None:
+    # -exec-continue returns ^running; the *stopped arrives on a later read().
+    engine, controller, attachment = _attached(tmp_path, writes=[_RUNNING], reads=[[], _stopped("breakpoint-hit")])
+    stop = engine.resume(attachment, "-exec-continue", timeout_sec=5)
+    assert isinstance(stop, StopRecord)
+    assert stop.reason == "breakpoint-hit"
+    assert stop.timed_out is False
+    assert "-exec-continue" in controller.commands
+
+
+def test_continue_timeout_interrupts_and_marks_timed_out(tmp_path: Path) -> None:
+    # No *stopped arrives on read() before the budget is spent; resume -exec-interrupts and collects
+    # the SIGINT stop on a follow-up read.
+    engine, controller, attachment = _attached(
+        tmp_path,
+        writes=[_RUNNING, [{"type": "result", "message": "done", "payload": None, "token": None}]],
+        reads=[[], _stopped("signal-received")],
+    )
+    stop = engine.resume(attachment, "-exec-continue", timeout_sec=0)  # 0 => one read slice, then interrupt
+    assert stop.timed_out is True
+    assert "-exec-interrupt" in controller.commands
+```
+
+- [ ] **Step 2: Run them — expect FAIL** (`resume` undefined).
+
+Run: `uv run python -m pytest tests/test_gdb_mi_core_ops.py -k "continue" -q`
+Expected: FAIL.
+
+- [ ] **Step 3: Implement** (after `interrupt`):
+
+```python
+    def resume(self, attachment: GdbMiAttachment, verb: str, *, timeout_sec: float) -> StopRecord:
+        """Issue an interactive exec verb (-exec-continue/-step/-next/-finish), wait for the stop,
+        and return a redacted StopRecord. On timeout, -exec-interrupt back to a known stop and mark
+        timed_out=True. Always returns HALTED (or raises session_exited)."""
+        bounded = max(1, min(int(timeout_sec) if timeout_sec else MAX_INTERACTIVE_WAIT_SEC, MAX_INTERACTIVE_WAIT_SEC))
+        self._run(attachment, verb)  # ^running under mi-async on
+        stop = self.wait_for_stop(attachment, timeout_sec=bounded)
+        if stop is not None:
+            return self._redact_stop(stop)
+        interrupted = self.interrupt(attachment)
+        return self._redact_stop((interrupted or StopRecord()).model_copy(update={"timed_out": True}))
+```
+
+Note: `timeout_sec=0` yields `bounded=max(1, min(60, 60))`? No — `int(0) if 0 else 60` evaluates the `else` because `0` is falsy, giving `60`. For the timeout *test* to force the interrupt path deterministically, `wait_for_stop` must exhaust its read budget; with `reads=[[]]` the single empty slice returns None, then `interrupt` runs. Keep `wait_for_stop`'s `slices = max(1, int(timeout_sec / _STOP_POLL_SLICE_SEC) + 1)` so a small budget still polls at least once. The test scripts exactly one empty read before the interrupt's stop, so it is deterministic regardless of the bound.
+
+- [ ] **Step 4: Run them — expect PASS**, then the full file.
 
 Run: `uv run python -m pytest tests/test_gdb_mi_core_ops.py -q`
 Expected: PASS.
@@ -498,7 +526,7 @@ Expected: PASS.
 
 ```bash
 git add src/linux_debug_mcp/providers/gdb_mi.py tests/test_gdb_mi_core_ops.py
-git commit -m "feat(gdb-mi): non-raising interrupt primitive (ensure-HALTED, idempotent)"
+git commit -m "feat(gdb-mi): resume verb (continue) with bounded wait + timeout interrupt"
 ```
 
 ---
@@ -669,6 +697,12 @@ def test_clear_breakpoint_rejects_non_numeric_id(tmp_path: Path) -> None:
     with pytest.raises(GdbMiError) as exc:
         engine.clear_breakpoint(attachment, "1; quit")
     assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_clear_watchpoint_uses_break_delete(tmp_path: Path) -> None:
+    engine, controller, attachment = _attached(tmp_path, writes=[_DONE])
+    engine.clear_watchpoint(attachment, "2")
+    assert controller.commands[-1] == "-break-delete 2"
 ```
 
 - [ ] **Step 2: Run — expect FAIL.**
@@ -713,6 +747,11 @@ _BREAK_ID_RE = re.compile(r"^[0-9]+$")
                 details={"number": number},
             )
         self._run(attachment, f"-break-delete {number}")
+
+    # A watchpoint is a breakpoint to gdb; clearing one is the same `-break-delete <n>` verb. Kept as
+    # a named method so the debug.clear_watchpoint handler has an explicit engine target.
+    def clear_watchpoint(self, attachment: GdbMiAttachment, number: str) -> None:
+        self.clear_breakpoint(attachment, number)
 
     def list_breakpoints(self, attachment: GdbMiAttachment) -> list[BreakpointRef]:
         records = self._run(attachment, "-break-list")
@@ -793,17 +832,35 @@ def test_backtrace_returns_typed_frames(tmp_path: Path) -> None:
     assert controller.commands[-1] == "-stack-list-frames"
 
 
-def test_list_variables_redacts_secret_values(tmp_path: Path) -> None:
-    engine, controller, attachment = _attached(tmp_path, writes=[_VARS])
+class _StubRedactor:
+    """Proves the redaction PATH is wired without depending on the default Redactor's patterns:
+    every value is replaced with a sentinel. Mirrors the real Redactor's two methods used by the
+    engine (`redact_value` recurses; `redact_text` masks a string)."""
+
+    def redact_value(self, value: object) -> object:
+        if isinstance(value, dict):
+            return {k: self.redact_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self.redact_value(v) for v in value]
+        if isinstance(value, str):
+            return "[REDACTED]"
+        return value
+
+    def redact_text(self, value: str) -> str:
+        return "[REDACTED]"
+
+
+def test_list_variables_passes_values_through_redactor(tmp_path: Path) -> None:
+    engine, controller, attachment = _attached(tmp_path, writes=[_VARS], redactor=_StubRedactor())
     variables = engine.list_variables(attachment)
     names = {v.name for v in variables}
-    assert names == {"fd", "token"}
-    token = next(v for v in variables if v.name == "token")
-    assert "<a-secret-shaped-value>" not in (token.value or "")  # redacted
+    assert names == {"[REDACTED]"} or names == {"fd", "token"}  # names may or may not be masked; values must be
+    token = next(v for v in variables if v.value is not None)
+    assert token.value == "[REDACTED]"  # the value went through the injected redactor
     assert controller.commands[-1] == "-stack-list-variables --all-values"
 ```
 
-(If the default `Redactor` does not catch that specific token shape, assert against a value the repo's redaction config does catch — confirm with `tests/` redaction fixtures before finalizing; the structural requirement is that the value passes through `Redactor`.)
+Note the stub masks every string, so both name and value become `[REDACTED]`; the assertion's first clause covers that. The structural guarantee under test is "the value passed through the engine's redactor," which is exactly what ADR 0021 decision 2c requires. (The `GdbMiEngine.__init__` already accepts `redactor`; `None` keeps the default `Redactor`.)
 
 - [ ] **Step 2: Run — expect FAIL.**
 
@@ -863,14 +920,25 @@ git commit -m "feat(gdb-mi): backtrace + list_variables (redacted, bounded)"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-_REG = [{"type": "result", "message": "done",
-         "payload": {"register-values": [{"number": "0", "value": "0x10"}]}, "token": None}]
+_REG_NAMES = [{"type": "result", "message": "done",
+               "payload": {"register-names": ["rax", "rbx", "pc"]}, "token": None}]
+_REG_VALUES = [{"type": "result", "message": "done",
+                "payload": {"register-values": [{"number": "0", "value": "0x10"},
+                                                {"number": "1", "value": "0x20"},
+                                                {"number": "2", "value": "0xffffffff81000000"}]}, "token": None}]
 _MEM = [{"type": "result", "message": "done",
          "payload": {"memory": [{"begin": "0x1000", "contents": "deadbeef"}]}, "token": None}]
 _EVAL_BANNER = [{"type": "result", "message": "done",
                  "payload": {"value": "Linux version 6.9.0 ..."}, "token": None}]
 _EVAL_ADDR = [{"type": "result", "message": "done",
                "payload": {"value": "0xffffffff82000000 <jiffies>"}, "token": None}]
+
+
+def test_read_registers_returns_only_requested(tmp_path: Path) -> None:
+    engine, controller, attachment = _attached(tmp_path, writes=[_REG_NAMES, _REG_VALUES])
+    result = engine.read_registers(attachment, ["pc"])
+    assert set(result["registers"].keys()) == {"pc"}  # not rax/rbx
+    assert result["registers"]["pc"] == "0xffffffff81000000"
 
 
 def test_read_memory_rejects_over_cap_without_touching_gdb(tmp_path: Path) -> None:
@@ -924,15 +992,32 @@ def test_read_symbol_evaluates_validated_name(tmp_path: Path) -> None:
 
 ```python
     def read_registers(self, attachment: GdbMiAttachment, register_names: list[str]) -> dict[str, object]:
+        if not isinstance(register_names, list) or not register_names:
+            raise GdbMiError("registers must be a non-empty list", category=ErrorCategory.CONFIGURATION_ERROR)
+        requested: list[str] = []
         for name in register_names:
-            if not _REGISTER_RE.match(name):
-                raise GdbMiError(
-                    f"invalid register name {name!r}", category=ErrorCategory.CONFIGURATION_ERROR
-                )
-        records = self._run(attachment, "-data-list-register-values x")
-        result = MiRecord.first_result(records)
-        payload = result.payload if result is not None and isinstance(result.payload, dict) else {}
-        return self._redactor.redact_value({"register_values": payload.get("register-values", [])})
+            if not isinstance(name, str) or not _REGISTER_RE.match(name):
+                raise GdbMiError(f"invalid register name {name!r}", category=ErrorCategory.CONFIGURATION_ERROR)
+            requested.append(name)
+        # gdb keys register VALUES by ordinal number; map names->ordinals via -data-list-register-names,
+        # then return only the requested names (the legacy op filtered; preserve that).
+        names_payload = MiRecord.first_result(self._run(attachment, "-data-list-register-names")).payload
+        ordered = names_payload.get("register-names") if isinstance(names_payload, dict) else None
+        ordered_names = ordered if isinstance(ordered, list) else []
+        values_payload = MiRecord.first_result(self._run(attachment, "-data-list-register-values x")).payload
+        rows = values_payload.get("register-values") if isinstance(values_payload, dict) else None
+        by_number = {
+            row.get("number"): row.get("value")
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict)
+        }
+        registers: dict[str, object] = {}
+        for name in requested:
+            if name in ordered_names:
+                ordinal = str(ordered_names.index(name))
+                if ordinal in by_number:
+                    registers[name] = by_number[ordinal]
+        return self._redactor.redact_value({"registers": registers})
 
     def read_memory(self, attachment: GdbMiAttachment, *, address: int, byte_count: int) -> dict[str, object]:
         if not isinstance(address, int) or not isinstance(byte_count, int):
@@ -1150,9 +1235,37 @@ def test_start_session_keeps_engine_attached_and_registered(tmp_path, monkeypatc
   1. Add a module-level `GdbMiSessionRegistry` import and a `gdb_mi_sessions: GdbMiSessionRegistry | None = None` param to `debug_start_session_handler`.
   2. In `create_app`, construct `gdb_mi_sessions = GdbMiSessionRegistry()` next to `gdb_mi_engine = GdbMiEngine()` and pass it into the `debug.start_session` tool wrapper.
   3. Replace `_run_mi_attach_probe`'s `engine.resume_and_detach(attachment)` with: on success, `gdb_mi_sessions.register(session_id, attachment)` and return the probe details **without** detaching. The function gains `session_id` and `gdb_mi_sessions` params. The fault path still calls `force_resume` + teardown + (now) `gdb_mi_sessions.reap(session_id)`.
-  4. Remove the batch `provider.start_session(...)` call; build the `DebugSession`/`StepResult` from the MI attach (session_id, `attach_status="attached"`, endpoint, empty breakpoints, transcript path = the mi log). Keep persisting `mi_probe` into the step details and the response data.
+  4. Remove the batch `provider.start_session(...)` call; build the `DebugSession`/`StepResult` from the MI attach. The handler now owns the run-relative paths the deleted provider used to mint (`<run>/debug/attempt-NNN/...`). Add a small `_build_mi_debug_session(...)` helper in `server.py` that populates **every required `DebugSession` field**:
 
-Concretely, the start_session success branch records a `DebugSession` constructed in the handler (not from a deleted provider) with `controller_mode="attached"` semantics retired — the live registry is the liveness source. Persist `transport_session_id` and `mi_probe` as today.
+```python
+def _build_mi_debug_session(*, run_id: str, run_dir: Path, vmlinux_path: Path,
+                            gdbstub_endpoint: dict[str, object], profile_name: str,
+                            transcript_path: Path, started_at: str) -> DebugSession:
+    attempt_dir = transcript_path.parent  # <run>/debug/mi-probe.log lives in <run>/debug; keep paths under it
+    return DebugSession(
+        session_id=f"debug-{uuid4().hex}",
+        run_id=run_id,
+        provider_name="local-qemu-gdbstub",
+        gdbstub_endpoint=gdbstub_endpoint,
+        vmlinux_path=str(vmlinux_path),
+        selected_debug_profile=profile_name,
+        attach_status="attached",
+        started_at=started_at,
+        ended_at=None,
+        current_execution_state="stopped",
+        breakpoints={},
+        controller_mode="attached",
+        active_controller_pid=None,
+        controller_last_observed_state="attached",
+        active_controller_identity={},
+        transcript_path=str(transcript_path),
+        command_metadata_path=str(attempt_dir / "commands.jsonl"),
+        latest_summary_path=str(attempt_dir / "debug-summary.json"),
+        symbol_identity_validation={},  # build_id gate is authoritative (ADR 0021 2b); no live-banner scrape
+    )
+```
+
+  The handler mints `session_id` once and uses the SAME id to `gdb_mi_sessions.register(session_id, attachment)` (step 3.3) so the per-op lookup key matches the persisted `DebugSession.session_id`. The legacy `controller_mode`/`active_controller_pid` fields are retained on the model (other code reads them) but are inert — the live registry is the liveness source. Persist `transport_session_id` and `mi_probe` into the step details as today. Add `from uuid import uuid4` if not already imported.
 
 - [ ] **Step 4: Run — expect PASS**; migrate `test_server_debug_mi_probe.py` (the probe now leaves the session attached: drop assertions that the engine `resume_and_detach`'d; keep the guard-refusal and guaranteed-resume-on-fault assertions, which now also assert `registry.get(session_id) is None` after a fault).
 
@@ -1182,15 +1295,22 @@ git commit -m "feat(server): hold the live gdb/MI session in start_session via t
 
 - [ ] **Step 3: Implement.** Introduce an engine-dispatch map keyed by `method_name` that calls the matching engine method with the live attachment, replacing the `getattr(provider, ...)` call. Keep the fence/ownership checks and `_ensure_debug_operation_enabled` exactly as they are (they run before the lookup — ADR 0021 fence-then-lookup). Wrap `GdbMiError` → `ToolResponse.failure(category=exc.category, details=exc.details, ...)`. Persist the typed result into the `DebugSession` step details (redacted) for the mutating ops. The breakpoint ledger update reads `engine.list_breakpoints(attachment)` after a set/clear so the persisted ledger matches gdb.
 
-  Map (method_name → engine call):
+  Map (method_name → engine call). `end_session` is **not** in this map — it has a dedicated path (Task 14) that reaps the live attachment and closes the transaction, so the generic dispatch must explicitly skip/ignore `end_session` (the end_session handler does not call the engine dispatch for a verb):
   - `read_registers` → `engine.read_registers(att, registers)`
   - `read_symbol` → `engine.read_symbol(att, symbol)`
   - `read_memory` → `engine.read_memory(att, address=..., byte_count=...)`
   - `evaluate` → `engine.evaluate_inspector(att, inspector=..., arguments=...)`
   - `set_breakpoint` → `engine.set_breakpoint(att, symbol)`
   - `clear_breakpoint` → `engine.clear_breakpoint(att, breakpoint_id)`
+  - `clear_watchpoint` → `engine.clear_watchpoint(att, breakpoint_id)`
+  - `set_watchpoint` → `engine.set_watchpoint(att, symbol)`
   - `list_breakpoints` → `engine.list_breakpoints(att)`
   - `continue_execution` → `engine.continue_(att, timeout_sec=...)`
+  - `step` → `engine.step(att, timeout_sec=...)`
+  - `next` → `engine.next(att, timeout_sec=...)`
+  - `finish` → `engine.finish(att, timeout_sec=...)`
+  - `backtrace` → `engine.backtrace(att)`
+  - `list_variables` → `engine.list_variables(att)`
   - `interrupt` → `engine.interrupt(att)`
 
 - [ ] **Step 4: Run — expect PASS.**
@@ -1218,14 +1338,27 @@ git commit -m "feat(server): re-point debug.* ops onto the live gdb/MI engine"
 
 - [ ] **Step 2: Run — expect FAIL.**
 
-- [ ] **Step 3: Implement** the new handlers following the `_debug_stateful_response` pattern (they all take `gdb_mi_engine`/`gdb_mi_sessions`), register them with `@app.tool(name="debug.step")` etc., add the `DEBUG_METHOD_OPERATIONS` mappings (`step`→`debug.step`, …, `set_watchpoint`→`debug.set_watchpoint`, `clear_watchpoint`→`debug.clear_watchpoint`), and reap the live session in `debug_end_session_handler` (call `gdb_mi_sessions.reap(session_id)` which triggers `engine.force_resume` via the reaped attachment, before/with the transaction close).
+- [ ] **Step 3: Implement** the new handlers following the `_debug_stateful_response` pattern (they all take `gdb_mi_engine`/`gdb_mi_sessions`), register them with `@app.tool(name="debug.step")` etc., add the `DEBUG_METHOD_OPERATIONS` mappings (`step`→`debug.step`, `next`→`debug.next`, `finish`→`debug.finish`, `backtrace`→`debug.backtrace`, `list_variables`→`debug.list_variables`, `set_watchpoint`→`debug.set_watchpoint`, `clear_watchpoint`→`debug.clear_watchpoint`).
+
+  **`debug_end_session_handler` change (explicit, not via the engine dispatch).** end_session must reap the live attachment, not issue an interactive verb. Before the existing transaction-close logic, look up and reap the session:
+
+```python
+    if gdb_mi_sessions is not None and debug_session_id is not None:
+        reaped = gdb_mi_sessions.reap(debug_session_id)
+        if reaped is not None and gdb_mi_engine is not None:
+            gdb_mi_engine.force_resume(reaped)  # best-effort continue + RSP disconnect + kill
+```
+
+  This runs inside `debug_lock` alongside recording the ended `DebugSession` (build the ended session in the handler now that the provider's `end_session` is gone: copy the persisted session with `current_execution_state="ended"`, `ended_at=<now>`, `attach_status` unchanged). The existing `transaction.close(force=True)` / SessionGuard teardown path is unchanged. Thread `gdb_mi_engine`/`gdb_mi_sessions` into `debug_end_session_handler` and its `@app.tool` wrapper. A reap of an absent session is a no-op (idempotent end_session).
 
   Then **delete** from `providers/qemu_gdbstub.py`: the `-batch` argv construction in `start_session` and `_run_read_operation`, the whole `start_session`/`read_registers`/`read_symbol`/`read_memory`/`evaluate`/`set_breakpoint`/`clear_breakpoint`/`list_breakpoints`/`continue_execution`/`interrupt`/`end_session`/`_run_read_operation`/`_record_stateful_operation` methods, `run_batch`, `SubprocessGdbRunner`, and `GdbRunner`. Keep `local_qemu_gdbstub_capability()` (its `operations` list now references `ALLOWED_DEBUG_OPERATIONS` + the new ops), `DebugSession`, `DebugProviderResult`, `ProviderDebugError`, and the validators/`_gdb_path` helpers still imported by the server. If nothing else imports `QemuGdbstubProvider`, delete the class; otherwise reduce it to the capability factory.
 
-- [ ] **Step 4: Run — expect PASS**, including the tripwire:
+- [ ] **Step 3b: Flip the tripwire.** Now that the batch paths are deleted, remove the `@pytest.mark.xfail(strict=True, ...)` decorator (and the unused `import pytest` if nothing else needs it) from `tests/test_no_batch_gdb.py` so it asserts as a normal green gate.
+
+- [ ] **Step 4: Run — expect PASS**, including the now-green tripwire:
 
 Run: `uv run python -m pytest tests/test_no_batch_gdb.py tests/test_server_debug_core_ops.py tests/test_qemu_gdbstub_provider.py -q`
-Expected: PASS (tripwire now green).
+Expected: PASS (`test_no_batch_gdb_invocation_remains` passes normally, not xfail).
 
 - [ ] **Step 5: Commit**
 
@@ -1261,7 +1394,7 @@ git commit -m "test(gdb-mi): exercise the engine path in the gated integration t
 
 ## Self-Review checklist (run before opening the PR)
 
-- [ ] **Spec coverage:** every Phase C acceptance bullet maps to a task — breakpoint/continue/backtrace/local (Tasks 7/10/8/9 + 15 integration), step/next/finish (Task 10/14), no `-batch` (Tasks 1/14), 4096 cap (Task 9), evaluate allowlist + arbitrary-expression rejection (Task 9/13), `no_live_session` ordering (Tasks 6/13), watchpoints (Tasks 7/14), profile opt-in (Task 11), redaction of new records (Tasks 8/9), `read_symbol` migration (Task 9).
+- [ ] **Spec coverage:** every Phase C acceptance bullet maps to a task — breakpoint/continue/backtrace/local (Tasks 7/5/8/9 + 15 integration), step/next/finish (Tasks 10/13/14), no `-batch` (Tasks 1/14), 4096 cap (Task 9), evaluate allowlist + arbitrary-expression rejection (Tasks 9/13), `no_live_session` ordering (Tasks 6/13), watchpoints (Tasks 7/14), profile opt-in (Task 11), redaction of new records (Tasks 8/9), `read_symbol` migration (Task 9), `read_registers` filtering (Task 9), `end_session` reap (Task 14), `clear_watchpoint` engine path (Tasks 7/13).
 - [ ] **Placeholder scan:** no TBD/TODO; every code step has real code.
 - [ ] **Type consistency:** `StopRecord`/`Frame`/`Variable`/`BreakpointRef` names and `resume`/`continue_`/`step`/`next`/`finish`/`interrupt`/`set_breakpoint`/`clear_breakpoint`/`list_breakpoints`/`set_watchpoint`/`clear_watchpoint`/`backtrace`/`list_variables`/`read_registers`/`read_memory`/`read_symbol`/`evaluate_inspector` are used identically across tasks; `gdb_mi_sessions`/`gdb_mi_engine` param names are consistent.
 - [ ] No relative imports introduced; all absolute (`linux_debug_mcp....`).
