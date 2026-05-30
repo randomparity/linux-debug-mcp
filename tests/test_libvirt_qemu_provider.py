@@ -1585,6 +1585,11 @@ def test_execute_boot_frozen_returns_succeeded_without_streaming(tmp_path: Path)
     assert result.details["guest_ip"] is None
     assert result.details["guest_ip_discovery"]["status"] == "skipped"
     assert result.details["guest_ip_discovery"]["reason"] == "wait_for_debugger"
+    # The frozen branch produces the same artifact set as the normal success branch: an
+    # (empty) console log is still created so the returned artifact shape is invariant.
+    assert plan.console_log_path.exists()
+    artifact_kinds = {artifact.kind for artifact in result.artifacts}
+    assert "console-log" in artifact_kinds
     assert runner.console_calls == []
     assert runner.domifaddr_calls == []
 

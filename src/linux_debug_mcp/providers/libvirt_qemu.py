@@ -541,6 +541,9 @@ class LibvirtQemuProvider:
             )
 
         if plan.wait_for_debugger:
+            # The vCPU is blocked at the gdbstub and prints nothing, but create an empty console
+            # log so the frozen success returns the same artifact set as the normal success branch.
+            plan.console_log_path.write_text("", encoding="utf-8")
             frozen_details: dict[str, object] = {
                 "domain": plan.domain_name,
                 "console_status": "frozen",
