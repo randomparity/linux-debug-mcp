@@ -152,8 +152,9 @@ def _gdb_mi_capability_check(runner: PrerequisiteRunner) -> PrerequisiteCheck:
     below_minimum = version is None or version < _MI_MIN_VERSION
     message = f"gdb {detected} supports the mi3 machine interface"
     if below_minimum:
+        relation = "could not be parsed against" if version is None else "is below"
         message += (
-            f" (admitted on the behavioral mi3 probe; reported version is below the documented minimum {required})"
+            f" (admitted on the behavioral mi3 probe; reported version {relation} the documented minimum {required})"
         )
     return PrerequisiteCheck(
         check_id="tool.gdb_mi",
