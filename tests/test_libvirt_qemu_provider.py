@@ -249,7 +249,6 @@ def test_debug_boot_rejects_occupied_gdbstub_port(tmp_path: Path) -> None:
     ("target_overrides", "rootfs_overrides", "message"),
     [
         ({}, {"source_type": "directory"}, "directory rootfs sources are not supported"),
-        ({}, {"mutability": "copy_on_write"}, "copy_on_write rootfs mutability is not supported"),
         ({"provider_name": "remote-libvirt-qemu"}, {}, "unsupported target provider"),
         ({"target_ref": None}, {}, "target_ref is required"),
         ({"managed_domain": False}, {}, "managed_domain=True is required"),
@@ -750,7 +749,7 @@ class FakeLibvirtRunner:
         destroy: CommandResult | None = None,
         console: ConsoleResult | None = None,
     ) -> None:
-        self.tools = {"virsh": "/usr/bin/virsh"} if tools is None else tools
+        self.tools = {"virsh": "/usr/bin/virsh", "qemu-img": "/usr/bin/qemu-img"} if tools is None else tools
         self.dumpxml = dumpxml or CommandResult(["virsh", "dumpxml"], 1, stderr="Domain not found: debug-vm\n")
         self.define = define or CommandResult(["virsh", "define"], 0, stdout="defined\n")
         self.start = start or CommandResult(["virsh", "start"], 0, stdout="started\n")
@@ -774,6 +773,8 @@ class FakeLibvirtRunner:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("a", encoding="utf-8") as log_file:
                 log_file.write(f"$ {' '.join(argv)}\n")
+        if argv[0] == "qemu-img":
+            return CommandResult(argv, 0, stdout="Formatting...\n")
         action = argv[3]
         if action == "dumpxml":
             return CommandResult(
@@ -1083,3 +1084,138 @@ def test_execute_boot_rotates_existing_console_log_on_rerun(tmp_path: Path) -> N
     ]
     assert len(rotated_artifacts) == 1
     assert rotated_artifacts[0].description == "previous console log"
+
+
+def test_validate_profiles_accepts_copy_on_write(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider(runner=PortCheckingRunner())
+    plan = provider.plan_boot(
+        run_id="run-cow",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(),
+        rootfs_profile=rootfs_profile(rootfs, mutability="copy_on_write"),
+    )
+    assert plan.rootfs_mutability == "copy_on_write"
+
+
+def test_plan_boot_copy_on_write_computes_overlay_and_backing(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider(runner=PortCheckingRunner())
+    plan = provider.plan_boot(
+        run_id="run-cow",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(),
+        rootfs_profile=rootfs_profile(rootfs, mutability="copy_on_write"),
+        attempt=1,
+    )
+    assert plan.rootfs_backing_path == rootfs.resolve()
+    assert plan.rootfs_path == run_dir.resolve() / "boot" / "attempt-1" / "rootfs-overlay.qcow2"
+    assert plan.overlay_create_argv == [
+        "qemu-img",
+        "create",
+        "-f",
+        "qcow2",
+        "-F",
+        "qcow2",
+        "-b",
+        str(rootfs.resolve()),
+        str(plan.rootfs_path),
+    ]
+
+
+def test_plan_boot_non_cow_has_no_overlay(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider(runner=PortCheckingRunner())
+    plan = provider.plan_boot(
+        run_id="run-ro",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(),
+        rootfs_profile=rootfs_profile(rootfs, mutability="read_only"),
+    )
+    assert plan.rootfs_backing_path is None
+    assert plan.overlay_create_argv is None
+    assert plan.rootfs_path == rootfs.resolve()
+
+
+def test_execute_boot_runs_qemu_img_create_before_define(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider(runner=PortCheckingRunner())
+    plan = provider.plan_boot(
+        run_id="run-cow",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(),
+        rootfs_profile=rootfs_profile(rootfs, mutability="copy_on_write"),
+    )
+    runner = FakeLibvirtRunner()
+    result = LibvirtQemuProvider(runner=runner).execute_boot(plan)
+    assert result.status == StepStatus.SUCCEEDED
+    commands = [c[0] if c[0] == "qemu-img" else c[3] for c in runner.commands]
+    assert "qemu-img" in commands
+    assert commands.index("qemu-img") < commands.index("define")
+
+
+def test_execute_boot_copy_on_write_missing_qemu_img_is_missing_dependency(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider(runner=PortCheckingRunner())
+    plan = provider.plan_boot(
+        run_id="run-cow",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(),
+        rootfs_profile=rootfs_profile(rootfs, mutability="copy_on_write"),
+    )
+    runner = FakeLibvirtRunner(tools={"virsh": "/usr/bin/virsh"})
+    result = LibvirtQemuProvider(runner=runner).execute_boot(plan)
+    assert result.status == StepStatus.FAILED
+    assert result.error_category == ErrorCategory.MISSING_DEPENDENCY
+    assert "qemu-img" in result.details["missing_tools"]
+
+
+def test_execute_boot_qemu_img_failure_is_infrastructure_failure(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider(runner=PortCheckingRunner())
+    plan = provider.plan_boot(
+        run_id="run-cow",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(),
+        rootfs_profile=rootfs_profile(rootfs, mutability="copy_on_write"),
+    )
+
+    class FailingQemuImgRunner(FakeLibvirtRunner):
+        def run(self, argv, *, timeout, log_path=None):
+            if argv[0] == "qemu-img":
+                self.commands.append(argv)
+                return CommandResult(argv, 1, stderr="qemu-img: boom\n")
+            return super().run(argv, timeout=timeout, log_path=log_path)
+
+    result = LibvirtQemuProvider(runner=FailingQemuImgRunner()).execute_boot(plan)
+    assert result.status == StepStatus.FAILED
+    assert result.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_render_domain_xml_copy_on_write_points_at_overlay_and_is_writable(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider(runner=PortCheckingRunner())
+    plan = provider.plan_boot(
+        run_id="run-cow",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(),
+        rootfs_profile=rootfs_profile(rootfs, mutability="copy_on_write"),
+    )
+    xml = ElementTree.fromstring(provider.render_domain_xml(plan))
+    disk = xml.find("devices/disk")
+    assert disk.find("source").attrib["file"] == str(plan.rootfs_path)
+    assert disk.find("readonly") is None
+
+
+def test_capability_advertises_qemu_img() -> None:
+    from linux_debug_mcp.providers.libvirt_qemu import local_libvirt_qemu_capability
+
+    capability = local_libvirt_qemu_capability()
+    assert "qemu-img" in capability.required_host_tools
