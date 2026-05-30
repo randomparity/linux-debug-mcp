@@ -62,7 +62,7 @@ def test_engine_attaches_reads_one_record_and_detaches(tmp_path: Path, monkeypat
 
     from linux_debug_mcp import server
     from linux_debug_mcp.config import RootfsProfile, TargetProfile
-    from linux_debug_mcp.providers.gdb_mi import GdbMiEngine, MiRecord
+    from linux_debug_mcp.providers.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiEngine, MiRecord
     from linux_debug_mcp.seams.target import TargetKey
     from linux_debug_mcp.server import (
         _build_transport_machinery,
@@ -148,6 +148,9 @@ def test_engine_attaches_reads_one_record_and_detaches(tmp_path: Path, monkeypat
     assert debug_resp.ok is True, debug_resp.model_dump(mode="json")
     # AC#1: the wired probe surfaced a typed ^connected MI record.
     assert debug_resp.data["mi_probe"]["record"]["message"] == "connected"
+    # AC2: the wired probe resolved the canonical symbol by name against the loaded vmlinux symbols.
+    assert debug_resp.data["mi_probe"]["symbol"]["name"] == CANONICAL_PROBE_SYMBOL
+    assert debug_resp.data["mi_probe"]["symbol"]["value"]  # a non-empty gdb-rendered address string
 
     record = machinery.session_registry.read_record(TargetKey(provisioner="local-qemu", target_id=run_id))
     assert record is not None and record.rsp_endpoint is not None
@@ -159,6 +162,9 @@ def test_engine_attaches_reads_one_record_and_detaches(tmp_path: Path, monkeypat
     )
     mi_record = engine.probe_read(attachment)
     assert isinstance(mi_record, MiRecord) and mi_record.message == "connected"
+
+    resolved = engine.resolve_symbol(attachment, CANONICAL_PROBE_SYMBOL)
+    assert resolved.name == CANONICAL_PROBE_SYMBOL and resolved.value, "linux_banner must resolve by name"
 
     # Anti-hang regression guard (the live counterpart to the unit-test ordering proxy): the async
     # continue must NOT block on a free-running kernel, so resume must return promptly. A sync
