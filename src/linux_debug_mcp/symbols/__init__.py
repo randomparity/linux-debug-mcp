@@ -13,6 +13,12 @@ from linux_debug_mcp.symbols.verify import (
     verify_build_id,
     verify_vmlinux_provenance,
 )
+from linux_debug_mcp.symbols.vmcore_build_id import (
+    VmcoreBuildIdAbsent,
+    VmcoreBuildIdError,
+    VmcoreFormatUnsupported,
+    read_vmcore_build_id,
+)
 
 __all__ = [
     "BUILD_ID_RE",
@@ -21,7 +27,11 @@ __all__ = [
     "ResolutionWarning",
     "ResolvedSymbols",
     "SymbolResolutionError",
+    "VmcoreBuildIdAbsent",
+    "VmcoreBuildIdError",
+    "VmcoreFormatUnsupported",
     "read_elf_build_id",
+    "read_vmcore_build_id",
     "resolve_symbols",
     "verify_build_id",
     "verify_vmlinux_provenance",

@@ -7,6 +7,7 @@ from pydantic import Field, field_validator
 from linux_debug_mcp.domain import ImplementationState, Model, ProviderCapability
 from linux_debug_mcp.providers.base import sprint0_capability
 from linux_debug_mcp.providers.libvirt_qemu import local_libvirt_qemu_capability
+from linux_debug_mcp.providers.local_crash_postmortem import local_crash_postmortem_capability
 from linux_debug_mcp.providers.local_drgn_introspect import local_drgn_introspect_capability
 from linux_debug_mcp.providers.local_kernel_build import local_kernel_build_capability
 from linux_debug_mcp.providers.local_ssh_tests import local_ssh_tests_capability
@@ -58,6 +59,7 @@ def local_provider_plugin_specs() -> list[ProviderPluginSpec]:
                 local_ssh_tests_capability,
                 local_qemu_gdbstub_capability,
                 local_drgn_introspect_capability,
+                local_crash_postmortem_capability,
             ],
             documentation_paths=["README.md"],
         )

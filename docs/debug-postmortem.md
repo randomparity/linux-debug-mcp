@@ -1,0 +1,115 @@
+# `debug.postmortem.crash` — host-side crash batch runner
+
+`debug.postmortem.crash` runs a validated batch of [`crash`](https://crash-utility.github.io/)
+commands against a captured vmcore + matching vmlinux **on the agent host** and
+returns parsed JSON keyed by command plus a preserved, redacted transcript. It is the
+`crash`-utility analogue of the offline drgn path (`debug.introspect.from_vmcore`):
+offline, host-side, and **always concurrent-safe** — no live target, no admission gate,
+never gated by a `DebugProfile`.
+
+Design: [spec](superpowers/specs/2026-05-30-debug-postmortem-crash-design.md) ·
+[ADR 0026](adr/0026-postmortem-crash-batch-runner.md).
+
+## Request
+
+| Field | Type | Notes |
+|---|---|---|
+| `run_id` | str | Existing run (`kernel.create_run`). |
+| `vmcore_ref` | str | Run-relative path to the captured vmcore, confined to `<run_dir>`. |
+| `vmlinux_ref` | str | Run-relative path to the uncompressed ELF vmlinux with symbols. |
+| `modules_ref` | str \| null | Optional run-relative directory of `*.ko[.debug]`. |
+| `commands` | list[str] | crash command lines (validated — see below). |
+| `timeout_seconds` | int | Handler-bounded to `[5, 300]` (default 60). |
+
+`vmcore_ref`/`vmlinux_ref`/`modules_ref` are **run-relative** and confined to the run
+directory. A vmcore captured elsewhere (kdump, or a `virsh dump`) must be staged into
+the run directory first; an out-of-sandbox ref is a `configuration_error`.
+
+## Command validation (security)
+
+The path is offline and never gated, so command-content validation is the only trust
+boundary. `crash`'s command interpreter is **not** a sandbox: `!` runs a host shell
+command, `cmd | prog` pipes to a host shell, and `cmd > file` redirects to a host file.
+Each command is therefore checked before any crash invocation:
+
+- **Denied:** a leading `!`, any of `|`, `>`, `<`, `` ` ``, `$(`, `;`, `&`, and any
+  newline/control character. A violation is `configuration_error` / `command_not_permitted`.
+- **Allowlisted leading verb:** the first token must be a read-only analysis verb
+  (`bt`, `ps`, `log`, `kmem`, `sys`, `mod`, `struct`, `union`, `p`, `rd`, `vtop`,
+  `task`, `files`, `vm`, `net`, `dev`, `irq`, `mach`, `runq`, `mount`, `swap`, `timer`,
+  `dis`, `sym`, `list`, `tree`, `search`, `foreach`, `help`).
+
+Commands are stripped before validation, dedup, and use as the response key; `"bt"` and
+`"bt "` are the same command and rejected as a duplicate.
+
+## Response
+
+Success `data`:
+
+- `call_id` — the per-call id.
+- `vmcore_build_id` — the verified vmcore build-id.
+- `results` — an object keyed by the (stripped) command string. Each value is either a
+  typed parsed object (for `bt`/`ps`/`log`/`kmem -i`/`sys`) or a raw-passthrough object
+  `{"parsed": false, "reason": ..., "raw": ...}`. Reasons: `unknown_command` (no
+  parser), `parse_failed` (parser raised), `output_truncated` (hit the output cap),
+  `not_captured` (crash aborted before this command ran). A command is **never** silently
+  dropped.
+- `module_symbols` — present only when `modules_ref` was supplied:
+  `{requested, status: "loaded" | "load_failed", detail}` from the server-injected
+  `mod -S` load (best-effort, never fatal).
+- `truncated` — `true` when the aggregate output hit the cap.
+- `artifacts` — `ArtifactRef`s to the redacted transcript and parsed JSON under
+  `<run>/debug/postmortem/crash/<call-id>/`.
+
+### Parsed shapes
+
+| Command | Parsed shape |
+|---|---|
+| `bt` | `{pid?, command?, frames: [{level, symbol, pc_addr}]}` |
+| `ps` | `{processes: [{pid, ppid, cpu, task_addr, st, comm}]}` |
+| `log` | `{lines: [{ts, text}]}` |
+| `kmem -i` | `{memory: {<label>: {pages, detail}}}` |
+| `sys` | `{system: {<KEY>: <value>}}` |
+
+## Build-id fail-loud
+
+Before crash runs, the host compares two build-ids:
+
+- `read_vmcore_build_id(vmcore)` — the vmcore's embedded `VMCOREINFO BUILD-ID` (the
+  same value drgn exposes as `main_module().build_id`); and
+- `read_elf_build_id(vmlinux)` — the vmlinux's ELF GNU build-id.
+
+A mismatch is `configuration_error` / `provenance_mismatch` and **no crash runs**.
+Distinct fail-closed codes:
+
+| Condition | Code |
+|---|---|
+| vmcore build-id ≠ vmlinux build-id | `provenance_mismatch` |
+| vmlinux ELF build-id unreadable (non-ELF / compressed / stripped) | `vmlinux_build_id_unreadable` |
+| vmcore is not an ELF container (e.g. compressed-kdump) | `vmcore_format_unsupported` |
+| vmcore ELF is truncated / unreadable | `vmcore_build_id_unreadable` |
+| vmcore carries no `VMCOREINFO BUILD-ID` (cannot verify) | `provenance_unverifiable` |
+
+The vmcore must be an ELF container from a `CONFIG_BUILD_ID` kernel that registered
+VMCOREINFO (kdump `/proc/vmcore`, or a QEMU `dump-guest-memory` with VMCOREINFO).
+Compressed-kdump containers are not parsed in this release; they fail loud with
+`vmcore_format_unsupported` rather than silently skipping the check.
+
+## Bounds and concurrency
+
+- One `crash` session opens the vmcore once; each command's output is redirected to its
+  own file (`cmd-NNNN.out`), so per-command framing is race-free.
+- crash runs under `prlimit --fsize` so no single command's output file can exceed the
+  per-command cap on disk; the aggregate is bounded by the per-run command limit.
+- A timeout (`timeout --kill-after`) cuts the crash child cleanly → `crash_timeout`.
+  Runner-level failures always win over partial output.
+- No admission gate, no SSH, no target snapshot read: two calls against the same run
+  proceed in parallel, regardless of target lifecycle. Each call writes a unique
+  `postmortem.crash:<call_id>` manifest step.
+
+## Redaction
+
+Every command output (typed or raw), the persisted `parsed.json`, and the redacted
+`transcript.txt` pass through `Redactor()` before being returned or persisted. The
+unredacted crash stdout/stderr stays under `<run>/sensitive/…` (mode 0600) and is never
+returned.

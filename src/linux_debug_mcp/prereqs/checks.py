@@ -50,7 +50,7 @@ def check_prerequisites(
     checks: list[PrerequisiteCheck] = []
     checks.append(_python_version_check())
     checks.extend(_python_package_checks())
-    for tool in ["make", "bash", "git", "qemu-system-x86_64", "virsh", "gdb"]:
+    for tool in ["make", "bash", "git", "qemu-system-x86_64", "virsh", "gdb", "crash"]:
         checks.append(_tool_check(tool, runner))
     checks.append(_gdb_mi_capability_check(runner))
     checks.append(_agent_proxy_check(runner))

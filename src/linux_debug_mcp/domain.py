@@ -188,6 +188,25 @@ class DebugIntrospectFromVmcoreHelperRequest(Model):
     timeout_seconds: int = 30
 
 
+class DebugPostmortemCrashRequest(Model):
+    """Request payload for ``debug.postmortem.crash``. Spec §3.1.
+
+    No ``target_ref``/``*_profile``: the offline crash path names no live target.
+    ``vmcore_ref``/``vmlinux_ref``/``modules_ref`` are run-relative and confined
+    to the run dir. ``commands`` is validated (sanitise + allowlist) and the
+    ``[5, 300]`` timeout / command-count / script-size bounds are enforced by the
+    handler so they surface as ``ToolResponse.failure(...)`` with the spec's exact
+    codes.
+    """
+
+    run_id: str
+    vmcore_ref: str
+    vmlinux_ref: str
+    modules_ref: str | None = None
+    commands: list[str]
+    timeout_seconds: int = 60
+
+
 class RunStep(Model):
     name: str
     status: StepStatus = StepStatus.PENDING
