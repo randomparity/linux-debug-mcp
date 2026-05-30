@@ -108,7 +108,13 @@ from linux_debug_mcp.postmortem.triage import (
     any_section_ok,
     assemble_report,
 )
-from linux_debug_mcp.prereqs.checks import check_prerequisites
+from linux_debug_mcp.prereqs.checks import (
+    PortProbeResult,
+    check_gdbstub_port,
+    check_kernel_config,
+    check_prerequisites,
+    check_rootfs_image,
+)
 from linux_debug_mcp.prereqs.drgn_probe import (
     PROBE_SCRIPT,
     UNKNOWN,
@@ -1229,17 +1235,59 @@ def get_manifest_handler(*, artifact_root: Path, run_id: str) -> ToolResponse:
     )
 
 
+_READINESS_CHECK_IDS = {"build": "kernel.config", "target": "gdbstub.port", "rootfs": "rootfs.image"}
+
+
+def _resolve_readiness_profile(
+    kind: str, name: str | None, registry: dict[str, Any]
+) -> tuple[Any, PrerequisiteCheck | None]:
+    """Resolve a readiness profile name to its object, or to a FAILED check for an unknown name.
+
+    A `None` name yields `(None, None)` so the readiness check renders SKIPPED. An unknown name yields a
+    FAILED check under that concern's check_id, so the preflight reports the bad name and still runs the
+    other checks.
+    """
+    if name is None:
+        return None, None
+    if name not in registry:
+        known = ", ".join(sorted(registry)) or "(none configured)"
+        return None, PrerequisiteCheck(
+            check_id=_READINESS_CHECK_IDS[kind],
+            status=PrerequisiteStatus.FAILED,
+            message=f"unknown {kind} profile: {name}",
+            suggested_fix=f"Select a known {kind} profile: {known}.",
+        )
+    return registry[name], None
+
+
 def prerequisites_handler(
     *,
     artifact_root: Path,
     source_path: str | None,
     enable_libvirt_check: bool = False,
+    build_profile: str | None = None,
+    target_profile: str | None = None,
+    rootfs_profile: str | None = None,
+    build_profiles: dict[str, BuildProfile] | None = None,
+    target_profiles: dict[str, TargetProfile] | None = None,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    port_probe: Callable[[str, int], PortProbeResult] | None = None,
 ) -> ToolResponse:
+    build_profiles = build_profiles if build_profiles is not None else DEFAULT_BUILD_PROFILES
+    target_profiles = target_profiles if target_profiles is not None else DEFAULT_TARGET_PROFILES
+    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    source = Path(source_path) if source_path else None
     checks = check_prerequisites(
         artifact_root=artifact_root,
-        source_path=Path(source_path) if source_path else None,
+        source_path=source,
         enable_libvirt_check=enable_libvirt_check,
     )
+    build_obj, build_err = _resolve_readiness_profile("build", build_profile, build_profiles)
+    rootfs_obj, rootfs_err = _resolve_readiness_profile("rootfs", rootfs_profile, rootfs_profiles)
+    target_obj, target_err = _resolve_readiness_profile("target", target_profile, target_profiles)
+    checks.append(build_err or check_kernel_config(source, build_obj))
+    checks.append(rootfs_err or check_rootfs_image(rootfs_obj))
+    checks.append(target_err or check_gdbstub_port(target_obj, port_probe=port_probe))
     failed = [check for check in checks if check.status == "failed"]
     return ToolResponse.success(
         summary=f"{len(failed)} prerequisite checks failed",
@@ -8708,11 +8756,17 @@ def create_app(
         artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
         source_path: str | None = None,
         enable_libvirt_check: bool = False,
+        build_profile: str | None = None,
+        target_profile: str | None = None,
+        rootfs_profile: str | None = None,
     ) -> dict[str, Any]:
         return prerequisites_handler(
             artifact_root=Path(artifact_root),
             source_path=source_path,
             enable_libvirt_check=enable_libvirt_check,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
         ).model_dump(mode="json")
 
     @app.tool(name="kernel.create_run")
