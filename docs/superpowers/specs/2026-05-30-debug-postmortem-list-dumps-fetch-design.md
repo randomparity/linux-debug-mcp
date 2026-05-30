@@ -209,10 +209,12 @@ fetches from a dump dir containing `:` and a space to lock this in.
 The pre-transfer admission checks (run after `dump_ref` is matched in §3, **before** the
 lock):
 
-- **`incomplete` refusal (review finding 2):** if the matched `entry.incomplete` is true,
-  refuse with `READINESS_FAILURE / dump_incomplete` unless `force` — an
-  in-progress/`vmcore.flat` dir is not a directly-analyzable core, and its size races a
-  still-writing file so the size guard below would be unreliable.
+- **`incomplete` / flat refusal (review finding 2):** a `vmcore.flat` core is refused
+  `READINESS_FAILURE / dump_flat_format` **even with** `force` (it is a distinct format
+  crash/drgn cannot read without a `makedumpfile -R` rebuild, which is out of scope).
+  An in-progress `vmcore-incomplete` core is refused `dump_incomplete` unless `force`
+  (it is a partial of the real format, so a forced fetch stages the partial as
+  `vmcore`); its size races a still-writing file, so `force` is the explicit override.
 - **Size ceiling (review finding 1):** the effective ceiling is `max_bytes` when set,
   else `DEFAULT_FETCH_MAX_BYTES` (a config constant). Refuse with `CONFIGURATION_ERROR /
   dump_too_large` when `sum(entry.file_sizes.values())` exceeds it.
@@ -265,7 +267,8 @@ future opt-in could skip the local hash for very large cores (ADR 0029 decision 
 | no python3 on target (enumeration, exit 127) | INFRASTRUCTURE_FAILURE | `probe_no_python` |
 | enumeration emitted no parseable JSON dict | INFRASTRUCTURE_FAILURE | `probe_unparseable` |
 | `dump_ref` not in the fresh listing (fetch) | CONFIGURATION_ERROR | `dump_not_found` |
-| matched dump is `incomplete` and not `force` (fetch) | READINESS_FAILURE | `dump_incomplete` |
+| matched dump is `vmcore-incomplete` and not `force` (fetch) | READINESS_FAILURE | `dump_incomplete` |
+| matched dump is `vmcore.flat` (fetch; refused even with `force`) | READINESS_FAILURE | `dump_flat_format` |
 | total fetch size exceeds the effective ceiling (fetch) | CONFIGURATION_ERROR | `dump_too_large` |
 | host free space below total fetch size + headroom (fetch) | INFRASTRUCTURE_FAILURE | `insufficient_disk` |
 | scp transferred a short/partial file (fetch) | INFRASTRUCTURE_FAILURE | `incomplete_transfer` |

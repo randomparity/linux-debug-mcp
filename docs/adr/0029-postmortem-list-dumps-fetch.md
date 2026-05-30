@@ -129,10 +129,13 @@ when set — a dump whose total exceeds the effective ceiling is refused
 transfer it could have predicted would not fit, and the unbounded-by-default
 disk-consumption failure mode is closed.
 
-`fetch` also refuses an `incomplete` dump (the enumeration's `incomplete` fact:
-`vmcore-incomplete`/`vmcore.flat` with no finished `vmcore`) with `READINESS_FAILURE /
-dump_incomplete` unless `force` — an in-progress core is not directly analyzable and its
-size races a still-writing file, which would make the decision-4 size guard unreliable.
+`fetch` also refuses a non-finished core. A `vmcore.flat` (makedumpfile flat format) is
+refused `READINESS_FAILURE / dump_flat_format` **even with** `force`: crash/drgn cannot
+read it without a `makedumpfile -R` rebuild on the target (out of scope), so staging it
+as `vmcore` would hand the agent an unusable ref. An in-progress `vmcore-incomplete`
+core is refused `dump_incomplete` unless `force` — it is a partial of the *same* format
+the finished `vmcore` would have, so a forced fetch stages the partial as `vmcore`; its
+size races a still-writing file, which is why `force` is the explicit override.
 
 ### 8. HALTED fast-reject on both ops (reuse #94, generalized message)
 

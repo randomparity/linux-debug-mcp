@@ -258,8 +258,11 @@ co-located `vmcore-dmesg.txt` / `vmlinux` / `vmcoreinfo` into
 - **Idempotency:** a second `fetch` of an already-staged dump returns the existing refs
   (`already_fetched=true`) without re-transferring; `force=true` re-transfers and
   replaces.
-- **Incomplete dumps:** an in-progress (`vmcore-incomplete`) or flattened
-  (`vmcore.flat`) dump is refused (`dump_incomplete`) unless `force`.
+- **Incomplete dumps:** an in-progress `vmcore-incomplete` dump is refused
+  (`dump_incomplete`) unless `force` (it is a partial of the real format, so a forced
+  fetch stages the partial as `vmcore`). A flattened `vmcore.flat` dump is refused
+  (`dump_flat_format`) **even with** `force` — crash/drgn cannot read it without a
+  `makedumpfile -R` rebuild on the target, which is out of scope here.
 - **HALTED fast-reject:** both ops are ssh-tier, so a HALTED target is rejected
   immediately, never left to hang.
 

@@ -183,6 +183,20 @@ def test_fetch_incomplete_refused(tmp_path) -> None:
     assert resp.error.details["code"] == "dump_incomplete"
 
 
+def test_fetch_flat_format_refused_even_with_force(tmp_path) -> None:
+    # vmcore.flat is a makedumpfile flat dump crash/drgn cannot read without a
+    # `makedumpfile -R` rebuild; force overrides vmcore-incomplete, not .flat.
+    _booted(tmp_path)
+    listing = (
+        _LISTING.replace('"vmcore_name": "vmcore"', '"vmcore_name": "vmcore.flat"')
+        .replace('"incomplete": false', '"incomplete": true')
+        .replace('"vmcore": 16', '"vmcore.flat": 16')
+    )
+    resp = _fetch(tmp_path, _FetchRunner(listing=listing, sizes={"vmcore.flat": 16}), force=True)
+    assert resp.ok is False
+    assert resp.error.details["code"] == "dump_flat_format"
+
+
 def test_fetch_incomplete_allowed_with_force(tmp_path) -> None:
     _booted(tmp_path)
     listing = (

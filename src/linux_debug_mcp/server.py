@@ -3086,11 +3086,25 @@ def _admit_fetch_entry(
             message=f"dump_ref not found in current listing: {request.dump_ref!r}",
             details={"code": "dump_not_found"},
         )
+    if _core_name(entry) == "vmcore.flat":
+        # A flat dump is a distinct format crash/drgn cannot read directly; staging it as
+        # `vmcore` would hand the agent an unusable ref. force overrides an in-progress
+        # `vmcore-incomplete` (a partial of the real format), never `.flat`.
+        return None, ToolResponse.failure(
+            category=ErrorCategory.READINESS_FAILURE,
+            run_id=run_id,
+            message=(
+                "dump is in makedumpfile flat format (vmcore.flat); rebuild it on the target with "
+                "`makedumpfile -R` to a vmcore before fetching"
+            ),
+            details={"code": "dump_flat_format"},
+            suggested_next_actions=["debug.postmortem.list_dumps"],
+        )
     if entry.incomplete and not request.force:
         return None, ToolResponse.failure(
             category=ErrorCategory.READINESS_FAILURE,
             run_id=run_id,
-            message="dump is incomplete (in-progress or vmcore.flat); pass force to fetch anyway",
+            message="dump is in-progress (vmcore-incomplete); pass force to fetch the partial anyway",
             details={"code": "dump_incomplete"},
             suggested_next_actions=["debug.postmortem.list_dumps"],
         )
