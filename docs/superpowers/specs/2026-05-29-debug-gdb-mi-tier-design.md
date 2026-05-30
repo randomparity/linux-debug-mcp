@@ -156,11 +156,21 @@ matching image attaches and resolves a symbol by name (the probe surfaces the
 typed `linux_banner` resolution).
 
 ### Phase C — core operations, MI-typed *(design 2026-05-29, #81; ADR [0021](../../adr/0021-gdb-mi-phase-c-session-registry-and-execution-state.md))*
-**Scope.** Migrate onto MI typed JSON: set/clear breakpoints & watchpoints,
-`continue`, `step`/`next`/`finish`, `-stack-list-frames`,
-`-stack-list-variables`, register/memory reads (preserve the 4096-byte
-`read_memory` cap). **Delete** the corresponding `-batch` paths in
-`qemu_gdbstub.py`.
+**Scope.** Migrate the **complete** `DEBUG_METHOD_OPERATIONS` set
+(`server.py:248-259`) onto MI typed JSON — `read_registers`, `read_symbol`
+(`-data-evaluate-expression "<validated_symbol>"`, a name-shape-gated value read),
+`read_memory` (4096-byte cap), `evaluate`, set/clear/list breakpoints, `continue`,
+`interrupt`, `end_session` — and add the new structured ops: `step`/`next`/`finish`,
+`-stack-list-frames` (`backtrace`), `-stack-list-variables` (`list_variables`),
+set/clear **watchpoints**. **Delete** the corresponding `-batch` paths in
+`qemu_gdbstub.py`; no `DEBUG_METHOD_OPERATIONS` entry is left calling a deleted
+method. `start_session`'s legacy live-banner identity scrape
+(`live_banner_match`/`symbol_identity_required`) is **subsumed by** the pre-attach
+build_id provenance gate (ADR 0017 / #70) and removed; the migrated `start_session`
+keeps the engine attached and retains the typed `mi_probe` connect record +
+`linux_banner` resolution in its success data (now from the live session, not a
+detach-probe) — the existing `test_server_debug_mi_probe` assertions migrate to the
+still-attached shape.
 
 **Live session held across calls (ADR 0021 decision 1).** The acceptance spans
 separate MCP tool calls (set a breakpoint, *then* continue, *then* backtrace), so
