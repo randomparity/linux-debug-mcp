@@ -9,6 +9,7 @@ from linux_debug_mcp.config import (
     MAX_INTROSPECT_CALLS_PER_RUN,
     PRELUDE_WARNING_FRACTION_PCT,
     ArtifactPolicy,
+    BuildOverrides,
     BuildProfile,
     DebugProfile,
     RootfsProfile,
@@ -327,6 +328,36 @@ def test_build_profile_rejects_invalid_jobs() -> None:
 def test_build_profile_rejects_targets_that_can_change_make_policy(target: str) -> None:
     with pytest.raises(ValidationError):
         BuildProfile(name="bad", architecture="x86_64", targets=[target])
+
+
+def test_build_profile_base_config_defaults_empty() -> None:
+    assert BuildProfile(name="x86_64-default", architecture="x86_64").base_config == []
+
+
+def test_build_profile_accepts_ordered_base_config_targets() -> None:
+    profile = BuildProfile(name="debug", architecture="x86_64", base_config=["defconfig", "kvm_guest.config"])
+
+    assert profile.base_config == ["defconfig", "kvm_guest.config"]
+
+
+@pytest.mark.parametrize("target", ["", "O=/tmp/out", "--eval=$(shell id)", "-j8", "bad target", "; rm -rf"])
+def test_build_profile_rejects_invalid_base_config_target(target: str) -> None:
+    with pytest.raises(ValidationError):
+        BuildProfile(name="bad", architecture="x86_64", base_config=[target])
+
+
+def test_build_overrides_base_config_defaults_empty() -> None:
+    assert BuildOverrides().base_config == []
+
+
+def test_build_overrides_accepts_ordered_base_config_targets() -> None:
+    assert BuildOverrides(base_config=["tinyconfig"]).base_config == ["tinyconfig"]
+
+
+@pytest.mark.parametrize("target", ["", "-f", "bad target", "ARCH=arm64"])
+def test_build_overrides_rejects_invalid_base_config_target(target: str) -> None:
+    with pytest.raises(ValidationError):
+        BuildOverrides(base_config=[target])
 
 
 def test_allowed_debug_operations_includes_introspect_run() -> None:
