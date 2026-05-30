@@ -52,6 +52,95 @@ def test_run_tests_requires_succeeded_boot(tmp_path: Path) -> None:
     assert "succeeded boot" in response.error.message
 
 
+def _set_boot_guest_ip(artifact_root: Path, guest_ip: str | None, *, run_id: str = "run-abc123") -> None:
+    store = ArtifactStore(artifact_root, create_root=False)
+    store.record_step_result(
+        run_id,
+        StepResult(
+            step_name="boot",
+            status=StepStatus.SUCCEEDED,
+            summary="boot ok",
+            details={"guest_ip": guest_ip, "guest_ip_discovery": {"status": "found"}},
+        ),
+        replace_succeeded=True,
+    )
+
+
+def test_run_tests_overrides_loopback_ssh_host_with_guest_ip(tmp_path: Path) -> None:
+    artifact_root = create_booted_run(tmp_path)
+    _set_boot_guest_ip(artifact_root, "192.168.122.45")
+    provider = FakeTestProvider()
+
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=provider,
+        rootfs_profiles={"minimal": rootfs(tmp_path)},  # ssh_host="127.0.0.1"
+        test_suites=suites(),
+    )
+
+    assert response.ok is True
+    assert provider.planned_rootfs.ssh_host == "192.168.122.45"
+
+
+def test_run_tests_preserves_explicit_non_loopback_ssh_host(tmp_path: Path) -> None:
+    artifact_root = create_booted_run(tmp_path)
+    _set_boot_guest_ip(artifact_root, "192.168.122.45")
+    provider = FakeTestProvider()
+    explicit = RootfsProfile(
+        name="minimal",
+        source=str(tmp_path / "rootfs.qcow2"),
+        access_method="ssh",
+        ssh_host="203.0.113.7",
+        ssh_user="root",
+    )
+
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=provider,
+        rootfs_profiles={"minimal": explicit},
+        test_suites=suites(),
+    )
+
+    assert response.ok is True
+    assert provider.planned_rootfs.ssh_host == "203.0.113.7"
+
+
+def test_run_tests_ignores_invalid_persisted_guest_ip(tmp_path: Path) -> None:
+    artifact_root = create_booted_run(tmp_path)
+    _set_boot_guest_ip(artifact_root, "127.0.0.1")  # fails re-validation
+    provider = FakeTestProvider()
+
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=provider,
+        rootfs_profiles={"minimal": rootfs(tmp_path)},  # ssh_host="127.0.0.1"
+        test_suites=suites(),
+    )
+
+    assert response.ok is True
+    assert provider.planned_rootfs.ssh_host == "127.0.0.1"  # original preserved
+
+
+def test_run_tests_no_guest_ip_is_noop(tmp_path: Path) -> None:
+    artifact_root = create_booted_run(tmp_path)
+    _set_boot_guest_ip(artifact_root, None)
+    provider = FakeTestProvider()
+
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id="run-abc123",
+        provider=provider,
+        rootfs_profiles={"minimal": rootfs(tmp_path)},
+        test_suites=suites(),
+    )
+
+    assert response.ok is True
+    assert provider.planned_rootfs.ssh_host == "127.0.0.1"
+
+
 def test_run_tests_executes_default_suite_after_boot(tmp_path: Path) -> None:
     artifact_root = create_booted_run(tmp_path)
     provider = FakeTestProvider()

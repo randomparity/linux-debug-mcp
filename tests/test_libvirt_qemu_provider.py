@@ -1,5 +1,6 @@
 import json
 import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from xml.etree import ElementTree
@@ -14,6 +15,7 @@ from linux_debug_mcp.providers.libvirt_qemu import (
     LibvirtQemuProvider,
     ProviderBootError,
     SubprocessLibvirtRunner,
+    parse_domifaddr_ipv4,
 )
 
 MCP_METADATA_NS = "urn:linux-debug-mcp:domain"
@@ -748,6 +750,7 @@ class FakeLibvirtRunner:
         start: CommandResult | None = None,
         destroy: CommandResult | None = None,
         console: ConsoleResult | None = None,
+        domifaddr: list[CommandResult] | None = None,
     ) -> None:
         self.tools = {"virsh": "/usr/bin/virsh", "qemu-img": "/usr/bin/qemu-img"} if tools is None else tools
         self.dumpxml = dumpxml or CommandResult(["virsh", "dumpxml"], 1, stderr="Domain not found: debug-vm\n")
@@ -761,6 +764,22 @@ class FakeLibvirtRunner:
             started_at=datetime(2026, 1, 1, tzinfo=UTC),
             ended_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
+        self.domifaddr_results = (
+            list(domifaddr)
+            if domifaddr is not None
+            else [
+                CommandResult(
+                    ["virsh", "domifaddr"],
+                    0,
+                    stdout=(
+                        " Name   MAC address          Protocol     Address\n"
+                        "----------------------------------------------------\n"
+                        " vnet0  52:54:00:1a:2b:3c    ipv4         192.168.122.45/24\n"
+                    ),
+                )
+            ]
+        )
+        self.domifaddr_calls: list[dict[str, object]] = []
         self.commands: list[list[str]] = []
         self.console_calls: list[dict[str, object]] = []
 
@@ -808,6 +827,11 @@ class FakeLibvirtRunner:
                 self.destroy.stderr,
                 self.destroy.timed_out,
             )
+        if action == "domifaddr":
+            self.domifaddr_calls.append({"argv": argv, "timeout": timeout})
+            if self.domifaddr_results:
+                return self.domifaddr_results.pop(0)
+            return CommandResult(argv, 0, stdout="")
         raise AssertionError(f"unexpected command: {argv}")
 
     def stream_console(
@@ -855,7 +879,7 @@ def test_execute_boot_first_boot_domain_absent_defines_starts_and_writes_artifac
     result = provider.execute_boot(plan)
 
     assert result.status == StepStatus.SUCCEEDED
-    assert runner.commands == [plan.dumpxml_argv, plan.define_argv, plan.start_argv]
+    assert runner.commands == [plan.dumpxml_argv, plan.define_argv, plan.start_argv, plan.domifaddr_argv]
     assert runner.console_calls[0]["domain"] == "debug-vm"
     assert plan.domain_xml_path.is_file()
     assert plan.boot_plan_path.is_file()
@@ -911,7 +935,13 @@ def test_execute_boot_retry_stops_matching_domain_before_define_start(tmp_path: 
     result = LibvirtQemuProvider(runner=runner).execute_boot(plan, retrying_after_failure=True)
 
     assert result.status == StepStatus.SUCCEEDED
-    assert runner.commands == [plan.dumpxml_argv, plan.destroy_argv, plan.define_argv, plan.start_argv]
+    assert runner.commands == [
+        plan.dumpxml_argv,
+        plan.destroy_argv,
+        plan.define_argv,
+        plan.start_argv,
+        plan.domifaddr_argv,
+    ]
 
 
 def test_execute_boot_stops_existing_matching_domain_before_fresh_run_start(tmp_path: Path) -> None:
@@ -922,7 +952,13 @@ def test_execute_boot_stops_existing_matching_domain_before_fresh_run_start(tmp_
     result = LibvirtQemuProvider(runner=runner).execute_boot(plan)
 
     assert result.status == StepStatus.SUCCEEDED
-    assert runner.commands == [plan.dumpxml_argv, plan.destroy_argv, plan.define_argv, plan.start_argv]
+    assert runner.commands == [
+        plan.dumpxml_argv,
+        plan.destroy_argv,
+        plan.define_argv,
+        plan.start_argv,
+        plan.domifaddr_argv,
+    ]
 
 
 def test_execute_boot_continues_when_existing_matching_domain_is_already_inactive(tmp_path: Path) -> None:
@@ -936,7 +972,13 @@ def test_execute_boot_continues_when_existing_matching_domain_is_already_inactiv
     result = LibvirtQemuProvider(runner=runner).execute_boot(plan)
 
     assert result.status == StepStatus.SUCCEEDED
-    assert runner.commands == [plan.dumpxml_argv, plan.destroy_argv, plan.define_argv, plan.start_argv]
+    assert runner.commands == [
+        plan.dumpxml_argv,
+        plan.destroy_argv,
+        plan.define_argv,
+        plan.start_argv,
+        plan.domifaddr_argv,
+    ]
 
 
 def test_execute_boot_console_timeout_maps_to_boot_timeout_and_preserves_artifacts(tmp_path: Path) -> None:
@@ -1219,3 +1261,245 @@ def test_capability_advertises_qemu_img() -> None:
 
     capability = local_libvirt_qemu_capability()
     assert "qemu-img" in capability.required_host_tools
+
+
+_DOMIFADDR_SINGLE = """\
+ Name       MAC address          Protocol     Address
+-------------------------------------------------------------------------------
+ vnet0      52:54:00:1a:2b:3c    ipv4         192.168.122.45/24
+"""
+
+_DOMIFADDR_IPV6_THEN_IPV4 = """\
+ Name       MAC address          Protocol     Address
+-------------------------------------------------------------------------------
+ vnet0      52:54:00:1a:2b:3c    ipv6         fe80::5054:ff:fe1a:2b3c/64
+ vnet0      52:54:00:1a:2b:3c    ipv4         192.168.122.50/24
+"""
+
+_DOMIFADDR_HEADERS_ONLY = """\
+ Name       MAC address          Protocol     Address
+-------------------------------------------------------------------------------
+"""
+
+_DOMIFADDR_LOOPBACK_ONLY = """\
+ Name       MAC address          Protocol     Address
+-------------------------------------------------------------------------------
+ lo         00:00:00:00:00:00    ipv4         127.0.0.1/8
+"""
+
+_DOMIFADDR_LINKLOCAL_THEN_ROUTABLE = """\
+ Name       MAC address          Protocol     Address
+-------------------------------------------------------------------------------
+ vnet0      52:54:00:1a:2b:3c    ipv4         169.254.3.4/16
+ vnet1      52:54:00:1a:2b:3d    ipv4         192.168.122.77/24
+"""
+
+
+def test_parse_domifaddr_single_ipv4() -> None:
+    assert parse_domifaddr_ipv4(_DOMIFADDR_SINGLE) == "192.168.122.45"
+
+
+def test_parse_domifaddr_prefers_ipv4_over_ipv6() -> None:
+    assert parse_domifaddr_ipv4(_DOMIFADDR_IPV6_THEN_IPV4) == "192.168.122.50"
+
+
+def test_parse_domifaddr_headers_only_returns_none() -> None:
+    assert parse_domifaddr_ipv4(_DOMIFADDR_HEADERS_ONLY) is None
+
+
+def test_parse_domifaddr_empty_returns_none() -> None:
+    assert parse_domifaddr_ipv4("") is None
+
+
+def test_parse_domifaddr_skips_loopback() -> None:
+    assert parse_domifaddr_ipv4(_DOMIFADDR_LOOPBACK_ONLY) is None
+
+
+def test_parse_domifaddr_skips_linklocal_takes_routable() -> None:
+    assert parse_domifaddr_ipv4(_DOMIFADDR_LINKLOCAL_THEN_ROUTABLE) == "192.168.122.77"
+
+
+def test_parse_domifaddr_malformed_rows_are_skipped() -> None:
+    assert parse_domifaddr_ipv4("garbage\nipv4 not-an-ip\n   \n") is None
+
+
+def test_plan_boot_sets_domifaddr_argv_and_discovery_gate(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider()
+
+    plan = provider.plan_boot(
+        run_id="run-abc123",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(),
+        rootfs_profile=rootfs_profile(rootfs),  # default access_method="ssh"
+    )
+
+    assert plan.domifaddr_argv == [
+        "virsh",
+        "-c",
+        "qemu:///system",
+        "domifaddr",
+        "debug-vm",
+        "--source",
+        "lease",
+    ]
+    assert plan.discover_guest_ip is True
+
+
+def test_plan_boot_disables_discovery_for_serial_only_profile(tmp_path: Path) -> None:
+    kernel, rootfs, run_dir = make_inputs(tmp_path)
+    provider = LibvirtQemuProvider()
+    profile = RootfsProfile(
+        name="minimal",
+        source=str(rootfs),
+        access_method="serial",
+        readiness_marker="linux-debug-mcp-ready",
+    )
+
+    plan = provider.plan_boot(
+        run_id="run-abc123",
+        run_dir=run_dir,
+        kernel_image_path=kernel,
+        target_profile=target_profile(),
+        rootfs_profile=profile,
+    )
+
+    assert plan.discover_guest_ip is False
+
+
+class SleepRecorder:
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
+
+
+def test_execute_boot_surfaces_guest_ip_on_success(tmp_path: Path) -> None:
+    plan = make_plan(tmp_path)  # default rootfs access_method="ssh" -> discover_guest_ip True
+    runner = FakeLibvirtRunner()
+    provider = LibvirtQemuProvider(runner=runner, sleep=SleepRecorder())
+
+    result = provider.execute_boot(plan)
+
+    assert result.status == StepStatus.SUCCEEDED
+    assert result.details["guest_ip"] == "192.168.122.45"
+    assert result.details["guest_ip_discovery"]["status"] == "found"
+    assert any(call["argv"] == plan.domifaddr_argv for call in runner.domifaddr_calls)
+
+
+def test_execute_boot_uses_call_timeout_not_boot_timeout(tmp_path: Path) -> None:
+    plan = make_plan(tmp_path)
+    runner = FakeLibvirtRunner()
+    provider = LibvirtQemuProvider(runner=runner, sleep=SleepRecorder(), lease_discovery_call_timeout=5)
+
+    provider.execute_boot(plan)
+
+    domifaddr_call = next(c for c in runner.domifaddr_calls if c["argv"] == plan.domifaddr_argv)
+    assert domifaddr_call["timeout"] == 5
+    assert domifaddr_call["timeout"] != plan.timeout_seconds
+
+
+def test_execute_boot_polls_until_lease_found(tmp_path: Path) -> None:
+    plan = make_plan(tmp_path)
+    empty = CommandResult(["virsh", "domifaddr"], 0, stdout="")
+    found = CommandResult(
+        ["virsh", "domifaddr"],
+        0,
+        stdout=" vnet0  52:54:00:1a:2b:3c    ipv4    192.168.122.9/24\n",
+    )
+    runner = FakeLibvirtRunner(domifaddr=[empty, empty, found])
+    sleeper = SleepRecorder()
+    provider = LibvirtQemuProvider(
+        runner=runner, sleep=sleeper, lease_discovery_attempts=8, lease_discovery_interval=1.0
+    )
+
+    result = provider.execute_boot(plan)
+
+    assert result.details["guest_ip"] == "192.168.122.9"
+    assert len(runner.domifaddr_calls) == 3
+    assert sleeper.calls == [1.0, 1.0]  # slept between the 3 attempts, not after the success
+
+
+def test_execute_boot_no_lease_after_poll(tmp_path: Path) -> None:
+    plan = make_plan(tmp_path)
+    empty = CommandResult(["virsh", "domifaddr"], 0, stdout="")
+    runner = FakeLibvirtRunner(domifaddr=[empty, empty])
+    sleeper = SleepRecorder()
+    provider = LibvirtQemuProvider(
+        runner=runner, sleep=sleeper, lease_discovery_attempts=2, lease_discovery_interval=0.5
+    )
+
+    result = provider.execute_boot(plan)
+
+    assert result.status == StepStatus.SUCCEEDED
+    assert result.details["guest_ip"] is None
+    assert result.details["guest_ip_discovery"]["status"] == "no_lease"
+    assert len(runner.domifaddr_calls) == 2
+    assert sleeper.calls == [0.5]  # attempts-1 sleeps
+
+
+def test_execute_boot_domifaddr_failure_is_unavailable(tmp_path: Path) -> None:
+    plan = make_plan(tmp_path)
+    failure = CommandResult(["virsh", "domifaddr"], 1, stderr="error: Domain not found\n")
+    runner = FakeLibvirtRunner(domifaddr=[failure])
+    provider = LibvirtQemuProvider(runner=runner, sleep=SleepRecorder(), lease_discovery_attempts=8)
+
+    result = provider.execute_boot(plan)
+
+    assert result.status == StepStatus.SUCCEEDED
+    assert result.details["guest_ip"] is None
+    assert result.details["guest_ip_discovery"]["status"] == "unavailable"
+    assert len(runner.domifaddr_calls) == 1  # non-zero exit stops the poll immediately
+
+
+def test_execute_boot_skips_discovery_for_serial_profile(tmp_path: Path) -> None:
+    plan = make_plan(tmp_path)
+    plan = replace(plan, discover_guest_ip=False)
+    runner = FakeLibvirtRunner()
+    provider = LibvirtQemuProvider(runner=runner, sleep=SleepRecorder())
+
+    result = provider.execute_boot(plan)
+
+    assert result.status == StepStatus.SUCCEEDED
+    assert result.details["guest_ip"] is None
+    assert result.details["guest_ip_discovery"]["status"] == "skipped"
+    assert runner.domifaddr_calls == []
+
+
+def test_execute_boot_discovery_runner_exception_stays_succeeded(tmp_path: Path) -> None:
+    plan = make_plan(tmp_path)
+
+    class RaisingDomifaddrRunner(FakeLibvirtRunner):
+        def run(self, argv, *, timeout, log_path=None):
+            if len(argv) > 3 and argv[3] == "domifaddr":
+                raise FileNotFoundError("virsh disappeared")
+            return super().run(argv, timeout=timeout, log_path=log_path)
+
+    provider = LibvirtQemuProvider(runner=RaisingDomifaddrRunner(), sleep=SleepRecorder())
+
+    result = provider.execute_boot(plan)
+
+    assert result.status == StepStatus.SUCCEEDED
+    assert result.details["guest_ip"] is None
+    assert result.details["guest_ip_discovery"]["status"] == "unavailable"
+
+
+def test_execute_boot_timeout_skips_discovery(tmp_path: Path) -> None:
+    plan = make_plan(tmp_path)
+    timeout_console = ConsoleResult(
+        status="timeout",
+        matched_marker=None,
+        snippet="...",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ended_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    runner = FakeLibvirtRunner(console=timeout_console)
+    provider = LibvirtQemuProvider(runner=runner, sleep=SleepRecorder())
+
+    result = provider.execute_boot(plan)
+
+    assert result.status == StepStatus.FAILED
+    assert "guest_ip" not in result.details
+    assert runner.domifaddr_calls == []

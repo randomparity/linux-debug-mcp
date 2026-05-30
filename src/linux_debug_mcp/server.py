@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -2035,6 +2036,41 @@ def target_boot_handler(
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
 
 
+def _ssh_host_is_unset_or_loopback(host: str | None) -> bool:
+    """True when ``host`` is unset/empty, ``localhost``, or a loopback IP (ADR 0032 d6).
+
+    Any other value — a routable IP or a non-IP DNS name — is a deliberate operator
+    override and returns False so it is preserved.
+    """
+    if host is None or not host.strip():
+        return True
+    normalized = host.strip()
+    if normalized.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _validated_guest_ip(value: object) -> str | None:
+    """Return a routable IP string from an untrusted persisted ``guest_ip`` or None (ADR 0032 d7).
+
+    Re-validates the on-disk value before it can reach an SSH argv: rejects non-strings,
+    non-IP text, and loopback/link-local/unspecified addresses, keeping the SSH target
+    injection-free even if the manifest was corrupted between boot and test.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = ipaddress.ip_address(value.strip())
+    except ValueError:
+        return None
+    if parsed.is_loopback or parsed.is_link_local or parsed.is_unspecified:
+        return None
+    return str(parsed)
+
+
 def target_run_tests_handler(
     *,
     artifact_root: Path,
@@ -2096,6 +2132,18 @@ def target_run_tests_handler(
                 run_id=run_id,
                 message=f"unknown rootfs profile: {manifest.request.rootfs_profile}",
             )
+
+    boot_details = boot_result.details if isinstance(boot_result.details, dict) else {}
+    guest_ip = _validated_guest_ip(boot_details.get("guest_ip"))
+    if guest_ip is not None and _ssh_host_is_unset_or_loopback(resolved_rootfs_profile.ssh_host):
+        resolved_rootfs_profile = resolved_rootfs_profile.model_copy(update={"ssh_host": guest_ip})
+    elif boot_details.get("guest_ip") is not None and guest_ip is None:
+        logger.warning(
+            "run %s: discarding invalid persisted guest_ip %r; using configured ssh_host",
+            run_id,
+            boot_details.get("guest_ip"),
+        )
+
     try:
         suite_profile = test_suites[requested_suite] if requested_suite is not None else None
     except KeyError:

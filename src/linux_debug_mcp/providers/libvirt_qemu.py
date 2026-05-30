@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import ipaddress
 import json
+import logging
 import os
 import selectors
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +29,34 @@ MCP_METADATA_NS = "urn:linux-debug-mcp:domain"
 QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 ElementTree.register_namespace("ldmcp", MCP_METADATA_NS)
 ElementTree.register_namespace("qemu", QEMU_NS)
+
+logger = logging.getLogger(__name__)
+
+
+def parse_domifaddr_ipv4(output: str) -> str | None:
+    """Return the first routable IPv4 address from ``virsh domifaddr`` output.
+
+    Scans the tabular rows, keeps rows whose protocol column is ``ipv4``, strips the
+    ``/prefix`` from the address, and returns the first address that is not loopback,
+    link-local, or unspecified. Total: malformed/short rows are skipped, never raised.
+    Returns ``None`` when no routable IPv4 row is present.
+    """
+    for line in output.splitlines():
+        columns = line.split()
+        if len(columns) < 4:
+            continue
+        protocol, address_field = columns[2], columns[3]
+        if protocol != "ipv4":
+            continue
+        candidate = address_field.split("/", maxsplit=1)[0]
+        try:
+            parsed = ipaddress.IPv4Address(candidate)
+        except ipaddress.AddressValueError:
+            continue
+        if parsed.is_loopback or parsed.is_link_local or parsed.is_unspecified:
+            continue
+        return str(parsed)
+    return None
 
 
 @dataclass(frozen=True)
@@ -69,6 +100,8 @@ class BootPlan:
     debug_gdbstub: bool
     gdbstub_endpoint: GdbstubEndpoint | None
     nokaslr_source: Literal["not_applicable", "profile_supplied", "provider_added"]
+    domifaddr_argv: list[str]
+    discover_guest_ip: bool
 
 
 @dataclass(frozen=True)
@@ -307,8 +340,20 @@ class LibvirtQemuProvider:
     serial_device = "ttyS0"
     default_readiness_marker = "linux-debug-mcp-ready"
 
-    def __init__(self, *, runner: LibvirtRunner | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        runner: LibvirtRunner | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        lease_discovery_attempts: int = 8,
+        lease_discovery_interval: float = 1.0,
+        lease_discovery_call_timeout: int = 5,
+    ) -> None:
         self.runner = runner or SubprocessLibvirtRunner()
+        self._sleep = sleep
+        self._lease_discovery_attempts = lease_discovery_attempts
+        self._lease_discovery_interval = lease_discovery_interval
+        self._lease_discovery_call_timeout = lease_discovery_call_timeout
 
     def plan_boot(
         self,
@@ -406,6 +451,8 @@ class LibvirtQemuProvider:
             debug_gdbstub=target_profile.debug_gdbstub,
             gdbstub_endpoint=gdbstub_endpoint,
             nokaslr_source=nokaslr_source,
+            domifaddr_argv=[*virsh_prefix, "domifaddr", domain_name, "--source", "lease"],
+            discover_guest_ip=rootfs_profile.access_method in {"ssh", "ssh_and_serial"},
         )
 
     def execute_boot(
@@ -509,6 +556,7 @@ class LibvirtQemuProvider:
             "kernel_args": plan.kernel_args,
         }
         if console.status == "ready":
+            details.update(self._discover_guest_ip(plan))
             return self._boot_result(
                 plan=plan,
                 status=StepStatus.SUCCEEDED,
@@ -530,6 +578,58 @@ class LibvirtQemuProvider:
             artifacts=self._existing_artifacts(artifacts),
             diagnostic=console.snippet,
         )
+
+    def _discover_guest_ip(self, plan: BootPlan) -> dict[str, object]:
+        """Best-effort guest-IP discovery from the libvirt lease (ADR 0032).
+
+        Never raises: any failure — including an unexpected ``runner.run`` exception —
+        resolves to a typed status so a successful boot is never downgraded. Polls
+        ``virsh domifaddr --source lease`` up to ``lease_discovery_attempts`` times,
+        sleeping ``lease_discovery_interval`` between attempts, stopping at the first
+        routable IPv4. A non-zero ``domifaddr`` exit stops the poll immediately.
+        """
+        if not plan.discover_guest_ip:
+            return {"guest_ip": None, "guest_ip_discovery": {"status": "skipped", "source": "lease"}}
+        try:
+            return self._poll_guest_ip(plan)
+        except Exception as exc:
+            # Broad catch is deliberate (ADR 0032 d3): discovery is best-effort enrichment
+            # and must never turn a boot that reached readiness into a FAILED result. The
+            # SubprocessLibvirtRunner only converts TimeoutExpired to a CommandResult, so a
+            # FileNotFoundError/OSError from virsh would otherwise propagate. Log with a
+            # traceback so a masked defect stays observable, then report a typed status.
+            logger.warning("guest-ip discovery failed: %s", exc, exc_info=True)
+            return {
+                "guest_ip": None,
+                "guest_ip_discovery": {
+                    "status": "unavailable",
+                    "source": "lease",
+                    "detail": f"{type(exc).__name__}: {exc}"[:512],
+                },
+            }
+
+    def _poll_guest_ip(self, plan: BootPlan) -> dict[str, object]:
+        for attempt in range(self._lease_discovery_attempts):
+            result = self.runner.run(
+                plan.domifaddr_argv,
+                timeout=self._lease_discovery_call_timeout,
+                log_path=plan.boot_log_path,
+            )
+            if result.exit_status != 0 or result.timed_out:
+                detail = (result.stderr or result.stdout or "").strip()[:512]
+                return {
+                    "guest_ip": None,
+                    "guest_ip_discovery": {"status": "unavailable", "source": "lease", "detail": detail},
+                }
+            guest_ip = parse_domifaddr_ipv4(result.stdout)
+            if guest_ip is not None:
+                return {
+                    "guest_ip": guest_ip,
+                    "guest_ip_discovery": {"status": "found", "source": "lease"},
+                }
+            if attempt < self._lease_discovery_attempts - 1:
+                self._sleep(self._lease_discovery_interval)
+        return {"guest_ip": None, "guest_ip_discovery": {"status": "no_lease", "source": "lease"}}
 
     def render_domain_xml(self, plan: BootPlan) -> str:
         domain = ElementTree.Element("domain", {"type": "kvm"})
