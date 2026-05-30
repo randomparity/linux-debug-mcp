@@ -20,7 +20,22 @@ advertised operations, limitations, and documentation paths.
 ### `host.check_prerequisites`
 
 Checks local Python, host tools, artifact root writability, optional Linux
-source markers, and optional non-destructive libvirt visibility.
+source markers, and optional non-destructive libvirt visibility. When you pass
+the build/target/rootfs profile names you intend to use, it also runs a
+run-readiness preflight that names the roundtrip-blocking gaps up front, each
+with a concrete `suggested_fix`:
+
+- `kernel.config` — the kernel `.config` is present in the source tree or
+  derivable from the build profile's `base_config`.
+- `rootfs.image` — the rootfs profile resolves to an existing disk image
+  (a missing builder image points you at `just rootfs`).
+- `gdbstub.port` — for a `debug_gdbstub` target, the `gdbstub_endpoint` port is
+  free to bind. This is a point-in-time advisory, not a reservation: the port can
+  be taken before `target.boot` binds it.
+
+Omitting a profile name leaves its readiness check `skipped`. An unsupported or
+typo'd profile name is reported as a `failed` check, not a hard error, so the
+remaining checks still run.
 
 ```json
 {
@@ -28,7 +43,10 @@ source markers, and optional non-destructive libvirt visibility.
   "arguments": {
     "artifact_root": ".linux-debug-mcp/runs",
     "source_path": "/home/dave/src/linux",
-    "enable_libvirt_check": true
+    "enable_libvirt_check": true,
+    "build_profile": "x86_64-debug",
+    "target_profile": "local-qemu-debug",
+    "rootfs_profile": "minimal"
   }
 }
 ```

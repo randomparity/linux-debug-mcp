@@ -4,8 +4,9 @@ from conftest import make_source_tree
 
 from linux_debug_mcp import server
 from linux_debug_mcp.artifacts.store import ArtifactStore
-from linux_debug_mcp.config import BootOverrides, BuildOverrides
+from linux_debug_mcp.config import BootOverrides, BuildOverrides, TargetProfile
 from linux_debug_mcp.domain import ArtifactRef, StepResult, StepStatus
+from linux_debug_mcp.prereqs.checks import PortProbeResult
 from linux_debug_mcp.server import (
     DEFAULT_TEST_SUITES,
     create_app,
@@ -188,6 +189,51 @@ def test_prerequisites_handler_returns_checks(tmp_path: Path) -> None:
     assert response.ok is True
     assert "checks" in response.data
     assert any(check["check_id"] == "python.version" for check in response.data["checks"])
+
+
+def test_prerequisites_handler_readiness_skipped_without_profiles(tmp_path: Path) -> None:
+    response = prerequisites_handler(artifact_root=tmp_path / "runs", source_path=None)
+    by_id = {c["check_id"]: c for c in response.data["checks"]}
+    assert by_id["kernel.config"]["status"] == "skipped"
+    assert by_id["rootfs.image"]["status"] == "skipped"
+    assert by_id["gdbstub.port"]["status"] == "skipped"
+
+
+def test_prerequisites_handler_names_missing_rootfs_and_passes_config(tmp_path: Path) -> None:
+    response = prerequisites_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=None,
+        build_profile="x86_64-debug",
+        target_profile="local-qemu-debug",
+        rootfs_profile="minimal",
+        port_probe=lambda h, p: PortProbeResult("free"),
+    )
+    by_id = {c["check_id"]: c for c in response.data["checks"]}
+    assert by_id["kernel.config"]["status"] == "passed"
+    assert by_id["rootfs.image"]["status"] == "failed"
+    assert "just rootfs" in by_id["rootfs.image"]["suggested_fix"]
+    assert by_id["gdbstub.port"]["status"] == "passed"
+
+
+def test_prerequisites_handler_unknown_profile_is_failed_check(tmp_path: Path) -> None:
+    response = prerequisites_handler(artifact_root=tmp_path / "runs", source_path=None, build_profile="does-not-exist")
+    by_id = {c["check_id"]: c for c in response.data["checks"]}
+    assert by_id["kernel.config"]["status"] == "failed"
+    assert "unknown build profile" in by_id["kernel.config"]["message"]
+    assert by_id["rootfs.image"]["status"] == "skipped"
+
+
+def test_prerequisites_handler_port_check_uses_injected_target_registry(tmp_path: Path) -> None:
+    response = prerequisites_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=None,
+        target_profile="custom",
+        target_profiles={"custom": TargetProfile(name="custom", architecture="x86_64", debug_gdbstub=True)},
+        port_probe=lambda h, p: PortProbeResult("in_use"),
+    )
+    by_id = {c["check_id"]: c for c in response.data["checks"]}
+    assert by_id["gdbstub.port"]["status"] == "failed"
+    assert "in use" in by_id["gdbstub.port"]["message"]
 
 
 def test_list_providers_handler_returns_default_capabilities() -> None:
