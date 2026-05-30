@@ -1370,8 +1370,12 @@ def test_timeout_beats_partial_files(tmp_path) -> None:
 
 def test_redaction_masks_secret_in_output(tmp_path) -> None:
     _run(tmp_path)
-    secret = "AKIAIOSFODNN7EXAMPLE"  # pragma: allowlist secret
-    runner = _FakeRunner(outputs={0: f"leak {secret} here"})
+    # The default Redactor (src/linux_debug_mcp/safety/redaction.py) masks
+    # `key=value` pairs whose key matches password|passwd|token|api_key|secret.
+    # Use such a key so the test exercises a real default pattern (not a bare
+    # token, which the default set does NOT mask).
+    secret_value = "hunter2trustno1xyz"  # pragma: allowlist secret
+    runner = _FakeRunner(outputs={0: f"[ 0.1] db_password={secret_value} loaded\n"})
     resp = debug_postmortem_crash_handler(
         DebugPostmortemCrashRequest(
             run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux",
@@ -1382,12 +1386,116 @@ def test_redaction_masks_secret_in_output(tmp_path) -> None:
         vmcore_build_id_reader=lambda _p: GOOD_ID,
         vmlinux_build_id_reader=lambda _p: GOOD_ID,
     )
-    # The generic redactor masks AWS-key-shaped tokens; assert the raw secret is
-    # not present in the returned results.
-    assert secret not in repr(resp.data["results"])
+    blob = repr(resp.data["results"])
+    assert secret_value not in blob
+    assert "[REDACTED]" in blob
+    # And the persisted parsed.json is redacted too (AC: persisted + response).
+    rd = ArtifactStore(artifact_root=tmp_path).run_dir("r1")
+    parsed_on_disk = (rd / "debug" / "postmortem" / "crash").glob("*/parsed.json")
+    assert all(secret_value not in p.read_text(encoding="utf-8") for p in parsed_on_disk)
+
+
+def test_argv_carries_prlimit_disk_bound(tmp_path) -> None:
+    from linux_debug_mcp.config import CRASH_PER_CMD_CAP
+
+    _run(tmp_path)
+
+    class _ArgvCapturingRunner(_FakeRunner):
+        def run(self, argv, **kwargs):  # type: ignore[override]
+            self.argv = argv
+            return super().run(argv, **kwargs)
+
+    runner = _ArgvCapturingRunner(outputs={0: "PID: 0\n"})
+    debug_postmortem_crash_handler(
+        DebugPostmortemCrashRequest(
+            run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux",
+            commands=["bt"],
+        ),
+        artifact_root=tmp_path,
+        runner=runner,
+        vmcore_build_id_reader=lambda _p: GOOD_ID,
+        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+    )
+    assert runner.argv[:2] == ["prlimit", f"--fsize={CRASH_PER_CMD_CAP}"]
+    assert "crash" in runner.argv and "-s" in runner.argv
+
+
+def test_modules_path_unsafe_rejected_no_run(tmp_path, monkeypatch) -> None:
+    import linux_debug_mcp.server as server
+    from linux_debug_mcp.symbols import ResolvedSymbols
+
+    store = _run(tmp_path)
+    rd = store.run_dir("r1")
+    (rd / "build" / "mods").mkdir(parents=True, exist_ok=True)
+
+    def _fake_resolve(_prov, *, run_dir):
+        return ResolvedSymbols(
+            vmlinux_path=run_dir / "build" / "vmlinux",
+            modules_path=run_dir / "build" / "mo ds",  # space -> unsafe
+            warnings=[],
+        )
+
+    monkeypatch.setattr(server, "resolve_symbols", _fake_resolve)
+    runner = _FakeRunner(outputs={})
+    resp = debug_postmortem_crash_handler(
+        DebugPostmortemCrashRequest(
+            run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux",
+            modules_ref="build/mods", commands=["bt"],
+        ),
+        artifact_root=tmp_path,
+        runner=runner,
+        vmcore_build_id_reader=lambda _p: GOOD_ID,
+        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+    )
+    assert resp.ok is False
+    assert resp.error.details["code"] == "modules_path_unsafe"
+    assert runner.calls == 0
+
+
+def test_module_symbols_status_reported(tmp_path, monkeypatch) -> None:
+    import linux_debug_mcp.server as server
+    from linux_debug_mcp.symbols import ResolvedSymbols
+
+    store = _run(tmp_path)
+    rd = store.run_dir("r1")
+    (rd / "build" / "mods").mkdir(parents=True, exist_ok=True)
+
+    def _fake_resolve(_prov, *, run_dir):
+        return ResolvedSymbols(
+            vmlinux_path=run_dir / "build" / "vmlinux",
+            modules_path=run_dir / "build" / "mods",
+            warnings=[],
+        )
+
+    monkeypatch.setattr(server, "resolve_symbols", _fake_resolve)
+
+    class _ModRunner(_FakeRunner):
+        def run(self, argv, *, stdin=None, **kwargs):  # type: ignore[override]
+            # Write a successful mod-load.out, plus the bt output.
+            for line in (stdin or "").splitlines():
+                if " > " not in line:
+                    continue
+                target = __import__("pathlib").Path(line.split(" > ", 1)[1])
+                if target.name == "mod-load.out":
+                    target.write_text("MODULE  NAME  loaded\n", encoding="utf-8")
+            return super().run(argv, stdin=stdin, **kwargs)
+
+    runner = _ModRunner(outputs={0: "PID: 0\n"})
+    resp = debug_postmortem_crash_handler(
+        DebugPostmortemCrashRequest(
+            run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux",
+            modules_ref="build/mods", commands=["bt"],
+        ),
+        artifact_root=tmp_path,
+        runner=runner,
+        vmcore_build_id_reader=lambda _p: GOOD_ID,
+        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+    )
+    assert resp.ok is True
+    assert resp.data["module_symbols"]["status"] == "loaded"
 ```
 
-Note: confirm the generic `Redactor()` pattern set masks an AWS-key-shaped token by checking `src/linux_debug_mcp/safety/redaction.py`; if its default patterns differ, adjust the `secret` fixture to a token the default patterns match (e.g. a `ssh-rsa ...` blob) so the redaction test exercises a real default pattern.
+Note: the default `Redactor` masks registry-registered secret values and `key=value` pairs whose **key** matches `password|passwd|token|api[_-]?key|secret` — confirmed in `src/linux_debug_mcp/safety/redaction.py:30-37`. A bare token (e.g. `AKIA…`) is NOT masked, so the redaction fixture must use such a key. The `modules_path_unsafe`/`module_symbols` tests inject a `ResolvedSymbols` with a hostile/known `modules_path` directly (a real `confine_run_relative` path cannot easily contain a space), per the spec §11 next-step.
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -1734,7 +1842,7 @@ Match the exact wrapper style of the adjacent `debug.introspect.from_vmcore` reg
 - [ ] **Step 6: Run to verify pass**
 
 Run: `uv run python -m pytest tests/test_debug_postmortem_crash.py -q`
-Expected: PASS. If the redaction test fails because the default `Redactor` pattern set does not mask the chosen token, switch the fixture to a token the default patterns match (inspect `safety/redaction.py`).
+Expected: PASS (all handler tests, including the `prlimit` argv, `modules_path_unsafe`, `module_symbols`, and redaction tests).
 
 - [ ] **Step 7: Full guardrails + commit**
 
@@ -1873,7 +1981,9 @@ Expected: exit 124 (server started and was killed by timeout) — proves tool re
 - AC "build_id mismatch fails loud, no crash run" → Task 1 + Task 9 `_crash_buildid_failloud` + `runner.calls == 0` test.
 - AC "timeout cuts cleanly; oversize truncated with indicator" → Task 9 (`prlimit`+`timeout`, `crash_timeout`, `truncated` flag) + Task 3 caps.
 - AC "unaffected by target lifecycle (no gate)" → Task 9 (no admission parameter) + lifecycle test.
-- AC "all persisted + response through `Redactor()`" → Task 9 `_finalize_crash_call` (redact every value + transcript) + redaction test.
+- AC "all persisted + response through `Redactor()`" → Task 9 `_finalize_crash_call` (redact every value + transcript) + `test_redaction_masks_secret_in_output` (response + persisted `parsed.json`).
 - AC "real-crash test env-gated" → Task 11.
 - Security control (ADR 0026 2a) → Task 2 + Task 9 `command_not_permitted` test.
-- Disk bound (spec §4.1) → Task 9 `prlimit --fsize` argv; Task 12 covers full-suite.
+- Disk bound (spec §4.1) → Task 9 `prlimit --fsize` argv + `test_argv_carries_prlimit_disk_bound`; real `SIGXFSZ` exercised in Task 11.
+- Path-injection guard (spec §6 step 8) → Task 2 `validate_modules_path` + Task 9 `test_modules_path_unsafe_rejected_no_run`.
+- Module-load status (spec §3.3) → Task 9 `_finalize_crash_call` `module_symbols` + `test_module_symbols_status_reported`.
