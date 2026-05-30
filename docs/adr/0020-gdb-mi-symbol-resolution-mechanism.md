@@ -40,9 +40,10 @@ agent-facing operation.
 
 1. **Resolve a name to an address with `-data-evaluate-expression "&<name>"`.**
    `GdbMiEngine.resolve_symbol(attachment, symbol_name) -> ResolvedSymbol` issues
-   that one MI command and parses the address out of the `^done` record's
-   `value` payload. `ResolvedSymbol` is a frozen wire model carrying the requested
-   `name` and the observed `value` string (e.g. `"0x... <linux_banner>"`).
+   that one MI command and reads the `value` field from the parsed `^done` record
+   verbatim (no substring/address extraction). `ResolvedSymbol` is a frozen wire
+   model carrying the requested `name` and the observed `value` string
+   (e.g. `"0x... <linux_banner>"`).
    A `^error` (symbol absent / not yet loaded) raises `GdbMiError` with
    `DEBUG_ATTACH_FAILURE` — symbols were supposed to be loaded, so an unresolvable
    canonical symbol is an attach-level failure, not a soft miss. The observed
