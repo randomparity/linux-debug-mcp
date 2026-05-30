@@ -14,6 +14,7 @@ from pathlib import Path
 from _layer4_fakes import FakeQemuTransport, build_txn
 from conftest import kernel_provenance_details, write_vmlinux_with_build_id
 
+import linux_debug_mcp.server as server_module
 from linux_debug_mcp.artifacts.store import ArtifactStore
 from linux_debug_mcp.config import DebugProfile
 from linux_debug_mcp.coordination.admission import AdmissionService
@@ -40,6 +41,7 @@ from linux_debug_mcp.seams.target import (
     publish_ready_snapshot,
 )
 from linux_debug_mcp.server import (
+    _end_mi_debug_session,
     debug_continue_handler,
     debug_set_breakpoint_handler,
     debug_start_session_handler,
@@ -407,3 +409,70 @@ def test_continue_dispatches_onto_live_attachment(tmp_path: Path) -> None:
     assert ("continue_", (5,)) in engine.calls
     assert response.data["stop"]["reason"] == "breakpoint-hit"
     assert response.data["current_execution_state"] == "stopped"
+
+
+def _start_for_end(tmp_path: Path) -> tuple[Path, str, FakeMiEngine, GdbMiSessionRegistry, SessionRegistry]:
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+    engine = FakeMiEngine()
+    sessions = GdbMiSessionRegistry()
+    start = _start(artifact_root, registry=registry, txn=txn, admission=admission, engine=engine, sessions=sessions)
+    assert start.ok is True, start
+    return artifact_root, start.data["debug_session_id"], engine, sessions, registry
+
+
+def test_end_session_bookkeeping_fault_does_not_resume_before_recording(tmp_path: Path, monkeypatch) -> None:
+    """Guaranteed-resume ordering: end_session must durably record ENDED *before* the irreversible
+    reap+force_resume. If the persist write faults, the kernel must stay HALTED with the live
+    attachment intact (re-runnable) — never resumed-yet-owned, which would strand target.run_tests."""
+    artifact_root, session_id, engine, sessions, registry = _start_for_end(tmp_path)
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(server_module, "_persist_mi_debug_session", _boom)
+    response = _end_mi_debug_session(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        debug_session_id=session_id,
+        debug_profiles=_profiles(),
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
+
+    assert response.ok is False
+    assert response.error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    # The irreversible reap+resume never ran: the kernel is still HALTED and the session re-runnable.
+    assert engine.forced is False
+    assert sessions.get(session_id) is not None
+    assert registry.read_record(KEY).execution_state == ExecutionState.HALTED
+
+
+def test_end_session_record_fault_does_not_resume_before_recording(tmp_path: Path, monkeypatch) -> None:
+    """Same invariant for the manifest-record write: a ManifestStateError after the (successful)
+    persist must still leave the kernel HALTED and the attachment registered, not reaped+resumed."""
+    from linux_debug_mcp.artifacts.store import ArtifactStore, ManifestStateError
+
+    artifact_root, session_id, engine, sessions, registry = _start_for_end(tmp_path)
+    real_record = ArtifactStore.record_step_result
+
+    def _maybe_fail(self, run_id, result, *args, **kwargs):
+        if result.summary == "debug.end_session succeeded":
+            raise ManifestStateError("manifest busy", ErrorCategory.INFRASTRUCTURE_FAILURE)
+        return real_record(self, run_id, result, *args, **kwargs)
+
+    monkeypatch.setattr(ArtifactStore, "record_step_result", _maybe_fail)
+    response = _end_mi_debug_session(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        debug_session_id=session_id,
+        debug_profiles=_profiles(),
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
+
+    assert response.ok is False
+    assert engine.forced is False
+    assert sessions.get(session_id) is not None
+    assert registry.read_record(KEY).execution_state == ExecutionState.HALTED

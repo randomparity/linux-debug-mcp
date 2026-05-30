@@ -5384,14 +5384,13 @@ def _end_mi_debug_session(
             session = _load_active_debug_session(store, run_id, debug_session_id, allow_ended=True)
             profile = _resolve_debug_profile(profile_name=session.selected_debug_profile, debug_profiles=debug_profiles)
             _ensure_debug_operation_enabled(profile, "debug.end_session")
-            if gdb_mi_sessions is not None:
-                reaped = gdb_mi_sessions.reap(session.session_id)
-                if reaped is not None and gdb_mi_engine is not None:
-                    with contextlib.suppress(Exception):
-                        gdb_mi_engine.force_resume(reaped)
             ended = session.model_copy(
                 update={"current_execution_state": "ended", "ended_at": datetime.now(UTC).isoformat()}
             )
+            # Durably record ENDED BEFORE the irreversible reap+force_resume. A disk/manifest fault
+            # here must leave the live attachment intact and the durable record legitimately HALTED
+            # (re-runnable), never resumed-yet-owned — which would strand target.run_tests on a kernel
+            # that is actually running free with no live session left to act on.
             _persist_mi_debug_session(store=store, run_id=run_id, session=ended)
             details = {
                 **_debug_session_manifest_details(store=store, run_id=run_id, session=ended),
@@ -5405,8 +5404,22 @@ def _end_mi_debug_session(
                 details=details,
             )
             store.record_step_result(run_id, terminal, replace_succeeded=True)
+            # Point of no return: un-halt the kernel only after the ENDED bookkeeping is durable.
+            if gdb_mi_sessions is not None:
+                reaped = gdb_mi_sessions.reap(session.session_id)
+                if reaped is not None and gdb_mi_engine is not None:
+                    with contextlib.suppress(Exception):
+                        gdb_mi_engine.force_resume(reaped)
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    except OSError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            message=redactor.redact_text(f"failed to record debug.end_session: {exc}"),
+            run_id=run_id,
+            details={"code": "debug_session_end_record_failed"},
+            suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
+        )
     except ProviderDebugError as exc:
         return ToolResponse.failure(
             category=exc.category,
