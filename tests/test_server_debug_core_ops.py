@@ -550,3 +550,39 @@ def test_op_persist_fault_keeps_healthy_session_registered(tmp_path: Path, monke
     # Engine is healthy; the session stays registered and was NOT resumed.
     assert sessions.get(session_id) is not None
     assert engine.forced is False
+
+
+def test_mutator_ledger_rebuild_fault_reaps_and_returns_structured_failure(tmp_path: Path) -> None:
+    """The breakpoint-ledger rebuild (-break-list) after a mutator is an engine call too: if gdb dies
+    between the mutator and the rebuild, it must reap+resume and surface a structured failure, not
+    escape the handler with the kernel stranded HALTED."""
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+
+    class _LedgerFaultEngine(FakeMiEngine):
+        def list_breakpoints(self, attachment):
+            raise RuntimeError("gdb died before -break-list")
+
+    engine = _LedgerFaultEngine()
+    sessions = GdbMiSessionRegistry()
+    start = _start(artifact_root, registry=registry, txn=txn, admission=admission, engine=engine, sessions=sessions)
+    assert start.ok is True, start
+    session_id = start.data["debug_session_id"]
+
+    response = debug_set_breakpoint_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        symbol="do_sys_open",
+        debug_session_id=session_id,
+        debug_profiles=_profiles(),
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
+
+    assert response.ok is False
+    assert response.error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert sessions.get(session_id) is None
+    assert engine.forced is True
