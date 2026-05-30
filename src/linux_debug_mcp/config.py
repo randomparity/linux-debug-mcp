@@ -22,6 +22,7 @@ _KERNEL_ARG_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:=,/+%@-]*\Z")
 # host-side injection results.
 _KERNEL_ARG_QUOTED_PATTERN = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_.:/+%@-]*="[\x20-\x21\x23-\x7e]*"\Z')
 _MAKE_VAR_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
+_MAKE_TARGET_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./+-]*\Z")
 _CONFIG_LINE_PATTERN = re.compile(
     r'^(?:CONFIG_[A-Z0-9_]+=(?:[ymn]|-?\d+|0x[0-9A-Fa-f]+|"[^"\n\r]*")|# CONFIG_[A-Z0-9_]+ is not set)\Z'
 )
@@ -72,6 +73,13 @@ def merge_config_lines(base: list[str], override: list[str]) -> list[str]:
     merged = [line for line in base if _config_symbol(line) not in override_symbols]
     merged.extend(override)
     return merged
+
+
+def validate_make_targets(value: list[str]) -> list[str]:
+    for target in value:
+        if not _MAKE_TARGET_PATTERN.match(target):
+            raise ValueError(f"target {target!r} is not a simple make target")
+    return value
 
 
 def validate_make_variable_map(value: dict[str, str]) -> dict[str, str]:
@@ -295,6 +303,7 @@ class BuildProfile(ConfigModel):
     jobs: int | None = Field(default=None, ge=1)
     make_variables: dict[str, str] = Field(default_factory=dict)
     config_lines: list[str] = Field(default_factory=list)
+    base_config: list[str] = Field(default_factory=list)
 
     def effective_required_tools(self) -> list[str]:
         tools = ["make"]
@@ -306,11 +315,12 @@ class BuildProfile(ConfigModel):
     @field_validator("targets")
     @classmethod
     def validate_targets(cls, value: list[str]) -> list[str]:
-        target_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./+-]*\Z")
-        for target in value:
-            if not target_pattern.match(target):
-                raise ValueError(f"target {target!r} is not a simple make target")
-        return value
+        return validate_make_targets(value)
+
+    @field_validator("base_config")
+    @classmethod
+    def validate_base_config(cls, value: list[str]) -> list[str]:
+        return validate_make_targets(value)
 
     @field_validator("make_variables")
     @classmethod
@@ -411,6 +421,7 @@ class TargetProfile(ConfigModel):
 class BuildOverrides(ConfigModel):
     make_variables: dict[str, str] = Field(default_factory=dict)
     config_lines: list[str] = Field(default_factory=list)
+    base_config: list[str] = Field(default_factory=list)
 
     @field_validator("make_variables")
     @classmethod
@@ -421,6 +432,11 @@ class BuildOverrides(ConfigModel):
     @classmethod
     def validate_config_lines(cls, value: list[str]) -> list[str]:
         return validate_config_line_tokens(value)
+
+    @field_validator("base_config")
+    @classmethod
+    def validate_base_config(cls, value: list[str]) -> list[str]:
+        return validate_make_targets(value)
 
 
 class RootfsOverrides(ConfigModel):

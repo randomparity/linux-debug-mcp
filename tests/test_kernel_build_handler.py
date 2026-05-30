@@ -176,17 +176,76 @@ def test_kernel_build_missing_run_is_configuration_error(tmp_path: Path) -> None
     assert "run not found" in response.error.message
 
 
-def test_kernel_build_fails_without_developer_config(tmp_path: Path) -> None:
-    source, artifact_root = create_run(tmp_path)
-    (source / ".config").unlink()
+def test_default_build_profile_uses_defconfig_base_config() -> None:
+    from linux_debug_mcp.server import DEFAULT_BUILD_PROFILES
+
+    assert DEFAULT_BUILD_PROFILES["x86_64-default"].base_config == ["defconfig"]
+
+
+def test_default_build_profiles_include_x86_64_debug() -> None:
+    from linux_debug_mcp.server import DEFAULT_BUILD_PROFILES
+
+    profile = DEFAULT_BUILD_PROFILES["x86_64-debug"]
+    assert profile.base_config == ["defconfig"]
+    assert profile.config_lines == [
+        "CONFIG_VIRTIO=y",
+        "CONFIG_VIRTIO_PCI=y",
+        "CONFIG_VIRTIO_BLK=y",
+        "CONFIG_VIRTIO_NET=y",
+        "CONFIG_VIRTIO_CONSOLE=y",
+        "CONFIG_SERIAL_8250=y",
+        "CONFIG_SERIAL_8250_CONSOLE=y",
+        "CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y",
+        "# CONFIG_RANDOMIZE_BASE is not set",
+    ]
+
+
+def test_build_overrides_base_config_replaces_profile_value(tmp_path: Path) -> None:
+    from linux_debug_mcp.artifacts.store import ArtifactStore
+    from linux_debug_mcp.config import BuildOverrides
+
+    source = make_source_tree(tmp_path, with_config=True)
+    artifact_root = tmp_path / "runs"
+    created = create_run_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        run_id="run-abc123",
+        build_overrides=BuildOverrides(base_config=["tinyconfig"]),
+    )
+
+    assert created.ok is True
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
+    assert manifest.resolved_build_profile is not None
+    # Replacement, not a merge with the profile's ["defconfig"].
+    assert manifest.resolved_build_profile.base_config == ["tinyconfig"]
+
+
+def test_kernel_build_without_config_or_base_config_returns_suggested_fix(tmp_path: Path) -> None:
     from linux_debug_mcp.artifacts.store import ArtifactStore
     from linux_debug_mcp.domain import StepStatus
 
+    source = make_source_tree(tmp_path)  # no developer .config
+    artifact_root = tmp_path / "runs"
+    created = create_run_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile_spec={"name": "no-base", "architecture": "x86_64", "base_config": []},
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        run_id="run-abc123",
+    )
+    assert created.ok is True
+
+    # No provider injected: rung 4 raises before any make/runner call, so the real provider is safe.
     response = kernel_build_handler(artifact_root=artifact_root, run_id="run-abc123")
 
     assert response.ok is False
     assert response.error is not None
     assert response.error.category == "configuration_error"
+    assert "base_config" in response.error.details["suggested_fix"]
     manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
     assert manifest.step_results["build"].status == StepStatus.FAILED
 
