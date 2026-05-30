@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
@@ -2119,6 +2119,23 @@ def target_run_tests_handler(
     )
 
 
+class _SupportsProbeRequest(Protocol):
+    """Structural type for the run-scoped fields ``_resolve_probe_context`` reads.
+
+    Lets ``DebugIntrospectCheckPrerequisitesRequest`` and
+    ``DebugPostmortemCheckPrereqsRequest`` (field-identical, distinct tools) share the
+    resolver without ``ty`` rejecting the second model (it does not duck-type Pydantic
+    models by structure unless the parameter is a Protocol). See ADR 0028 decision 8.
+    """
+
+    run_id: str
+    target_ref: str
+    timeout_seconds: int
+    debug_profile: str | None
+    target_profile: str | None
+    rootfs_profile: str | None
+
+
 @dataclass(frozen=True)
 class _ProbeContext:
     store: ArtifactStore
@@ -2129,7 +2146,7 @@ class _ProbeContext:
 
 
 def _resolve_probe_context(
-    request: DebugIntrospectCheckPrerequisitesRequest,
+    request: _SupportsProbeRequest,
     *,
     artifact_root: Path,
     rootfs_profiles: dict[str, RootfsProfile],
