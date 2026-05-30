@@ -1205,15 +1205,29 @@ In `src/linux_debug_mcp/providers/local_drgn_introspect.py`, add to the `operati
 
 (Append it after `"debug.introspect.check_prerequisites"`. It uses `live_semantics` — it is not in `vmcore_ops`, so the existing `operation_capabilities` comprehension assigns `live_semantics` automatically.)
 
-- [ ] **Step 4: Run to verify pass + no other capability assertion broke**
+- [ ] **Step 3b: Update the exact-match default-profile golden list in `test_config.py`**
 
-Run: `uv run python -m pytest tests/test_kdump_prereqs_capability.py tests/test_prereqs_drgn_probe.py -q`
+`DebugProfile.enabled_operations` defaults to `list(ALLOWED_DEBUG_OPERATIONS)` (`config.py:470`), and `tests/test_config.py::test_default_debug_profile_matches_sprint_4_policy` (line 131) asserts that default list by **exact equality**. The constant change above breaks it, so update the expected list in the same commit. In `tests/test_config.py`, insert the new op between `"debug.postmortem.triage"` and `"debug.introspect.write"` (matching the constant's order):
+
+```python
+        "debug.postmortem.crash",
+        "debug.postmortem.triage",
+        "debug.postmortem.check_prereqs",
+        "debug.introspect.write",
+    ]
+```
+
+(This mirrors what #93 did for the triage op — see commit "test(config): include triage op in default debug-profile policy list".)
+
+- [ ] **Step 4: Run to verify pass + no other capability/config assertion broke**
+
+Run: `uv run python -m pytest tests/test_kdump_prereqs_capability.py tests/test_prereqs_drgn_probe.py tests/test_config.py -q`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/linux_debug_mcp/config.py src/linux_debug_mcp/providers/local_drgn_introspect.py tests/test_kdump_prereqs_capability.py
+git add src/linux_debug_mcp/config.py src/linux_debug_mcp/providers/local_drgn_introspect.py tests/test_kdump_prereqs_capability.py tests/test_config.py
 git commit -m "feat(config): enumerate debug.postmortem.check_prereqs op + capability"
 ```
 
