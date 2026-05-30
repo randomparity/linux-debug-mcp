@@ -46,3 +46,25 @@ def test_collect_total_cap_marks_rest_truncated(tmp_path) -> None:
     assert segs[0]["capture"] == "ok"
     assert segs[1]["capture"] == "output_truncated"
     assert truncated is True
+
+
+def test_collect_does_not_read_whole_oversize_file(tmp_path, monkeypatch) -> None:
+    # The per-command read must be bounded (cap+1), not slurp the whole file --
+    # robust even if the prlimit RLIMIT_FSIZE bound were ever absent.
+    big = tmp_path / redirect_filename(0)
+    big.write_bytes(b"z" * (1 << 20))  # 1 MiB on disk
+
+    import linux_debug_mcp.postmortem.crash_batch as mod
+
+    real_read_bytes = mod.Path.read_bytes
+
+    def _no_slurp(self, *args, **kwargs):
+        raise AssertionError(f"read_bytes() slurped the whole file: {self}")
+
+    monkeypatch.setattr(mod.Path, "read_bytes", _no_slurp)
+    try:
+        segs, truncated = collect_command_outputs(tmp_path, ["bt"], per_cmd_cap=16, total_cap=4096)
+    finally:
+        monkeypatch.setattr(mod.Path, "read_bytes", real_read_bytes)
+    assert segs[0]["capture"] == "output_truncated"
+    assert len(segs[0]["raw"]) == 16

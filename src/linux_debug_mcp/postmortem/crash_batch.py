@@ -33,7 +33,10 @@ def build_command_script(commands: list[str], output_dir: Path, modules_path: st
 
 
 def _read_capped(path: Path, cap: int) -> tuple[str, bool]:
-    data = path.read_bytes()[: cap + 1]
+    # Bounded read (cap+1 bytes), so an oversize file is never slurped into RAM
+    # even if the prlimit RLIMIT_FSIZE write-bound were ever absent.
+    with path.open("rb") as fh:
+        data = fh.read(cap + 1)
     if len(data) > cap:
         return data[:cap].decode("utf-8", errors="replace"), True
     return data.decode("utf-8", errors="replace"), False
