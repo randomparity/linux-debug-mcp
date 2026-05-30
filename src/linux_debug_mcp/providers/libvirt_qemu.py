@@ -102,6 +102,7 @@ class BootPlan:
     nokaslr_source: Literal["not_applicable", "profile_supplied", "provider_added"]
     domifaddr_argv: list[str]
     discover_guest_ip: bool
+    wait_for_debugger: bool
 
 
 @dataclass(frozen=True)
@@ -375,6 +376,8 @@ class LibvirtQemuProvider:
             target_profile.kernel_args,
             target_profile.debug_gdbstub,
         )
+        if target_profile.wait_for_debugger and not target_profile.debug_gdbstub:
+            raise self._configuration_error("wait_for_debugger requires debug_gdbstub")
         gdbstub_endpoint = None
         if target_profile.debug_gdbstub:
             gdbstub_endpoint = self._parse_gdbstub_endpoint(target_profile.gdbstub_endpoint)
@@ -453,6 +456,7 @@ class LibvirtQemuProvider:
             nokaslr_source=nokaslr_source,
             domifaddr_argv=[*virsh_prefix, "domifaddr", domain_name, "--source", "lease"],
             discover_guest_ip=rootfs_profile.access_method in {"ssh", "ssh_and_serial"},
+            wait_for_debugger=target_profile.wait_for_debugger,
         )
 
     def execute_boot(
@@ -534,6 +538,32 @@ class LibvirtQemuProvider:
                 result=start,
                 artifacts=artifacts,
                 details=details,
+            )
+
+        if plan.wait_for_debugger:
+            # The vCPU is blocked at the gdbstub and prints nothing, but create an empty console
+            # log so the frozen success returns the same artifact set as the normal success branch.
+            plan.console_log_path.write_text("", encoding="utf-8")
+            frozen_details: dict[str, object] = {
+                "domain": plan.domain_name,
+                "console_status": "frozen",
+                "wait_for_debugger": True,
+                "matched_marker": None,
+                "console_snippet": "",
+                "kernel_args": plan.kernel_args,
+                "guest_ip": None,
+                "guest_ip_discovery": {
+                    "status": "skipped",
+                    "source": "lease",
+                    "reason": "wait_for_debugger",
+                },
+            }
+            return self._boot_result(
+                plan=plan,
+                status=StepStatus.SUCCEEDED,
+                summary="target booted frozen, waiting for debugger attach",
+                details=frozen_details,
+                artifacts=self._existing_artifacts(artifacts),
             )
 
         console = self.runner.stream_console(
@@ -662,12 +692,13 @@ class LibvirtQemuProvider:
         ElementTree.SubElement(console, "target", {"type": "serial", "port": "0"})
 
         if plan.debug_gdbstub and plan.gdbstub_endpoint is not None:
+            wait = "on" if plan.wait_for_debugger else "off"
             qemu_commandline = ElementTree.SubElement(domain, f"{{{QEMU_NS}}}commandline")
             ElementTree.SubElement(qemu_commandline, f"{{{QEMU_NS}}}arg", {"value": "-gdb"})
             ElementTree.SubElement(
                 qemu_commandline,
                 f"{{{QEMU_NS}}}arg",
-                {"value": f"tcp:{plan.gdbstub_endpoint.host}:{plan.gdbstub_endpoint.port},server=on,wait=off"},
+                {"value": f"tcp:{plan.gdbstub_endpoint.host}:{plan.gdbstub_endpoint.port},server=on,wait={wait}"},
             )
 
         return ElementTree.tostring(domain, encoding="unicode")

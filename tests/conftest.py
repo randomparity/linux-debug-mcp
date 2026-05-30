@@ -119,6 +119,7 @@ class FakeBootProvider:
         block: bool = False,
         raise_on_plan: ProviderBootError | None = None,
         raise_on_execute: Exception | None = None,
+        details: dict[str, object] | None = None,
     ) -> None:
         self.status = status
         self.summary = summary
@@ -126,6 +127,7 @@ class FakeBootProvider:
         self.block = block
         self.raise_on_plan = raise_on_plan
         self.raise_on_execute = raise_on_execute
+        self.extra_details = details or {}
         self.plans: list[dict[str, object]] = []
         self.executions: list[dict[str, object]] = []
         self.started = threading.Event()
@@ -198,6 +200,7 @@ class FakeBootProvider:
                 "debug_boot": plan.debug_gdbstub,
                 "gdbstub_endpoint": plan.gdbstub_endpoint,
                 "nokaslr_source": plan.nokaslr_source,
+                **self.extra_details,
             },
             artifacts=[ArtifactRef(path=str(plan.boot_log_path), kind="boot-log")],
             error_category=self.error_category,

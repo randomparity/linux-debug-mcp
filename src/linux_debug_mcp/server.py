@@ -615,13 +615,20 @@ def _redacted_boot_data(data: dict[str, Any]) -> dict[str, Any]:
     return Redactor().redact_value(data)
 
 
+def _boot_success_next_actions(details: dict[str, Any]) -> list[str]:
+    """A frozen boot steers the agent to attach; a normal boot to the manifest."""
+    if details.get("console_status") == "frozen":
+        return ["debug.start_session"]
+    return ["artifacts.get_manifest"]
+
+
 def _recorded_boot_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
     return ToolResponse.success(
         summary=result.summary,
         run_id=run_id,
         data=_redacted_boot_data(result.details),
         artifacts=result.artifacts,
-        suggested_next_actions=["artifacts.get_manifest"],
+        suggested_next_actions=_boot_success_next_actions(result.details),
     )
 
 
@@ -1748,6 +1755,10 @@ def target_boot_handler(
                         )
                     }
                 )
+            if effective_boot_overrides.wait_for_debugger is not None:
+                resolved_target_profile = resolved_target_profile.model_copy(
+                    update={"wait_for_debugger": effective_boot_overrides.wait_for_debugger}
+                )
             rootfs_update: dict[str, object] = {}
             if effective_boot_overrides.rootfs_source is not None:
                 validated = validate_rootfs_source(
@@ -1788,6 +1799,7 @@ def target_boot_handler(
         bool(boot_overrides.kernel_args)
         or boot_overrides.rootfs_source is not None
         or boot_overrides.has_rootfs_field_overrides()
+        or boot_overrides.wait_for_debugger is not None
     )
 
     existing = manifest.step_results.get("boot")
@@ -1927,7 +1939,7 @@ def target_boot_handler(
                 run_id=run_id,
                 data=_redacted_boot_data(terminal.details),
                 artifacts=execution.artifacts,
-                suggested_next_actions=["artifacts.get_manifest"],
+                suggested_next_actions=_boot_success_next_actions(terminal.details),
             )
         return ToolResponse.failure(
             category=execution.error_category or ErrorCategory.INFRASTRUCTURE_FAILURE,

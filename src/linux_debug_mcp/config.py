@@ -5,7 +5,7 @@ import unicodedata
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from linux_debug_mcp.safety.secrets import SecretReference
 
@@ -409,6 +409,7 @@ class TargetProfile(ConfigModel):
     cleanup_policy: Literal["preserve_on_failure", "stop_on_failure"] = "preserve_on_failure"
     debug_gdbstub: bool = False
     gdbstub_endpoint: str = "127.0.0.1:1234"
+    wait_for_debugger: bool = False
     libvirt_uri: str | None = None
     managed_domain: bool = False
     managed_domain_prefix: str | None = None
@@ -417,6 +418,12 @@ class TargetProfile(ConfigModel):
     @classmethod
     def validate_kernel_args(cls, value: list[str]) -> list[str]:
         return validate_kernel_arg_tokens(value)
+
+    @model_validator(mode="after")
+    def validate_wait_for_debugger(self) -> TargetProfile:
+        if self.wait_for_debugger and not self.debug_gdbstub:
+            raise ValueError("wait_for_debugger requires debug_gdbstub")
+        return self
 
 
 class BuildOverrides(ConfigModel):
@@ -482,6 +489,7 @@ class BootOverrides(ConfigModel):
     kernel_args: list[str] = Field(default_factory=list)
     rootfs_source: str | None = None
     rootfs: RootfsOverrides | None = None
+    wait_for_debugger: bool | None = None
 
     @field_validator("kernel_args")
     @classmethod
