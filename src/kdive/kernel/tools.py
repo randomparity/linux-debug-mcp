@@ -33,6 +33,17 @@ class CreateRunHandler(Protocol):
     ) -> ToolResponse: ...
 
 
+class KernelBuildHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        run_id: str,
+        build_profile: str | None,
+        force_rebuild: bool,
+    ) -> ToolResponse: ...
+
+
 class CreateRunProfiles(Model):
     source_path: str
     build_profile: str | None = None
@@ -51,6 +62,16 @@ class CreateRunOptions(Model):
     build_overrides: dict[str, Any] | None = None
     boot_overrides: dict[str, Any] | None = None
     profile_specs: dict[str, dict[str, Any]] | None = None
+
+
+class KernelBuildContext(Model):
+    run_id: str
+    artifact_root: str | None = None
+
+
+class KernelBuildOptions(Model):
+    build_profile: str | None = None
+    force_rebuild: bool = False
 
 
 CreateRunToolShapes = tuple[
@@ -87,6 +108,7 @@ def register_kernel_tools(
     default_artifact_root: Path,
     sensitive_paths: list[Path],
     create_run_handler: CreateRunHandler,
+    kernel_build_handler: KernelBuildHandler,
 ) -> None:
     default_artifact_root_text = str(default_artifact_root)
 
@@ -124,4 +146,21 @@ def register_kernel_tools(
             build_profile_spec=build_spec,
             target_profile_spec=target_spec,
             rootfs_profile_spec=rootfs_spec,
+        ).model_dump(mode="json")
+
+    @app.tool(name="kernel.build")
+    def kernel_build(
+        context: KernelBuildContext | dict[str, Any],
+        options: KernelBuildOptions | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            context_model = model_arg(context, KernelBuildContext)
+            options_model = optional_model_arg(options, KernelBuildOptions)
+        except (TypeError, ValueError, ValidationError) as exc:
+            return adapter_validation_failure(exc)
+        return kernel_build_handler(
+            artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
+            run_id=context_model.run_id,
+            build_profile=options_model.build_profile,
+            force_rebuild=options_model.force_rebuild,
         ).model_dump(mode="json")

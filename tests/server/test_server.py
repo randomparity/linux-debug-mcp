@@ -497,6 +497,16 @@ def test_root_kernel_and_host_tools_use_grouped_inputs() -> None:
         assert flat_properties.isdisjoint(properties), tool_name
 
 
+def test_kernel_build_tool_and_handler_are_kernel_owned() -> None:
+    from kdive.kernel import handlers as kernel_handlers
+
+    tool = create_app()._tool_manager._tools["kernel.build"]
+
+    assert tool.fn.__module__ == "kdive.kernel.tools"
+    assert kernel_handlers.kernel_build_handler.__module__ == "kdive.kernel.handlers"
+    assert server.kernel_build_handler is kernel_handlers.kernel_build_handler
+
+
 def test_create_run_freezes_merged_profiles(tmp_path):
     source = make_source_tree(tmp_path)
     response = server.create_run_handler(
