@@ -32,11 +32,7 @@ from kdive.config import (
     DEFAULT_FETCH_MAX_BYTES,
     FETCH_DISK_HEADROOM_BYTES,
     FETCH_TIMEOUT_BAND,
-    MAX_INTROSPECT_CALLS_PER_RUN,
     TARGET_DESTRUCTIVE_PERMISSIONS,
-    TRIAGE_CRASH_COMMANDS,
-    TRIAGE_DMESG_HELPER,
-    TRIAGE_MODULES_HELPER,
     BootOverrides,
     BuildOverrides,
     BuildProfile,
@@ -113,8 +109,6 @@ from kdive.default_profiles import DEFAULT_DEBUG_PROFILES as _DEFAULT_DEBUG_PROF
 from kdive.domain import (
     ArtifactRef,
     DebugIntrospectCheckPrerequisitesRequest,
-    DebugIntrospectFromVmcoreHelperRequest,
-    DebugIntrospectFromVmcoreRequest,
     ErrorCategory,
     PrerequisiteCheck,
     PrerequisiteStatus,
@@ -123,20 +117,15 @@ from kdive.domain import (
     StepStatus,
     ToolResponse,
 )
-from kdive.introspect.execution import (
-    HELPER_CAP_PROFILE,
-    IntrospectPostValidator,
-    _finalize_introspect_call,
-    _make_helper_post_validator,
+from kdive.introspect.handlers import (
+    debug_introspect_from_vmcore_handler,
+    debug_introspect_from_vmcore_helper_handler,
+    debug_introspect_helper_handler,
+    debug_introspect_run_handler,
 )
-from kdive.introspect.handlers import debug_introspect_helper_handler, debug_introspect_run_handler
 from kdive.introspect.tools import register_introspect_tools
-from kdive.introspect_helpers import get_helper_registry
 from kdive.logging import SECRET_REGISTRY, configure_logging
-from kdive.postmortem.crash_commands import validate_modules_path
 from kdive.postmortem.crash_handler import (
-    _crash_build_id_fail_loud,
-    _crash_config_failure,
     debug_postmortem_crash_handler,
 )
 from kdive.postmortem.dumps import (
@@ -148,22 +137,15 @@ from kdive.postmortem.dumps import (
     plan_fetch,
     render_dump_list_script,
 )
+from kdive.postmortem.handlers import debug_postmortem_triage_handler
 from kdive.postmortem.models import (
     DebugPostmortemCheckPrereqsRequest,
-    DebugPostmortemCrashRequest,
     DebugPostmortemFetchRequest,
     DebugPostmortemListDumpsRequest,
-    DebugPostmortemTriageRequest,
     DumpEntry,
     FetchedFile,
 )
 from kdive.postmortem.tools import register_postmortem_tools
-from kdive.postmortem.triage import (
-    CrashOutcome,
-    DrgnOutcome,
-    any_section_ok,
-    assemble_report,
-)
 from kdive.prereqs.drgn_probe import (
     PROBE_SCRIPT,
     UNKNOWN,
@@ -181,12 +163,7 @@ from kdive.providers.local.gdb_mi import (
 )
 from kdive.providers.local.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from kdive.providers.local.local_drgn_introspect import (
-    SCRIPT_BYTE_CAP,
     TARGET_PYTHON_ARGV,
-    WrapperRenderError,
-    render_vmcore_wrapper,
-    render_vmcore_wrapper_skeleton,
-    user_script_sha256,
 )
 from kdive.providers.local.local_kernel_build import (
     BuildIdMissing,
@@ -209,7 +186,6 @@ from kdive.providers.local.qemu_gdbstub import (
 from kdive.rootfs.sources import RootfsSourceError, resolve_rootfs_source
 from kdive.safety.paths import (
     PathSafetyError,
-    confine_run_relative,
     validate_rootfs_source,
     validate_source_path,
 )
@@ -246,14 +222,10 @@ from kdive.seams.target import (
     TargetKey,
 )
 from kdive.symbols.build_id import BuildIdReadError, read_elf_build_id
-from kdive.symbols.resolve import SymbolResolutionError, resolve_symbols
 from kdive.symbols.verify import (
     BUILD_ID_RE,
     ProvenanceMismatch,
     verify_vmlinux_provenance,
-)
-from kdive.symbols.vmcore_build_id import (
-    read_vmcore_build_id,
 )
 from kdive.tools.artifacts import register_artifact_tools
 from kdive.tools.providers import register_provider_tools
@@ -3312,571 +3284,10 @@ def debug_postmortem_fetch_handler(
     return _fetch_under_lock(ctx, runner=runner, request=request, dump_dir=dump_dir, dump_id=dump_id, dest_dir=dest_dir)
 
 
-# Live introspection execution policy lives in kdive.introspect.execution.
+# Live and vmcore introspection handlers live in kdive.introspect.handlers/execution.
 
 
-def _execute_vmcore_introspect_call(
-    request: DebugIntrospectFromVmcoreRequest,
-    *,
-    artifact_root: Path,
-    runner: SshRunner | None = None,
-    build_id_reader: Callable[[Path], str] = read_elf_build_id,
-    clock: Callable[[], datetime] | None = None,
-    operation_name: str = "debug.introspect.from_vmcore",
-    caps: dict[str, int] | None = None,
-    post_validator: IntrospectPostValidator | None = None,
-) -> ToolResponse:
-    """Offline vmcore drgn introspection (spec §6 / ADR 0010).
-
-    Runs the user/helper drgn script against a captured vmcore on the agent
-    host via a local ``python3`` subprocess. No admission gate, no SSH, no sudo
-    — vmcore analysis is always concurrent-safe (interface-contracts §5.6 rule
-    3). The build_id fail-loud compares the vmcore's embedded id against the
-    host-parsed id of the supplied vmlinux.
-    """
-    run_id = request.run_id
-    now = clock or _utcnow
-
-    try:
-        store = ArtifactStore(artifact_root, create_root=False)
-        if not (store.run_dir(run_id) / "manifest.json").is_file():
-            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
-        manifest = store.load_manifest(run_id)
-    except ManifestStateError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-
-    # Spec §6 step 2 / ADR 0011: a vmcore is an immutable core-dump file and the
-    # offline path carries no DebugProfile to gate against, so write mode does not
-    # apply here (it would be a phantom feature) — reject it with an accurate reason.
-    if request.allow_write:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message="write mode is not applicable to offline vmcore analysis; the core file is immutable",
-            details={"code": "write_mode_not_applicable"},
-        )
-    if not (5 <= request.timeout_seconds <= 300):
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=f"timeout_seconds must be in [5, 300]; got {request.timeout_seconds}",
-            details={"code": "invalid_timeout"},
-        )
-    script_bytes = request.script.encode("utf-8")
-    if not script_bytes or len(script_bytes) > SCRIPT_BYTE_CAP:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message="script must be non-empty and <= the script byte cap",
-            details={"code": "invalid_script"},
-        )
-
-    # Spec §6 step 3: shared introspect call budget.
-    if _count_introspect_calls(manifest) >= MAX_INTROSPECT_CALLS_PER_RUN:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=(
-                f"introspect call budget exhausted (>= {MAX_INTROSPECT_CALLS_PER_RUN}); "
-                "start a new run via kernel.create_run"
-            ),
-            details={"code": "manifest_call_budget_exhausted"},
-        )
-
-    # Spec §6 step 4: sensitive/ parent-mode preflight.
-    run_dir = store.run_dir(run_id)
-    sensitive_dir = run_dir / "sensitive"
-    try:
-        mode = sensitive_dir.stat().st_mode & 0o777
-    except FileNotFoundError:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=f"{sensitive_dir} is missing; re-run kernel.create_run to recreate the run layout.",
-            details={"code": "sensitive_dir_missing"},
-        )
-    if mode & 0o077:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=(f"{sensitive_dir} mode is {oct(mode)}; expected 0o700. Re-run kernel.create_run."),
-            details={"code": "sensitive_dir_too_permissive", "actual_mode": oct(mode)},
-        )
-
-    # Spec §6 step 5: resolve symbols (confine vmlinux/modules to run_dir) and
-    # confine the vmcore ref. Build a KernelProvenance shell purely to reuse the
-    # #53 resolver; build_id="" is unused by resolve_symbols.
-    redactor = Redactor(secret_values=[])
-    provenance_shell = KernelProvenance(
-        build_id="",
-        release="",
-        vmlinux_ref=request.vmlinux_ref,
-        modules_ref=request.modules_ref,
-        cmdline="",
-        config_ref=None,
-    )
-    try:
-        resolved = resolve_symbols(provenance_shell, run_dir=run_dir)
-    except SymbolResolutionError as exc:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=str(exc),
-            details={"code": "symbol_resolution_failed", "resolver_code": exc.code},
-        )
-    try:
-        vmcore_path = confine_run_relative(request.vmcore_ref, run_dir=run_dir)
-    except PathSafetyError as exc:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=str(exc),
-            details={"code": "vmcore_not_found"},
-        )
-    if not vmcore_path.is_file():
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=f"vmcore not found at {request.vmcore_ref!r}",
-            details={"code": "vmcore_not_found"},
-        )
-
-    # Spec §6 step 6: host-authoritative expected build_id from the vmlinux ELF.
-    try:
-        expected_build_id = build_id_reader(resolved.vmlinux_path)
-    except BuildIdReadError as exc:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=f"could not read a GNU build-id from the supplied vmlinux: {exc}",
-            details={"code": "vmlinux_build_id_unreadable"},
-        )
-    if not BUILD_ID_RE.match(expected_build_id):
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message="vmlinux build_id is malformed",
-            details={"code": "vmlinux_build_id_unreadable", "recorded": expected_build_id},
-        )
-
-    # Spec §6 step 7: mint call_id, lay out dirs, render + persist the wrapper.
-    call_id = uuid.uuid4().hex
-    agent_dir = run_dir / "debug" / "introspect" / call_id
-    sensitive_call_dir = run_dir / "sensitive" / "debug" / "introspect" / call_id
-    agent_dir.mkdir(parents=True, mode=0o700)
-    sensitive_call_dir.mkdir(parents=True, mode=0o700)
-    sensitive_call_dir.chmod(0o700)
-    sensitive_call_dir.parent.chmod(0o700)
-    sensitive_call_dir.parent.parent.chmod(0o700)
-
-    args_json = json.dumps(request.args or {})
-    modules_arg = str(resolved.modules_path) if resolved.modules_path is not None else None
-    try:
-        wrapper = render_vmcore_wrapper(
-            user_script=request.script,
-            expected_build_id=expected_build_id,
-            call_id=call_id,
-            vmcore_path=str(vmcore_path),
-            vmlinux_path=str(resolved.vmlinux_path),
-            modules_path=modules_arg,
-            args_json=args_json,
-            caps=caps,
-        )
-        skeleton = render_vmcore_wrapper_skeleton(
-            expected_build_id=expected_build_id,
-            call_id=call_id,
-            user_script_sha256_hex=user_script_sha256(request.script),
-            vmcore_path=str(vmcore_path),
-            vmlinux_path=str(resolved.vmlinux_path),
-            modules_path=modules_arg,
-            args_json=args_json,
-            caps=caps,
-        )
-    except WrapperRenderError as exc:
-        shutil.rmtree(agent_dir, ignore_errors=True)
-        shutil.rmtree(sensitive_call_dir, ignore_errors=True)
-        failed = StepResult(
-            step_name=f"introspect:{call_id}",
-            status=StepStatus.FAILED,
-            summary=f"wrapper render error: {exc}",
-            artifacts=[],
-            details={
-                "call_id": call_id,
-                "code": "wrapper_render_error",
-                "outcome_status": None,
-                "timeout_seconds": request.timeout_seconds,
-                "duration_ms": 0,
-                "wrapper_exit_code": None,
-            },
-        )
-        _record_terminal_introspect_result(store, run_id, failed)
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"wrapper render error: {exc}",
-            details={"code": "wrapper_render_error", "call_id": call_id},
-            suggested_next_actions=["artifacts.get_manifest"],
-        )
-
-    wrapper_path = sensitive_call_dir / "wrapper.py"
-    wrapper_fd = os.open(wrapper_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(wrapper_fd, "w", encoding="utf-8") as wrapper_handle:
-            wrapper_handle.write(wrapper)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            wrapper_path.unlink()
-        raise
-    (agent_dir / "wrapper.skeleton.py").write_text(skeleton, encoding="utf-8")
-
-    request_dump = request.model_dump(mode="json")
-    request_dump["script"] = f"sha256:{user_script_sha256(request.script)}"
-    (agent_dir / "request.json").write_text(json.dumps(redactor.redact_value(request_dump)), encoding="utf-8")
-
-    # Spec §6 step 8: local drgn subprocess (no SSH, no sudo, no admission).
-    stdout_path = sensitive_call_dir / "stdout.raw"
-    stderr_path = sensitive_call_dir / "stderr.raw"
-    active_runner: SshRunner = runner or SubprocessSshRunner()
-    argv = ["timeout", "--kill-after=2s", f"{request.timeout_seconds}s", "python3", "-"]
-    started_at = now()
-    started_monotonic = time.monotonic()
-    ssh_result = active_runner.run(
-        argv,
-        timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
-        stdout_path=stdout_path,
-        stderr_path=stderr_path,
-        cancel=threading.Event(),
-        stdin=wrapper,
-        max_stdout_bytes=RUN_STDOUT_CAP,
-    )
-    for raw_path in (stdout_path, stderr_path):
-        _chmod_best_effort(raw_path, 0o600)
-
-    finished_at = now()
-    duration_ms = int((time.monotonic() - started_monotonic) * 1000)
-    return _finalize_introspect_call(
-        store=store,
-        run_id=run_id,
-        call_id=call_id,
-        ssh_result=ssh_result,
-        stdout_path=stdout_path,
-        stderr_path=stderr_path,
-        agent_dir=agent_dir,
-        sensitive_call_dir=sensitive_call_dir,
-        redactor=redactor,
-        expected_build_id=expected_build_id,
-        request_timeout_seconds=request.timeout_seconds,
-        started_at=started_at,
-        finished_at=finished_at,
-        duration_ms=duration_ms,
-        operation_name=operation_name,
-        drgn_open_message="drgn could not open the vmcore",
-        exec_principal=None,
-        post_validator=post_validator,
-    )
-
-
-def debug_introspect_from_vmcore_handler(
-    request: DebugIntrospectFromVmcoreRequest,
-    *,
-    artifact_root: Path,
-    runner: SshRunner | None = None,
-    build_id_reader: Callable[[Path], str] = read_elf_build_id,
-    clock: Callable[[], datetime] | None = None,
-) -> ToolResponse:
-    """Spec §6 / ADR 0010. Offline vmcore drgn introspection; no admission gate."""
-    return _execute_vmcore_introspect_call(
-        request,
-        artifact_root=artifact_root,
-        runner=runner,
-        build_id_reader=build_id_reader,
-        clock=clock,
-        operation_name="debug.introspect.from_vmcore",
-        caps=None,
-        post_validator=None,
-    )
-
-
-def debug_introspect_from_vmcore_helper_handler(
-    request: DebugIntrospectFromVmcoreHelperRequest,
-    *,
-    artifact_root: Path,
-    runner: SshRunner | None = None,
-    build_id_reader: Callable[[Path], str] = read_elf_build_id,
-    clock: Callable[[], datetime] | None = None,
-) -> ToolResponse:
-    """Spec §3.1. Run a curated helper against a vmcore, reusing
-    the live helper's post-validator and cap profile unchanged.
-    """
-    helper_registry = get_helper_registry()
-    spec = helper_registry.get(request.name)
-    if spec is None:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=request.run_id,
-            message=f"unknown helper {request.name!r}; valid: {sorted(helper_registry)}",
-            details={"code": "unknown_helper", "valid": sorted(helper_registry)},
-            suggested_next_actions=["debug.introspect.from_vmcore_helper"],
-        )
-    try:
-        validated_args = spec.args_model.model_validate(request.args)
-    except ValidationError as exc:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=request.run_id,
-            message=_redact_and_truncate(Redactor(), str(exc), cap=512),
-            details={"code": "helper_args_invalid"},
-            suggested_next_actions=["debug.introspect.from_vmcore_helper"],
-        )
-    run_request = DebugIntrospectFromVmcoreRequest(
-        run_id=request.run_id,
-        vmcore_ref=request.vmcore_ref,
-        vmlinux_ref=request.vmlinux_ref,
-        modules_ref=request.modules_ref,
-        script=spec.script,
-        timeout_seconds=request.timeout_seconds,
-        allow_write=False,
-        args=validated_args.model_dump(mode="json"),
-    )
-    return _execute_vmcore_introspect_call(
-        run_request,
-        artifact_root=artifact_root,
-        runner=runner,
-        build_id_reader=build_id_reader,
-        clock=clock,
-        operation_name="debug.introspect.from_vmcore_helper",
-        caps=HELPER_CAP_PROFILE,
-        post_validator=_make_helper_post_validator(spec),
-    )
-
-
-def _triage_subcall_id(resp: ToolResponse) -> str | None:
-    """The sub-call's own call_id, on success (data) or failure (error.details)."""
-    cid = resp.data.get("call_id") if resp.ok else (resp.error.details if resp.error else {}).get("call_id")
-    return cid if isinstance(cid, str) else None
-
-
-def _triage_reason(resp: ToolResponse) -> str:
-    """A failed sub-call's stable error code, defensively (details may be empty)."""
-    details = resp.error.details if resp.error else {}
-    code = details.get("code")
-    return code if isinstance(code, str) and code else "sub_call_failed"
-
-
-def debug_postmortem_triage_handler(
-    request: DebugPostmortemTriageRequest,
-    *,
-    artifact_root: Path,
-    runner: SshRunner | None = None,
-    vmcore_build_id_reader: Callable[[Path], str] = read_vmcore_build_id,
-    vmlinux_build_id_reader: Callable[[Path], str] = read_elf_build_id,
-    clock: Callable[[], datetime] | None = None,
-    crash_handler: Callable[..., ToolResponse] = debug_postmortem_crash_handler,
-    drgn_helper_handler: Callable[..., ToolResponse] = debug_introspect_from_vmcore_helper_handler,
-) -> ToolResponse:
-    """Spec §4 / ADR 0027. Compose the crash + drgn offline tiers into one report; no
-    admission gate. One up-front build-id gate over the shared refs, then three sub-calls,
-    then per-section assembly with a partial-vs-hard failure contract."""
-    run_id = request.run_id
-    now = clock or _utcnow
-    try:
-        store = ArtifactStore(artifact_root, create_root=False)
-        if not (store.run_dir(run_id) / "manifest.json").is_file():
-            return _crash_config_failure(run_id, "run_not_found", f"run not found: {run_id}")
-        store.load_manifest(run_id)
-    except ManifestStateError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-
-    if not (5 <= request.timeout_seconds <= 300):
-        return _crash_config_failure(
-            run_id, "invalid_timeout", f"timeout_seconds must be in [5, 300]; got {request.timeout_seconds}"
-        )
-
-    run_dir = store.run_dir(run_id)
-    # Up-front gate over the shared refs (spec §4 step 2): resolve vmlinux + modules,
-    # confine vmcore, charset-check modules_path, then the host build-id fail-loud — all
-    # before any sub-call, so a caller-input ref error hard-fails (never a partial).
-    provenance_shell = KernelProvenance(
-        build_id="",
-        release="",
-        vmlinux_ref=request.vmlinux_ref,
-        modules_ref=request.modules_ref,
-        cmdline="",
-        config_ref=None,
-    )
-    try:
-        resolved = resolve_symbols(provenance_shell, run_dir=run_dir)
-    except SymbolResolutionError as exc:
-        return _crash_config_failure(run_id, "symbol_resolution_failed", str(exc))
-    try:
-        vmcore_path = confine_run_relative(request.vmcore_ref, run_dir=run_dir)
-    except PathSafetyError as exc:
-        return _crash_config_failure(run_id, "vmcore_not_found", str(exc))
-    if not vmcore_path.is_file():
-        return _crash_config_failure(run_id, "vmcore_not_found", f"vmcore not found at {request.vmcore_ref!r}")
-    if resolved.modules_path is not None and not validate_modules_path(str(resolved.modules_path)):
-        return _crash_config_failure(run_id, "modules_path_unsafe", "resolved modules path has unsafe characters")
-
-    vmcore_build_id, failure = _crash_build_id_fail_loud(
-        run_id, vmcore_path, resolved.vmlinux_path, vmcore_build_id_reader, vmlinux_build_id_reader
-    )
-    if failure is not None:
-        return failure
-
-    started_at = now()
-    started_monotonic = time.monotonic()
-
-    # Sub-calls (sequential): crash once (log+bt), then dmesg + modules. modules_ref rides
-    # on the crash sub-call only; the drgn helpers get modules_ref=None (spec §3.1).
-    crash_resp = crash_handler(
-        DebugPostmortemCrashRequest(
-            run_id=run_id,
-            vmcore_ref=request.vmcore_ref,
-            vmlinux_ref=request.vmlinux_ref,
-            modules_ref=request.modules_ref,
-            commands=list(TRIAGE_CRASH_COMMANDS),
-            timeout_seconds=request.timeout_seconds,
-        ),
-        artifact_root=artifact_root,
-        runner=runner,
-        vmcore_build_id_reader=vmcore_build_id_reader,
-        vmlinux_build_id_reader=vmlinux_build_id_reader,
-        clock=clock,
-    )
-
-    def _drgn(name: str) -> ToolResponse:
-        return drgn_helper_handler(
-            DebugIntrospectFromVmcoreHelperRequest(
-                run_id=run_id,
-                vmcore_ref=request.vmcore_ref,
-                vmlinux_ref=request.vmlinux_ref,
-                modules_ref=None,
-                name=name,
-                timeout_seconds=request.timeout_seconds,
-            ),
-            artifact_root=artifact_root,
-            runner=runner,
-            build_id_reader=vmlinux_build_id_reader,
-            clock=clock,
-        )
-
-    dmesg_resp = _drgn(TRIAGE_DMESG_HELPER)
-    modules_resp = _drgn(TRIAGE_MODULES_HELPER)
-
-    crash_outcome = CrashOutcome(
-        ok=crash_resp.ok,
-        reason=None if crash_resp.ok else _triage_reason(crash_resp),
-        results=crash_resp.data.get("results", {}) if crash_resp.ok else {},
-    )
-    dmesg_outcome = DrgnOutcome(
-        ok=dmesg_resp.ok,
-        reason=None if dmesg_resp.ok else _triage_reason(dmesg_resp),
-        result=dmesg_resp.data.get("result", {}) if dmesg_resp.ok else {},
-    )
-    modules_outcome = DrgnOutcome(
-        ok=modules_resp.ok,
-        reason=None if modules_resp.ok else _triage_reason(modules_resp),
-        result=modules_resp.data.get("result", {}) if modules_resp.ok else {},
-    )
-
-    report = assemble_report(
-        vmcore_build_id=vmcore_build_id,
-        crash=crash_outcome,
-        dmesg=dmesg_outcome,
-        modules=modules_outcome,
-    )
-    sub_call_ids = {
-        "crash": _triage_subcall_id(crash_resp),
-        "dmesg": _triage_subcall_id(dmesg_resp),
-        "modules": _triage_subcall_id(modules_resp),
-    }
-    redactor = Redactor(secret_values=[])
-    duration_ms = int((time.monotonic() - started_monotonic) * 1000)
-    finished_at = now()
-
-    if not any_section_ok(report):
-        section_reasons = {
-            "panic_reason": report.panic_reason.reason,
-            "faulting_task": report.faulting_task.reason,
-            "backtrace": report.backtrace.reason,
-            "recent_dmesg": report.recent_dmesg.reason,
-            "modules": report.modules.reason,
-        }
-        details = redactor.redact_value(
-            {"code": "triage_all_sources_failed", "sub_call_ids": sub_call_ids, "section_reasons": section_reasons}
-        )
-        _record_terminal_introspect_result(
-            store,
-            run_id,
-            StepResult(
-                step_name=f"postmortem.triage:{uuid.uuid4().hex}",
-                status=StepStatus.FAILED,
-                summary="triage: all sources failed",
-                artifacts=[],
-                details={"code": "triage_all_sources_failed", "duration_ms": duration_ms},
-            ),
-        )
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="triage produced no usable section; both crash and drgn sources failed",
-            details=details,
-            suggested_next_actions=["artifacts.get_manifest"],
-        )
-
-    call_id = uuid.uuid4().hex
-    redacted_report = redactor.redact_value(report.model_dump(mode="json"))
-    agent_dir = run_dir / "debug" / "postmortem" / "triage" / call_id
-    agent_dir.mkdir(parents=True, mode=0o700)
-    report_path = agent_dir / "report.json"
-    report_path.write_text(json.dumps(redacted_report), encoding="utf-8")
-    artifact = ArtifactRef(path=str(report_path.relative_to(run_dir)), kind="triage_report_json")
-    partial = not all(
-        section["status"] == "ok"
-        for section in (
-            redacted_report["panic_reason"],
-            redacted_report["faulting_task"],
-            redacted_report["backtrace"],
-            redacted_report["recent_dmesg"],
-            redacted_report["modules"],
-        )
-    )
-    _record_terminal_introspect_result(
-        store,
-        run_id,
-        StepResult(
-            step_name=f"postmortem.triage:{call_id}",
-            status=StepStatus.SUCCEEDED,
-            summary=f"triage report (partial={partial})",
-            artifacts=[artifact],
-            details={
-                "call_id": call_id,
-                "vmcore_build_id": vmcore_build_id,
-                "partial": partial,
-                "duration_ms": duration_ms,
-            },
-        ),
-    )
-    return ToolResponse.success(
-        summary=f"triage report (partial={partial})",
-        run_id=run_id,
-        data={
-            "call_id": call_id,
-            "report": redacted_report,
-            "partial": partial,
-            "vmcore_build_id": vmcore_build_id,
-            "sub_call_ids": sub_call_ids,
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
-            "duration_ms": duration_ms,
-        },
-        artifacts=[artifact],
-        suggested_next_actions=[
-            "debug.postmortem.crash",
-            "debug.introspect.from_vmcore_helper",
-            "artifacts.get_manifest",
-        ],
-    )
+# Postmortem triage composition lives in kdive.postmortem.handlers.
 
 
 def _debug_open_request(*, run_id: str, gdbstub_endpoint: dict[str, Any], admission: AdmissionService) -> OpenRequest:

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import kdive.server as server_module
 from kdive.artifacts.store import ArtifactStore
 from kdive.domain import (
     DebugIntrospectFromVmcoreHelperRequest,
@@ -14,6 +15,7 @@ from kdive.domain import (
     RunRequest,
     StepStatus,
 )
+from kdive.introspect import handlers as introspect_handlers
 from kdive.providers.local.local_ssh_tests import SshCommandResult
 from kdive.server import (
     debug_introspect_from_vmcore_handler,
@@ -48,6 +50,17 @@ def test_helper_request_shape() -> None:
     r = DebugIntrospectFromVmcoreHelperRequest(run_id="r1", vmcore_ref="c", vmlinux_ref="v", name="sysinfo")
     assert r.args == {}
     assert r.timeout_seconds == 30
+
+
+def test_vmcore_handlers_live_in_introspect_package() -> None:
+    assert introspect_handlers.debug_introspect_from_vmcore_handler.__module__ == "kdive.introspect.handlers"
+    assert (
+        server_module.debug_introspect_from_vmcore_handler is introspect_handlers.debug_introspect_from_vmcore_handler
+    )
+    assert (
+        server_module.debug_introspect_from_vmcore_helper_handler
+        is introspect_handlers.debug_introspect_from_vmcore_helper_handler
+    )
 
 
 # ---------------------------------------------------------------------------

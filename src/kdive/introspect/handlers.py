@@ -1,25 +1,62 @@
 from __future__ import annotations
 
+import contextlib
+import json
+import os
+import shutil
+import threading
+import time
+import uuid
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from kdive.config import DebugProfile, RootfsProfile, TargetProfile
+from kdive.artifacts.store import ArtifactStore, ManifestStateError
+from kdive.config import MAX_INTROSPECT_CALLS_PER_RUN, DebugProfile, RootfsProfile, TargetProfile
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
-from kdive.domain import DebugIntrospectHelperRequest, DebugIntrospectRunRequest, ErrorCategory, ToolResponse
+from kdive.domain import (
+    DebugIntrospectFromVmcoreHelperRequest,
+    DebugIntrospectFromVmcoreRequest,
+    DebugIntrospectHelperRequest,
+    DebugIntrospectRunRequest,
+    ErrorCategory,
+    StepResult,
+    StepStatus,
+    ToolResponse,
+)
 from kdive.introspect.execution import (
     HELPER_CAP_PROFILE,
+    RUN_STDOUT_CAP,
+    SSH_TIMEOUT_GRACE_SECONDS,
     IntrospectPostValidator,
+    _chmod_best_effort,
+    _configuration_failure,
+    _count_introspect_calls,
     _execute_introspect_call,
+    _finalize_introspect_call,
     _make_helper_post_validator,
+    _record_terminal_introspect_result,
     _redact_and_truncate,
+    _utcnow,
 )
 from kdive.introspect_helpers import get_helper_registry
-from kdive.providers.local.local_ssh_tests import SshRunner
+from kdive.providers.local.local_drgn_introspect import (
+    SCRIPT_BYTE_CAP,
+    WrapperRenderError,
+    render_vmcore_wrapper,
+    render_vmcore_wrapper_skeleton,
+    user_script_sha256,
+)
+from kdive.providers.local.local_ssh_tests import SshRunner, SubprocessSshRunner
+from kdive.safety.paths import PathSafetyError, confine_run_relative
 from kdive.safety.redaction import Redactor
+from kdive.seams.target import KernelProvenance
+from kdive.symbols.build_id import BuildIdReadError, read_elf_build_id
+from kdive.symbols.resolve import SymbolResolutionError, resolve_symbols
+from kdive.symbols.verify import BUILD_ID_RE
 
 
 def _execute_live_introspect_call(
@@ -135,6 +172,327 @@ def debug_introspect_helper_handler(
         session_registry=session_registry,
         clock=clock,
         operation_name="debug.introspect.helper",
+        caps=HELPER_CAP_PROFILE,
+        post_validator=_make_helper_post_validator(spec),
+    )
+
+
+def _execute_vmcore_introspect_call(
+    request: DebugIntrospectFromVmcoreRequest,
+    *,
+    artifact_root: Path,
+    runner: SshRunner | None = None,
+    build_id_reader: Callable[[Path], str] = read_elf_build_id,
+    clock: Callable[[], datetime] | None = None,
+    operation_name: str = "debug.introspect.from_vmcore",
+    caps: dict[str, int] | None = None,
+    post_validator: IntrospectPostValidator | None = None,
+) -> ToolResponse:
+    """Offline vmcore drgn introspection (spec §6 / ADR 0010).
+
+    Runs the user/helper drgn script against a captured vmcore on the agent host via a local
+    ``python3`` subprocess. No admission gate, no SSH, no sudo; vmcore analysis is always
+    concurrent-safe (interface-contracts §5.6 rule 3).
+    """
+    run_id = request.run_id
+    now = clock or _utcnow
+
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        if not (store.run_dir(run_id) / "manifest.json").is_file():
+            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    if request.allow_write:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message="write mode is not applicable to offline vmcore analysis; the core file is immutable",
+            details={"code": "write_mode_not_applicable"},
+        )
+    if not (5 <= request.timeout_seconds <= 300):
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=f"timeout_seconds must be in [5, 300]; got {request.timeout_seconds}",
+            details={"code": "invalid_timeout"},
+        )
+    script_bytes = request.script.encode("utf-8")
+    if not script_bytes or len(script_bytes) > SCRIPT_BYTE_CAP:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message="script must be non-empty and <= the script byte cap",
+            details={"code": "invalid_script"},
+        )
+
+    if _count_introspect_calls(manifest) >= MAX_INTROSPECT_CALLS_PER_RUN:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=(
+                f"introspect call budget exhausted (>= {MAX_INTROSPECT_CALLS_PER_RUN}); "
+                "start a new run via kernel.create_run"
+            ),
+            details={"code": "manifest_call_budget_exhausted"},
+        )
+
+    run_dir = store.run_dir(run_id)
+    sensitive_dir = run_dir / "sensitive"
+    try:
+        mode = sensitive_dir.stat().st_mode & 0o777
+    except FileNotFoundError:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=f"{sensitive_dir} is missing; re-run kernel.create_run to recreate the run layout.",
+            details={"code": "sensitive_dir_missing"},
+        )
+    if mode & 0o077:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=(f"{sensitive_dir} mode is {oct(mode)}; expected 0o700. Re-run kernel.create_run."),
+            details={"code": "sensitive_dir_too_permissive", "actual_mode": oct(mode)},
+        )
+
+    redactor = Redactor(secret_values=[])
+    provenance_shell = KernelProvenance(
+        build_id="",
+        release="",
+        vmlinux_ref=request.vmlinux_ref,
+        modules_ref=request.modules_ref,
+        cmdline="",
+        config_ref=None,
+    )
+    try:
+        resolved = resolve_symbols(provenance_shell, run_dir=run_dir)
+    except SymbolResolutionError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=str(exc),
+            details={"code": "symbol_resolution_failed", "resolver_code": exc.code},
+        )
+    try:
+        vmcore_path = confine_run_relative(request.vmcore_ref, run_dir=run_dir)
+    except PathSafetyError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=str(exc),
+            details={"code": "vmcore_not_found"},
+        )
+    if not vmcore_path.is_file():
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=f"vmcore not found at {request.vmcore_ref!r}",
+            details={"code": "vmcore_not_found"},
+        )
+
+    try:
+        expected_build_id = build_id_reader(resolved.vmlinux_path)
+    except BuildIdReadError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=f"could not read a GNU build-id from the supplied vmlinux: {exc}",
+            details={"code": "vmlinux_build_id_unreadable"},
+        )
+    if not BUILD_ID_RE.match(expected_build_id):
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message="vmlinux build_id is malformed",
+            details={"code": "vmlinux_build_id_unreadable", "recorded": expected_build_id},
+        )
+
+    call_id = uuid.uuid4().hex
+    agent_dir = run_dir / "debug" / "introspect" / call_id
+    sensitive_call_dir = run_dir / "sensitive" / "debug" / "introspect" / call_id
+    agent_dir.mkdir(parents=True, mode=0o700)
+    sensitive_call_dir.mkdir(parents=True, mode=0o700)
+    sensitive_call_dir.chmod(0o700)
+    sensitive_call_dir.parent.chmod(0o700)
+    sensitive_call_dir.parent.parent.chmod(0o700)
+
+    args_json = json.dumps(request.args or {})
+    modules_arg = str(resolved.modules_path) if resolved.modules_path is not None else None
+    try:
+        wrapper = render_vmcore_wrapper(
+            user_script=request.script,
+            expected_build_id=expected_build_id,
+            call_id=call_id,
+            vmcore_path=str(vmcore_path),
+            vmlinux_path=str(resolved.vmlinux_path),
+            modules_path=modules_arg,
+            args_json=args_json,
+            caps=caps,
+        )
+        skeleton = render_vmcore_wrapper_skeleton(
+            expected_build_id=expected_build_id,
+            call_id=call_id,
+            user_script_sha256_hex=user_script_sha256(request.script),
+            vmcore_path=str(vmcore_path),
+            vmlinux_path=str(resolved.vmlinux_path),
+            modules_path=modules_arg,
+            args_json=args_json,
+            caps=caps,
+        )
+    except WrapperRenderError as exc:
+        shutil.rmtree(agent_dir, ignore_errors=True)
+        shutil.rmtree(sensitive_call_dir, ignore_errors=True)
+        failed = StepResult(
+            step_name=f"introspect:{call_id}",
+            status=StepStatus.FAILED,
+            summary=f"wrapper render error: {exc}",
+            artifacts=[],
+            details={
+                "call_id": call_id,
+                "code": "wrapper_render_error",
+                "outcome_status": None,
+                "timeout_seconds": request.timeout_seconds,
+                "duration_ms": 0,
+                "wrapper_exit_code": None,
+            },
+        )
+        _record_terminal_introspect_result(store, run_id, failed)
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"wrapper render error: {exc}",
+            details={"code": "wrapper_render_error", "call_id": call_id},
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+
+    wrapper_path = sensitive_call_dir / "wrapper.py"
+    wrapper_fd = os.open(wrapper_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(wrapper_fd, "w", encoding="utf-8") as wrapper_handle:
+            wrapper_handle.write(wrapper)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            wrapper_path.unlink()
+        raise
+    (agent_dir / "wrapper.skeleton.py").write_text(skeleton, encoding="utf-8")
+
+    request_dump = request.model_dump(mode="json")
+    request_dump["script"] = f"sha256:{user_script_sha256(request.script)}"
+    (agent_dir / "request.json").write_text(json.dumps(redactor.redact_value(request_dump)), encoding="utf-8")
+
+    stdout_path = sensitive_call_dir / "stdout.raw"
+    stderr_path = sensitive_call_dir / "stderr.raw"
+    active_runner: SshRunner = runner or SubprocessSshRunner()
+    argv = ["timeout", "--kill-after=2s", f"{request.timeout_seconds}s", "python3", "-"]
+    started_at = now()
+    started_monotonic = time.monotonic()
+    ssh_result = active_runner.run(
+        argv,
+        timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        cancel=threading.Event(),
+        stdin=wrapper,
+        max_stdout_bytes=RUN_STDOUT_CAP,
+    )
+    for raw_path in (stdout_path, stderr_path):
+        _chmod_best_effort(raw_path, 0o600)
+
+    finished_at = now()
+    duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+    return _finalize_introspect_call(
+        store=store,
+        run_id=run_id,
+        call_id=call_id,
+        ssh_result=ssh_result,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        agent_dir=agent_dir,
+        sensitive_call_dir=sensitive_call_dir,
+        redactor=redactor,
+        expected_build_id=expected_build_id,
+        request_timeout_seconds=request.timeout_seconds,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_ms=duration_ms,
+        operation_name=operation_name,
+        drgn_open_message="drgn could not open the vmcore",
+        exec_principal=None,
+        post_validator=post_validator,
+    )
+
+
+def debug_introspect_from_vmcore_handler(
+    request: DebugIntrospectFromVmcoreRequest,
+    *,
+    artifact_root: Path,
+    runner: SshRunner | None = None,
+    build_id_reader: Callable[[Path], str] = read_elf_build_id,
+    clock: Callable[[], datetime] | None = None,
+) -> ToolResponse:
+    """Spec §6 / ADR 0010. Offline vmcore drgn introspection; no admission gate."""
+    return _execute_vmcore_introspect_call(
+        request,
+        artifact_root=artifact_root,
+        runner=runner,
+        build_id_reader=build_id_reader,
+        clock=clock,
+        operation_name="debug.introspect.from_vmcore",
+        caps=None,
+        post_validator=None,
+    )
+
+
+def debug_introspect_from_vmcore_helper_handler(
+    request: DebugIntrospectFromVmcoreHelperRequest,
+    *,
+    artifact_root: Path,
+    runner: SshRunner | None = None,
+    build_id_reader: Callable[[Path], str] = read_elf_build_id,
+    clock: Callable[[], datetime] | None = None,
+) -> ToolResponse:
+    """Spec §3.1. Run a curated helper against a vmcore, reusing the live helper's post-validator
+    and cap profile unchanged."""
+    helper_registry = get_helper_registry()
+    spec = helper_registry.get(request.name)
+    if spec is None:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=request.run_id,
+            message=f"unknown helper {request.name!r}; valid: {sorted(helper_registry)}",
+            details={"code": "unknown_helper", "valid": sorted(helper_registry)},
+            suggested_next_actions=["debug.introspect.from_vmcore_helper"],
+        )
+    try:
+        validated_args = spec.args_model.model_validate(request.args)
+    except ValidationError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=request.run_id,
+            message=_redact_and_truncate(Redactor(), str(exc), cap=512),
+            details={"code": "helper_args_invalid"},
+            suggested_next_actions=["debug.introspect.from_vmcore_helper"],
+        )
+    run_request = DebugIntrospectFromVmcoreRequest(
+        run_id=request.run_id,
+        vmcore_ref=request.vmcore_ref,
+        vmlinux_ref=request.vmlinux_ref,
+        modules_ref=request.modules_ref,
+        script=spec.script,
+        timeout_seconds=request.timeout_seconds,
+        allow_write=False,
+        args=validated_args.model_dump(mode="json"),
+    )
+    return _execute_vmcore_introspect_call(
+        run_request,
+        artifact_root=artifact_root,
+        runner=runner,
+        build_id_reader=build_id_reader,
+        clock=clock,
+        operation_name="debug.introspect.from_vmcore_helper",
         caps=HELPER_CAP_PROFILE,
         post_validator=_make_helper_post_validator(spec),
     )
