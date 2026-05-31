@@ -555,3 +555,68 @@ def check_kvm_access(*, kvm_probe: Callable[[], bool] | None = None) -> Prerequi
             "(the interactive uaccess seat ACL does not follow into non-login contexts)."
         ),
     )
+
+
+# Matches the build-time default URI baked into DEFAULT_TARGET_PROFILES (server.py); used when a
+# target profile leaves libvirt_uri unset.
+DEFAULT_LIBVIRT_URI = "qemu:///system"
+
+
+def check_libvirt_connect(
+    target_profile: TargetProfile | None,
+    *,
+    runner: PrerequisiteRunner | None = None,
+) -> PrerequisiteCheck:
+    """Report whether an authenticated *read* connection to the profile's libvirt URI succeeds.
+
+    Runs ``virsh -c <uri> capabilities`` — strictly more than ``virsh uri``, which only reads local
+    config. Advisory only (like ``check_gdbstub_port``): it does **not** prove ``org.libvirt.unix.manage``
+    (define/start), so a PASS can still be followed by a polkit denial at ``target.boot``.
+    """
+    if target_profile is None:
+        return PrerequisiteCheck(
+            check_id="libvirt.connect", status=PrerequisiteStatus.SKIPPED, message="no target profile selected"
+        )
+    runner = runner or SubprocessPrerequisiteRunner()
+    uri = target_profile.libvirt_uri or DEFAULT_LIBVIRT_URI
+    if runner.which("virsh") is None:
+        return PrerequisiteCheck(
+            check_id="libvirt.connect",
+            status=PrerequisiteStatus.FAILED,
+            message="virsh was not found",
+            suggested_fix="Install libvirt client tools.",
+        )
+    try:
+        code, _stdout, stderr = runner.run(["virsh", "-c", uri, "capabilities"], timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        return PrerequisiteCheck(
+            check_id="libvirt.connect",
+            status=PrerequisiteStatus.FAILED,
+            message=f"virsh capabilities timed out after {exc.timeout} seconds against {uri}",
+            suggested_fix="Confirm the libvirt daemon for this URI is running and responsive.",
+        )
+    except OSError as exc:
+        return PrerequisiteCheck(
+            check_id="libvirt.connect",
+            status=PrerequisiteStatus.FAILED,
+            message=f"virsh capabilities could not run: {exc}",
+            suggested_fix="Confirm libvirt client tools are installed and runnable.",
+        )
+    if code == 0:
+        return PrerequisiteCheck(
+            check_id="libvirt.connect",
+            status=PrerequisiteStatus.PASSED,
+            message=f"authenticated read connection to {uri} (advisory: does not prove define/start)",
+            details={"uri": uri},
+        )
+    if uri.startswith("qemu:///session"):
+        fix = "Start the per-user daemon: systemctl --user start virtqemud.socket."
+    else:
+        fix = "Join the 'libvirt' group or install the libvirt polkit rule for org.libvirt.unix.manage."
+    return PrerequisiteCheck(
+        check_id="libvirt.connect",
+        status=PrerequisiteStatus.FAILED,
+        message=f"could not connect to {uri}",
+        details={"uri": uri, "stderr": stderr.strip()},
+        suggested_fix=fix,
+    )

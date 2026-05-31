@@ -29,6 +29,18 @@ class TimeoutRunner(FakeRunner):
         raise subprocess.TimeoutExpired(command, timeout)
 
 
+class LibvirtCapabilitiesRunner(FakeRunner):
+    def __init__(self, available: set[str], *, code: int, stderr: str = "") -> None:
+        super().__init__(available)
+        self._code = code
+        self._stderr = stderr
+        self.last_command: list[str] | None = None
+
+    def run(self, command: list[str], timeout: int) -> tuple[int, str, str]:
+        self.last_command = command
+        return (self._code, "<capabilities/>" if self._code == 0 else "", self._stderr)
+
+
 def test_prereq_checks_report_missing_tools(tmp_path: Path) -> None:
     checks = check_prerequisites(
         artifact_root=tmp_path,
@@ -271,3 +283,56 @@ def test_kvm_access_warns_when_device_unusable() -> None:
     assert check.status == "warning"
     assert "kvm" in (check.suggested_fix or "").lower()
     assert "TCG" in (check.message or "")
+
+
+def test_libvirt_connect_skipped_without_profile() -> None:
+    from kdive.prereqs.checks import check_libvirt_connect
+
+    check = check_libvirt_connect(None)
+    assert check.check_id == "libvirt.connect"
+    assert check.status == "skipped"
+
+
+def test_libvirt_connect_passes_and_uses_profile_uri() -> None:
+    from kdive.prereqs.checks import check_libvirt_connect
+
+    target = TargetProfile(name="t", architecture="x86_64", libvirt_uri="qemu:///session")
+    runner = LibvirtCapabilitiesRunner({"virsh"}, code=0)
+    check = check_libvirt_connect(target, runner=runner)
+    assert check.status == "passed"
+    assert runner.last_command == ["virsh", "-c", "qemu:///session", "capabilities"]
+
+
+def test_libvirt_connect_defaults_uri_when_profile_unset() -> None:
+    from kdive.prereqs.checks import check_libvirt_connect
+
+    target = TargetProfile(name="t", architecture="x86_64", libvirt_uri=None)
+    runner = LibvirtCapabilitiesRunner({"virsh"}, code=0)
+    check_libvirt_connect(target, runner=runner)
+    assert runner.last_command == ["virsh", "-c", "qemu:///system", "capabilities"]
+
+
+def test_libvirt_connect_fails_distinguishes_system_and_session() -> None:
+    from kdive.prereqs.checks import check_libvirt_connect
+
+    system_target = TargetProfile(name="t", architecture="x86_64", libvirt_uri="qemu:///system")
+    system = check_libvirt_connect(
+        system_target, runner=LibvirtCapabilitiesRunner({"virsh"}, code=1, stderr="polkit denied")
+    )
+    assert system.status == "failed"
+    assert "polkit" in (system.suggested_fix or "").lower()
+
+    session_target = TargetProfile(name="t", architecture="x86_64", libvirt_uri="qemu:///session")
+    session = check_libvirt_connect(
+        session_target, runner=LibvirtCapabilitiesRunner({"virsh"}, code=1, stderr="failed to connect")
+    )
+    assert session.status == "failed"
+    assert "virtqemud" in (session.suggested_fix or "")
+
+
+def test_libvirt_connect_fails_when_virsh_missing() -> None:
+    from kdive.prereqs.checks import check_libvirt_connect
+
+    target = TargetProfile(name="t", architecture="x86_64", libvirt_uri="qemu:///system")
+    check = check_libvirt_connect(target, runner=LibvirtCapabilitiesRunner(set(), code=0))
+    assert check.status == "failed"
