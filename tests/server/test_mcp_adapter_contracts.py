@@ -13,7 +13,18 @@ from kdive.postmortem.tools import (
     PostmortemTargetContext,
     register_postmortem_tools,
 )
-from kdive.transport.tools import TransportToolContext, TransportToolHandlers, register_transport_tools
+from kdive.tools.artifacts import (
+    ArtifactCollectContext,
+    ArtifactCollectOptions,
+    register_artifact_tools,
+)
+from kdive.transport.tools import (
+    TransportBreakOptions,
+    TransportTargetContext,
+    TransportToolContext,
+    TransportToolHandlers,
+    register_transport_tools,
+)
 from kdive.workflow.handlers import WorkflowHandlerDependencies
 from kdive.workflow.tools import (
     WorkflowBuildBootDebugOptions,
@@ -29,6 +40,35 @@ def _tool_fn(app: FastMCP, name: str):
 
 def _success(**data: Any) -> ToolResponse:
     return ToolResponse.success(summary="ok", data=data)
+
+
+def test_artifact_adapter_uses_grouped_context_and_options(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    calls: list[dict[str, Any]] = []
+
+    def collect_handler(**kwargs: Any) -> ToolResponse:
+        calls.append(kwargs)
+        return _success(run_id=kwargs["run_id"])
+
+    register_artifact_tools(
+        app,
+        default_artifact_root=tmp_path / "default",
+        collect_handler=collect_handler,
+    )
+
+    raw = _tool_fn(app, "artifacts.collect")(
+        context=ArtifactCollectContext(run_id="run-1", artifact_root=str(tmp_path / "runs")),
+        options=ArtifactCollectOptions(force_recollect=True),
+    )
+
+    assert raw["ok"] is True
+    assert calls == [
+        {
+            "artifact_root": tmp_path / "runs",
+            "run_id": "run-1",
+            "force_recollect": True,
+        }
+    ]
 
 
 def test_transport_adapter_forwards_inject_break_collaborators_and_path(tmp_path: Path) -> None:
@@ -58,10 +98,14 @@ def test_transport_adapter_forwards_inject_break_collaborators_and_path(tmp_path
     )
 
     raw = _tool_fn(app, "transport.inject_break")(
-        run_id="run-1",
+        context=TransportTargetContext(
+            run_id="run-1",
+            artifact_root=str(tmp_path / "runs"),
+        ),
         session_id="session-1",
-        acknowledged_permissions=["drop target kernel into the debugger"],
-        artifact_root=str(tmp_path / "runs"),
+        options=TransportBreakOptions(
+            acknowledged_permissions=["drop target kernel into the debugger"],
+        ),
     )
 
     assert raw["ok"] is True

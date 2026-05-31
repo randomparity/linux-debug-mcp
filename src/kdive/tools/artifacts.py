@@ -4,8 +4,11 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import ValidationError
 
 from kdive.domain import ToolResponse
+from kdive.model import Model
+from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, optional_model_arg
 
 
 class ArtifactCollectHandler(Protocol):
@@ -18,6 +21,15 @@ class ArtifactCollectHandler(Protocol):
     ) -> ToolResponse: ...
 
 
+class ArtifactCollectContext(Model):
+    run_id: str
+    artifact_root: str | None = None
+
+
+class ArtifactCollectOptions(Model):
+    force_recollect: bool = False
+
+
 def register_artifact_tools(
     app: FastMCP,
     *,
@@ -28,12 +40,16 @@ def register_artifact_tools(
 
     @app.tool(name="artifacts.collect")
     def artifacts_collect(
-        run_id: str,
-        artifact_root: str = default_artifact_root_text,
-        force_recollect: bool = False,
+        context: ArtifactCollectContext | dict[str, Any],
+        options: ArtifactCollectOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        try:
+            context_model = model_arg(context, ArtifactCollectContext)
+            options_model = optional_model_arg(options, ArtifactCollectOptions)
+        except (TypeError, ValueError, ValidationError) as exc:
+            return adapter_validation_failure(exc)
         return collect_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            force_recollect=force_recollect,
+            artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
+            run_id=context_model.run_id,
+            force_recollect=options_model.force_recollect,
         ).model_dump(mode="json")

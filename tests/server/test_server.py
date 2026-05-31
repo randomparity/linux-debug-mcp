@@ -421,13 +421,30 @@ def test_target_run_tests_handler_response_serializes(tmp_path: Path) -> None:
     assert response.model_dump(mode="json")["run_id"] == "run-abc123"
 
 
-def test_artifacts_collect_tool_is_registered_with_force_recollect() -> None:
+def test_artifacts_collect_tool_uses_grouped_context_and_options() -> None:
     app = create_app()
     tool = app._tool_manager._tools["artifacts.collect"]
 
     assert "artifacts.collect" in tool_names()
-    assert "force_recollect" in tool.parameters["properties"]
+    properties = tool.parameters["properties"]
+    assert {"context", "options"}.issubset(properties)
+    assert {"run_id", "artifact_root", "force_recollect"}.isdisjoint(properties)
     assert tool.fn.__name__ == "artifacts_collect"
+
+
+def test_transport_tools_use_grouped_context_and_options() -> None:
+    app = create_app()
+
+    open_properties = app._tool_manager._tools["transport.open"].parameters["properties"]
+    close_properties = app._tool_manager._tools["transport.close"].parameters["properties"]
+    inject_properties = app._tool_manager._tools["transport.inject_break"].parameters["properties"]
+
+    assert {"context", "options"}.issubset(open_properties)
+    assert {"run_id", "recovery"}.isdisjoint(open_properties)
+    assert {"context", "session_id"}.issubset(close_properties)
+    assert {"run_id"}.isdisjoint(close_properties)
+    assert {"context", "session_id", "options"}.issubset(inject_properties)
+    assert {"run_id", "artifact_root", "acknowledged_permissions"}.isdisjoint(inject_properties)
 
 
 def test_create_app_registers_artifact_tools_through_package_module() -> None:
