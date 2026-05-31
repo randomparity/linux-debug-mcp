@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Protocol
@@ -407,375 +408,166 @@ def debug_evaluate_handler(
     )
 
 
-def debug_set_breakpoint_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    symbol: str,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_operation_handler(
-        request=DebugSetBreakpointRequest(symbol=symbol),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
+def _make_symbol_control_handler(
+    name: str,
+    request_factory: Callable[[str], DebugOperationRequest],
+) -> Callable[..., ToolResponse]:
+    def handler(
+        *,
+        artifact_root: Path,
+        run_id: str,
+        symbol: str,
+        debug_session_id: str | None = None,
+        debug_profiles: dict[str, DebugProfile] | None = None,
+        admission: AdmissionService | None = None,
+        transaction: TransportTransaction | None = None,
+        session_registry: SessionRegistry | None = None,
+        session_guard: SessionGuard | None = None,
+        gdb_mi_engine: GdbMiEngine | None = None,
+        gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+    ) -> ToolResponse:
+        return _debug_operation_handler(
+            request=request_factory(symbol),
+            artifact_root=artifact_root,
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+            debug_profiles=debug_profiles,
+            admission=admission,
+            transaction=transaction,
+            session_registry=session_registry,
+            session_guard=session_guard,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+        )
+
+    handler.__name__ = name
+    return handler
 
 
-def debug_set_watchpoint_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    symbol: str,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_operation_handler(
-        request=DebugSetWatchpointRequest(symbol=symbol),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
+def _make_breakpoint_id_control_handler(
+    name: str,
+    request_factory: Callable[[str], DebugOperationRequest],
+) -> Callable[..., ToolResponse]:
+    def handler(
+        *,
+        artifact_root: Path,
+        run_id: str,
+        breakpoint_id: str,
+        debug_session_id: str | None = None,
+        debug_profiles: dict[str, DebugProfile] | None = None,
+        admission: AdmissionService | None = None,
+        transaction: TransportTransaction | None = None,
+        session_registry: SessionRegistry | None = None,
+        session_guard: SessionGuard | None = None,
+        gdb_mi_engine: GdbMiEngine | None = None,
+        gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+    ) -> ToolResponse:
+        return _debug_operation_handler(
+            request=request_factory(breakpoint_id),
+            artifact_root=artifact_root,
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+            debug_profiles=debug_profiles,
+            admission=admission,
+            transaction=transaction,
+            session_registry=session_registry,
+            session_guard=session_guard,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+        )
+
+    handler.__name__ = name
+    return handler
 
 
-def debug_clear_breakpoint_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    breakpoint_id: str,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_operation_handler(
-        request=DebugClearBreakpointRequest(breakpoint_id=breakpoint_id),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
+def _make_debug_session_query_handler(
+    name: str,
+    request_factory: Callable[[], DebugOperationRequest],
+) -> Callable[..., ToolResponse]:
+    def handler(
+        *,
+        artifact_root: Path,
+        run_id: str,
+        debug_session_id: str | None = None,
+        debug_profiles: dict[str, DebugProfile] | None = None,
+        admission: AdmissionService | None = None,
+        transaction: TransportTransaction | None = None,
+        session_registry: SessionRegistry | None = None,
+        session_guard: SessionGuard | None = None,
+        gdb_mi_engine: GdbMiEngine | None = None,
+        gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+    ) -> ToolResponse:
+        return _debug_operation_handler(
+            request=request_factory(),
+            artifact_root=artifact_root,
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+            debug_profiles=debug_profiles,
+            admission=admission,
+            transaction=transaction,
+            session_registry=session_registry,
+            session_guard=session_guard,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+        )
+
+    handler.__name__ = name
+    return handler
 
 
-def debug_clear_watchpoint_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    breakpoint_id: str,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_operation_handler(
-        request=DebugClearWatchpointRequest(breakpoint_id=breakpoint_id),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
+def _make_debug_execution_control_handler(
+    name: str,
+    request_factory: Callable[[int | None], DebugOperationRequest],
+) -> Callable[..., ToolResponse]:
+    def handler(
+        *,
+        artifact_root: Path,
+        run_id: str,
+        timeout_seconds: int | None = None,
+        debug_session_id: str | None = None,
+        debug_profiles: dict[str, DebugProfile] | None = None,
+        admission: AdmissionService | None = None,
+        transaction: TransportTransaction | None = None,
+        session_registry: SessionRegistry | None = None,
+        session_guard: SessionGuard | None = None,
+        gdb_mi_engine: GdbMiEngine | None = None,
+        gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+    ) -> ToolResponse:
+        return _debug_operation_handler(
+            request=request_factory(timeout_seconds),
+            artifact_root=artifact_root,
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+            debug_profiles=debug_profiles,
+            admission=admission,
+            transaction=transaction,
+            session_registry=session_registry,
+            session_guard=session_guard,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+        )
+
+    handler.__name__ = name
+    return handler
 
 
-def debug_list_breakpoints_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_operation_handler(
-        request=DebugListBreakpointsRequest(),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_backtrace_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_operation_handler(
-        request=DebugBacktraceRequest(),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_list_variables_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_operation_handler(
-        request=DebugListVariablesRequest(),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def _debug_execution_control_handler(
-    *,
-    request: DebugOperationRequest,
-    artifact_root: Path,
-    run_id: str,
-    debug_session_id: str | None,
-    debug_profiles: dict[str, DebugProfile] | None,
-    admission: AdmissionService | None,
-    transaction: TransportTransaction | None,
-    session_registry: SessionRegistry | None,
-    session_guard: SessionGuard | None,
-    gdb_mi_engine: GdbMiEngine | None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None,
-) -> ToolResponse:
-    return _debug_operation_handler(
-        request=request,
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_continue_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    timeout_seconds: int | None = None,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_execution_control_handler(
-        request=DebugContinueRequest(timeout_seconds=timeout_seconds),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_step_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    timeout_seconds: int | None = None,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_execution_control_handler(
-        request=DebugStepRequest(timeout_seconds=timeout_seconds),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_next_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    timeout_seconds: int | None = None,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_execution_control_handler(
-        request=DebugNextRequest(timeout_seconds=timeout_seconds),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_finish_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    timeout_seconds: int | None = None,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_execution_control_handler(
-        request=DebugFinishRequest(timeout_seconds=timeout_seconds),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_interrupt_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    timeout_seconds: int | None = None,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_execution_control_handler(
-        request=DebugInterruptRequest(timeout_seconds=timeout_seconds),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
+debug_set_breakpoint_handler = _make_symbol_control_handler("debug_set_breakpoint_handler", DebugSetBreakpointRequest)
+debug_set_watchpoint_handler = _make_symbol_control_handler("debug_set_watchpoint_handler", DebugSetWatchpointRequest)
+debug_clear_breakpoint_handler = _make_breakpoint_id_control_handler(
+    "debug_clear_breakpoint_handler", DebugClearBreakpointRequest
+)
+debug_clear_watchpoint_handler = _make_breakpoint_id_control_handler(
+    "debug_clear_watchpoint_handler", DebugClearWatchpointRequest
+)
+debug_list_breakpoints_handler = _make_debug_session_query_handler(
+    "debug_list_breakpoints_handler", DebugListBreakpointsRequest
+)
+debug_backtrace_handler = _make_debug_session_query_handler("debug_backtrace_handler", DebugBacktraceRequest)
+debug_list_variables_handler = _make_debug_session_query_handler(
+    "debug_list_variables_handler", DebugListVariablesRequest
+)
+debug_continue_handler = _make_debug_execution_control_handler("debug_continue_handler", DebugContinueRequest)
+debug_step_handler = _make_debug_execution_control_handler("debug_step_handler", DebugStepRequest)
+debug_next_handler = _make_debug_execution_control_handler("debug_next_handler", DebugNextRequest)
+debug_finish_handler = _make_debug_execution_control_handler("debug_finish_handler", DebugFinishRequest)
+debug_interrupt_handler = _make_debug_execution_control_handler("debug_interrupt_handler", DebugInterruptRequest)
