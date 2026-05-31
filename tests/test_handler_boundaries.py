@@ -110,3 +110,17 @@ def test_server_public_api_is_explicit_and_composition_scoped() -> None:
     }
     assert not any(name.endswith("_handler") for name in server.__all__)
     assert not any(name.endswith(("Context", "Options", "Profiles")) for name in server.__all__)
+
+
+def test_server_does_not_expose_capability_model_or_helper_aliases() -> None:
+    import kdive.server as server
+
+    compatibility_aliases = {
+        "CreateRunContext",
+        "CreateRunOptions",
+        "CreateRunProfiles",
+        "_overrides_from_tool_args",
+        "build_scp_argv",
+    }
+
+    assert sorted(name for name in compatibility_aliases if hasattr(server, name)) == []

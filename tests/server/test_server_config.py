@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 from conftest import make_source_tree
 
-from kdive import server
 from kdive.config import BootOverrides, ServerConfig
+from kdive.kernel import tools as kernel_tools
 from kdive.server import (
     SERVER_CONFIG_ENV_VAR,
     create_app,
@@ -101,14 +101,14 @@ def test_create_app_threads_configured_sensitive_paths_into_create_run(tmp_path:
     create_run_fn = app._tool_manager._tools["kernel.create_run"].fn
 
     result = create_run_fn(
-        profiles=server.CreateRunProfiles(
+        profiles=kernel_tools.CreateRunProfiles(
             source_path=str(source),
             build_profile="x86_64-default",
             target_profile="local-qemu",
             rootfs_profile="minimal",
         ),
-        context=server.CreateRunContext(artifact_root=str(tmp_path / "runs")),
-        options=server.CreateRunOptions(boot_overrides={"rootfs_source": str(rootfs)}),
+        context=kernel_tools.CreateRunContext(artifact_root=str(tmp_path / "runs")),
+        options=kernel_tools.CreateRunOptions(boot_overrides={"rootfs_source": str(rootfs)}),
     )
 
     assert result["ok"] is False
@@ -123,14 +123,14 @@ def test_create_app_without_config_allows_nonsensitive_rootfs(tmp_path: Path) ->
     create_run_fn = app._tool_manager._tools["kernel.create_run"].fn
 
     result = create_run_fn(
-        profiles=server.CreateRunProfiles(
+        profiles=kernel_tools.CreateRunProfiles(
             source_path=str(source),
             build_profile="x86_64-default",
             target_profile="local-qemu",
             rootfs_profile="minimal",
         ),
-        context=server.CreateRunContext(artifact_root=str(tmp_path / "runs")),
-        options=server.CreateRunOptions(boot_overrides={"rootfs_source": str(rootfs)}),
+        context=kernel_tools.CreateRunContext(artifact_root=str(tmp_path / "runs")),
+        options=kernel_tools.CreateRunOptions(boot_overrides={"rootfs_source": str(rootfs)}),
     )
 
     assert result["ok"] is True

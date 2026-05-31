@@ -12,6 +12,7 @@ from kdive.coordination.registry import SessionRegistry
 from kdive.debug import operations as debug_operations
 from kdive.domain import ArtifactRef, StepResult, StepStatus, ToolResponse
 from kdive.kernel import handlers as kernel_handlers
+from kdive.kernel import tools as kernel_tools
 from kdive.prereqs.checks import PortProbeResult
 from kdive.providers.handlers import list_providers_handler
 from kdive.server import (
@@ -716,39 +717,45 @@ def test_build_profile_from_manifest_v1_fallback():
     assert resolved.name == "x86_64-default"
 
 
-def test_overrides_from_tool_args_builds_models():
+def test_create_run_shapes_from_tool_args_builds_models():
     from kdive.config import BootOverrides, BuildOverrides
 
-    build, boot = server._overrides_from_tool_args(
-        kernel_args=["dhash_entries=1"], rootfs_source=None, make_variables={"CC": "clang"}, config_lines=None
+    build, boot, build_spec, target_spec, rootfs_spec = kernel_tools.create_run_shapes_from_tool_args(
+        build_overrides={"make_variables": {"CC": "clang"}},
+        boot_overrides={"kernel_args": ["dhash_entries=1"]},
+        profile_specs=None,
     )
     assert isinstance(build, BuildOverrides) and build.make_variables == {"CC": "clang"}
-    assert build.config_lines == []
     assert isinstance(boot, BootOverrides) and boot.kernel_args == ["dhash_entries=1"]
+    assert (build_spec, target_spec, rootfs_spec) == (None, None, None)
 
-    none_build, none_boot = server._overrides_from_tool_args(
-        kernel_args=None, rootfs_source=None, make_variables=None, config_lines=None
+    none_build, none_boot, *_ = kernel_tools.create_run_shapes_from_tool_args(
+        build_overrides=None,
+        boot_overrides=None,
+        profile_specs=None,
     )
     assert none_build is None and none_boot is None
 
 
-def test_overrides_from_tool_args_builds_config_lines():
-    build_overrides, boot_overrides = server._overrides_from_tool_args(
-        kernel_args=None,
-        rootfs_source=None,
-        make_variables=None,
-        config_lines=["CONFIG_DEBUG_INFO=y"],
+def test_create_run_shapes_from_tool_args_builds_config_lines():
+    build_overrides, boot_overrides, *_ = kernel_tools.create_run_shapes_from_tool_args(
+        build_overrides={"config_lines": ["CONFIG_DEBUG_INFO=y"]},
+        boot_overrides=None,
+        profile_specs=None,
     )
     assert build_overrides is not None
     assert build_overrides.config_lines == ["CONFIG_DEBUG_INFO=y"]
     assert boot_overrides is None
 
 
-def test_overrides_from_tool_args_none_when_no_build_overrides():
-    build_overrides, _ = server._overrides_from_tool_args(
-        kernel_args=["nokaslr"], rootfs_source=None, make_variables=None, config_lines=None
+def test_create_run_shapes_from_tool_args_none_when_no_build_overrides():
+    build_overrides, boot_overrides, *_ = kernel_tools.create_run_shapes_from_tool_args(
+        build_overrides=None,
+        boot_overrides={"kernel_args": ["nokaslr"]},
+        profile_specs=None,
     )
     assert build_overrides is None
+    assert boot_overrides is not None
 
 
 def test_create_run_tool_accepts_overrides_and_rejects_bad_args(tmp_path: Path):
@@ -762,32 +769,32 @@ def test_create_run_tool_accepts_overrides_and_rejects_bad_args(tmp_path: Path):
     assert set(params) == {"profiles", "context", "options"}
 
     ok = tool_fn(
-        profiles=server.CreateRunProfiles(
+        profiles=kernel_tools.CreateRunProfiles(
             source_path=str(src),
             build_profile="x86_64-default",
             target_profile="local-qemu",
             rootfs_profile="minimal",
         ),
-        context=server.CreateRunContext(artifact_root=str(tmp_path / "runs")),
-        options=server.CreateRunOptions(
+        context=kernel_tools.CreateRunContext(artifact_root=str(tmp_path / "runs")),
+        options=kernel_tools.CreateRunOptions(
             boot_overrides={"kernel_args": ["dhash_entries=1"]},
             build_overrides={"make_variables": {"CC": "clang"}, "config_lines": ["CONFIG_DEBUG_INFO=y"]},
         ),
     )
     assert ok["ok"] is True
     run_id = ok["run_id"]
-    manifest = server.ArtifactStore(tmp_path / "runs", create_root=False).load_manifest(run_id)
+    manifest = ArtifactStore(tmp_path / "runs", create_root=False).load_manifest(run_id)
     assert manifest.resolved_build_profile.config_lines == ["CONFIG_DEBUG_INFO=y"]
 
     bad = tool_fn(
-        profiles=server.CreateRunProfiles(
+        profiles=kernel_tools.CreateRunProfiles(
             source_path=str(src),
             build_profile="x86_64-default",
             target_profile="local-qemu",
             rootfs_profile="minimal",
         ),
-        context=server.CreateRunContext(artifact_root=str(tmp_path / "runs2")),
-        options=server.CreateRunOptions(boot_overrides={"kernel_args": ["bad;arg"]}),
+        context=kernel_tools.CreateRunContext(artifact_root=str(tmp_path / "runs2")),
+        options=kernel_tools.CreateRunOptions(boot_overrides={"kernel_args": ["bad;arg"]}),
     )
     assert bad["ok"] is False
     assert bad["error"]["category"] == "configuration_error"

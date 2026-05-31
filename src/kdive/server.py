@@ -21,12 +21,7 @@ from kdive.artifacts.handlers import (
 )
 from kdive.artifacts.manifest import RunManifest
 from kdive.artifacts.store import ArtifactStore, record_step_with_retry
-from kdive.config import (
-    BootOverrides,
-    BuildOverrides,
-    RootfsOverrides,
-    ServerConfig,
-)
+from kdive.config import ServerConfig
 from kdive.coordination.admission import (
     AdmissionService,
     SnapshotStore,
@@ -79,9 +74,6 @@ from kdive.kernel import tools as kernel_tools
 from kdive.kernel.handlers import kernel_build_handler
 from kdive.postmortem.crash_handler import (
     debug_postmortem_crash_handler,
-)
-from kdive.postmortem.handlers import (
-    build_scp_argv as build_scp_argv,
 )
 from kdive.postmortem.handlers import (
     debug_postmortem_check_prereqs_handler,
@@ -152,9 +144,6 @@ DEFAULT_DEBUG_PROFILES = _DEFAULT_DEBUG_PROFILES
 DEFAULT_ROOTFS_PROFILES = _DEFAULT_ROOTFS_PROFILES
 DEFAULT_TARGET_PROFILES = _DEFAULT_TARGET_PROFILES
 DEFAULT_TEST_SUITES = _DEFAULT_TEST_SUITES
-CreateRunContext = kernel_tools.CreateRunContext
-CreateRunOptions = kernel_tools.CreateRunOptions
-CreateRunProfiles = kernel_tools.CreateRunProfiles
 
 _RequiredT = TypeVar("_RequiredT")
 
@@ -282,30 +271,6 @@ def not_implemented_handler(tool_name: str, *, run_id: str | None = None) -> Too
         details={"tool": tool_name, "sprint": sprint},
         suggested_next_actions=["Use host.check_prerequisites", "Use kernel.create_run"],
     )
-
-
-def _overrides_from_tool_args(
-    *,
-    kernel_args: list[str] | None,
-    rootfs_source: str | None,
-    make_variables: dict[str, str] | None,
-    config_lines: list[str] | None,
-    rootfs_overrides: dict[str, Any] | None = None,
-) -> tuple[BuildOverrides | None, BootOverrides | None]:
-    build_overrides = (
-        BuildOverrides(make_variables=make_variables or {}, config_lines=config_lines or [])
-        if (make_variables or config_lines)
-        else None
-    )
-    # RootfsOverrides validation raises pydantic ValidationError (a ValueError subclass), which
-    # the tool wrappers surface as a configuration error.
-    rootfs = RootfsOverrides(**rootfs_overrides) if rootfs_overrides else None
-    boot_overrides = (
-        BootOverrides(kernel_args=kernel_args or [], rootfs_source=rootfs_source, rootfs=rootfs)
-        if (kernel_args or rootfs_source or rootfs)
-        else None
-    )
-    return build_overrides, boot_overrides
 
 
 def load_server_config() -> ServerConfig | None:
