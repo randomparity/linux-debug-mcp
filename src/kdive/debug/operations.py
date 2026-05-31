@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,29 @@ def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any]
         run_id=run_id,
         details=details,
     )
+
+
+@dataclass(frozen=True)
+class _DebugOpSuccess:
+    data: dict[str, object]
+    session: DebugSession
+
+
+@dataclass(frozen=True)
+class _DebugOpFailure:
+    category: ErrorCategory
+    message: str
+    details: dict[str, object]
+    suggested_next_actions: list[str]
+
+    def to_tool_response(self, *, run_id: str, redactor: Redactor) -> ToolResponse:
+        return ToolResponse.failure(
+            category=self.category,
+            message=redactor.redact_text(self.message),
+            run_id=run_id,
+            details=redactor.redact_value(self.details),
+            suggested_next_actions=self.suggested_next_actions,
+        )
 
 
 def _debug_session_details_from_result(result: StepResult, *, allow_ended: bool = False) -> dict[str, Any] | None:
@@ -537,22 +561,19 @@ def _run_debug_engine_op(
     session: DebugSession,
     method_name: str,
     kwargs: dict[str, object],
-    redactor: Redactor,
     artifact_root: Path,
     run_id: str,
     transaction: TransportTransaction | None,
     admission: AdmissionService | None,
     session_registry: SessionRegistry | None,
     session_guard: SessionGuard | None,
-) -> tuple[dict[str, object], DebugSession] | ToolResponse:
+) -> _DebugOpSuccess | _DebugOpFailure:
     """Run one debug.* op on the live attachment and rebuild the breakpoint ledger after a mutator
     (TD-09 — extracted from ``_debug_operation_response`` so the handler stays under the size limit).
 
-    Returns ``(op_data, updated_session)`` on success. Returns a ``ToolResponse`` for the two cases
-    that abort the op while keeping the handler structure: a ``transport_stall`` GdbMiError (the RSP
-    link is dead — reap + force_resume + tear the transport down here inside debug_lock) and an
-    ``InjectBreakError``. A benign GdbMiError / ProviderDebugError is re-raised for the caller's outer
-    handler; any other exception reaps the unusable attachment and returns a structured failure."""
+    Returns a domain result object, not a public ``ToolResponse``. Benign typed exceptions are
+    re-raised for the caller's outer handler; failures that require local teardown are returned as
+    ``_DebugOpFailure`` and translated at the response boundary."""
     try:
         if method_name == "interrupt":
             data = _interrupt_op_data(
@@ -572,7 +593,7 @@ def _run_debug_engine_op(
         if method_name in _BREAKPOINT_MUTATORS:
             ledger = {ref.number: ref.model_dump(mode="json") for ref in engine.list_breakpoints(attachment)}
             updated_session = session.model_copy(update={"breakpoints": ledger})
-        return data, updated_session
+        return _DebugOpSuccess(data=data, session=updated_session)
     except GdbMiError as exc:
         if exc.details.get("code") == "transport_stall":
             reaped = gdb_mi_sessions.reap(session.session_id)
@@ -586,20 +607,18 @@ def _run_debug_engine_op(
                 transaction=transaction,
                 session_guard=session_guard,
             )
-            return ToolResponse.failure(
+            return _DebugOpFailure(
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                message=redactor.redact_text(str(exc)),
-                run_id=run_id,
+                message=str(exc),
                 details={"code": "transport_stall"},
                 suggested_next_actions=["debug.start_session", "debug.kdb", "debug.introspect.run"],
             )
         raise
     except InjectBreakError as exc:
-        return ToolResponse.failure(
+        return _DebugOpFailure(
             category=exc.category,
-            message=redactor.redact_text(str(exc)),
-            run_id=run_id,
-            details=redactor.redact_value(exc.details),
+            message=str(exc),
+            details=exc.details,
             suggested_next_actions=["debug.kdb", "debug.introspect.run", "artifacts.get_manifest"],
         )
     except ProviderDebugError:
@@ -609,10 +628,9 @@ def _run_debug_engine_op(
         if reaped is not None:
             with contextlib.suppress(Exception):
                 engine.force_resume(reaped)
-        return ToolResponse.failure(
+        return _DebugOpFailure(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            message=redactor.redact_text(f"the gdb/MI engine faulted during debug.{method_name}: {exc}"),
-            run_id=run_id,
+            message=f"the gdb/MI engine faulted during debug.{method_name}: {exc}",
             details={"code": "debug_engine_faulted"},
             suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
         )
@@ -723,9 +741,8 @@ def _debug_operation_response(
             attachment = runtime.gdb_mi_sessions.require(session.session_id)
             # Every engine interaction for this op — the op itself AND the post-mutator ledger rebuild
             # (-break-list) — shares one guard (inside debug_lock, no concurrent op can require() a
-            # stalled attachment). _run_debug_engine_op returns a ToolResponse for the abort cases
-            # (transport_stall / inject-break) and (data, session) on success; a benign
-            # GdbMiError/ProviderDebugError propagates to the outer handler below.
+            # stalled attachment). _run_debug_engine_op returns an internal success/failure result;
+            # a benign GdbMiError/ProviderDebugError propagates to the outer handler below.
             op_result = _run_debug_engine_op(
                 engine=runtime.gdb_mi_engine,
                 gdb_mi_sessions=runtime.gdb_mi_sessions,
@@ -733,7 +750,6 @@ def _debug_operation_response(
                 session=session,
                 method_name=method_name,
                 kwargs=kwargs,
-                redactor=redactor,
                 artifact_root=artifact_root,
                 run_id=run_id,
                 transaction=runtime.transaction,
@@ -741,9 +757,10 @@ def _debug_operation_response(
                 session_registry=runtime.session_registry,
                 session_guard=runtime.session_guard,
             )
-            if isinstance(op_result, ToolResponse):
-                return op_result
-            data, updated_session = op_result
+            if isinstance(op_result, _DebugOpFailure):
+                return op_result.to_tool_response(run_id=run_id, redactor=redactor)
+            data = op_result.data
+            updated_session = op_result.session
             if persist_manifest:
                 details = _persist_debug_op_details(
                     store=store, run_id=run_id, method_name=method_name, session=updated_session, data=data
