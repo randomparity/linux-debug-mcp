@@ -6310,9 +6310,7 @@ def _engine_op_data(
         if not isinstance(address, int) or not isinstance(byte_count, int):
             raise GdbMiError("address and byte_count must be integers", category=ErrorCategory.CONFIGURATION_ERROR)
         if address < 0:
-            raise GdbMiError(
-                f"address must be non-negative, got {address}", category=ErrorCategory.CONFIGURATION_ERROR
-            )
+            raise GdbMiError(f"address must be non-negative, got {address}", category=ErrorCategory.CONFIGURATION_ERROR)
         if not 0 < byte_count <= MAX_MEMORY_READ_BYTES:
             raise GdbMiError(
                 f"byte_count must be in 1..{MAX_MEMORY_READ_BYTES}, got {byte_count}",
