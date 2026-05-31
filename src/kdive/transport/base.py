@@ -390,6 +390,19 @@ class Transport(ABC):
     @abstractmethod
     def health(self, session: TransportSession) -> str: ...
 
+    def reap_backend(self, pid: int, start_time: str | None) -> None:
+        """Best-effort kill of a supervised backend process by its (pid, start-time) fingerprint.
+
+        Layer-4 teardown (`_SessionSubscriber.invalidate`) and open-failure unwind
+        (`TransportTransaction._rollback`) both call this to reap an orphaned backend; it is the
+        single hook that replaces the previous private `transport._proxy` reach (ADR 0004 / TD-07).
+        Default: no-op — a transport with no supervised backend process (e.g. qemu-gdbstub, whose
+        `backend_pid` is always None) needs no reap. An overriding transport MUST start-time-fence
+        the kill so it never signals a recycled PID, and MAY raise; the caller suppresses so a reap
+        failure never masks the original teardown error.
+        """
+        return None
+
 
 class TransportRegistry:
     """In-process registry of transport capabilities, keyed by provider name. The

@@ -264,6 +264,17 @@ class SessionRegistry:
         Callback exceptions are collected, not silently swallowed; the caller logs the failures
         via the project logger. A buggy callback still does not block remaining reap work — the
         durable record delete still runs for every record.
+
+        Non-atomic callback contract (TD-27): the `on_orphan_reaped` callback and the subsequent
+        `delete_record` are NOT a transaction. The callback fires first and may partially mutate
+        external state (e.g. emit a `LifecycleEvent`, close admission); whether it succeeds, raises,
+        or half-completes, the durable record is then deleted unconditionally. This ordering is
+        deliberate — reconcile MUST converge to a clean registry on every restart, so a record can
+        never be left undeletable by a failing callback — and it means the callback must be safe to
+        have run against a record that is about to disappear: it must read everything it needs off
+        the `OrphanReap` snapshot it is handed, never re-read the record, and must be idempotent
+        (a crash mid-reconcile re-runs it next start). It must not assume the delete will be rolled
+        back if it raises; it will not be.
         """
         report = OrphanReapReport()
         # 1. re-assert persisted tombstones (durable across restarts). A malformed marker is

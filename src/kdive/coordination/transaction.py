@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -28,7 +29,56 @@ from kdive.transport.base import (
 )
 from kdive.transport.break_inject import InjectBreakError, inject_break
 
+logger = logging.getLogger(__name__)
+
 _ATTACH_DEADLINE_SECONDS = 30.0
+
+
+def _best_effort_reap(transport: Transport, state: _OpenState) -> None:
+    """Single backend-reap path for both teardown (`invalidate`) and open-failure unwind
+    (`_rollback`) — TD-07. No-op when no supervised backend pid was recorded; otherwise delegate to
+    the transport's `reap_backend()` hook with the failure suppressed, because a reap error must
+    never mask the original teardown/rollback error (ADR 0002). Replaces the duplicated
+    `getattr(transport, '_proxy', None)` private reach the two sites previously shared."""
+    if state.backend_pid is None:
+        return
+    try:
+        transport.reap_backend(state.backend_pid, state.backend_start)
+    except Exception:  # noqa: BLE001 - best-effort; a reap failure must not mask the original error
+        logger.warning(
+            "transaction: best-effort reap_backend(pid=%s) failed during unwind",
+            state.backend_pid,
+            exc_info=True,
+        )
+
+
+def _write_backend_partial(
+    registry: SessionRegistry, record: TransportSession, resource: object
+) -> tuple[int, str | None] | None:
+    """Handle a transport's ``on_partial("backend_process", ...)`` callback during attach() (TD-25).
+
+    Validate the reported backend identity and, if well-formed, WRITE IT THROUGH into the durable
+    OPENING record before attach() returns — so a backend death before READY is reapable (ADR 0005
+    Finding #1). Returns the ``(pid, start_time)`` the caller mirrors onto the in-memory unwind
+    state, or None for a malformed or non-backend partial.
+
+    Atomicity & exception contract: ``registry.write_record`` is a single atomic os.replace, so the
+    durable record never reflects a half-written backend identity — it lands whole or not at all.
+    The durable write happens BEFORE the caller updates the in-memory unwind state, so a crash in the
+    window between them leaves the durable record as the source of truth (``reconcile()`` reaps from
+    it) while the in-memory state is merely one step behind (it only ever under-reports, never reaps
+    a wrong pid). A malformed partial is ignored: this never raises, so a bad partial can never abort
+    attach().
+    """
+    if not isinstance(resource, dict):
+        return None
+    backend_process = cast(dict[str, object], resource)
+    pid_val = backend_process.get("pid")
+    start_val = backend_process.get("start_time")
+    if not isinstance(pid_val, int) or (start_val is not None and not isinstance(start_val, str)):
+        return None
+    registry.write_record(record.model_copy(update=dict(backend_pid=pid_val, backend_start_time=start_val)))
+    return pid_val, start_val
 
 
 @dataclass(frozen=True)
@@ -89,13 +139,7 @@ class _SessionSubscriber:
         # `force_drop` is idempotent, so calling it here after the reap completes the teardown
         # without duplicating the unwind logic.
         transport = self._transaction._transports[self._session.provider]
-        if self._state.backend_pid is not None:
-            proxy = getattr(transport, "_proxy", None)
-            if proxy is not None:
-                # TODO: a Transport.reap_backend() hook would avoid the private-attribute reach
-                # (out of scope here).
-                with contextlib.suppress(Exception):
-                    proxy.stop_by_identity(self._state.backend_pid, self._state.backend_start)
+        _best_effort_reap(transport, self._state)
         # Confirm "the kill resolved" (returned cleanly, raised+suppressed, or was skipped because
         # no proxy is wired). Only set here — never in force_drop — so a force_drop dispatched
         # while this worker is still wedged on stop_by_identity will NOT see `_killed` and will
@@ -119,9 +163,18 @@ class _SessionSubscriber:
         # invalidate_lifecycle ran close_admission (which set the cancel fence and recorded the target
         # as closed) before emit, so confirm_reaped → abandon is the §5.4 contract.
         if self._state.admission_handle is not None:
-            with contextlib.suppress(Exception):
+            try:
                 self._transaction._admission.confirm_reaped(self._state.admission_handle)
                 self._transaction._admission.abandon(self._state.admission_handle)
+            except Exception:  # noqa: BLE001 - out-of-band drop is best-effort; never raise
+                # TD-42: log instead of silently swallowing. `_handles.pop` below still runs, so the
+                # in-memory binding is dropped; a confirm_reaped/abandon failure here leaves the
+                # admission-side binding for reconcile() to reap and must be visible, not hidden.
+                logger.warning(
+                    "transaction.force_drop: confirm_reaped/abandon failed for session %s",
+                    self._session.session_id,
+                    exc_info=True,
+                )
         self._transaction._handles.pop(self._session.session_id, None)
         # Only delete the durable ownership record once the backend kill has resolved. While the
         # dispatcher's bounded force_drop fires from a wedged invalidate (`_killed` still unset),
@@ -287,18 +340,18 @@ class TransportTransaction:
             backend_start: str | None = None
 
             def on_partial(label: str, resource: object) -> None:
+                # Thin adapter: _write_backend_partial does the durable write-through (and documents
+                # the atomicity contract); the closure only mirrors the result onto the in-memory
+                # unwind state. The state update MUST stay here (synchronous with the partial) so an
+                # attach-time crash unwinds with a reapable pid — it cannot move into the helper.
                 nonlocal backend_pid, backend_start, state
-                if label == "backend_process" and isinstance(resource, dict):
-                    backend_process = cast(dict[str, object], resource)
-                    pid_val = backend_process["pid"]
-                    start_val = backend_process.get("start_time")
-                    if not isinstance(pid_val, int) or (start_val is not None and not isinstance(start_val, str)):
-                        return
-                    backend_pid, backend_start = pid_val, start_val
-                    state = replace(state, backend_pid=backend_pid, backend_start=backend_start)
-                    self._registry.write_record(
-                        record.model_copy(update=dict(backend_pid=backend_pid, backend_start_time=backend_start))
-                    )
+                if label != "backend_process":
+                    return
+                result = _write_backend_partial(self._registry, record, resource)
+                if result is None:
+                    return
+                backend_pid, backend_start = result
+                state = replace(state, backend_pid=backend_pid, backend_start=backend_start)
 
             attachment = transport.attach(
                 request,
@@ -378,15 +431,7 @@ class TransportTransaction:
         handle: AdmissionHandle,
     ) -> None:
         # reverse order; each guarded so a partial rollback still completes.
-        if state.backend_pid is not None:
-            proxy = getattr(transport, "_proxy", None)
-            if proxy is not None:
-                # best-effort reap reaching the concrete transport's proxy; a reap failure must
-                # never mask the original error.
-                # TODO: a Transport.reap_backend() hook would avoid the private-attribute reach
-                # (out of scope here — would touch the Transport ABC + Layer-3 impls).
-                with contextlib.suppress(Exception):
-                    proxy.stop_by_identity(state.backend_pid, state.backend_start)
+        _best_effort_reap(transport, state)
         if state.session_id is not None:
             self._tokens.pop(state.session_id, None)
             self._handles.pop(state.session_id, None)  # keep _handles symmetric with _tokens
