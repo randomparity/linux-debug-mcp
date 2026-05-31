@@ -311,30 +311,22 @@ def test_debug_tool_registration_groups_same_shaped_operations() -> None:
     )
 
 
-def test_debug_operation_response_uses_runtime_bundle() -> None:
+def test_debug_operation_handler_builds_runtime_without_pass_through_layers() -> None:
     import inspect
 
     assert debug_operations._debug_operation_response.__module__ == "kdive.debug.operations"
     assert server_module._debug_operation_response is debug_operations._debug_operation_response
     assert hasattr(debug_handlers, "DebugRuntime")
-    params = inspect.signature(debug_handlers.debug_tool_operation_response).parameters
-    response_hints = get_type_hints(debug_handlers.debug_tool_operation_response)
-    assert response_hints["runtime"] is debug_handlers.DebugRuntime
+    assert not hasattr(debug_handlers, "debug_tool_operation_response")
+    assert not hasattr(debug_handlers, "_runtime_from_operation_args")
+    params = inspect.signature(debug_handlers._debug_operation_handler).parameters
+    response_hints = get_type_hints(debug_handlers._debug_operation_handler)
     assert response_hints["request"] is debug_handlers.DebugOperationRequest
-    assert "runtime" in params
     assert "request" in params
+    assert "operation_core" in params
+    assert "runtime" not in params
     assert "operation_name" not in params
     assert "values" not in params
-    for dependency_name in (
-        "debug_profiles",
-        "admission",
-        "transaction",
-        "session_registry",
-        "session_guard",
-        "gdb_mi_engine",
-        "gdb_mi_sessions",
-    ):
-        assert dependency_name not in params
 
 
 def test_debug_operation_handlers_accept_explicit_operation_core(tmp_path: Path) -> None:

@@ -224,45 +224,6 @@ def _default_debug_operation_core(
     )
 
 
-def debug_tool_operation_response(
-    *,
-    request: DebugOperationRequest,
-    artifact_root: Path,
-    run_id: str,
-    debug_session_id: str | None,
-    runtime: DebugRuntime,
-    operation_core: DebugOperationCore = _default_debug_operation_core,
-) -> ToolResponse:
-    return operation_core(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        request=request,
-        runtime=runtime,
-    )
-
-
-def _runtime_from_operation_args(
-    *,
-    debug_profiles: dict[str, DebugProfile] | None,
-    admission: AdmissionService | None,
-    transaction: TransportTransaction | None,
-    session_registry: SessionRegistry | None,
-    session_guard: SessionGuard | None,
-    gdb_mi_engine: GdbMiEngine | None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None,
-) -> DebugRuntime:
-    return debug_runtime_from_handler_args(
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
 def _debug_operation_handler(
     *,
     request: DebugOperationRequest,
@@ -278,21 +239,21 @@ def _debug_operation_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None,
     operation_core: DebugOperationCore,
 ) -> ToolResponse:
-    return debug_tool_operation_response(
-        request=request,
+    runtime = DebugRuntime(
+        debug_profiles=debug_profiles,
+        admission=admission,
+        transaction=transaction,
+        session_registry=session_registry,
+        session_guard=session_guard,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
+    )
+    return operation_core(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        runtime=_runtime_from_operation_args(
-            debug_profiles=debug_profiles,
-            admission=admission,
-            transaction=transaction,
-            session_registry=session_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ),
-        operation_core=operation_core,
+        request=request,
+        runtime=runtime,
     )
 
 
