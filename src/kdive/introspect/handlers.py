@@ -18,6 +18,7 @@ from kdive.config import MAX_INTROSPECT_CALLS_PER_RUN, DebugProfile, RootfsProfi
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.domain import (
+    ArtifactRef,
     DebugIntrospectFromVmcoreHelperRequest,
     DebugIntrospectFromVmcoreRequest,
     DebugIntrospectHelperRequest,
@@ -389,15 +390,44 @@ def _execute_vmcore_introspect_call(
     argv = ["timeout", "--kill-after=2s", f"{request.timeout_seconds}s", "python3", "-"]
     started_at = now()
     started_monotonic = time.monotonic()
-    ssh_result = active_runner.run(
-        argv,
-        timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
-        stdout_path=stdout_path,
-        stderr_path=stderr_path,
-        cancel=threading.Event(),
-        stdin=wrapper,
-        max_stdout_bytes=RUN_STDOUT_CAP,
-    )
+    try:
+        ssh_result = active_runner.run(
+            argv,
+            timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            cancel=threading.Event(),
+            stdin=wrapper,
+            max_stdout_bytes=RUN_STDOUT_CAP,
+        )
+    except Exception as exc:  # noqa: BLE001 - offline boundary: return typed ToolResponse, do not leak raw exceptions
+        duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+        artifacts = [
+            ArtifactRef(path=str(agent_dir / "request.json"), kind="application/json"),
+            ArtifactRef(path=str(agent_dir / "wrapper.skeleton.py"), kind="text/x-python"),
+            ArtifactRef(path=str(sensitive_call_dir / "wrapper.py"), kind="text/x-python", sensitive=True),
+        ]
+        failed = StepResult(
+            step_name=f"introspect:{call_id}",
+            status=StepStatus.FAILED,
+            summary="offline introspection failed before runner finalization",
+            artifacts=artifacts,
+            details={
+                "call_id": call_id,
+                "code": "offline_introspect_failed",
+                "exception_type": type(exc).__name__,
+                "duration_ms": duration_ms,
+            },
+        )
+        _record_terminal_introspect_result(store, run_id, failed)
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="offline introspection failed before runner finalization",
+            details={"code": "offline_introspect_failed", "call_id": call_id, "exception_type": type(exc).__name__},
+            artifacts=[artifact for artifact in artifacts if not artifact.sensitive],
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
     for raw_path in (stdout_path, stderr_path):
         _chmod_best_effort(raw_path, 0o600)
 

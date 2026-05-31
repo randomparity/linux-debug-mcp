@@ -49,6 +49,16 @@ def _triage_reason(resp: ToolResponse) -> str:
     return code if isinstance(code, str) and code else "sub_call_failed"
 
 
+def _triage_subcall_failure(*, run_id: str, code: str, exc: Exception) -> ToolResponse:
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        run_id=run_id,
+        message="postmortem triage subcall failed before returning a tool response",
+        details={"code": code, "exception_type": type(exc).__name__},
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
 def debug_postmortem_triage_handler(
     request: DebugPostmortemTriageRequest,
     *,
@@ -107,37 +117,43 @@ def debug_postmortem_triage_handler(
     started_at = now()
     started_monotonic = time.monotonic()
 
-    crash_resp = crash_handler(
-        DebugPostmortemCrashRequest(
-            run_id=run_id,
-            vmcore_ref=request.vmcore_ref,
-            vmlinux_ref=request.vmlinux_ref,
-            modules_ref=request.modules_ref,
-            commands=list(TRIAGE_CRASH_COMMANDS),
-            timeout_seconds=request.timeout_seconds,
-        ),
-        artifact_root=artifact_root,
-        runner=runner,
-        vmcore_build_id_reader=vmcore_build_id_reader,
-        vmlinux_build_id_reader=vmlinux_build_id_reader,
-        clock=clock,
-    )
-
-    def drgn(name: str) -> ToolResponse:
-        return drgn_helper_handler(
-            DebugIntrospectFromVmcoreHelperRequest(
+    try:
+        crash_resp = crash_handler(
+            DebugPostmortemCrashRequest(
                 run_id=run_id,
                 vmcore_ref=request.vmcore_ref,
                 vmlinux_ref=request.vmlinux_ref,
-                modules_ref=None,
-                name=name,
+                modules_ref=request.modules_ref,
+                commands=list(TRIAGE_CRASH_COMMANDS),
                 timeout_seconds=request.timeout_seconds,
             ),
             artifact_root=artifact_root,
             runner=runner,
-            build_id_reader=vmlinux_build_id_reader,
+            vmcore_build_id_reader=vmcore_build_id_reader,
+            vmlinux_build_id_reader=vmlinux_build_id_reader,
             clock=clock,
         )
+    except Exception as exc:  # noqa: BLE001 - triage boundary normalizes subcall exceptions
+        crash_resp = _triage_subcall_failure(run_id=run_id, code="postmortem_crash_failed", exc=exc)
+
+    def drgn(name: str) -> ToolResponse:
+        try:
+            return drgn_helper_handler(
+                DebugIntrospectFromVmcoreHelperRequest(
+                    run_id=run_id,
+                    vmcore_ref=request.vmcore_ref,
+                    vmlinux_ref=request.vmlinux_ref,
+                    modules_ref=None,
+                    name=name,
+                    timeout_seconds=request.timeout_seconds,
+                ),
+                artifact_root=artifact_root,
+                runner=runner,
+                build_id_reader=vmlinux_build_id_reader,
+                clock=clock,
+            )
+        except Exception as exc:  # noqa: BLE001 - triage boundary normalizes subcall exceptions
+            return _triage_subcall_failure(run_id=run_id, code="offline_introspect_failed", exc=exc)
 
     dmesg_resp = drgn(TRIAGE_DMESG_HELPER)
     modules_resp = drgn(TRIAGE_MODULES_HELPER)

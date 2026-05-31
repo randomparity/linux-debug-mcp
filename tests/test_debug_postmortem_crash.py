@@ -8,6 +8,7 @@ from kdive.artifacts.store import ArtifactStore
 from kdive.domain import (
     ErrorCategory,
     RunRequest,
+    StepStatus,
 )
 from kdive.postmortem.models import DebugPostmortemCrashRequest
 from kdive.providers.local.local_ssh_tests import SshCommandResult
@@ -62,6 +63,11 @@ class _FakeRunner:
         return SshCommandResult(exit_status=self.exit_status, **self.flags)
 
 
+class _RaisingRunner:
+    def run(self, *args, **kwargs):
+        raise OSError("crash unavailable")
+
+
 def test_happy_path_keys_results_by_command(tmp_path) -> None:
     store = _run(tmp_path)
     runner = _FakeRunner(outputs={0: "KERNEL: vmlinux\nRELEASE: 6.1.0\n", 1: "raw text"})
@@ -81,6 +87,34 @@ def test_happy_path_keys_results_by_command(tmp_path) -> None:
     assert resp.data["results"]["sys"]["system"]["RELEASE"] == "6.1.0"
     assert resp.data["results"]["vtop 0x0"]["parsed"] is False
     assert any(name.startswith("postmortem.crash:") for name in store.load_manifest("r1").step_results)
+
+
+def test_runner_exception_records_failed_crash_step(tmp_path) -> None:
+    store = _run(tmp_path)
+    resp = debug_postmortem_crash_handler(
+        DebugPostmortemCrashRequest(
+            run_id="r1",
+            vmcore_ref="inputs/vmcore",
+            vmlinux_ref="build/vmlinux",
+            commands=["sys"],
+        ),
+        artifact_root=tmp_path,
+        runner=_RaisingRunner(),
+        vmcore_build_id_reader=lambda _p: GOOD_ID,
+        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+    )
+
+    assert resp.ok is False
+    assert resp.error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert resp.error.details["code"] == "postmortem_crash_failed"
+    assert resp.error.details["exception_type"] == "OSError"
+    result = next(
+        result
+        for name, result in store.load_manifest("r1").step_results.items()
+        if name.startswith("postmortem.crash:")
+    )
+    assert result.status is StepStatus.FAILED
+    assert result.details["code"] == "postmortem_crash_failed"
 
 
 def test_raw_output_files_are_mode_0600(tmp_path) -> None:

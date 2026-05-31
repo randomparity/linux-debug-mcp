@@ -52,6 +52,11 @@ class _Recorder:
         return self.response
 
 
+class _RaisingHandler:
+    def __call__(self, *args, **kwargs):
+        raise OSError("subcall failed")
+
+
 def _crash_ok() -> ToolResponse:
     return ToolResponse.success(
         summary="crash",
@@ -72,6 +77,24 @@ def _drgn_ok(payload: dict) -> ToolResponse:
 
 def _dispatch(dmesg: _Recorder, modules: _Recorder):
     return lambda req, **kw: (dmesg if req.name == "dmesg" else modules)(req, **kw)
+
+
+def test_triage_subcall_exception_becomes_section_failure(tmp_path: Path) -> None:
+    _run(tmp_path)
+    resp = debug_postmortem_triage_handler(
+        DebugPostmortemTriageRequest(run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux"),
+        artifact_root=tmp_path,
+        vmcore_build_id_reader=lambda _p: GOOD_ID,
+        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        crash_handler=_RaisingHandler(),
+        drgn_helper_handler=_RaisingHandler(),
+    )
+
+    assert resp.ok is False
+    assert resp.error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert resp.error.details["code"] == "triage_all_sources_failed"
+    assert resp.error.details["section_reasons"]["panic_reason"] == "postmortem_crash_failed"
+    assert resp.error.details["section_reasons"]["recent_dmesg"] == "offline_introspect_failed"
 
 
 def test_happy_path_full_report(tmp_path) -> None:

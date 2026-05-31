@@ -97,6 +97,11 @@ class FakeRunner:
         return result
 
 
+class RaisingRunner:
+    def run(self, *args, **kwargs):
+        raise OSError("disk full")
+
+
 def _run(tmp_path: Path) -> ArtifactStore:
     store = ArtifactStore(artifact_root=tmp_path)
     store.create_run(
@@ -114,6 +119,31 @@ def _run(tmp_path: Path) -> ArtifactStore:
     (rd / "inputs" / "vmcore").write_bytes(b"core")
     (rd / "build" / "vmlinux").write_bytes(b"elf")
     return store
+
+
+def test_from_vmcore_runner_exception_records_failed_step(tmp_path: Path) -> None:
+    store = _run(tmp_path)
+    resp = debug_introspect_from_vmcore_handler(
+        DebugIntrospectFromVmcoreRequest(
+            run_id="r1",
+            vmcore_ref="inputs/vmcore",
+            vmlinux_ref="build/vmlinux",
+            script="print(1)",
+        ),
+        artifact_root=tmp_path,
+        runner=RaisingRunner(),
+        build_id_reader=lambda _p: VALID,
+    )
+
+    assert resp.ok is False
+    assert resp.error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert resp.error.details["code"] == "offline_introspect_failed"
+    assert resp.error.details["exception_type"] == "OSError"
+    result = next(
+        result for name, result in store.load_manifest("r1").step_results.items() if name.startswith("introspect:")
+    )
+    assert result.status is StepStatus.FAILED
+    assert result.details["code"] == "offline_introspect_failed"
 
 
 def _wrapper_json(build_id: str | None = VALID, status: str = "ok", emits=None, user_stdout: str = "") -> dict:

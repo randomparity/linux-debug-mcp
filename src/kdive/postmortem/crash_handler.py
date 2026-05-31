@@ -245,15 +245,40 @@ def debug_postmortem_crash_handler(
     ]
     started_at = now()
     started_monotonic = time.monotonic()
-    ssh_result = active_runner.run(
-        argv,
-        timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
-        stdout_path=stdout_path,
-        stderr_path=stderr_path,
-        cancel=threading.Event(),
-        stdin=cmd_script,
-        max_stdout_bytes=CRASH_STDOUT_CAP,
-    )
+    try:
+        ssh_result = active_runner.run(
+            argv,
+            timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            cancel=threading.Event(),
+            stdin=cmd_script,
+            max_stdout_bytes=CRASH_STDOUT_CAP,
+        )
+    except Exception as exc:  # noqa: BLE001 - offline boundary: return typed ToolResponse, do not leak raw exceptions
+        duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+        artifacts = [ArtifactRef(path=str(agent_dir / "request.json"), kind="application/json")]
+        failed = StepResult(
+            step_name=f"postmortem.crash:{call_id}",
+            status=StepStatus.FAILED,
+            summary="postmortem crash failed before runner finalization",
+            artifacts=artifacts,
+            details={
+                "call_id": call_id,
+                "code": "postmortem_crash_failed",
+                "exception_type": type(exc).__name__,
+                "duration_ms": duration_ms,
+            },
+        )
+        _record_terminal_crash_result(store, run_id, failed)
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="postmortem crash failed before runner finalization",
+            details={"code": "postmortem_crash_failed", "call_id": call_id, "exception_type": type(exc).__name__},
+            artifacts=artifacts,
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
     # The per-command output files are written by the crash child at its own
     # umask (commonly 0644) and carry raw, unredacted guest memory; tighten them
     # (and stdout/stderr) to 0600 so they match the sensitive/ 0700 discipline.
