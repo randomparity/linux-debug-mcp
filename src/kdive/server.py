@@ -6237,6 +6237,23 @@ def _fence_legacy_debug_session(
     )
 
 
+def _enforce_debug_ownership_fence(
+    *,
+    run_id: str,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+) -> None:
+    """Single enforcement point for the debug.* ownership fence (Finding F8 / TD-10). Every debug.*
+    path that connects gdb funnels the choice through here so it cannot drift between call sites: a
+    stateful mutating op (admission wired) runs the legacy fence — which tombstones and refuses a
+    legacy session — while a read/probe path (no admission) runs the lighter Layer-4 ownership
+    assertion. Both raise ProviderDebugError on a legacy session with no durable record."""
+    if admission is not None:
+        _fence_legacy_debug_session(run_id=run_id, admission=admission, session_registry=session_registry)
+    else:
+        _assert_layer4_ownership(run_id=run_id, session_registry=session_registry)
+
+
 # Stateful debug.* ops whose effect changes the persisted breakpoint ledger; after each, the ledger
 # is rebuilt from gdb's authoritative -break-list so the manifest matches the engine.
 # Derived from DEBUG_METHOD_OPERATIONS so a new breakpoint/watchpoint op cannot drift out of sync
@@ -6412,6 +6429,151 @@ def _preserved_debug_step_details(store: ArtifactStore, run_id: str) -> dict[str
     return {key: existing.details[key] for key in ("transport_session_id", "mi_probe") if key in existing.details}
 
 
+def _run_debug_engine_op(
+    *,
+    engine: GdbMiEngine,
+    gdb_mi_sessions: GdbMiSessionRegistry,
+    attachment: GdbMiAttachment,
+    session: DebugSession,
+    method_name: str,
+    kwargs: dict[str, object],
+    redactor: Redactor,
+    artifact_root: Path,
+    run_id: str,
+    transaction: TransportTransaction | None,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+    session_guard: SessionGuard | None,
+) -> tuple[dict[str, object], DebugSession] | ToolResponse:
+    """Run one debug.* op on the live attachment and rebuild the breakpoint ledger after a mutator
+    (TD-09 — extracted from ``_debug_operation_response`` so the handler stays under the size limit).
+
+    Returns ``(op_data, updated_session)`` on success. Returns a ``ToolResponse`` for the two cases
+    that abort the op while keeping the handler structure: a ``transport_stall`` GdbMiError (the RSP
+    link is dead — reap + force_resume + tear the transport down here inside debug_lock) and an
+    ``InjectBreakError``. A benign GdbMiError / ProviderDebugError is re-raised for the caller's outer
+    handler; any other exception reaps the unusable attachment and returns a structured failure."""
+    try:
+        if method_name == "interrupt":
+            data = _interrupt_op_data(
+                engine=engine,
+                attachment=attachment,
+                transport_session=_lookup_transport_session(
+                    session_registry=session_registry,
+                    artifact_root=artifact_root,
+                    run_id=run_id,
+                    transaction=transaction,
+                ),
+                transaction=transaction,
+            )
+        else:
+            data = _engine_op_data(engine=engine, attachment=attachment, method_name=method_name, kwargs=kwargs)
+        updated_session = session
+        if method_name in _BREAKPOINT_MUTATORS:
+            ledger = {ref.number: ref.model_dump(mode="json") for ref in engine.list_breakpoints(attachment)}
+            updated_session = session.model_copy(update={"breakpoints": ledger})
+        return data, updated_session
+    except GdbMiError as exc:
+        if exc.details.get("code") == "transport_stall":
+            reaped = gdb_mi_sessions.reap(session.session_id)
+            if reaped is not None:
+                with contextlib.suppress(Exception):
+                    engine.force_resume(reaped)
+            _teardown_stalled_debug_session(
+                run_id=run_id,
+                admission=admission,
+                session_registry=session_registry,
+                transaction=transaction,
+                session_guard=session_guard,
+            )
+            return ToolResponse.failure(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                message=redactor.redact_text(str(exc)),
+                run_id=run_id,
+                details={"code": "transport_stall"},
+                suggested_next_actions=["debug.start_session", "debug.kdb", "debug.introspect.run"],
+            )
+        raise
+    except InjectBreakError as exc:
+        return ToolResponse.failure(
+            category=exc.category,
+            message=redactor.redact_text(str(exc)),
+            run_id=run_id,
+            details=redactor.redact_value(exc.details),
+            suggested_next_actions=["debug.kdb", "debug.introspect.run", "artifacts.get_manifest"],
+        )
+    except ProviderDebugError:
+        raise
+    except Exception as exc:
+        reaped = gdb_mi_sessions.reap(session.session_id)
+        if reaped is not None:
+            with contextlib.suppress(Exception):
+                engine.force_resume(reaped)
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            message=redactor.redact_text(f"the gdb/MI engine faulted during debug.{method_name}: {exc}"),
+            run_id=run_id,
+            details={"code": "debug_engine_faulted"},
+            suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
+        )
+
+
+def _persist_debug_op_details(
+    *, store: ArtifactStore, run_id: str, method_name: str, session: DebugSession, data: dict[str, object]
+) -> dict[str, object]:
+    """Persist the post-op DebugSession + a SUCCEEDED ``debug`` step, returning the merged details
+    (manifest details + preserved step details + op data). Extracted from _debug_operation_response
+    (TD-09)."""
+    _persist_mi_debug_session(store=store, run_id=run_id, session=session)
+    details = {
+        **_debug_session_manifest_details(store=store, run_id=run_id, session=session),
+        **_preserved_debug_step_details(store, run_id),
+        **data,
+    }
+    terminal = StepResult(
+        step_name="debug",
+        status=StepStatus.SUCCEEDED,
+        summary=f"debug.{method_name} succeeded",
+        artifacts=_mi_session_artifacts(store=store, run_id=run_id, session=session),
+        details=details,
+    )
+    store.record_step_result(run_id, terminal, replace_succeeded=True)
+    return details
+
+
+def _map_debug_op_exception(exc: Exception, *, run_id: str, method_name: str, redactor: Redactor) -> ToolResponse:
+    """Map the terminal exceptions of _debug_operation_response's op block to a structured failure
+    (TD-09), preserving the original per-type handling order."""
+    if isinstance(exc, ManifestStateError):
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    if isinstance(exc, ProviderDebugError):
+        return ToolResponse.failure(
+            category=exc.category,
+            message=redactor.redact_text(str(exc)),
+            run_id=run_id,
+            details=redactor.redact_value(exc.details),
+            artifacts=_redacted_artifacts(exc.artifacts, redactor),
+            suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+        )
+    if isinstance(exc, GdbMiError):
+        return ToolResponse.failure(
+            category=exc.category,
+            message=redactor.redact_text(str(exc)),
+            run_id=run_id,
+            details=redactor.redact_value(exc.details),
+            suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+        )
+    # OSError: the engine op already ran (live session healthy); only persist/record bookkeeping
+    # faulted. Surface a structured failure WITHOUT reaping — the caller can retry the op.
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        message=redactor.redact_text(f"failed to record debug.{method_name}: {exc}"),
+        run_id=run_id,
+        details={"code": "debug_session_op_record_failed"},
+        suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
+    )
+
+
 def _debug_operation_response(
     *,
     artifact_root: Path,
@@ -6454,10 +6616,7 @@ def _debug_operation_response(
             # ownership assertion, so a legacy session can never silently halt the kernel as a side
             # effect of `target remote` against a run target.run_tests is unaware of. This runs BEFORE
             # the live-attachment lookup (ADR 0021 fence-then-lookup).
-            if admission is not None:
-                _fence_legacy_debug_session(run_id=run_id, admission=admission, session_registry=session_registry)
-            else:
-                _assert_layer4_ownership(run_id=run_id, session_registry=session_registry)
+            _enforce_debug_ownership_fence(run_id=run_id, admission=admission, session_registry=session_registry)
             profile = _resolve_debug_profile(
                 profile_name=session.selected_debug_profile,
                 debug_profiles=debug_profiles,
@@ -6465,133 +6624,36 @@ def _debug_operation_response(
             _ensure_debug_operation_enabled(profile, DEBUG_METHOD_OPERATIONS[method_name])
             attachment = gdb_mi_sessions.require(session.session_id)
             # Every engine interaction for this op — the op itself AND the post-mutator ledger rebuild
-            # (-break-list) — shares one guard: a raw non-protocol fault (dead gdb pipe / crashed
-            # engine) reaps the unusable attachment, best-effort un-halts the kernel, and returns a
-            # structured failure (defence-in-depth matching start_session's guaranteed-resume
-            # teardown). A GdbMiError means gdb answered (alive) — keep the session, surface it below.
-            try:
-                if method_name == "interrupt":
-                    # ADR 0024: break entry routes off the admitted break_plan, not a hardcoded
-                    # method. Native (the loopback QEMU default) interrupts the inferior directly;
-                    # any other admitted method is injected over the console via the transaction.
-                    data = _interrupt_op_data(
-                        engine=gdb_mi_engine,
-                        attachment=attachment,
-                        transport_session=_lookup_transport_session(
-                            session_registry=session_registry,
-                            artifact_root=artifact_root,
-                            run_id=run_id,
-                            transaction=transaction,
-                        ),
-                        transaction=transaction,
-                    )
-                else:
-                    data = _engine_op_data(
-                        engine=gdb_mi_engine, attachment=attachment, method_name=method_name, kwargs=kwargs
-                    )
-                updated_session = session
-                if method_name in _BREAKPOINT_MUTATORS:
-                    ledger = {
-                        ref.number: ref.model_dump(mode="json") for ref in gdb_mi_engine.list_breakpoints(attachment)
-                    }
-                    updated_session = session.model_copy(update={"breakpoints": ledger})
-            except GdbMiError as exc:
-                # A transport_stall means the RSP link is dead (ADR 0023): unlike a benign GdbMiError
-                # (bad symbol), the session cannot make progress, so reap + force_resume + tear the
-                # transport down here INSIDE debug_lock (no concurrent op can require() the stalled
-                # attachment), then return a structured INFRASTRUCTURE_FAILURE routing the agent to
-                # re-attach. Every other GdbMiError stays contained (re-raised, session kept).
-                if exc.details.get("code") == "transport_stall":
-                    reaped = gdb_mi_sessions.reap(session.session_id)
-                    if reaped is not None:
-                        with contextlib.suppress(Exception):
-                            gdb_mi_engine.force_resume(reaped)
-                    _teardown_stalled_debug_session(
-                        run_id=run_id,
-                        admission=admission,
-                        session_registry=session_registry,
-                        transaction=transaction,
-                        session_guard=session_guard,
-                    )
-                    return ToolResponse.failure(
-                        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                        message=redactor.redact_text(str(exc)),
-                        run_id=run_id,
-                        details={"code": "transport_stall"},
-                        suggested_next_actions=["debug.start_session", "debug.kdb", "debug.introspect.run"],
-                    )
-                raise
-            except InjectBreakError as exc:
-                # The admitted break plan could not be injected (no break handle on this transport,
-                # or a requested method that does not match the plan). The live attachment is
-                # healthy — keep it, surface a CONFIGURATION_ERROR with the mechanism's own details.
-                return ToolResponse.failure(
-                    category=exc.category,
-                    message=redactor.redact_text(str(exc)),
-                    run_id=run_id,
-                    details=redactor.redact_value(exc.details),
-                    suggested_next_actions=["debug.kdb", "debug.introspect.run", "artifacts.get_manifest"],
-                )
-            except ProviderDebugError:
-                raise
-            except Exception as exc:
-                reaped = gdb_mi_sessions.reap(session.session_id)
-                if reaped is not None:
-                    with contextlib.suppress(Exception):
-                        gdb_mi_engine.force_resume(reaped)
-                return ToolResponse.failure(
-                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                    message=redactor.redact_text(f"the gdb/MI engine faulted during debug.{method_name}: {exc}"),
-                    run_id=run_id,
-                    details={"code": "debug_engine_faulted"},
-                    suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
-                )
+            # (-break-list) — shares one guard (inside debug_lock, no concurrent op can require() a
+            # stalled attachment). _run_debug_engine_op returns a ToolResponse for the abort cases
+            # (transport_stall / inject-break) and (data, session) on success; a benign
+            # GdbMiError/ProviderDebugError propagates to the outer handler below.
+            op_result = _run_debug_engine_op(
+                engine=gdb_mi_engine,
+                gdb_mi_sessions=gdb_mi_sessions,
+                attachment=attachment,
+                session=session,
+                method_name=method_name,
+                kwargs=kwargs,
+                redactor=redactor,
+                artifact_root=artifact_root,
+                run_id=run_id,
+                transaction=transaction,
+                admission=admission,
+                session_registry=session_registry,
+                session_guard=session_guard,
+            )
+            if isinstance(op_result, ToolResponse):
+                return op_result
+            data, updated_session = op_result
             if persist_manifest:
-                _persist_mi_debug_session(store=store, run_id=run_id, session=updated_session)
-                details = {
-                    **_debug_session_manifest_details(store=store, run_id=run_id, session=updated_session),
-                    **_preserved_debug_step_details(store, run_id),
-                    **data,
-                }
-                terminal = StepResult(
-                    step_name="debug",
-                    status=StepStatus.SUCCEEDED,
-                    summary=f"debug.{method_name} succeeded",
-                    artifacts=_mi_session_artifacts(store=store, run_id=run_id, session=updated_session),
-                    details=details,
+                details = _persist_debug_op_details(
+                    store=store, run_id=run_id, method_name=method_name, session=updated_session, data=data
                 )
-                store.record_step_result(run_id, terminal, replace_succeeded=True)
             else:
                 details = data
-    except ManifestStateError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-    except ProviderDebugError as exc:
-        return ToolResponse.failure(
-            category=exc.category,
-            message=redactor.redact_text(str(exc)),
-            run_id=run_id,
-            details=redactor.redact_value(exc.details),
-            artifacts=_redacted_artifacts(exc.artifacts, redactor),
-            suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
-        )
-    except GdbMiError as exc:
-        return ToolResponse.failure(
-            category=exc.category,
-            message=redactor.redact_text(str(exc)),
-            run_id=run_id,
-            details=redactor.redact_value(exc.details),
-            suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
-        )
-    except OSError as exc:
-        # The engine op already ran (the live session is healthy); only the persist/record bookkeeping
-        # faulted. Surface a structured failure WITHOUT reaping — the caller can retry the op.
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            message=redactor.redact_text(f"failed to record debug.{method_name}: {exc}"),
-            run_id=run_id,
-            details={"code": "debug_session_op_record_failed"},
-            suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
-        )
+    except (ManifestStateError, ProviderDebugError, GdbMiError, OSError) as exc:
+        return _map_debug_op_exception(exc, run_id=run_id, method_name=method_name, redactor=redactor)
 
     op_artifacts = _mi_session_artifacts(store=store, run_id=run_id, session=updated_session)
     return ToolResponse.success(
@@ -6885,10 +6947,7 @@ def debug_load_module_symbols_handler(
     try:
         with store.debug_lock(run_id):
             session = _load_active_debug_session(store, run_id, debug_session_id)
-            if admission is not None:
-                _fence_legacy_debug_session(run_id=run_id, admission=admission, session_registry=session_registry)
-            else:
-                _assert_layer4_ownership(run_id=run_id, session_registry=session_registry)
+            _enforce_debug_ownership_fence(run_id=run_id, admission=admission, session_registry=session_registry)
             profile = _resolve_debug_profile(profile_name=session.selected_debug_profile, debug_profiles=debug_profiles)
             _ensure_debug_operation_enabled(profile, "debug.load_module_symbols")
             if not _MODULE_NAME_RE.match(module):
