@@ -257,13 +257,6 @@ _target_python_remote_argv = _INTROSPECT_TARGET_PYTHON_REMOTE_ARGV
 CreateRunContext = kernel_tools.CreateRunContext
 CreateRunOptions = kernel_tools.CreateRunOptions
 CreateRunProfiles = kernel_tools.CreateRunProfiles
-KernelBuildContext = kernel_tools.KernelBuildContext
-KernelBuildOptions = kernel_tools.KernelBuildOptions
-TargetBootContext = target_tools.TargetBootContext
-TargetBootOptions = target_tools.TargetBootOptions
-TargetBootProfiles = target_tools.TargetBootProfiles
-TargetRunContext = target_tools.TargetRunContext
-TargetRunOptions = target_tools.TargetRunOptions
 
 _RequiredT = TypeVar("_RequiredT")
 
