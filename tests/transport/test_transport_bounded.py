@@ -1,7 +1,6 @@
 import socket
 import sys
 import threading
-import time
 
 import pytest
 
@@ -19,10 +18,12 @@ from kdive.transport.bounded import (
 
 
 def test_deadline_remaining_decreases_and_expires():
-    deadline = Deadline.after(0.05)
-    assert deadline.remaining() > 0
+    now = 100.0
+    deadline = Deadline.after(0.05, clock=lambda: now)
+    assert deadline.remaining() == pytest.approx(0.05)
     assert not deadline.expired()
-    time.sleep(0.06)
+
+    now = 100.06
     assert deadline.remaining() == 0.0
     assert deadline.expired()
 

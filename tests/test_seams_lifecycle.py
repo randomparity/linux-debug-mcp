@@ -1,5 +1,5 @@
 import threading
-import time
+from pathlib import Path
 
 from kdive.seams.lifecycle import (
     InProcessLifecycleDispatcher,
@@ -14,6 +14,24 @@ from kdive.seams.target import TargetKey
 
 def _key(target_id: str = "run-1", provisioner: str = "local-qemu") -> TargetKey:
     return TargetKey(provisioner=provisioner, target_id=target_id)
+
+
+def test_lifecycle_tests_use_event_handshakes_instead_of_sleep() -> None:
+    source = Path(__file__).read_text(encoding="utf-8")
+
+    assert "time" + ".sleep(" not in source
+
+
+class _BlockingInvalidation:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def wait_until_started(self) -> None:
+        assert self.started.wait(timeout=5)
+
+    def unblock(self) -> None:
+        self.release.set()
 
 
 class _RecordingSubscriber:
@@ -39,21 +57,26 @@ class _RaisingSubscriber:
 
 class _StuckSubscriber:
     def __init__(self) -> None:
+        self.block = _BlockingInvalidation()
         self.force_dropped = threading.Event()
 
     def invalidate(self, event: LifecycleEvent, deadline: float) -> None:
-        time.sleep(60)  # never returns within the deadline (contract violation)
+        self.block.started.set()
+        self.block.release.wait()
 
     def force_drop(self, event: LifecycleEvent) -> None:
         self.force_dropped.set()  # release recorded resources, independently of invalidate
 
 
 class _SlowButFinishingSubscriber:
-    def __init__(self, sleep_for: float) -> None:
-        self._sleep_for = sleep_for
+    def __init__(self) -> None:
+        self.block = _BlockingInvalidation()
+        self.finished = threading.Event()
 
     def invalidate(self, event: LifecycleEvent, deadline: float) -> None:
-        time.sleep(self._sleep_for)  # overruns the deadline but eventually finishes
+        self.block.started.set()
+        self.block.release.wait()
+        self.finished.set()
 
     def force_drop(self, event: LifecycleEvent) -> None:
         pass
@@ -111,14 +134,15 @@ def test_stuck_subscriber_is_abandoned_and_emit_returns_within_deadline():
     stuck, good = _StuckSubscriber(), _RecordingSubscriber()
     dispatcher.subscribe(_key(), "stuck", stuck)
     dispatcher.subscribe(_key(), "good", good)
-    start = time.monotonic()
-    result = dispatcher.emit(LifecycleEvent(target_key=_key(), kind=LifecycleKind.CRASHED))
-    elapsed = time.monotonic() - start
-    assert elapsed < 2.0  # bounded by the deadline, not the 60s sleep
-    assert "stuck" in result.overdue
-    assert stuck.force_dropped.is_set()  # force_drop was invoked on the overdue subscriber
-    assert "stuck" in result.force_dropped
-    assert good.events  # the transition completed for the healthy subscriber
+    try:
+        result = dispatcher.emit(LifecycleEvent(target_key=_key(), kind=LifecycleKind.CRASHED))
+        stuck.block.wait_until_started()
+        assert "stuck" in result.overdue
+        assert stuck.force_dropped.is_set()  # force_drop was invoked on the overdue subscriber
+        assert "stuck" in result.force_dropped
+        assert good.events  # the transition completed for the healthy subscriber
+    finally:
+        stuck.block.unblock()
 
 
 def test_force_drop_releases_externally_held_resources_when_invalidate_wedges():
@@ -129,31 +153,40 @@ def test_force_drop_releases_externally_held_resources_when_invalidate_wedges():
 
     lease = ConsoleLease(_key())
     lease.acquire(LeaseOwner.TRANSPORT)
+    block = _BlockingInvalidation()
 
     class _WedgedOwner:
         def invalidate(self, event: LifecycleEvent, deadline: float) -> None:
-            time.sleep(60)  # wedges before it can release the lease itself
+            block.started.set()
+            block.release.wait()
 
         def force_drop(self, event: LifecycleEvent) -> None:
             lease.revoke()  # releases the out-of-band resource the subscriber owned
 
     dispatcher = InProcessLifecycleDispatcher(teardown_deadline=0.2)
     dispatcher.subscribe(_key(), "owner", _WedgedOwner())
-    result = dispatcher.emit(LifecycleEvent(target_key=_key(), kind=LifecycleKind.CRASHED))
-    assert "owner" in result.overdue
-    assert "owner" in result.force_dropped
-    assert lease.snapshot()[0] is LeaseOwner.FREE  # the line was dropped despite the wedge
+    try:
+        result = dispatcher.emit(LifecycleEvent(target_key=_key(), kind=LifecycleKind.CRASHED))
+        block.wait_until_started()
+        assert "owner" in result.overdue
+        assert "owner" in result.force_dropped
+        assert lease.snapshot()[0] is LeaseOwner.FREE  # the line was dropped despite the wedge
+    finally:
+        block.unblock()
 
 
 def test_overdue_worker_is_observable_then_pruned_when_it_finishes():
     # CPython cannot kill the abandoned worker, so it is tracked as observable overdue state;
     # once a (slow-but-finishing) subscriber completes, the count prunes back to 0.
     dispatcher = InProcessLifecycleDispatcher(teardown_deadline=0.2)
-    dispatcher.subscribe(_key(), "slow", _SlowButFinishingSubscriber(sleep_for=0.6))
+    slow = _SlowButFinishingSubscriber()
+    dispatcher.subscribe(_key(), "slow", slow)
     result = dispatcher.emit(LifecycleEvent(target_key=_key(), kind=LifecycleKind.CRASHED))
+    slow.block.wait_until_started()
     assert "slow" in result.overdue
     assert dispatcher.outstanding_overdue() >= 1  # abandoned worker still running
-    time.sleep(0.7)  # let it finish
+    slow.block.unblock()
+    assert slow.finished.wait(timeout=5)
     assert dispatcher.outstanding_overdue() == 0  # pruned -> no permanent accumulation
 
 
@@ -173,13 +206,20 @@ def test_single_flight_caps_workers_for_a_permanently_stuck_subscriber():
     # stuck thread each time: it is tracked single-flight by (TargetKey, name) and not
     # re-invoked while still overdue, so worker count stays bounded at one.
     dispatcher = InProcessLifecycleDispatcher(teardown_deadline=0.1)
-    dispatcher.subscribe(_key(), "stuck", _StuckSubscriber())
-    for _ in range(5):
-        result = dispatcher.emit(LifecycleEvent(target_key=_key(), kind=LifecycleKind.CRASHED))
-        assert "stuck" in result.overdue
-    assert dispatcher.outstanding_overdue() == 1  # not 5
-    overdue = dispatcher.overdue_subscribers()
-    assert overdue == {OverdueSubscriber(target_key=_key(), name="stuck", instance_id=next(iter(overdue)).instance_id)}
+    stuck = _StuckSubscriber()
+    dispatcher.subscribe(_key(), "stuck", stuck)
+    try:
+        for _ in range(5):
+            result = dispatcher.emit(LifecycleEvent(target_key=_key(), kind=LifecycleKind.CRASHED))
+            assert "stuck" in result.overdue
+        stuck.block.wait_until_started()
+        assert dispatcher.outstanding_overdue() == 1  # not 5
+        overdue = dispatcher.overdue_subscribers()
+        assert overdue == {
+            OverdueSubscriber(target_key=_key(), name="stuck", instance_id=next(iter(overdue)).instance_id)
+        }
+    finally:
+        stuck.block.unblock()
 
 
 def test_new_subscriber_under_a_reused_overdue_name_is_still_torn_down():
@@ -191,16 +231,22 @@ def test_new_subscriber_under_a_reused_overdue_name_is_still_torn_down():
     dispatcher.emit(LifecycleEvent(target_key=_key(), kind=LifecycleKind.CRASHED))  # "s" now overdue
     fresh = _StuckSubscriber()
     dispatcher.subscribe(_key(), "s", fresh)  # reuse the name with a NEW instance
-    result = dispatcher.emit(LifecycleEvent(target_key=_key(), kind=LifecycleKind.CRASHED))
-    assert fresh.force_dropped.is_set()  # the new binding was torn down, not skipped
-    assert "s" in result.overdue
-    # BOTH wedged instances stay observable as DISTINCT records (the reaper can act on each);
-    # the new entry never overwrote/hid the old one, and identity is not collapsed by name.
-    assert dispatcher.outstanding_overdue() == 2
-    overdue = dispatcher.overdue_subscribers()
-    assert len(overdue) == 2
-    assert {o.name for o in overdue} == {"s"}
-    assert {o.instance_id for o in overdue} == {id(first), id(fresh)}  # distinct per-instance ids
+    try:
+        first.block.wait_until_started()
+        result = dispatcher.emit(LifecycleEvent(target_key=_key(), kind=LifecycleKind.CRASHED))
+        fresh.block.wait_until_started()
+        assert fresh.force_dropped.is_set()  # the new binding was torn down, not skipped
+        assert "s" in result.overdue
+        # BOTH wedged instances stay observable as DISTINCT records (the reaper can act on each);
+        # the new entry never overwrote/hid the old one, and identity is not collapsed by name.
+        assert dispatcher.outstanding_overdue() == 2
+        overdue = dispatcher.overdue_subscribers()
+        assert len(overdue) == 2
+        assert {o.name for o in overdue} == {"s"}
+        assert {o.instance_id for o in overdue} == {id(first), id(fresh)}  # distinct per-instance ids
+    finally:
+        first.block.unblock()
+        fresh.block.unblock()
 
 
 def test_subscriber_teardown_side_effect_is_token_fenced():
@@ -253,7 +299,7 @@ def test_concurrent_emits_start_one_invalidate_per_subscriber_instance():
         def invalidate(self, event: LifecycleEvent, deadline: float) -> None:
             with starts_lock:
                 starts.append(1)
-            release.wait(30)  # wedge past the deadline; freed only at test teardown
+            release.wait()
 
         def force_drop(self, event: LifecycleEvent) -> None:
             self.force_dropped.set()

@@ -7,7 +7,7 @@ import stat
 import subprocess  # nosec B404
 import threading
 import time
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 
 
@@ -24,13 +24,14 @@ class Deadline:
     """A monotonic deadline. `remaining()` never goes negative."""
 
     at: float
+    clock: Callable[[], float] = time.monotonic
 
     @classmethod
-    def after(cls, seconds: float) -> Deadline:
-        return cls(time.monotonic() + seconds)
+    def after(cls, seconds: float, *, clock: Callable[[], float] = time.monotonic) -> Deadline:
+        return cls(clock() + seconds, clock=clock)
 
     def remaining(self) -> float:
-        return max(0.0, self.at - time.monotonic())
+        return max(0.0, self.at - self.clock())
 
     def expired(self) -> bool:
         return self.remaining() <= 0.0
