@@ -69,7 +69,9 @@ def _target_python_remote_argv(*, timeout_seconds: int, use_sudo: bool) -> list[
     return argv
 
 
-def _record_step_with_retry(store: ArtifactStore, run_id: str, result: StepResult, *, append: bool = False) -> None:
+def _record_introspect_step_with_retry(
+    store: ArtifactStore, run_id: str, result: StepResult, *, append: bool = False
+) -> None:
     delay_seconds = 0.01
     for attempt in range(5):
         try:
@@ -137,7 +139,7 @@ def _chmod_best_effort(path: Path, mode: int) -> None:
 
 def _record_terminal_introspect_result(store: ArtifactStore, run_id: str, result: StepResult) -> None:
     # Spec §5.2 step 13: every introspect:<call_id> is a fresh entry (UUIDv4) — append, never replace.
-    _record_step_with_retry(store, run_id, result, append=True)
+    _record_introspect_step_with_retry(store, run_id, result, append=True)
 
 
 def _record_introspect_failure(

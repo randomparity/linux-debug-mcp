@@ -52,7 +52,7 @@ def _chmod_best_effort(path: Path, mode: int) -> None:
         path.chmod(mode)
 
 
-def _record_step_with_retry(
+def _record_postmortem_crash_step_with_retry(
     store: ArtifactStore,
     run_id: str,
     result: StepResult,
@@ -74,7 +74,7 @@ def _record_step_with_retry(
 
 
 def _record_terminal_crash_result(store: ArtifactStore, run_id: str, result: StepResult) -> None:
-    _record_step_with_retry(store, run_id, result, append=True)
+    _record_postmortem_crash_step_with_retry(store, run_id, result, append=True)
 
 
 def _crash_config_failure(run_id: str, code: str, message: str) -> ToolResponse:
