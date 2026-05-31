@@ -43,7 +43,7 @@ class Redactor:
             sensitive = value.get("sensitive") is True
             redacted: dict[str, Any] = {}
             for key, item in value.items():
-                if sensitive and key == "path" or isinstance(item, str) and self._secret_key_pattern.search(str(key)):
+                if (sensitive and key == "path") or self._secret_key_pattern.search(str(key)):
                     redacted[key] = REDACTION
                 else:
                     redacted[key] = self.redact_value(item)
