@@ -303,6 +303,292 @@ class _IntrospectAdmission:
     handle: AdmissionHandle
 
 
+@dataclass(frozen=True)
+class _LiveManifestContext:
+    store: ArtifactStore
+    manifest: RunManifest
+
+
+@dataclass(frozen=True)
+class _LiveIntrospectContext:
+    store: ArtifactStore
+    manifest: RunManifest
+    resolved_rootfs: RootfsProfile
+    resolved_debug: DebugProfile
+    redactor: Redactor
+    build_id: str
+
+
+@dataclass(frozen=True)
+class _LiveIntrospectPolicy:
+    write_mode_permissions: list[str]
+    use_sudo: bool
+
+
+def _load_validate_manifest_context(
+    *, artifact_root: Path, run_id: str
+) -> tuple[_LiveManifestContext | None, ToolResponse | None]:
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        manifest_path = store.run_dir(run_id) / "manifest.json"
+        if not manifest_path.is_file():
+            return None, _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return None, ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    return _LiveManifestContext(store=store, manifest=manifest), None
+
+
+def _manifest_profile_mismatch_response(
+    *,
+    run_id: str,
+    profile_kind: str,
+    requested_profile: str | None,
+    manifest_profile: str | None,
+) -> ToolResponse:
+    return _configuration_failure(
+        run_id=run_id,
+        message=f"{profile_kind}_profile must match the immutable run manifest request",
+        details={
+            "requested_profile": requested_profile,
+            "manifest_profile": manifest_profile,
+            "code": "manifest_profile_mismatch",
+        },
+    )
+
+
+def _validate_live_introspect_manifest_binding(
+    *, request: DebugIntrospectRunRequest, manifest: RunManifest
+) -> ToolResponse | None:
+    run_id = request.run_id
+    if request.target_profile is not None and request.target_profile != manifest.request.target_profile:
+        return _manifest_profile_mismatch_response(
+            run_id=run_id,
+            profile_kind="target",
+            requested_profile=request.target_profile,
+            manifest_profile=manifest.request.target_profile,
+        )
+    if request.rootfs_profile is not None and request.rootfs_profile != manifest.request.rootfs_profile:
+        return _manifest_profile_mismatch_response(
+            run_id=run_id,
+            profile_kind="rootfs",
+            requested_profile=request.rootfs_profile,
+            manifest_profile=manifest.request.rootfs_profile,
+        )
+    if (
+        manifest.request.debug_profile is not None
+        and request.debug_profile is not None
+        and request.debug_profile != manifest.request.debug_profile
+    ):
+        return _manifest_profile_mismatch_response(
+            run_id=run_id,
+            profile_kind="debug",
+            requested_profile=request.debug_profile,
+            manifest_profile=manifest.request.debug_profile,
+        )
+    if request.manifest_target_profile != manifest.request.target_profile:
+        return _configuration_failure(
+            run_id=run_id,
+            message="manifest_target_profile must match the immutable run manifest target_profile",
+            details={
+                "requested_target_profile": request.manifest_target_profile,
+                "manifest_target_profile": manifest.request.target_profile,
+                "code": "manifest_profile_mismatch",
+            },
+        )
+    return None
+
+
+def _build_id_from_boot_provenance(*, run_id: str, manifest: RunManifest) -> tuple[str | None, ToolResponse | None]:
+    boot_step = manifest.step_results.get("boot")
+    provenance = boot_step.details.get("kernel_provenance") if boot_step is not None else None
+    if not isinstance(provenance, dict):
+        capture_error = boot_step.details.get("kernel_provenance_capture_error") if boot_step is not None else None
+        if isinstance(capture_error, dict):
+            return None, ToolResponse.failure(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                run_id=run_id,
+                message=(f"boot did not record a KernelProvenance: {capture_error.get('message', 'capture failed')}"),
+                details={
+                    "code": "provenance_missing",
+                    "capture_error": capture_error.get("code"),
+                },
+            )
+        return None, ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=(
+                "boot for this run did not record a KernelProvenance (it predates "
+                "provenance capture). Re-run target.boot with force_reboot=true; a "
+                "plain re-run short-circuits the recorded SUCCEEDED boot and will "
+                "not re-capture provenance."
+            ),
+            details={"code": "provenance_missing"},
+        )
+    build_id = provenance.get("build_id")
+    if not isinstance(build_id, str) or not BUILD_ID_RE.match(build_id):
+        return None, ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="recorded build_id is malformed",
+            details={"code": "provenance_corrupt", "recorded": str(build_id)},
+        )
+    return build_id, None
+
+
+def _resolve_live_introspect_context(
+    *,
+    request: DebugIntrospectRunRequest,
+    manifest_context: _LiveManifestContext,
+    rootfs_profiles: dict[str, RootfsProfile],
+    debug_profiles: dict[str, DebugProfile],
+) -> tuple[_LiveIntrospectContext | None, ToolResponse | None]:
+    manifest = manifest_context.manifest
+    run_id = request.run_id
+    binding_failure = _validate_live_introspect_manifest_binding(request=request, manifest=manifest)
+    if binding_failure is not None:
+        return None, binding_failure
+
+    rootfs_name = request.rootfs_profile or manifest.request.rootfs_profile
+    try:
+        resolved_rootfs = rootfs_profiles[rootfs_name]
+    except KeyError:
+        return None, _configuration_failure(run_id=run_id, message=f"unknown rootfs profile: {rootfs_name}")
+
+    debug_name = request.debug_profile or manifest.request.debug_profile or "qemu-gdbstub-default"
+    try:
+        resolved_debug = _resolve_debug_profile(profile_name=debug_name, debug_profiles=debug_profiles)
+    except ProviderDebugError as exc:
+        return None, ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id, details=exc.details)
+
+    redactor = Redactor(secret_values=[resolved_rootfs.ssh_key_ref] if resolved_rootfs.ssh_key_ref else [])
+    build_id, build_id_failure = _build_id_from_boot_provenance(run_id=run_id, manifest=manifest)
+    if build_id_failure is not None:
+        return None, build_id_failure
+    return (
+        _LiveIntrospectContext(
+            store=manifest_context.store,
+            manifest=manifest,
+            resolved_rootfs=resolved_rootfs,
+            resolved_debug=resolved_debug,
+            redactor=redactor,
+            build_id=_require_value(build_id, "build_id missing after successful provenance resolution"),
+        ),
+        None,
+    )
+
+
+def _enforce_live_introspect_policy(
+    *,
+    request: DebugIntrospectRunRequest,
+    context: _LiveIntrospectContext,
+    operation_name: str,
+) -> tuple[_LiveIntrospectPolicy | None, ToolResponse | None]:
+    run_id = request.run_id
+    try:
+        _ensure_debug_operation_enabled(context.resolved_debug, operation_name)
+    except ProviderDebugError as exc:
+        return None, ToolResponse.failure(
+            category=exc.category,
+            message=str(exc),
+            run_id=run_id,
+            details={**exc.details, "code": "operation_disabled"},
+        )
+
+    if request.allow_write:
+        try:
+            _ensure_debug_operation_enabled(context.resolved_debug, "debug.introspect.write")
+        except ProviderDebugError as exc:
+            return None, ToolResponse.failure(
+                category=exc.category,
+                message=str(exc),
+                run_id=run_id,
+                details={**exc.details, "code": "operation_disabled"},
+            )
+        missing = missing_destructive_permissions(
+            operation_name,
+            request.acknowledged_permissions,
+            registry=INTROSPECT_DESTRUCTIVE_PERMISSIONS,
+        )
+        if missing:
+            return None, ToolResponse.failure(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                run_id=run_id,
+                message=(
+                    "debug.introspect.run write mode is destructive; acknowledge its required permissions to proceed"
+                ),
+                details={"code": "permission_required", "required_permissions": missing},
+            )
+    write_mode_permissions = (
+        list(INTROSPECT_DESTRUCTIVE_PERMISSIONS.get(operation_name, [])) if request.allow_write else []
+    )
+    if not (5 <= request.timeout_seconds <= 300):
+        return None, ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=f"timeout_seconds must be in [5, 300]; got {request.timeout_seconds}",
+            details={"code": "invalid_timeout"},
+        )
+    script_bytes = request.script.encode("utf-8")
+    if not script_bytes:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message="script must not be empty",
+            details={"code": "invalid_script"},
+        )
+    if len(script_bytes) > SCRIPT_BYTE_CAP:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=f"script exceeds {SCRIPT_BYTE_CAP} bytes",
+            details={"code": "invalid_script"},
+        )
+    if _count_introspect_calls(context.manifest) >= MAX_INTROSPECT_CALLS_PER_RUN:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=(
+                f"introspect call budget exhausted (>= {MAX_INTROSPECT_CALLS_PER_RUN}); "
+                "start a new run via kernel.create_run"
+            ),
+            details={"code": "manifest_call_budget_exhausted"},
+        )
+    sensitive_dir = context.store.run_dir(run_id) / "sensitive"
+    try:
+        mode = sensitive_dir.stat().st_mode & 0o777
+    except FileNotFoundError:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=(f"{sensitive_dir} is missing; re-run kernel.create_run to recreate the run layout."),
+            details={"code": "sensitive_dir_missing"},
+        )
+    if mode & 0o077:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=(
+                f"{sensitive_dir} mode is {oct(mode)}; expected 0o700. "
+                "Re-run kernel.create_run, or chmod 0700 the directory."
+            ),
+            details={"code": "sensitive_dir_too_permissive", "actual_mode": oct(mode)},
+        )
+    return (
+        _LiveIntrospectPolicy(
+            write_mode_permissions=write_mode_permissions,
+            use_sudo=context.resolved_rootfs.ssh_user != "root",
+        ),
+        None,
+    )
+
+
+def _prepare_live_wrapper(
+    **kwargs: Any,
+) -> tuple[_IntrospectCallWorkspace | None, ToolResponse | None]:
+    return _prepare_introspect_call_workspace(**kwargs)
+
+
 def _prepare_introspect_call_workspace(
     *,
     store: ArtifactStore,
@@ -569,6 +855,96 @@ def _admit_introspect_call(
     return _IntrospectAdmission(target_key=target_key, snapshot=snapshot, proof=proof, handle=handle), None
 
 
+def _run_live_wrapper(
+    *,
+    runner: SshRunner,
+    store: ArtifactStore,
+    request: DebugIntrospectRunRequest,
+    resolved_rootfs: RootfsProfile,
+    workspace: _IntrospectCallWorkspace,
+    admission: AdmissionService,
+    handle: AdmissionHandle,
+    redactor: Redactor,
+    use_sudo: bool,
+    write_mode_permissions: list[str],
+    now: Callable[[], datetime],
+) -> tuple[_IntrospectSshRun | None, ToolResponse | None, bool]:
+    call_id = workspace.call_id
+    agent_dir = workspace.agent_dir
+    sensitive_call_dir = workspace.sensitive_call_dir
+    user_timeout = request.timeout_seconds
+    remote_argv = _target_python_remote_argv(timeout_seconds=user_timeout, use_sudo=use_sudo)
+    try:
+        ssh_argv = build_ssh_argv(
+            rootfs_profile=resolved_rootfs,
+            known_hosts_path=store.run_dir(request.run_id) / "sensitive" / "known_hosts",
+            command=remote_argv,
+            command_timeout=user_timeout + SSH_TIMEOUT_GRACE_SECONDS,
+        )
+    except ValueError as exc:
+        _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=request.run_id)
+        shutil.rmtree(agent_dir, ignore_errors=True)
+        shutil.rmtree(sensitive_call_dir, ignore_errors=True)
+        return (
+            None,
+            ToolResponse.failure(
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                run_id=request.run_id,
+                message=_redact_and_truncate(redactor, str(exc), cap=256),
+                details={"code": "invalid_ssh_options", "call_id": call_id},
+                suggested_next_actions=["artifacts.collect"],
+            ),
+            True,
+        )
+    ssh_run = _run_introspect_ssh_with_cancellation(
+        runner=runner,
+        ssh_argv=ssh_argv,
+        handle=handle,
+        timeout_seconds=user_timeout,
+        stdout_path=workspace.stdout_path,
+        stderr_path=workspace.stderr_path,
+        wrapper=workspace.wrapper,
+        now=now,
+    )
+    ssh_result = ssh_run.result
+    for raw_path in (workspace.stdout_path, workspace.stderr_path):
+        _chmod_best_effort(raw_path, 0o600)
+    try:
+        admission.complete(handle)
+    except AdmissionError as exc:
+        _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=request.run_id)
+        raw_stderr = (
+            workspace.stderr_path.read_text(encoding="utf-8", errors="replace")
+            if workspace.stderr_path.exists()
+            else ""
+        )
+        duration_ms = int((time.monotonic() - ssh_run.started_monotonic) * 1000)
+        return (
+            None,
+            _record_introspect_failure(
+                store=store,
+                run_id=request.run_id,
+                call_id=call_id,
+                category=exc.category,
+                code=exc.code,
+                message=redactor.redact_text(str(exc)),
+                agent_dir=agent_dir,
+                sensitive_dir=sensitive_call_dir,
+                redactor=redactor,
+                raw_stderr=raw_stderr,
+                ssh_exit=ssh_result.exit_status,
+                request_timeout_seconds=request.timeout_seconds,
+                duration_ms=duration_ms,
+                ssh_user=resolved_rootfs.ssh_user,
+                outcome_status_for_forensics=None,
+                allow_write=request.allow_write,
+                acknowledged_permissions=write_mode_permissions,
+            ),
+            True,
+        )
+    return ssh_run, None, True
+
+
 def _execute_introspect_call(
     request: DebugIntrospectRunRequest,
     *,
@@ -591,228 +967,38 @@ def _execute_introspect_call(
     run_id = request.run_id
     now = clock or _utcnow
 
-    # Spec §5.2 step 1: resolve profiles + load manifest.
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
     target_profiles = target_profiles if target_profiles is not None else DEFAULT_TARGET_PROFILES
     debug_profiles = debug_profiles if debug_profiles is not None else DEFAULT_DEBUG_PROFILES
 
-    try:
-        store = ArtifactStore(artifact_root, create_root=False)
-        manifest_path = store.run_dir(run_id) / "manifest.json"
-        if not manifest_path.is_file():
-            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
-        manifest = store.load_manifest(run_id)
-    except ManifestStateError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-
-    # Every later step must honour the run manifest's immutable profile fields,
-    # so live introspection cannot silently target a different rootfs/debug setup.
-    if request.target_profile is not None and request.target_profile != manifest.request.target_profile:
-        return _configuration_failure(
-            run_id=run_id,
-            message="target_profile must match the immutable run manifest request",
-            details={
-                "requested_profile": request.target_profile,
-                "manifest_profile": manifest.request.target_profile,
-                "code": "manifest_profile_mismatch",
-            },
-        )
-    if request.rootfs_profile is not None and request.rootfs_profile != manifest.request.rootfs_profile:
-        return _configuration_failure(
-            run_id=run_id,
-            message="rootfs_profile must match the immutable run manifest request",
-            details={
-                "requested_profile": request.rootfs_profile,
-                "manifest_profile": manifest.request.rootfs_profile,
-                "code": "manifest_profile_mismatch",
-            },
-        )
-    if (
-        manifest.request.debug_profile is not None
-        and request.debug_profile is not None
-        and request.debug_profile != manifest.request.debug_profile
-    ):
-        return _configuration_failure(
-            run_id=run_id,
-            message="debug_profile must match the immutable run manifest request",
-            details={
-                "requested_profile": request.debug_profile,
-                "manifest_profile": manifest.request.debug_profile,
-                "code": "manifest_profile_mismatch",
-            },
-        )
-    # The request's manifest target profile must name the same target profile
-    # recorded when the run was created.
-    if request.manifest_target_profile != manifest.request.target_profile:
-        return _configuration_failure(
-            run_id=run_id,
-            message="manifest_target_profile must match the immutable run manifest target_profile",
-            details={
-                "requested_target_profile": request.manifest_target_profile,
-                "manifest_target_profile": manifest.request.target_profile,
-                "code": "manifest_profile_mismatch",
-            },
-        )
-
-    rootfs_name = request.rootfs_profile or manifest.request.rootfs_profile
-    try:
-        resolved_rootfs = rootfs_profiles[rootfs_name]
-    except KeyError:
-        return _configuration_failure(run_id=run_id, message=f"unknown rootfs profile: {rootfs_name}")
-
-    debug_name = request.debug_profile or manifest.request.debug_profile or "qemu-gdbstub-default"
-    try:
-        resolved_debug = _resolve_debug_profile(profile_name=debug_name, debug_profiles=debug_profiles)
-    except ProviderDebugError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id, details=exc.details)
-
-    # ssh_key_ref (the SSH identity-file path) is the only secret-bearing value in this handler's
-    # scope: the sudo preflight below runs `sudo -n true` (non-interactive — sudo never prompts for
-    # or echoes a password; NOPASSWD per ADR 0037), and RootfsProfile.credential_refs is not resolved
-    # by any code path, so no other user secret can reach the preflight stderr this redactor masks
-    # (TD-16). Broaden this seed if credential_refs is ever wired into the SSH connection.
-    redactor = Redactor(secret_values=[resolved_rootfs.ssh_key_ref] if resolved_rootfs.ssh_key_ref else [])
-
-    # Spec §5.2 step 2: operation gating.
-    try:
-        _ensure_debug_operation_enabled(resolved_debug, operation_name)
-    except ProviderDebugError as exc:
-        return ToolResponse.failure(
-            category=exc.category,
-            message=str(exc),
-            run_id=run_id,
-            details={**exc.details, "code": "operation_disabled"},
-        )
-
-    # Spec §5.2 step 3 / ADR 0011: write-mode policy gate (live path only). The
-    # security boundary is host-side and runs before any SSH/admission work: a
-    # write requires BOTH the DebugProfile write capability AND a per-call ack.
-    if request.allow_write:
-        try:
-            _ensure_debug_operation_enabled(resolved_debug, "debug.introspect.write")
-        except ProviderDebugError as exc:
-            return ToolResponse.failure(
-                category=exc.category,
-                message=str(exc),
-                run_id=run_id,
-                details={**exc.details, "code": "operation_disabled"},
-            )
-        missing = missing_destructive_permissions(
-            operation_name,
-            request.acknowledged_permissions,
-            registry=INTROSPECT_DESTRUCTIVE_PERMISSIONS,
-        )
-        if missing:
-            return ToolResponse.failure(
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                run_id=run_id,
-                message=(
-                    "debug.introspect.run write mode is destructive; acknowledge its required permissions to proceed"
-                ),
-                details={"code": "permission_required", "required_permissions": missing},
-            )
-    # The satisfied required permissions for audit/recording (the gate guarantees all
-    # required perms are acknowledged when allow_write is set; empty otherwise).
-    write_mode_permissions = (
-        list(INTROSPECT_DESTRUCTIVE_PERMISSIONS.get(operation_name, [])) if request.allow_write else []
+    manifest_context, manifest_failure = _load_validate_manifest_context(artifact_root=artifact_root, run_id=run_id)
+    if manifest_failure is not None:
+        return manifest_failure
+    context, context_failure = _resolve_live_introspect_context(
+        request=request,
+        manifest_context=_require_value(manifest_context, "manifest context missing after successful load"),
+        rootfs_profiles=rootfs_profiles,
+        debug_profiles=debug_profiles,
     )
-    if not (5 <= request.timeout_seconds <= 300):
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=f"timeout_seconds must be in [5, 300]; got {request.timeout_seconds}",
-            details={"code": "invalid_timeout"},
-        )
-    script_bytes = request.script.encode("utf-8")
-    if not script_bytes:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message="script must not be empty",
-            details={"code": "invalid_script"},
-        )
-    if len(script_bytes) > SCRIPT_BYTE_CAP:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=f"script exceeds {SCRIPT_BYTE_CAP} bytes",
-            details={"code": "invalid_script"},
-        )
-
-    # Design §4: build_id flows from the boot-recorded KernelProvenance, the
-    # authoritative §4.2 record — not the build step.
-    boot_step = manifest.step_results.get("boot")
-    provenance = boot_step.details.get("kernel_provenance") if boot_step is not None else None
-    if not isinstance(provenance, dict):
-        capture_error = boot_step.details.get("kernel_provenance_capture_error") if boot_step is not None else None
-        if isinstance(capture_error, dict):
-            return ToolResponse.failure(
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                run_id=run_id,
-                message=(f"boot did not record a KernelProvenance: {capture_error.get('message', 'capture failed')}"),
-                details={
-                    "code": "provenance_missing",
-                    "capture_error": capture_error.get("code"),
-                },
-            )
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=(
-                "boot for this run did not record a KernelProvenance (it predates "
-                "provenance capture). Re-run target.boot with force_reboot=true; a "
-                "plain re-run short-circuits the recorded SUCCEEDED boot and will "
-                "not re-capture provenance."
-            ),
-            details={"code": "provenance_missing"},
-        )
-    build_id = provenance.get("build_id")
-    if not isinstance(build_id, str) or not BUILD_ID_RE.match(build_id):
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="recorded build_id is malformed",
-            details={"code": "provenance_corrupt", "recorded": str(build_id)},
-        )
-
-    # Spec §5.2 step 4a: manifest call budget.
-    if _count_introspect_calls(manifest) >= MAX_INTROSPECT_CALLS_PER_RUN:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=(
-                f"introspect call budget exhausted (>= {MAX_INTROSPECT_CALLS_PER_RUN}); "
-                "start a new run via kernel.create_run"
-            ),
-            details={"code": "manifest_call_budget_exhausted"},
-        )
-
-    # Spec §5.2 step 4b: sensitive/ parent-mode preflight (R4-F1).
-    sensitive_dir = store.run_dir(run_id) / "sensitive"
-    try:
-        mode = sensitive_dir.stat().st_mode & 0o777
-    except FileNotFoundError:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=(f"{sensitive_dir} is missing; re-run kernel.create_run to recreate the run layout."),
-            details={"code": "sensitive_dir_missing"},
-        )
-    if mode & 0o077:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=(
-                f"{sensitive_dir} mode is {oct(mode)}; expected 0o700. "
-                "Re-run kernel.create_run, or chmod 0700 the directory."
-            ),
-            details={"code": "sensitive_dir_too_permissive", "actual_mode": oct(mode)},
-        )
+    if context_failure is not None:
+        return context_failure
+    context = _require_value(context, "live introspect context missing after successful resolution")
+    policy, policy_failure = _enforce_live_introspect_policy(
+        request=request,
+        context=context,
+        operation_name=operation_name,
+    )
+    if policy_failure is not None:
+        return policy_failure
+    policy = _require_value(policy, "live introspect policy missing after successful enforcement")
+    store = context.store
+    resolved_rootfs = context.resolved_rootfs
+    redactor = context.redactor
+    build_id = context.build_id
+    write_mode_permissions = policy.write_mode_permissions
 
     runner: SshRunner = ssh_runner or SubprocessSshRunner()
-    # sudo as root is a no-op: root logins skip both the preflight and the
-    # runtime `sudo python3 -` prefix.
-    use_sudo = resolved_rootfs.ssh_user != "root"
+    use_sudo = policy.use_sudo
 
     # Spec §5.2 step 5: sudo preflight (only when sudo is needed).
     if use_sudo:
@@ -843,7 +1029,7 @@ def _execute_introspect_call(
     # handle. Mirrors target_run_tests_handler:1588-1620.
     admission_disposed = False
     try:
-        workspace, workspace_failure = _prepare_introspect_call_workspace(
+        workspace, workspace_failure = _prepare_live_wrapper(
             store=store,
             run_id=run_id,
             request=request,
@@ -863,87 +1049,26 @@ def _execute_introspect_call(
         call_id = workspace.call_id
         agent_dir = workspace.agent_dir
         sensitive_call_dir = workspace.sensitive_call_dir
-        wrapper = workspace.wrapper
         stdout_path = workspace.stdout_path
         stderr_path = workspace.stderr_path
 
-        # Spec §5.2 steps 9–10: SSH invocation + cancellation watcher.
-        user_timeout = request.timeout_seconds
-        # ssh_user=root keeps the remote argv free of sudo for the same reason
-        # the preflight is skipped above.
-        remote_argv = _target_python_remote_argv(timeout_seconds=user_timeout, use_sudo=use_sudo)
-        try:
-            ssh_argv = build_ssh_argv(
-                rootfs_profile=resolved_rootfs,
-                known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
-                command=remote_argv,
-                command_timeout=user_timeout + SSH_TIMEOUT_GRACE_SECONDS,
-            )
-        except ValueError as exc:
-            # build_ssh_argv raises when RootfsProfile.ssh_options['ConnectTimeout']
-            # exceeds the command timeout — surface as CONFIGURATION_ERROR rather
-            # than letting it fall into the outer broad-except.
-            _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=run_id)
-            admission_disposed = True
-            shutil.rmtree(agent_dir, ignore_errors=True)
-            shutil.rmtree(sensitive_call_dir, ignore_errors=True)
-            return ToolResponse.failure(
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                run_id=run_id,
-                message=_redact_and_truncate(redactor, str(exc), cap=256),
-                details={"code": "invalid_ssh_options", "call_id": call_id},
-                suggested_next_actions=["artifacts.collect"],
-            )
-        ssh_run = _run_introspect_ssh_with_cancellation(
+        ssh_run, runner_failure, admission_disposed = _run_live_wrapper(
             runner=runner,
-            ssh_argv=ssh_argv,
+            store=store,
+            request=request,
+            resolved_rootfs=resolved_rootfs,
+            workspace=workspace,
+            admission=admission,
             handle=handle,
-            timeout_seconds=user_timeout,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-            wrapper=wrapper,
+            redactor=redactor,
+            use_sudo=use_sudo,
+            write_mode_permissions=write_mode_permissions,
             now=now,
         )
+        if runner_failure is not None:
+            return runner_failure
+        ssh_run = _require_value(ssh_run, "SSH run missing after successful live wrapper execution")
         ssh_result = ssh_run.result
-
-        # Tighten raw SSH-output file modes. `chmod` is attempted directly so a
-        # missing file remains a best-effort no-op instead of a check/use race.
-        for _raw_path in (stdout_path, stderr_path):
-            _chmod_best_effort(_raw_path, 0o600)
-
-        # admission_disposed flips True as soon as either complete() succeeds
-        # or rollback() runs — the outer `except` then skips a redundant
-        # rollback that would log a spurious handle_already_disposed.
-        try:
-            admission.complete(handle)
-            admission_disposed = True
-        except AdmissionError as exc:
-            # A completion failure still owns SSH artifacts on disk; roll back
-            # the admission binding and append a FAILED introspect:<call_id>
-            # record so the manifest reflects that state.
-            _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=run_id)
-            admission_disposed = True
-            raw_stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
-            duration_ms = int((time.monotonic() - ssh_run.started_monotonic) * 1000)
-            return _record_introspect_failure(
-                store=store,
-                run_id=run_id,
-                call_id=call_id,
-                category=exc.category,
-                code=exc.code,
-                message=redactor.redact_text(str(exc)),
-                agent_dir=agent_dir,
-                sensitive_dir=sensitive_call_dir,
-                redactor=redactor,
-                raw_stderr=raw_stderr,
-                ssh_exit=ssh_result.exit_status,
-                request_timeout_seconds=request.timeout_seconds,
-                duration_ms=duration_ms,
-                ssh_user=resolved_rootfs.ssh_user,
-                outcome_status_for_forensics=None,
-                allow_write=request.allow_write,
-                acknowledged_permissions=write_mode_permissions,
-            )
 
         # Spec §5.2 step 11+: shared post-runner finalization (live + vmcore).
         finished_at = now()
