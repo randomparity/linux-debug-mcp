@@ -98,6 +98,7 @@ from kdive.postmortem.dumps import (
     DEFAULT_DUMP_DIR,
     FetchSpec,
     derive_dump_id,
+    is_within_dump_dir,
     parse_dump_listing,
     plan_fetch,
     render_dump_list_script,
@@ -144,6 +145,7 @@ from kdive.providers.contracts import (
 )
 from kdive.providers.gdb_mi import (
     CANONICAL_PROBE_SYMBOL,
+    MAX_MEMORY_READ_BYTES,
     GdbMiAttachment,
     GdbMiEngine,
     GdbMiError,
@@ -3252,6 +3254,14 @@ def _admit_fetch_entry(
             message=f"dump_ref not found in current listing: {request.dump_ref!r}",
             details={"code": "dump_not_found"},
         )
+    if not is_within_dump_dir(entry.path, dump_dir):
+        # The dump path comes from untrusted target JSON; refuse to scp from a location the host
+        # did not ask the probe to enumerate (TD-23 — traversal/escape outside dump_dir).
+        return None, _configuration_failure(
+            run_id=run_id,
+            message=f"dump path {entry.path!r} is outside the enumerated dump_dir {dump_dir!r}",
+            details={"code": "dump_path_outside_dir"},
+        )
     if _core_name(entry) == "vmcore.flat":
         # A flat dump is a distinct format crash/drgn cannot read directly; staging it as
         # `vmcore` would hand the agent an unusable ref. force overrides an in-progress
@@ -3529,6 +3539,11 @@ def _execute_introspect_call(
     except ProviderDebugError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id, details=exc.details)
 
+    # ssh_key_ref (the SSH identity-file path) is the only secret-bearing value in this handler's
+    # scope: the sudo preflight below runs `sudo -n true` (non-interactive — sudo never prompts for
+    # or echoes a password; NOPASSWD per ADR 0037), and RootfsProfile.credential_refs is not resolved
+    # by any code path, so no other user secret can reach the preflight stderr this redactor masks
+    # (TD-16). Broaden this seed if credential_refs is ever wired into the SSH connection.
     redactor = Redactor(secret_values=[resolved_rootfs.ssh_key_ref] if resolved_rootfs.ssh_key_ref else [])
 
     # Spec §5.2 step 2: operation gating.
@@ -6294,6 +6309,13 @@ def _engine_op_data(
         byte_count = kwargs["byte_count"]
         if not isinstance(address, int) or not isinstance(byte_count, int):
             raise GdbMiError("address and byte_count must be integers", category=ErrorCategory.CONFIGURATION_ERROR)
+        if address < 0:
+            raise GdbMiError(f"address must be non-negative, got {address}", category=ErrorCategory.CONFIGURATION_ERROR)
+        if not 0 < byte_count <= MAX_MEMORY_READ_BYTES:
+            raise GdbMiError(
+                f"byte_count must be in 1..{MAX_MEMORY_READ_BYTES}, got {byte_count}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
         return engine.read_memory(attachment, address=address, byte_count=byte_count)
     if method_name == "evaluate":
         arguments = kwargs.get("arguments")

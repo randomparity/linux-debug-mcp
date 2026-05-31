@@ -9,16 +9,22 @@ mirrors ``prereqs/kdump_probe.py``).
 
 from __future__ import annotations
 
+import posixpath
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
+from pathlib import PurePosixPath
 from string import Template
 from typing import Any
 
 from kdive.domain import DumpEntry
 
 DEFAULT_DUMP_DIR = "/var/crash"
+# Plausible upper bound for a remote-supplied mtime: 2100-01-01T00:00:00Z. A value outside
+# 1970..this is treated as "unknown" rather than fed to datetime.fromtimestamp (which would
+# raise on a year-10000 timestamp). Untrusted target output (TD-22).
+_MAX_PLAUSIBLE_MTIME = 4102444800
 VMCORE_NAME = "vmcore"
 # Co-located files staged alongside the core, mapped to their result-ref key.
 SYMBOL_REF_KEYS = {
@@ -55,9 +61,40 @@ def derive_dump_id(remote_dir: str) -> str:
 
 
 def _capture_time(mtime: Any) -> str | None:
-    if isinstance(mtime, (int, float)) and not isinstance(mtime, bool):
+    if not isinstance(mtime, (int, float)) or isinstance(mtime, bool):
+        return None
+    if not 0 <= mtime <= _MAX_PLAUSIBLE_MTIME:  # out-of-range remote mtime -> unknown (TD-22)
+        return None
+    try:
         return datetime.fromtimestamp(mtime, UTC).isoformat()
-    return None
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _nonneg_int(value: Any) -> int:
+    """Coerce a remote-supplied numeric to a non-negative int; malformed or negative -> 0.
+
+    Sizes flow into the scp size-match truncation guard; a negative or non-numeric value from a
+    hostile/garbled target must degrade to 0 rather than raise or skew the guard (TD-22).
+    """
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):  # OverflowError: int(float('inf')) from `1e400` JSON
+        return 0
+    return parsed if parsed >= 0 else 0
+
+
+def is_within_dump_dir(remote_path: str, dump_dir: str) -> bool:
+    """True iff `remote_path` resolves to `dump_dir` or a location strictly below it, with no
+    `..` traversal escape. Component-aware via PurePosixPath (so `/var/crash-evil` is NOT treated
+    as under `/var/crash`) and normpath-collapsed first so `/var/crash/../../etc` is rejected.
+
+    The remote path originates from untrusted target JSON; the host validates it against the
+    dump_dir it authoritatively asked the probe to enumerate before scp'ing the file (TD-23).
+    """
+    base = PurePosixPath(posixpath.normpath(dump_dir))
+    target = PurePosixPath(posixpath.normpath(remote_path))
+    return target == base or target.is_relative_to(base)
 
 
 def parse_dump_listing(probe: dict[str, Any]) -> list[DumpEntry]:
@@ -74,10 +111,10 @@ def parse_dump_listing(probe: dict[str, Any]) -> list[DumpEntry]:
                 path=record["dir"],
                 kernel=record.get("kernel"),
                 capture_time=_capture_time(record.get("mtime")),
-                size_bytes=int(record.get("size") or 0),
+                size_bytes=_nonneg_int(record.get("size")),
                 incomplete=bool(record.get("incomplete")),
                 available_files=list(record.get("present") or []),
-                file_sizes={str(k): int(v) for k, v in file_sizes.items()},
+                file_sizes={str(k): _nonneg_int(v) for k, v in file_sizes.items()},
             )
         )
     entries.sort(key=_sort_key)

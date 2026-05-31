@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from pydantic import ValidationError
+
 from kdive.seams.target import TargetKey
 from kdive.transport.base import ExecutionState, TransportSession
 
@@ -209,16 +211,29 @@ class SessionRegistry:
             },
         )
 
+    @staticmethod
+    def _load_tombstone(path: Path) -> RecoveryTombstone | None:
+        """Parse a ``tomb-*.json`` file, returning None (with a logged warning) when it is
+        missing, truncated, or otherwise malformed. A corrupted recovery marker — e.g. a partial
+        write before a crash — must not raise out of read/reconcile at startup; it is skipped and
+        logged so the server still comes up. Orphan-record reconciliation re-tombstones any target
+        whose durable record is still HALTED/UNKNOWN, so a dropped standalone marker self-heals."""
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return RecoveryTombstone(
+                target_key=TargetKey(provisioner=data["provisioner"], target_id=data["target_id"]),
+                generation=data["generation"],
+                reason=data["reason"],
+            )
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValidationError) as exc:
+            logger.warning("registry: skipping malformed tombstone %s: %r", path, exc)
+            return None
+
     def read_tombstone(self, target_key: TargetKey) -> RecoveryTombstone | None:
         path = self._tomb_path(target_key)
         if not path.exists():
             return None
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return RecoveryTombstone(
-            target_key=TargetKey(provisioner=data["provisioner"], target_id=data["target_id"]),
-            generation=data["generation"],
-            reason=data["reason"],
-        )
+        return self._load_tombstone(path)
 
     def clear_tombstone(self, target_key: TargetKey, *, expected_generation: int) -> None:
         existing = self.read_tombstone(target_key)
@@ -251,11 +266,13 @@ class SessionRegistry:
         durable record delete still runs for every record.
         """
         report = OrphanReapReport()
-        # 1. re-assert persisted tombstones (durable across restarts)
+        # 1. re-assert persisted tombstones (durable across restarts). A malformed marker is
+        #    logged and skipped (TD-17) rather than aborting reconcile and blocking startup.
         for path in self._dir.glob("tomb-*.json"):
-            data = json.loads(path.read_text(encoding="utf-8"))
-            key = TargetKey(provisioner=data["provisioner"], target_id=data["target_id"])
-            admission.mark_recovery_required(key, data["generation"])
+            tombstone = self._load_tombstone(path)
+            if tombstone is None:
+                continue
+            admission.mark_recovery_required(tombstone.target_key, tombstone.generation)
         # 2. reap orphan records
         for record in self.list_records():
             # F1: did stop_by_identity actually kill a fingerprint-matched live backend?

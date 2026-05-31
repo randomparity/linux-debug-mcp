@@ -484,8 +484,23 @@ class SerialLocalTransport(Transport):
         host = target_ref.get("host")
         port = target_ref.get("port")
         if host is not None and port is not None:
-            return RemoteTerminalServerSource(host=str(host), port=int(port))
-        return LocalDeviceSource(device=device, baud=int(target_ref.get("baud", 115200)))
+            try:
+                port_int = int(port)
+            except (TypeError, ValueError) as exc:
+                raise SerialLocalConfigError(
+                    f"serial-local target_ref['port'] must be an integer, got {port!r}",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                ) from exc
+            return RemoteTerminalServerSource(host=str(host), port=port_int)
+        raw_baud = target_ref.get("baud", 115200)
+        try:
+            baud = int(raw_baud)
+        except (TypeError, ValueError) as exc:
+            raise SerialLocalConfigError(
+                f"serial-local target_ref['baud'] must be an integer, got {raw_baud!r}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            ) from exc
+        return LocalDeviceSource(device=device, baud=baud)
 
     def _attach_console_only(
         self,

@@ -439,10 +439,17 @@ class PortProbeResult:
 
 
 def _default_port_probe(host: str, port: int) -> PortProbeResult:
-    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    # Resolve the address family and bind tuple via getaddrinfo instead of guessing IPv4-vs-IPv6
+    # from a ':' in the host. The heuristic mishandles bracketless IPv6 literals and scoped
+    # addresses; getaddrinfo returns the correct family/sockaddr for IPv4, IPv6, and hostnames (TD-35).
     try:
-        with socket.socket(family, socket.SOCK_STREAM) as sock:
-            sock.bind((host, port))
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        return PortProbeResult("error", str(exc))
+    family, socktype, proto, _canonname, sockaddr = infos[0]
+    try:
+        with socket.socket(family, socktype, proto) as sock:
+            sock.bind(sockaddr)
     except OSError as exc:
         if exc.errno == errno.EADDRINUSE:
             return PortProbeResult("in_use")
