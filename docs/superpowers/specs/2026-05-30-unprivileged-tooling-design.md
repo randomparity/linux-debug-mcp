@@ -302,9 +302,10 @@ the context it runs in* — see the kvm context-skew note below.
   polkit/permission denial under `qemu:///system` (join `libvirt` group / install the polkit rule) vs. a
   non-running per-user daemon under `qemu:///session` (`systemctl --user start virtqemud.socket`). Probe
   is injected (the `PrerequisiteRunner`) for deterministic unit tests.
-- **`check_rootfs_builder()`** → `check_id="rootfs.builder"`. Verifies the unprivileged toolchain:
-  `virt-builder` and `qemu-img` present. FAILED naming `libguestfs-tools` when either is missing. It
-  explicitly does **not** require `dnf` or `sudo` (the old recipe's dependencies are gone).
+- **`check_rootfs_builder()`** → `check_id="rootfs.builder"`. Verifies the full unprivileged toolchain the
+  build script hard-requires: `virt-builder`, `virt-tar-out`, `virt-make-fs`, `guestfish` and `qemu-img`
+  present. FAILED naming `libguestfs-tools` (which ships all five) when any is missing. It explicitly does
+  **not** require `dnf` or `sudo` (the old recipe's dependencies are gone).
 
 The handler appends these to the flat `checks` list, `SKIPPED` when the relevant name is omitted —
 a backward-compatible superset, consistent with ADR 0034.
@@ -475,8 +476,9 @@ existing integration tests do it.
 - Preflight unit tests (`tests/test_prereqs.py` or a sibling): `check_kvm_access` PASSED/WARNING via a
   patched `os.access`; `check_libvirt_connect` PASSED/FAILED via an injected runner (capabilities exit 0
   vs. non-zero), with the right URI selected from the profile vs. default; `check_rootfs_builder` PASSED
-  when `virt-builder` and `qemu-img` resolve, FAILED (naming `libguestfs-tools`) when either is absent; all
-  three `SKIPPED` when the gating name is omitted.
+  when all five required tools (`virt-builder`, `virt-tar-out`, `virt-make-fs`, `guestfish`, `qemu-img`)
+  resolve, FAILED (naming `libguestfs-tools`) when any is absent; the gateable checks `SKIPPED` when the
+  gating name is omitted.
 - Default-profile test: `minimal.source` is unchanged (`/var/lib/kdive/rootfs/minimal.qcow2`) and matches
   the script default.
 - Guard: `just check-no-sudo` and the pytest fail on an injected `sudo` line in `scripts/`/`justfile` and

@@ -508,22 +508,27 @@ def check_gdbstub_port(
 def check_rootfs_builder(*, runner: PrerequisiteRunner | None = None) -> PrerequisiteCheck:
     """Report whether the unprivileged rootfs build toolchain is present.
 
-    The rewritten ``scripts/build-rootfs.sh`` builds entirely inside libguestfs, so it needs
-    ``virt-builder`` and ``qemu-img`` and explicitly does not need ``dnf`` or ``sudo``.
+    The rewritten ``scripts/build-rootfs.sh`` builds entirely inside libguestfs, so it needs the
+    full set of tools it hard-requires — ``virt-builder``, ``virt-tar-out``, ``virt-make-fs``,
+    ``guestfish`` and ``qemu-img`` — and explicitly does not need ``dnf`` or ``sudo``.
     """
     runner = runner or SubprocessPrerequisiteRunner()
-    missing = [tool for tool in ("virt-builder", "qemu-img") if runner.which(tool) is None]
+    required = ("virt-builder", "virt-tar-out", "virt-make-fs", "guestfish", "qemu-img")
+    missing = [tool for tool in required if runner.which(tool) is None]
     if missing:
         return PrerequisiteCheck(
             check_id="rootfs.builder",
             status=PrerequisiteStatus.FAILED,
             message=f"unprivileged build toolchain incomplete: missing {', '.join(missing)}",
-            suggested_fix="Install libguestfs-tools (provides virt-builder, virt-make-fs, qemu-img).",
+            suggested_fix=(
+                "Install libguestfs-tools (provides virt-builder, virt-tar-out, virt-make-fs, "
+                "guestfish, qemu-img)."
+            ),
         )
     return PrerequisiteCheck(
         check_id="rootfs.builder",
         status=PrerequisiteStatus.PASSED,
-        message="virt-builder and qemu-img are present",
+        message="unprivileged build toolchain present",
     )
 
 

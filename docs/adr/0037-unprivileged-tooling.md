@@ -97,8 +97,9 @@ Three new pure check functions, surfaced through `host.check_prerequisites` (ADR
   (define/start) permission, so a PASS can still be followed by a polkit denial at `target.boot` — the same
   advisory posture as `check_gdbstub_port`. `suggested_fix` distinguishes a `qemu:///system` polkit denial
   from a dead `qemu:///session` per-user daemon.
-- `check_rootfs_builder()` (`rootfs.builder`) — `virt-builder` + `qemu-img` present; FAILED naming
-  `libguestfs-tools`. It does not require `dnf`/`sudo`.
+- `check_rootfs_builder()` (`rootfs.builder`) — all five tools the build script hard-requires
+  (`virt-builder`, `virt-tar-out`, `virt-make-fs`, `guestfish`, `qemu-img`) present; FAILED naming
+  `libguestfs-tools` (which ships all five) when any is missing. It does not require `dnf`/`sudo`.
 
 ### 3. KVM access is a WARNING, not a FAILED
 

@@ -248,7 +248,9 @@ def test_gdbstub_port_fails_on_unparseable_endpoint() -> None:
 def test_rootfs_builder_passes_when_toolchain_present() -> None:
     from kdive.prereqs.checks import check_rootfs_builder
 
-    check = check_rootfs_builder(runner=FakeRunner({"virt-builder", "qemu-img"}))
+    check = check_rootfs_builder(
+        runner=FakeRunner({"virt-builder", "virt-tar-out", "virt-make-fs", "guestfish", "qemu-img"})
+    )
     assert check.check_id == "rootfs.builder"
     assert check.status == "passed"
 
@@ -266,6 +268,17 @@ def test_rootfs_builder_fails_when_qemu_img_missing() -> None:
 
     check = check_rootfs_builder(runner=FakeRunner({"virt-builder"}))
     assert check.status == "failed"
+
+
+def test_rootfs_builder_fails_when_repack_tool_missing() -> None:
+    from kdive.prereqs.checks import check_rootfs_builder
+
+    # All present except virt-make-fs (a Stage-2 repack tool the old 2-tool probe ignored).
+    check = check_rootfs_builder(
+        runner=FakeRunner({"virt-builder", "virt-tar-out", "guestfish", "qemu-img"})
+    )
+    assert check.status == "failed"
+    assert "virt-make-fs" in (check.message or "")
 
 
 def test_kvm_access_passes_when_device_usable() -> None:
@@ -345,7 +358,7 @@ def test_handler_includes_new_capability_checks() -> None:
         artifact_root=Path("/tmp/does-not-matter"),
         source_path=None,
         target_profile=None,
-        runner=FakeRunner({"virt-builder", "qemu-img", "virsh"}),
+        runner=FakeRunner({"virt-builder", "virt-tar-out", "virt-make-fs", "guestfish", "qemu-img", "virsh"}),
         kvm_probe=lambda: True,
     )
     ids = {check["check_id"] for check in response.data["checks"]}
