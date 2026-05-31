@@ -74,8 +74,8 @@ just setup
 ```
 
 `just setup` verifies that `uv` is available, creates or reuses `.venv`,
-installs editable `dev` and `test` dependencies, runs host checks, refreshes the
-secrets baseline, installs pre-commit hooks, and runs hooks once.
+installs editable `dev` and `test` dependencies, runs host checks, installs
+pre-commit hooks, and runs hooks once against the checked-in secrets baseline.
 
 To run the core `uv` environment setup and host check directly:
 
@@ -85,8 +85,8 @@ uv pip install -e '.[test,dev]'
 uv run python -m kdive.dev_setup check-host
 ```
 
-This direct sequence does not refresh the secrets baseline, install pre-commit
-hooks, or run hooks once. Use `just setup` for the full contributor setup.
+This direct sequence does not install pre-commit hooks or run hooks once. Use
+`just setup` for the full contributor setup.
 
 Run the test suite with:
 
