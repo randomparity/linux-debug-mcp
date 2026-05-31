@@ -25,6 +25,8 @@ from pydantic import ValidationError
 from kdive.artifacts.handlers import (
     _redacted_artifacts,
     artifacts_collect_handler,
+    create_run_handler,
+    get_manifest_handler,
 )
 from kdive.artifacts.manifest import BootAttempt, RunManifest
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
@@ -43,7 +45,6 @@ from kdive.config import (
     TargetProfile,
     TestCommand,
     TestSuiteProfile,
-    merge_config_lines,
     merge_kernel_args,
     missing_destructive_permissions,
 )
@@ -116,7 +117,6 @@ from kdive.domain import (
     ErrorCategory,
     PrerequisiteCheck,
     PrerequisiteStatus,
-    RunRequest,
     StepResult,
     StepStatus,
     ToolResponse,
@@ -829,205 +829,6 @@ def _select_boot_attempt(boot_attempts: list[BootAttempt], attempt: int | None) 
     if selected.status != StepStatus.SUCCEEDED:
         raise ValueError(f"boot attempt {attempt} did not succeed (status: {selected.status})")
     return selected
-
-
-@dataclass(frozen=True)
-class _ResolvedProfiles:
-    build: BuildProfile
-    target: TargetProfile
-    rootfs: RootfsProfile
-
-
-_ProfileT = TypeVar("_ProfileT", BuildProfile, TargetProfile, RootfsProfile)
-
-
-def _resolve_base_profile(
-    kind: str,
-    *,
-    name: str | None,
-    spec: dict[str, Any] | None,
-    registry: dict[str, _ProfileT],
-    model: type[_ProfileT],
-) -> _ProfileT:
-    """Resolve a base profile from exactly one of a named registry entry or an inline spec."""
-    if name is not None and spec is not None:
-        raise ValueError(f"provide either {kind}_profile or {kind}_profile_spec, not both")
-    if name is None and spec is None:
-        raise ValueError(f"{kind}_profile or {kind}_profile_spec is required")
-    if spec is not None:
-        try:
-            return model.model_validate(spec)
-        except ValidationError as exc:
-            raise ValueError(f"invalid {kind}_profile_spec: {exc.error_count()} validation error(s)") from exc
-    if name not in registry:
-        raise ValueError(f"unknown profile: {name}")
-    return registry[name]
-
-
-def _resolve_initial_profiles(
-    *,
-    source_path: Path,
-    sensitive_paths: list[Path],
-    build_profile: str | None,
-    build_profile_spec: dict[str, Any] | None,
-    target_profile: str | None,
-    target_profile_spec: dict[str, Any] | None,
-    rootfs_profile: str | None,
-    rootfs_profile_spec: dict[str, Any] | None,
-    build_overrides: BuildOverrides | None,
-    boot_overrides: BootOverrides | None,
-) -> _ResolvedProfiles:
-    base_build = _resolve_base_profile(
-        "build", name=build_profile, spec=build_profile_spec, registry=DEFAULT_BUILD_PROFILES, model=BuildProfile
-    )
-    base_target = _resolve_base_profile(
-        "target", name=target_profile, spec=target_profile_spec, registry=DEFAULT_TARGET_PROFILES, model=TargetProfile
-    )
-    base_rootfs = _resolve_base_profile(
-        "rootfs", name=rootfs_profile, spec=rootfs_profile_spec, registry=DEFAULT_ROOTFS_PROFILES, model=RootfsProfile
-    )
-
-    # model_copy(update=...) skips field validators, which is safe here: both base and
-    # override values were validated at construction (BuildProfile/BootOverrides), and the
-    # merges only union dicts, de-dup kernel-arg tokens by key, merge config_lines by
-    # symbol (last wins), or replace base_config wholesale (ordered make targets have no
-    # symbol identity to merge on — ADR 0030 decision 3) over already-validated values, so
-    # the result stays valid.
-    resolved_build = base_build
-    if build_overrides is not None:
-        build_update: dict[str, object] = {}
-        if build_overrides.make_variables:
-            build_update["make_variables"] = {**base_build.make_variables, **build_overrides.make_variables}
-        if build_overrides.config_lines:
-            build_update["config_lines"] = merge_config_lines(base_build.config_lines, build_overrides.config_lines)
-        if build_overrides.base_config:
-            build_update["base_config"] = list(build_overrides.base_config)
-        if build_update:
-            resolved_build = base_build.model_copy(update=build_update)
-
-    # An inline rootfs spec carries an agent-controlled `source`. Subject it to the same
-    # path-safety guards as a rootfs_source override (sensitive paths, source-tree overlap,
-    # shell/control chars, /, $HOME, must-be-a-file) so inline profiles cannot bypass them, and
-    # freeze the resolved (symlink-canonical) path that was validated.
-    if rootfs_profile_spec is not None:
-        validated_source = validate_rootfs_source(
-            Path(base_rootfs.source),
-            source_paths=[source_path],
-            sensitive_paths=sensitive_paths,
-        )
-        base_rootfs = base_rootfs.model_copy(update={"source": str(validated_source)})
-
-    # Fail-fast on a bad rootfs override at run creation; the resolved rootfs is re-derived at boot.
-    if boot_overrides is not None and boot_overrides.rootfs_source is not None:
-        validate_rootfs_source(
-            Path(boot_overrides.rootfs_source),
-            source_paths=[source_path],
-            sensitive_paths=sensitive_paths,
-        )
-    return _ResolvedProfiles(build=resolved_build, target=base_target, rootfs=base_rootfs)
-
-
-def create_run_handler(
-    *,
-    artifact_root: Path,
-    source_path: str,
-    build_profile: str | None = None,
-    target_profile: str | None = None,
-    rootfs_profile: str | None = None,
-    run_id: str | None = None,
-    debug_profile: str | None = None,
-    test_suite: str | None = None,
-    build_overrides: BuildOverrides | None = None,
-    boot_overrides: BootOverrides | None = None,
-    sensitive_paths: list[Path] | None = None,
-    build_profile_spec: dict[str, Any] | None = None,
-    target_profile_spec: dict[str, Any] | None = None,
-    rootfs_profile_spec: dict[str, Any] | None = None,
-) -> ToolResponse:
-    try:
-        resolved_source_path = validate_source_path(Path(source_path))
-    except PathSafetyError as exc:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            message=str(exc),
-            details={"source_path": source_path},
-        )
-    try:
-        resolved = _resolve_initial_profiles(
-            source_path=Path(resolved_source_path),
-            # Operator-configured sensitive paths (from a loaded ServerConfig, threaded in by
-            # create_app) are enforced here alongside the built-in validate_rootfs_source guards
-            # (reject /, $HOME, non-file, source-tree overlap, shell/control chars,
-            # symlink-resolved). When no config is loaded this is empty and only the built-ins apply.
-            sensitive_paths=sensitive_paths or [],
-            build_profile=build_profile,
-            build_profile_spec=build_profile_spec,
-            target_profile=target_profile,
-            target_profile_spec=target_profile_spec,
-            rootfs_profile=rootfs_profile,
-            rootfs_profile_spec=rootfs_profile_spec,
-            build_overrides=build_overrides,
-            boot_overrides=boot_overrides,
-        )
-    except (PathSafetyError, ValueError) as exc:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            message=str(exc),
-        )
-    request = RunRequest(
-        source_path=str(resolved_source_path),
-        build_profile=resolved.build.name,
-        target_profile=resolved.target.name,
-        rootfs_profile=resolved.rootfs.name,
-        debug_profile=debug_profile,
-        test_suite=test_suite,
-        run_id=run_id,
-        build_overrides=build_overrides,
-        boot_overrides=boot_overrides,
-    )
-    try:
-        store = ArtifactStore(artifact_root, source_paths=[resolved_source_path])
-        # The build profile is always frozen (named base + overrides). Target/rootfs are frozen
-        # only when supplied inline, since named profiles are re-resolved by name at boot.
-        manifest = store.create_run(
-            request,
-            resolved_build_profile=resolved.build,
-            resolved_target_profile=resolved.target if target_profile_spec is not None else None,
-            resolved_rootfs_profile=resolved.rootfs if rootfs_profile_spec is not None else None,
-        )
-    except ManifestStateError as exc:
-        return ToolResponse.failure(
-            category=exc.category,
-            message=str(exc),
-            details={"artifact_root": str(artifact_root)},
-        )
-    manifest_path = artifact_root.expanduser().resolve() / manifest.run_id / "manifest.json"
-    return ToolResponse.success(
-        summary=f"created run {manifest.run_id}",
-        run_id=manifest.run_id,
-        data={
-            "manifest": Redactor().redact_value(manifest.model_dump(mode="json")),
-            "manifest_path": str(manifest_path),
-        },
-        artifacts=[ArtifactRef(path=str(manifest_path), kind="manifest")],
-        suggested_next_actions=["kernel.build"],
-    )
-
-
-def get_manifest_handler(*, artifact_root: Path, run_id: str) -> ToolResponse:
-    try:
-        store = ArtifactStore(artifact_root, create_root=False)
-        manifest = store.load_manifest(run_id)
-    except ManifestStateError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-    return ToolResponse.success(
-        summary=f"loaded manifest for {run_id}",
-        run_id=run_id,
-        data={"manifest": Redactor().redact_value(manifest.model_dump(mode="json"))},
-        artifacts=[
-            ArtifactRef(path=str(artifact_root.expanduser().resolve() / run_id / "manifest.json"), kind="manifest")
-        ],
-    )
 
 
 def kernel_build_handler(
