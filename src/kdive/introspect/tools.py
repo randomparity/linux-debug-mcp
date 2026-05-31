@@ -20,6 +20,7 @@ from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, 
 
 
 class IntrospectTargetContext(Model):
+    run_id: str
     target_ref: str
     artifact_root: str | None = None
     debug_profile: str | None = None
@@ -44,6 +45,7 @@ class IntrospectProbeOptions(Model):
 
 
 class VmcoreIntrospectInputs(Model):
+    run_id: str
     vmcore_ref: str
     vmlinux_ref: str
     modules_ref: str | None = None
@@ -131,7 +133,6 @@ def register_introspect_tools(
 
     @app.tool(name="debug.introspect.run")
     def debug_introspect_run(
-        run_id: str,
         target: IntrospectTargetContext | dict[str, Any],
         script: str,
         options: IntrospectRunOptions | dict[str, Any] | None = None,
@@ -140,7 +141,7 @@ def register_introspect_tools(
             target_model = model_arg(target, IntrospectTargetContext)
             options_model = optional_model_arg(options, IntrospectRunOptions)
             request = DebugIntrospectRunRequest(
-                run_id=run_id,
+                run_id=target_model.run_id,
                 manifest_target_profile=target_model.target_ref,
                 script=script,
                 timeout_seconds=options_model.timeout_seconds,
@@ -162,7 +163,6 @@ def register_introspect_tools(
 
     @app.tool(name="debug.introspect.helper")
     def debug_introspect_helper(
-        run_id: str,
         target: IntrospectTargetContext | dict[str, Any],
         name: str,
         options: IntrospectHelperOptions | dict[str, Any] | None = None,
@@ -171,7 +171,7 @@ def register_introspect_tools(
             target_model = model_arg(target, IntrospectTargetContext)
             options_model = optional_model_arg(options, IntrospectHelperOptions)
             request = DebugIntrospectHelperRequest(
-                run_id=run_id,
+                run_id=target_model.run_id,
                 manifest_target_profile=target_model.target_ref,
                 name=name,
                 args=options_model.args or {},
@@ -191,7 +191,6 @@ def register_introspect_tools(
 
     @app.tool(name="debug.introspect.check_prerequisites")
     def debug_introspect_check_prerequisites(
-        run_id: str,
         target: IntrospectTargetContext | dict[str, Any],
         options: IntrospectProbeOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -199,7 +198,7 @@ def register_introspect_tools(
             target_model = model_arg(target, IntrospectTargetContext)
             options_model = optional_model_arg(options, IntrospectProbeOptions)
             request = DebugIntrospectCheckPrerequisitesRequest(
-                run_id=run_id,
+                run_id=target_model.run_id,
                 manifest_target_profile=target_model.target_ref,
                 timeout_seconds=options_model.timeout_seconds,
                 debug_profile=target_model.debug_profile,
@@ -217,7 +216,6 @@ def register_introspect_tools(
 
     @app.tool(name="debug.introspect.from_vmcore")
     def debug_introspect_from_vmcore(
-        run_id: str,
         vmcore: VmcoreIntrospectInputs | dict[str, Any],
         script: str,
         options: VmcoreIntrospectRunOptions | dict[str, Any] | None = None,
@@ -226,7 +224,7 @@ def register_introspect_tools(
             vmcore_model = model_arg(vmcore, VmcoreIntrospectInputs)
             options_model = optional_model_arg(options, VmcoreIntrospectRunOptions)
             request = DebugIntrospectFromVmcoreRequest(
-                run_id=run_id,
+                run_id=vmcore_model.run_id,
                 vmcore_ref=vmcore_model.vmcore_ref,
                 vmlinux_ref=vmcore_model.vmlinux_ref,
                 script=script,
@@ -244,7 +242,6 @@ def register_introspect_tools(
 
     @app.tool(name="debug.introspect.from_vmcore_helper")
     def debug_introspect_from_vmcore_helper(
-        run_id: str,
         vmcore: VmcoreIntrospectInputs | dict[str, Any],
         name: str,
         options: VmcoreIntrospectHelperOptions | dict[str, Any] | None = None,
@@ -253,7 +250,7 @@ def register_introspect_tools(
             vmcore_model = model_arg(vmcore, VmcoreIntrospectInputs)
             options_model = optional_model_arg(options, VmcoreIntrospectHelperOptions)
             request = DebugIntrospectFromVmcoreHelperRequest(
-                run_id=run_id,
+                run_id=vmcore_model.run_id,
                 vmcore_ref=vmcore_model.vmcore_ref,
                 vmlinux_ref=vmcore_model.vmlinux_ref,
                 name=name,

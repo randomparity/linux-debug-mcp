@@ -344,23 +344,43 @@ def test_create_app_registers_sprint_4_tools_as_real_handlers() -> None:
     assert tools["debug.start_session"].fn.__name__ == "debug_start_session"
     start_properties = tools["debug.start_session"].parameters["properties"]
     assert {"context", "options"}.issubset(start_properties)
-    assert {"artifact_root", "debug_profile", "new_session"}.isdisjoint(start_properties)
+    assert {"artifact_root", "debug_profile", "new_session", "run_id"}.isdisjoint(start_properties)
     assert tools["debug.read_memory"].fn.__name__ == "debug_read_memory"
     read_memory_properties = tools["debug.read_memory"].parameters["properties"]
     assert {"address", "byte_count", "context"}.issubset(read_memory_properties)
-    assert {"artifact_root", "debug_session_id"}.isdisjoint(read_memory_properties)
+    assert {"artifact_root", "debug_session_id", "run_id"}.isdisjoint(read_memory_properties)
     assert tools["debug.end_session"].fn.__name__ == "debug_end_session"
     assert "context" in tools["debug.end_session"].parameters["properties"]
 
 
 def test_debug_tool_malformed_grouped_input_returns_configuration_error() -> None:
     response = _get_tool_fn(create_app(), "debug.start_session")(
-        run_id="run-abc123",
         context={"unexpected": "field"},
     )
 
     assert response["ok"] is False
     assert response["error"]["category"] == "configuration_error"
+
+
+def test_run_scoped_mcp_tool_families_keep_run_id_in_context() -> None:
+    app = create_app()
+
+    for tool_name in (
+        "debug.start_session",
+        "debug.read_memory",
+        "debug.end_session",
+        "debug.introspect.run",
+        "debug.introspect.helper",
+        "debug.introspect.check_prerequisites",
+        "debug.introspect.from_vmcore",
+        "debug.introspect.from_vmcore_helper",
+        "debug.postmortem.crash",
+        "debug.postmortem.triage",
+        "debug.postmortem.check_prereqs",
+        "debug.postmortem.list_dumps",
+        "debug.postmortem.fetch",
+    ):
+        assert "run_id" not in app._tool_manager._tools[tool_name].parameters["properties"]
 
 
 def test_workflow_tool_malformed_grouped_input_returns_configuration_error() -> None:
@@ -760,6 +780,7 @@ def test_introspect_tool_is_registered() -> None:
     assert tool.fn.__module__ == "kdive.introspect.tools"
     assert "script" in tool.parameters["properties"]
     assert "options" in tool.parameters["properties"]
+    assert "run_id" not in tool.parameters["properties"]
     assert "timeout_seconds" not in tool.parameters["properties"]
 
     app = create_app()

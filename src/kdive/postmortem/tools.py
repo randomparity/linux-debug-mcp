@@ -20,6 +20,7 @@ from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, 
 
 
 class PostmortemTargetContext(Model):
+    run_id: str
     target_ref: str
     artifact_root: str | None = None
     debug_profile: str | None = None
@@ -28,6 +29,7 @@ class PostmortemTargetContext(Model):
 
 
 class PostmortemVmcoreInputs(Model):
+    run_id: str
     vmcore_ref: str
     vmlinux_ref: str
     modules_ref: str | None = None
@@ -124,7 +126,6 @@ def register_postmortem_tools(
 
     @app.tool(name="debug.postmortem.crash")
     def debug_postmortem_crash(
-        run_id: str,
         vmcore: PostmortemVmcoreInputs | dict[str, Any],
         commands: list[str],
         options: PostmortemCrashOptions | dict[str, Any] | None = None,
@@ -133,7 +134,7 @@ def register_postmortem_tools(
             vmcore_model = model_arg(vmcore, PostmortemVmcoreInputs)
             options_model = optional_model_arg(options, PostmortemCrashOptions)
             request = DebugPostmortemCrashRequest(
-                run_id=run_id,
+                run_id=vmcore_model.run_id,
                 vmcore_ref=vmcore_model.vmcore_ref,
                 vmlinux_ref=vmcore_model.vmlinux_ref,
                 commands=commands,
@@ -149,7 +150,6 @@ def register_postmortem_tools(
 
     @app.tool(name="debug.postmortem.triage")
     def debug_postmortem_triage(
-        run_id: str,
         vmcore: PostmortemVmcoreInputs | dict[str, Any],
         options: PostmortemCrashOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -157,7 +157,7 @@ def register_postmortem_tools(
             vmcore_model = model_arg(vmcore, PostmortemVmcoreInputs)
             options_model = optional_model_arg(options, PostmortemCrashOptions)
             request = DebugPostmortemTriageRequest(
-                run_id=run_id,
+                run_id=vmcore_model.run_id,
                 vmcore_ref=vmcore_model.vmcore_ref,
                 vmlinux_ref=vmcore_model.vmlinux_ref,
                 modules_ref=vmcore_model.modules_ref,
@@ -172,7 +172,6 @@ def register_postmortem_tools(
 
     @app.tool(name="debug.postmortem.check_prereqs")
     def debug_postmortem_check_prereqs(
-        run_id: str,
         target: PostmortemTargetContext | dict[str, Any],
         options: PostmortemProbeOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -180,7 +179,7 @@ def register_postmortem_tools(
             target_model = model_arg(target, PostmortemTargetContext)
             options_model = optional_model_arg(options, PostmortemProbeOptions)
             request = DebugPostmortemCheckPrereqsRequest(
-                run_id=run_id,
+                run_id=target_model.run_id,
                 manifest_target_profile=target_model.target_ref,
                 timeout_seconds=options_model.timeout_seconds,
                 debug_profile=target_model.debug_profile,
@@ -198,7 +197,6 @@ def register_postmortem_tools(
 
     @app.tool(name="debug.postmortem.list_dumps")
     def debug_postmortem_list_dumps(
-        run_id: str,
         target: PostmortemTargetContext | dict[str, Any],
         options: PostmortemListDumpsOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -206,7 +204,7 @@ def register_postmortem_tools(
             target_model = model_arg(target, PostmortemTargetContext)
             options_model = optional_model_arg(options, PostmortemListDumpsOptions)
             request = DebugPostmortemListDumpsRequest(
-                run_id=run_id,
+                run_id=target_model.run_id,
                 manifest_target_profile=target_model.target_ref,
                 dump_dir=options_model.dump_dir,
                 timeout_seconds=options_model.timeout_seconds,
@@ -225,7 +223,6 @@ def register_postmortem_tools(
 
     @app.tool(name="debug.postmortem.fetch")
     def debug_postmortem_fetch(
-        run_id: str,
         target: PostmortemTargetContext | dict[str, Any],
         dump_ref: str,
         options: PostmortemFetchOptions | dict[str, Any] | None = None,
@@ -234,7 +231,7 @@ def register_postmortem_tools(
             target_model = model_arg(target, PostmortemTargetContext)
             options_model = optional_model_arg(options, PostmortemFetchOptions)
             request = DebugPostmortemFetchRequest(
-                run_id=run_id,
+                run_id=target_model.run_id,
                 manifest_target_profile=target_model.target_ref,
                 dump_ref=dump_ref,
                 force=options_model.force,

@@ -200,6 +200,7 @@ class DebugToolContext:
 
 
 class DebugSessionContext(Model):
+    run_id: str
     artifact_root: str | None = None
     debug_session_id: str | None = None
 
@@ -234,10 +235,10 @@ def _session_context(
     value: DebugSessionContext | dict[str, Any] | None,
     *,
     default_artifact_root: str,
-) -> tuple[Path, str | None]:
+) -> tuple[Path, str, str | None]:
     context = optional_model_arg(value, DebugSessionContext)
     artifact_root = default_artifact_root if context.artifact_root is None else context.artifact_root
-    return _path(artifact_root), context.debug_session_id
+    return _path(artifact_root), context.run_id, context.debug_session_id
 
 
 def _debug_runtime(context: DebugToolContext, *, include_admission: bool) -> DebugRuntime:
@@ -260,12 +261,14 @@ def _register_debug_session_lifecycle_tools(
 ) -> None:
     @app.tool(name="debug.start_session")
     def debug_start_session(
-        run_id: str,
-        context: DebugSessionContext | dict[str, Any] | None = None,
+        context: DebugSessionContext | dict[str, Any],
         options: DebugStartSessionOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
-            artifact_root, _debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            artifact_root, run_id, _debug_session_id = _session_context(
+                context,
+                default_artifact_root=default_artifact_root,
+            )
             start_options = optional_model_arg(options, DebugStartSessionOptions)
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
@@ -286,11 +289,13 @@ def _register_debug_session_lifecycle_tools(
 
     @app.tool(name="debug.end_session")
     def debug_end_session(
-        run_id: str,
-        context: DebugSessionContext | dict[str, Any] | None = None,
+        context: DebugSessionContext | dict[str, Any],
     ) -> dict[str, Any]:
         try:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            artifact_root, run_id, debug_session_id = _session_context(
+                context,
+                default_artifact_root=default_artifact_root,
+            )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
@@ -317,12 +322,14 @@ def _register_registers_query(
     handler: DebugReadRegistersHandler,
 ) -> None:
     def debug_registers_query(
-        run_id: str,
         registers: list[str],
-        context: DebugSessionContext | dict[str, Any] | None = None,
+        context: DebugSessionContext | dict[str, Any],
     ) -> dict[str, Any]:
         try:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            artifact_root, run_id, debug_session_id = _session_context(
+                context,
+                default_artifact_root=default_artifact_root,
+            )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
@@ -348,12 +355,14 @@ def _register_symbol_query(
     handler: DebugReadSymbolHandler,
 ) -> None:
     def debug_symbol_query(
-        run_id: str,
         symbol: str,
-        context: DebugSessionContext | dict[str, Any] | None = None,
+        context: DebugSessionContext | dict[str, Any],
     ) -> dict[str, Any]:
         try:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            artifact_root, run_id, debug_session_id = _session_context(
+                context,
+                default_artifact_root=default_artifact_root,
+            )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
@@ -390,13 +399,15 @@ def _register_debug_read_tools(
 
     @app.tool(name="debug.read_memory")
     def debug_read_memory(
-        run_id: str,
         address: int,
         byte_count: int,
-        context: DebugSessionContext | dict[str, Any] | None = None,
+        context: DebugSessionContext | dict[str, Any],
     ) -> dict[str, Any]:
         try:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            artifact_root, run_id, debug_session_id = _session_context(
+                context,
+                default_artifact_root=default_artifact_root,
+            )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
@@ -412,13 +423,15 @@ def _register_debug_read_tools(
 
     @app.tool(name="debug.evaluate")
     def debug_evaluate(
-        run_id: str,
         inspector: str,
-        context: DebugSessionContext | dict[str, Any] | None = None,
+        context: DebugSessionContext | dict[str, Any],
         options: DebugEvaluateOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            artifact_root, run_id, debug_session_id = _session_context(
+                context,
+                default_artifact_root=default_artifact_root,
+            )
             evaluate_options = optional_model_arg(options, DebugEvaluateOptions)
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
@@ -439,13 +452,15 @@ def _register_debug_module_symbol_tools(
 ) -> None:
     @app.tool(name="debug.load_module_symbols")
     def debug_load_module_symbols(
-        run_id: str,
         module: str,
-        context: DebugSessionContext | dict[str, Any] | None = None,
+        context: DebugSessionContext | dict[str, Any],
         options: DebugLoadModuleSymbolsOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            artifact_root, run_id, debug_session_id = _session_context(
+                context,
+                default_artifact_root=default_artifact_root,
+            )
             load_options = optional_model_arg(options, DebugLoadModuleSymbolsOptions)
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
@@ -476,12 +491,14 @@ def _register_symbol_control(
     handler: DebugSymbolControlHandler,
 ) -> None:
     def debug_symbol_control(
-        run_id: str,
         symbol: str,
-        context: DebugSessionContext | dict[str, Any] | None = None,
+        context: DebugSessionContext | dict[str, Any],
     ) -> dict[str, Any]:
         try:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            artifact_root, run_id, debug_session_id = _session_context(
+                context,
+                default_artifact_root=default_artifact_root,
+            )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
@@ -507,12 +524,14 @@ def _register_breakpoint_id_control(
     handler: DebugBreakpointIdControlHandler,
 ) -> None:
     def debug_breakpoint_id_control(
-        run_id: str,
         breakpoint_id: str,
-        context: DebugSessionContext | dict[str, Any] | None = None,
+        context: DebugSessionContext | dict[str, Any],
     ) -> dict[str, Any]:
         try:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            artifact_root, run_id, debug_session_id = _session_context(
+                context,
+                default_artifact_root=default_artifact_root,
+            )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
@@ -538,11 +557,13 @@ def _register_gated_query(
     handler: DebugSessionQueryHandler,
 ) -> None:
     def debug_session_query(
-        run_id: str,
-        context: DebugSessionContext | dict[str, Any] | None = None,
+        context: DebugSessionContext | dict[str, Any],
     ) -> dict[str, Any]:
         try:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            artifact_root, run_id, debug_session_id = _session_context(
+                context,
+                default_artifact_root=default_artifact_root,
+            )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
@@ -608,12 +629,14 @@ def _register_execution_control(
     handler: DebugExecutionControlHandler,
 ) -> None:
     def debug_execution_control(
-        run_id: str,
-        context: DebugSessionContext | dict[str, Any] | None = None,
+        context: DebugSessionContext | dict[str, Any],
         options: DebugExecutionOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            artifact_root, run_id, debug_session_id = _session_context(
+                context,
+                default_artifact_root=default_artifact_root,
+            )
             execution_options = optional_model_arg(options, DebugExecutionOptions)
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)

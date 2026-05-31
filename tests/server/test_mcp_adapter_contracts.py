@@ -145,8 +145,8 @@ def test_introspect_adapter_builds_run_request_and_forwards_gate_collaborators(t
     )
 
     raw = _tool_fn(app, "debug.introspect.run")(
-        run_id="run-1",
         target=IntrospectTargetContext(
+            run_id="run-1",
             target_ref="local-qemu",
             artifact_root=str(tmp_path / "runs"),
         ),
@@ -192,7 +192,6 @@ def test_introspect_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_pa
     )
 
     raw = _tool_fn(app, "debug.introspect.run")(
-        run_id="run-1",
         target={},
         script="print('x')",
     )
@@ -224,8 +223,8 @@ def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators
     )
 
     raw = _tool_fn(app, "debug.postmortem.fetch")(
-        run_id="run-1",
         target=PostmortemTargetContext(
+            run_id="run-1",
             target_ref="local-qemu",
             artifact_root=str(tmp_path / "runs"),
         ),
@@ -271,7 +270,6 @@ def test_postmortem_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_pa
     )
 
     raw = _tool_fn(app, "debug.postmortem.fetch")(
-        run_id="run-1",
         target={},
         dump_ref="/var/crash/d1",
     )
