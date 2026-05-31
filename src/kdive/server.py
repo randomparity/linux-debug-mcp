@@ -92,6 +92,10 @@ from kdive.debug.operations import (
     _mi_session_artifacts,
     _persist_mi_debug_session,
     _preserved_debug_step_details,
+    _recorded_transport_session_id,
+    _resume_debug_transport,
+    _teardown_debug_transport,
+    _teardown_stalled_debug_session,
 )
 from kdive.debug.operations import (
     _engine_op_data as _engine_op_data,
@@ -116,6 +120,13 @@ from kdive.domain import (
     StepResult,
     StepStatus,
     ToolResponse,
+)
+from kdive.introspect.execution import (
+    _record_introspect_failure as _record_introspect_failure,
+)
+from kdive.introspect.execution import (
+    _redact_and_truncate,
+    _target_python_remote_argv,
 )
 from kdive.introspect.handlers import (
     debug_introspect_from_vmcore_handler,
@@ -162,9 +173,6 @@ from kdive.providers.local.gdb_mi import (
     GdbMiSessionRegistry,
 )
 from kdive.providers.local.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
-from kdive.providers.local.local_drgn_introspect import (
-    TARGET_PYTHON_ARGV,
-)
 from kdive.providers.local.local_kernel_build import (
     BuildIdMissing,
     LocalKernelBuildProvider,
@@ -317,23 +325,6 @@ RUN_STDOUT_CAP = 2 * 1024 * 1024
 SSH_TIMEOUT_GRACE_SECONDS = 10
 
 
-def _target_python_remote_argv(*, timeout_seconds: int, use_sudo: bool) -> list[str]:
-    """Build the remote argv shared by the probe and the introspect runner.
-
-    Spec §4 shared-interpreter invariant: both ``debug.introspect.run`` and
-    ``debug.introspect.check_prerequisites`` must run the interpreter through a
-    byte-identical SSH + interpreter invocation, *including* the privilege
-    prefix. A non-root SSH login runs the interpreter under ``sudo`` in both
-    paths so the probe checks drgn/debuginfo at the same privilege level the
-    runner will use.
-    """
-    argv = ["timeout", "--kill-after=2s", f"{timeout_seconds}s"]
-    if use_sudo:
-        argv.append("sudo")
-    argv.extend(TARGET_PYTHON_ARGV)
-    return argv
-
-
 def build_scp_argv(
     *,
     rootfs_profile: RootfsProfile,
@@ -459,18 +450,6 @@ def _rollback_introspect_admission(
         logger.exception("admission rollback failed for introspect call_id=%s run_id=%s", call_id, run_id)
 
 
-def _redact_and_truncate(redactor: Redactor, text: str, cap: int = 256) -> str:
-    """Spec §5.2 step 5, step 9, §6.3 — redact BEFORE truncate (R2-F3).
-
-    The order matters: ``Redactor.redact_text`` does literal substring
-    replacement against ``secret_values``, so truncating first could split
-    an ``ssh_key_ref`` mid-secret and leave an unmatched prefix in the
-    diagnostic.
-    """
-    redacted = redactor.redact_text(text)
-    return redacted[:cap]
-
-
 def _head_tail(s: str, *, head: int, tail: int) -> str:
     """Spec §3.2: snippet helper — head N + middle marker + tail N."""
     if len(s) <= head + tail:
@@ -494,100 +473,6 @@ def _chmod_best_effort(path: Path, mode: int) -> None:
 def _record_terminal_introspect_result(store: ArtifactStore, run_id: str, result: StepResult) -> None:
     # Spec §5.2 step 13: every introspect:<call_id> is a fresh entry (UUIDv4) — append, never replace.
     _record_step_with_retry(store, run_id, result, append=True)
-
-
-def _record_introspect_failure(
-    *,
-    store: ArtifactStore,
-    run_id: str,
-    call_id: str,
-    category: ErrorCategory,
-    code: str,
-    message: str,
-    agent_dir: Path,
-    sensitive_dir: Path,
-    redactor: Redactor,
-    raw_stderr: str,
-    ssh_exit: int,
-    request_timeout_seconds: int,
-    duration_ms: int,
-    ssh_user: str | None,
-    outcome_status_for_forensics: str | None,
-    include_stdout_json: bool = False,
-    redacted_payload: dict[str, Any] | None = None,
-    allow_write: bool = False,
-    acknowledged_permissions: list[str] | None = None,
-) -> ToolResponse:
-    """Persist artifacts, record the FAILED step, return ``ToolResponse.failure``.
-
-    ``request_timeout_seconds`` is the caller's *budget* (spec §6.2);
-    ``duration_ms`` is the measured wall-clock duration. Keeping success and
-    failure record shapes symmetric lets forensic tooling treat the two
-    paths uniformly. ``ssh_user`` is required (no "unknown" placeholder).
-
-    Note (R6-F3): the ``WrapperRenderError`` path in Step 9.5 does NOT call
-    this helper — the render failure happens before SSH runs, so there is
-    no stderr/stdout text to redact. That path writes the FAILED
-    ``StepResult`` directly.
-    """
-    (agent_dir / "stderr.log").write_text(redactor.redact_text(raw_stderr), encoding="utf-8")
-    if include_stdout_json and redacted_payload is not None:
-        (agent_dir / "stdout.json").write_text(json.dumps(redacted_payload), encoding="utf-8")
-    artifacts: list[ArtifactRef] = [
-        ArtifactRef(path=str(agent_dir / "request.json"), kind="application/json"),
-        ArtifactRef(path=str(agent_dir / "wrapper.skeleton.py"), kind="text/x-python"),
-        ArtifactRef(path=str(sensitive_dir / "wrapper.py"), kind="text/x-python", sensitive=True),
-        ArtifactRef(path=str(agent_dir / "stderr.log"), kind="text/plain"),
-    ]
-    if include_stdout_json:
-        artifacts.append(ArtifactRef(path=str(agent_dir / "stdout.json"), kind="application/json"))
-    # Raw SSH stdout/stderr live under sensitive/; register existing files for
-    # forensics on every failure path. Admit-time and preflight failures skip SSH.
-    for raw_name in ("stdout.raw", "stderr.raw"):
-        raw_path = sensitive_dir / raw_name
-        if raw_path.exists():
-            artifacts.append(
-                ArtifactRef(
-                    path=str(raw_path),
-                    kind="application/octet-stream",
-                    sensitive=True,
-                )
-            )
-    details: dict[str, Any] = {
-        "call_id": call_id,
-        "timeout_seconds": request_timeout_seconds,
-        "duration_ms": duration_ms,
-        "wrapper_exit_code": ssh_exit,
-        "outcome_status": outcome_status_for_forensics,
-        "code": code,
-    }
-    # ssh_user is None on the vmcore path (no SSH user); omit the key rather
-    # than recording a misleading `ssh_user: null` on a non-SSH step.
-    if ssh_user is not None:
-        details["ssh_user"] = ssh_user
-    # ADR 0011 / #56 audit: record allow_write on every live call so failed/blocked
-    # write-mode calls remain visible in the manifest; record the satisfied required
-    # permissions only when write mode was used.
-    details["allow_write"] = allow_write
-    if allow_write:
-        details["acknowledged_permissions"] = list(acknowledged_permissions or [])
-    step = StepResult(
-        step_name=f"introspect:{call_id}",
-        status=StepStatus.FAILED,
-        summary=message,
-        artifacts=artifacts,
-        details=details,
-    )
-    _record_terminal_introspect_result(store, run_id, step)
-    public = [a for a in artifacts if not a.sensitive]
-    return ToolResponse.failure(
-        category=category,
-        run_id=run_id,
-        message=message,
-        details={"code": code, "call_id": call_id, "outcome_status": outcome_status_for_forensics},
-        artifacts=public,
-        suggested_next_actions=["artifacts.get_manifest"],
-    )
 
 
 def _redacted_boot_data(data: dict[str, Any]) -> dict[str, Any]:
@@ -3411,81 +3296,6 @@ def _debug_open_request(*, run_id: str, gdbstub_endpoint: dict[str, Any], admiss
     )
 
 
-def _resume_debug_transport(
-    *,
-    session: TransportSession,
-    admission: AdmissionService,
-    session_registry: SessionRegistry,
-) -> None:
-    """Inverse of `_halt_debug_transport` for the guaranteed-resume path: once the MI engine confirms
-    the kernel is EXECUTING again (best-effort continue + RSP disconnect), persist HALTED->EXECUTING
-    and bump the execution epoch so a fresh ssh-tier proof at the new epoch is accepted. Writing the
-    durable record EXECUTING also makes a subsequent transaction.close() leave NO closed_while_halted
-    recovery tombstone, so a fresh ssh-tier operation succeeds with the target back in EXECUTING
-    (interface-contracts §5.6)."""
-    session_registry.write_record(session.model_copy(update={"execution_state": ExecutionState.EXECUTING}))
-    admission.note_execution_transition(session.target_key, session.generation)
-
-
-def _teardown_debug_transport(
-    *,
-    transport_session: TransportSession,
-    transaction: TransportTransaction,
-    session_registry: SessionRegistry | None,
-    session_guard: SessionGuard | None,
-) -> None:
-    """Tear down an open transport session after a failed attach: SessionGuard-supervised close when
-    the guard is wired, else a guarded transaction.close(force=False). Shared by the legacy batch
-    attach-failure path and the Phase-A MI probe-failure path."""
-    sid = transport_session.session_id
-    tkey = transport_session.target_key
-    if session_guard is not None and session_registry is not None:
-        session_guard.teardown(
-            SessionGuardContext(
-                target_key=tkey, generation=transport_session.generation, session_id=sid, reason="attach_error"
-            ),
-            close=lambda: transaction.close(sid, force=False),
-            read_record=lambda: session_registry.read_record(tkey),
-            force_reap=lambda: transaction.force_release(sid),
-        )
-    else:
-        with contextlib.suppress(Exception):
-            transaction.close(sid, force=False)
-
-
-def _teardown_stalled_debug_session(
-    *,
-    run_id: str,
-    admission: AdmissionService | None,
-    session_registry: SessionRegistry | None,
-    transaction: TransportTransaction | None,
-    session_guard: SessionGuard | None,
-) -> None:
-    """Full transport teardown after a `transport_stall` on an established session (ADR 0023). The
-    caller has already reaped the live attachment and `force_resume`d the guest; this writes the
-    durable record back to EXECUTING (when admission is wired — the stateful path) and closes the
-    transport, releasing the StopCapableGuard so target.run_tests is ungated and re-attach starts
-    clean. Degrades gracefully: with no transaction/record wired it is a no-op; on the read path
-    (no admission) it skips the durable-EXECUTING write and leaves the conservative
-    closed-while-halted recovery tombstone. Best-effort throughout — teardown must not raise."""
-    if transaction is None or session_registry is None:
-        return
-    tkey = TargetKey(provisioner="local-qemu", target_id=run_id)
-    record = session_registry.read_record(tkey)
-    if record is None:
-        return
-    if admission is not None:
-        with contextlib.suppress(Exception):
-            _resume_debug_transport(session=record, admission=admission, session_registry=session_registry)
-    with contextlib.suppress(Exception):
-        _teardown_debug_transport(
-            transport_session=record,
-            transaction=transaction,
-            session_registry=session_registry,
-            session_guard=session_guard,
-        )
-
-
 def _mi_probe_transcript_path(run_dir: Path) -> Path:
     """The live gdb/MI session's transcript. ADR 0021: this is the session-of-record transcript the
     persisted DebugSession references (it is the same file the attach probe writes into)."""
@@ -4308,23 +4118,6 @@ def _resolve_module_ko(
             ) from exc
         return resolved if resolved.is_file() else None
     return finder(build_tree, module)
-
-
-def _recorded_transport_session_id(*, artifact_root: Path, run_id: str) -> str | None:
-    """Read the transport-ownership binding `debug.start_session` persisted into the debug step
-    details (set only on the transaction-backed path). None when the run/manifest/step is absent or
-    no transport session was bound — the legacy ungated path records nothing, so close() is skipped."""
-    try:
-        store = ArtifactStore(artifact_root, create_root=False)
-        if not (store.run_dir(run_id) / "manifest.json").is_file():
-            return None
-        debug_result = store.load_manifest(run_id).step_results.get("debug")
-    except ManifestStateError:
-        return None
-    if debug_result is None:
-        return None
-    transport_session_id = debug_result.details.get("transport_session_id")
-    return transport_session_id if isinstance(transport_session_id, str) else None
 
 
 def _end_mi_debug_session(
