@@ -258,6 +258,19 @@ def test_debug_start_session_handler_lives_in_debug_layer() -> None:
     assert "from kdive.server import" not in session_handler_source
 
 
+def test_server_does_not_keep_duplicate_debug_session_helpers() -> None:
+    server_source = Path(server_module.__file__).read_text(encoding="utf-8")
+
+    for helper_name in (
+        "_debug_open_request",
+        "_mi_probe_transcript_path",
+        "_run_mi_attach_probe",
+        "_build_mi_debug_session",
+        "_verify_gdb_symbol_version_lock",
+    ):
+        assert f"def {helper_name}" not in server_source
+
+
 def test_debug_start_session_handler_is_split_into_named_phases() -> None:
     session_handler_source = Path(debug_start_session_handler.__code__.co_filename).read_text(encoding="utf-8")
 
@@ -393,12 +406,13 @@ def test_server_private_helpers_are_canonical_imports() -> None:
         "_load_active_debug_session",
         "_persist_mi_debug_session",
         "_recorded_transport_session_id",
-        "_resume_debug_transport",
-        "_teardown_debug_transport",
         "_teardown_stalled_debug_session",
     ):
         assert getattr(server_module, name) is getattr(debug_operations, name)
         assert getattr(server_module, name).__module__ == "kdive.debug.operations"
+
+    for name in ("_resume_debug_transport", "_teardown_debug_transport"):
+        assert not hasattr(server_module, name)
 
     for name in ("_target_python_remote_argv", "_redact_and_truncate", "_record_introspect_failure"):
         assert getattr(server_module, name) is getattr(introspect_execution, name)

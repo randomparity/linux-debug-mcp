@@ -323,7 +323,7 @@ def test_debug_open_request_carries_gdbstub_endpoint_in_transport_opts() -> None
     # open-request builder must populate opts — not only target_ref — or a real attach raises
     # KeyError: 'port'. This guards the live debug-attach path the gated integration test cannot in CI.
     from kdive.coordination.admission import SnapshotStore
-    from kdive.server import _debug_open_request
+    from kdive.debug.session_handlers import _debug_open_request
 
     admission = AdmissionService(SnapshotStore())
     publish_ready_snapshot(

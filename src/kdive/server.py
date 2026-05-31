@@ -74,8 +74,6 @@ from kdive.debug.operations import (
     _persist_mi_debug_session,
     _preserved_debug_step_details,
     _recorded_transport_session_id,
-    _resume_debug_transport,
-    _teardown_debug_transport,
     _teardown_stalled_debug_session,
 )
 from kdive.debug.operations import (
@@ -147,15 +145,11 @@ from kdive.prereqs.handlers import prerequisites_handler
 from kdive.prereqs.kdump_probe import build_kdump_checks
 from kdive.prereqs.tools import register_prereq_tools
 from kdive.providers.debug import (
-    DebugSession,
     DebugSessionState,
     GdbMiEngine,
     GdbMiError,
     GdbMiSessionRegistry,
     ProviderDebugError,
-)
-from kdive.providers.local.debug.gdb_mi import (
-    CANONICAL_PROBE_SYMBOL,
 )
 from kdive.providers.local.debug.gdb_mi import (
     GdbMiEngine as LocalGdbMiEngine,
@@ -192,14 +186,7 @@ from kdive.seams.secrets import (
     SecretsStore,
 )
 from kdive.seams.target import (
-    ConsoleKind,
     TargetKey,
-)
-from kdive.symbols.build_id import BuildIdReadError
-from kdive.symbols.verify import (
-    BUILD_ID_RE,
-    ProvenanceMismatch,
-    verify_vmlinux_provenance,
 )
 from kdive.target import tools as target_tools
 from kdive.target.handlers import DEFAULT_TEST_SUITES as _DEFAULT_TEST_SUITES
@@ -219,13 +206,9 @@ from kdive.tools.providers import register_provider_tools
 from kdive.transport.base import (
     EndpointExposure,
     ExecutionState,
-    LineRole,
-    OpenRequest,
     Transport,
     TransportLocality,
-    TransportRef,
     TransportRegistry,
-    TransportSession,
 )
 from kdive.transport.handlers import (
     _ensure_debug_operation_enabled,
@@ -809,245 +792,6 @@ def _assemble_kdump_response(
 
 
 # Postmortem triage composition lives in kdive.postmortem.handlers.
-
-
-def _debug_open_request(*, run_id: str, gdbstub_endpoint: dict[str, Any], admission: AdmissionService) -> OpenRequest:
-    """Build the §4.3 transport.open request for the recorded gdbstub endpoint, reading
-    `generation`/`platform` from the authoritative snapshot the boot step published (never
-    re-deriving them — ADR 0007). The RSP channel mirrors the boot snapshot producer."""
-    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
-    snapshot = _require_snapshot(admission, target_key)
-    return OpenRequest(
-        target_key=target_key,
-        generation=snapshot.generation,
-        transport_ref=TransportRef(
-            provider="qemu-gdbstub",
-            channel_id="rsp0",
-            line_role=LineRole.RSP,
-            caps=("rsp",),
-            target_ref=gdbstub_endpoint,
-            # The qemu-gdbstub transport reads the RSP host/port from opts (transport.qemu_gdbstub),
-            # so the endpoint must be in opts, not only target_ref, or attach raises KeyError: 'port'.
-            opts=gdbstub_endpoint,
-        ),
-        required_caps=["rsp"],
-        platform=snapshot.platform,
-    )
-
-
-def _mi_probe_transcript_path(run_dir: Path) -> Path:
-    """The live gdb/MI session's transcript. ADR 0021: this is the session-of-record transcript the
-    persisted DebugSession references (it is the same file the attach probe writes into)."""
-    return run_dir / "debug" / "mi-probe.log"
-
-
-def _run_mi_attach_probe(
-    *,
-    engine: GdbMiEngine,
-    transport_session: TransportSession,
-    vmlinux_path: Path,
-    run_dir: Path,
-    run_id: str,
-    session_id: str,
-    gdb_mi_sessions: GdbMiSessionRegistry,
-    transaction: TransportTransaction,
-    admission: AdmissionService,
-    session_registry: SessionRegistry,
-    session_guard: SessionGuard | None,
-    redactor: Redactor,
-) -> tuple[ToolResponse | None, dict[str, object]]:
-    """Attach the persistent gdb/MI engine over the guard-protected TransportSession.rsp_endpoint,
-    read one MI record as typed JSON, resolve the canonical probe symbol, and — on success — REGISTER
-    the live attachment under ``session_id`` and leave it ATTACHED (ADR 0021 decision 1). Returns
-    ``(None, {"mi_probe": ...})`` on success (the typed record is merged into the debug step details),
-    or ``(failure_response, {})`` after a guaranteed-resume teardown that never leaves the kernel
-    HALTED and reaps any partial registration. The live session is the sole session-of-record; there
-    is no batch attach behind it."""
-    transcript_path = _mi_probe_transcript_path(run_dir)
-    attachment = None
-    try:
-        attachment = engine.attach(
-            rsp_endpoint=transport_session.rsp_endpoint, vmlinux_path=vmlinux_path, transcript_path=transcript_path
-        )
-        record = engine.probe_read(attachment)
-        symbol = engine.resolve_symbol(attachment, CANONICAL_PROBE_SYMBOL)
-        # Keep the engine attached and hold the live attachment across MCP calls under the minted
-        # session id (ADR 0021) — the per-op handlers look it up to issue MI verbs. NO detach here.
-        gdb_mi_sessions.register(session_id, attachment)
-        mi_probe: dict[str, object] = {
-            "mi_probe": redactor.redact_value(
-                {
-                    "record": record.model_dump(mode="json"),
-                    "symbol": symbol.model_dump(mode="json"),
-                    "transcript_path": str(transcript_path),
-                }
-            )
-        }
-        return None, mi_probe
-    except Exception as exc:  # noqa: BLE001 - the guaranteed-resume invariant is unconditional
-        # The invariant is "the target is NEVER left HALTED on a tool error" (engine crash, RSP
-        # timeout, AND a raised tool exception). So this catch is intentionally broad: a non-GdbMiError
-        # (e.g. an unwrapped pygdbmi error) must still trigger resume + teardown, not escape and strand
-        # the kernel HALTED with the guard held. KeyboardInterrupt/SystemExit (BaseException, not
-        # Exception) still propagate. The error is re-reported as a failure response, never swallowed.
-        category = exc.category if isinstance(exc, GdbMiError) else ErrorCategory.INFRASTRUCTURE_FAILURE
-        base_details = exc.details if isinstance(exc, GdbMiError) else {}
-        # If attach failed before connecting (bad endpoint / missing gdb / missing vmlinux), no RSP
-        # connection was made, so the engine never halted the target -> treat resume as confirmed so
-        # the durable record is un-halted and no recovery tombstone is left. Otherwise run the
-        # guaranteed-resume (best-effort continue + disconnect + kill).
-        resume_confirmed = engine.force_resume(attachment) if attachment is not None else True
-        # Reap any registration (idempotent no-op when the fault preceded register()) so a failed
-        # attach never leaves a dangling live attachment behind the freed durable record.
-        gdb_mi_sessions.reap(session_id)
-        if resume_confirmed:
-            # Best-effort: the un-halt is a durable write that could raise (e.g. OSError on a full
-            # disk). It MUST NOT be able to skip the teardown below, or the guaranteed-resume
-            # invariant would be defeated (guard left held, kernel left HALTED). If the EXECUTING
-            # write fails, teardown's close(force=False) then leaves a closed_while_halted recovery
-            # tombstone -- the conservative fallback -- and still releases the guard.
-            with contextlib.suppress(Exception):
-                _resume_debug_transport(
-                    session=transport_session, admission=admission, session_registry=session_registry
-                )
-        _teardown_debug_transport(
-            transport_session=transport_session,
-            transaction=transaction,
-            session_registry=session_registry,
-            session_guard=session_guard,
-        )
-        details = redactor.redact_value({**base_details, "transport_session_id": transport_session.session_id})
-        failure = ToolResponse.failure(
-            category=category,
-            message=redactor.redact_text(str(exc)),
-            run_id=run_id,
-            details=details,
-            suggested_next_actions=["host.check_prerequisites", "artifacts.get_manifest"],
-        )
-        return failure, {}
-
-
-_LOSSY_OUT_OF_BAND_CONSOLES = frozenset({ConsoleKind.HVC, ConsoleKind.VIRTIO})
-_TRANSPORT_QUALITY_WARNING = (
-    "gdb/MI RSP is riding a lossy out-of-band console ({console_kind}); break-in and live"
-    " transcripts may be dropped or corrupted. Prefer the in-guest/postmortem tiers for"
-    " reliable inspection."
-)
-_LOSSY_TRANSPORT_NEXT_ACTIONS = ("debug.kdb", "debug.introspect.run")
-
-
-def is_lossy_out_of_band(console_kind: ConsoleKind) -> bool:
-    """True when the RSP travels over a console whose framing can silently drop or corrupt bytes
-    (paravirtual HVC, virtio-console) rather than a dedicated UART line. ADR 0024 decision 2: the
-    warning is keyed on console framing quality, never on the selected line's role."""
-    return console_kind in _LOSSY_OUT_OF_BAND_CONSOLES
-
-
-def _build_mi_debug_session(
-    *,
-    session_id: str,
-    run_id: str,
-    vmlinux_path: Path,
-    gdbstub_endpoint: dict[str, object],
-    profile_name: str,
-    transcript_path: Path,
-    started_at: str,
-) -> DebugSession:
-    """Build the persisted DebugSession for the live gdb/MI attach (ADR 0021). The id is minted once
-    in the handler BEFORE the probe and threaded here, so the registry key and the persisted id are
-    identical. Symbol-identity validation is empty: the #70 build-id version-lock gate ran before the
-    attach and is authoritative (ADR 0021 decision 2b) — there is no live-banner scrape."""
-    attempt_dir = transcript_path.parent
-    return DebugSession(
-        session_id=session_id,
-        run_id=run_id,
-        provider_name="local-qemu-gdbstub",
-        gdbstub_endpoint=gdbstub_endpoint,
-        vmlinux_path=str(vmlinux_path),
-        selected_debug_profile=profile_name,
-        attach_status="attached",
-        started_at=started_at,
-        ended_at=None,
-        current_execution_state=DebugSessionState.STOPPED,
-        breakpoints={},
-        transcript_path=str(transcript_path),
-        command_metadata_path=str(attempt_dir / "commands.jsonl"),
-        latest_summary_path=str(attempt_dir / "debug-summary.json"),
-        symbol_identity_validation={},
-    )
-
-
-def _verify_gdb_symbol_version_lock(
-    *,
-    boot_result: StepResult,
-    vmlinux_path: Path,
-    run_id: str,
-    build_id_reader: Callable[[Path], str],
-) -> ToolResponse | None:
-    """#70 / ADR 0017: verify the on-disk vmlinux ELF build-id equals the
-    boot-recorded §4.2 KernelProvenance.build_id. Returns a failure ToolResponse to
-    abort the attach, or None to proceed. Unconditional (independent of
-    symbol_identity_required) -- a detected mismatch is bogus symbols.
-
-    *vmlinux_path* is the manifest-recorded build artifact (trusted: the artifact
-    root is the trust boundary), read read-only for its ELF build-id note; the gdb
-    provider performs the authoritative under-run-dir path confinement at attach.
-    """
-    provenance = boot_result.details.get("kernel_provenance")
-    if not isinstance(provenance, dict):
-        capture_error = boot_result.details.get("kernel_provenance_capture_error")
-        details: dict[str, Any] = {"code": "provenance_missing"}
-        if isinstance(capture_error, dict):
-            message = f"boot did not record a KernelProvenance: {capture_error.get('message', 'capture failed')}"
-            details["capture_error"] = capture_error.get("code")
-        else:
-            message = (
-                "boot for this run did not record a KernelProvenance (it predates "
-                "provenance capture). Re-run target.boot with force_reboot=true to capture it."
-            )
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=message,
-            details=details,
-            suggested_next_actions=["artifacts.get_manifest"],
-        )
-    expected_build_id = provenance.get("build_id")
-    if not isinstance(expected_build_id, str) or not BUILD_ID_RE.match(expected_build_id):
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="recorded build_id is malformed",
-            details={"code": "provenance_corrupt", "recorded": str(expected_build_id)},
-            suggested_next_actions=["artifacts.get_manifest"],
-        )
-    try:
-        verify_vmlinux_provenance(
-            expected_build_id=expected_build_id,
-            vmlinux_path=vmlinux_path,
-            build_id_reader=build_id_reader,
-        )
-    except BuildIdReadError as exc:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=f"could not read a GNU build-id from the vmlinux to verify symbols: {exc}",
-            details={"code": "vmlinux_build_id_unreadable"},
-            suggested_next_actions=["artifacts.get_manifest"],
-        )
-    except ProvenanceMismatch as exc:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=run_id,
-            message=(
-                f"vmlinux build-id {exc.observed!r} does not match the booted kernel's recorded "
-                f"build-id {exc.expected!r}; rebuild or re-boot so the booted kernel and the "
-                "vmlinux on disk share a build-id"
-            ),
-            details={"code": "provenance_mismatch", "expected": exc.expected, "observed": exc.observed},
-            suggested_next_actions=["artifacts.get_manifest"],
-        )
-    return None
 
 
 # Debug operation response and persistence live in kdive.debug.operations.
