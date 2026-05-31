@@ -101,8 +101,9 @@ EOF
 printf '/dev/vda / ext4 defaults 0 1\n' >"${fstab_file}"
 printf 'SELINUX=disabled\nSELINUXTYPE=targeted\n' >"${selinux_file}"
 
-# virt-builder applies operations in its own fixed order; useradd is sequenced before
-# --ssh-inject so a non-root SSH_USER exists when the key is injected.
+# virt-builder runs --run-command and --ssh-inject in command-line order (virt-builder(1)), and
+# --ssh-inject requires the user to already exist in the guest. The useradd --run-command is therefore
+# placed before --ssh-inject so a non-root SSH_USER exists when the key is injected.
 builder_args=(
   "fedora-${RELEASEVER}"
   --format qcow2 --size "${IMAGE_SIZE}" --output "${scratch}"

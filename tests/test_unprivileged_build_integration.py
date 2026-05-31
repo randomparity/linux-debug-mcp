@@ -39,7 +39,7 @@ def require_build_tier() -> None:
         pytest.skip(f"missing build tools: {', '.join(missing)} (install libguestfs-tools).")
 
 
-def build_image(target: Path, *, key_dir: Path | None = None) -> None:
+def build_image(target: Path, *, key_dir: Path | None = None, ssh_user: str | None = None) -> None:
     key = (key_dir or target.parent) / "id_ed25519.pub"
     key.write_text("ssh-ed25519 AAAATESTKEYONLY test@kdive\n", encoding="utf-8")
     env = {
@@ -48,6 +48,8 @@ def build_image(target: Path, *, key_dir: Path | None = None) -> None:
         "KDIVE_ROOTFS_RELEASEVER": os.environ.get("KDIVE_ROOTFS_RELEASEVER", "43"),
         "KDIVE_ROOTFS_AUTHORIZED_KEY": str(key),
     }
+    if ssh_user is not None:
+        env["KDIVE_ROOTFS_SSH_USER"] = ssh_user
     subprocess.run(["bash", str(BUILD_SCRIPT)], check=True, env=env, timeout=1800)
 
 
@@ -110,6 +112,19 @@ def test_tier1_layout_and_permissions(tmp_path: Path) -> None:
     # No escalation in the script source.
     script_text = BUILD_SCRIPT.read_text(encoding="utf-8")
     assert not ESCALATION.search(script_text), "build script must contain no sudo/pkexec/doas"
+
+
+def test_tier1_nonroot_ssh_user_gets_key(tmp_path: Path) -> None:
+    require_build_tier()
+    image = tmp_path / "minimal.qcow2"
+    build_image(image, ssh_user="kdivetest")
+
+    # The key landing in /home/kdivetest/.ssh/authorized_keys proves the useradd --run-command ran
+    # before --ssh-inject (command-line order, virt-builder(1)); otherwise --ssh-inject would have
+    # failed against a not-yet-existent user.
+    code, authorized_keys = guestfish_cat(image, "/home/kdivetest/.ssh/authorized_keys")
+    assert code == 0, "expected an authorized_keys for the non-root user"
+    assert "AAAATESTKEYONLY" in authorized_keys, f"injected key missing:\n{authorized_keys}"
 
 
 def require_boot_tier() -> dict[str, str]:

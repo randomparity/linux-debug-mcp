@@ -166,10 +166,11 @@ does not get that for free, so the normalization is mandatory, not cosmetic.
   serial-unit install as unprivileged libguestfs operations on the scratch image; `virt-tar-out` +
   `virt-make-fs` repack the result into the whole-disk ext4 artifact.
 - A non-root `KDIVE_ROOTFS_SSH_USER` is created with an extra Stage-1 `--run-command 'useradd …'` so the
-  injected key lands on a real account (root always exists). **Verify at implementation:** `virt-builder`
-  applies operations in its own fixed order, not CLI order, so confirm the user-create is sequenced before
-  `--ssh-inject` per `virt-builder(1)` (or create the user via a guaranteed-ordered `--firstboot`/cloud
-  step) — otherwise the inject targets a not-yet-existent user.
+  injected key lands on a real account (root always exists). `virt-builder` runs `--run-command` and
+  `--ssh-inject` in **command-line order** (`virt-builder(1)`), and `--ssh-inject` requires the user to
+  already exist in the guest, so the `useradd` `--run-command` is placed before `--ssh-inject` — that
+  documented ordering is the mechanism the script relies on. (`--firstboot` is not an alternative here: it
+  runs at first boot, after the build-time `--ssh-inject` has already needed the user.)
 
 **Boot-contract precondition (the artifact must satisfy this, not merely "be qcow2").** The produced image
 is a **single whole-disk ext4 filesystem with no partition table**, directly mountable as `root=/dev/vda`
