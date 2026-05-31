@@ -21,6 +21,7 @@ from kdive.config import DebugProfile
 from kdive.coordination.admission import AdmissionService, publish_ready_snapshot
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
+from kdive.debug import bound_handlers as debug_bound_handlers
 from kdive.debug import handlers as debug_handlers
 from kdive.debug import operations as debug_operations
 from kdive.debug import session_end as debug_session_end
@@ -389,20 +390,37 @@ def test_debug_operation_handlers_accept_runtime_instead_of_dependency_bundle() 
         "gdb_mi_sessions",
     }
 
-    for handler in (
-        debug_handlers.debug_read_registers_handler,
-        debug_handlers.debug_read_symbol_handler,
-        debug_handlers.debug_read_memory_handler,
-        debug_handlers.debug_evaluate_handler,
-        debug_handlers.debug_set_breakpoint_handler,
-        debug_handlers.debug_clear_breakpoint_handler,
-        debug_handlers.debug_list_breakpoints_handler,
-        debug_handlers.debug_continue_handler,
-    ):
+    operation_handler_names = (
+        "debug_read_registers_handler",
+        "debug_read_symbol_handler",
+        "debug_read_memory_handler",
+        "debug_evaluate_handler",
+        "debug_set_breakpoint_handler",
+        "debug_set_watchpoint_handler",
+        "debug_clear_breakpoint_handler",
+        "debug_clear_watchpoint_handler",
+        "debug_list_breakpoints_handler",
+        "debug_backtrace_handler",
+        "debug_list_variables_handler",
+        "debug_continue_handler",
+        "debug_step_handler",
+        "debug_next_handler",
+        "debug_finish_handler",
+        "debug_interrupt_handler",
+    )
+
+    for module in (debug_handlers, debug_bound_handlers):
+        for handler_name in operation_handler_names:
+            handler = getattr(module, handler_name)
+            params = inspect.signature(handler).parameters
+            assert "runtime" in params
+            assert all(param.kind is not inspect.Parameter.VAR_KEYWORD for param in params.values())
+            assert dependency_params.isdisjoint(params)
+
+    for handler_name in operation_handler_names:
+        handler = getattr(debug_handlers, handler_name)
         params = inspect.signature(handler).parameters
-        assert "runtime" in params
-        assert all(param.kind is not inspect.Parameter.VAR_KEYWORD for param in params.values())
-        assert dependency_params.isdisjoint(params)
+        assert params["runtime"].annotation == "DebugRuntime"
 
     assert not hasattr(debug_tools, "_debug_runtime_kwargs")
     assert not hasattr(debug_tools, "_gated_debug_runtime_kwargs")
