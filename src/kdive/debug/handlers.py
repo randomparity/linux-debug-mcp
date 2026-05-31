@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Protocol
+from typing import ClassVar, Protocol
 
 from kdive.config import DebugProfile
 from kdive.coordination.admission import AdmissionService
@@ -209,7 +209,7 @@ def _debug_operation_handler(
     artifact_root: Path,
     run_id: str,
     debug_session_id: str | None,
-    runtime: DebugRuntime | None,
+    runtime: DebugRuntime,
     operation_core: DebugOperationCore,
 ) -> ToolResponse:
     return operation_core(
@@ -217,20 +217,8 @@ def _debug_operation_handler(
         run_id=run_id,
         debug_session_id=debug_session_id,
         request=request,
-        runtime=runtime or DebugRuntime(),
+        runtime=runtime,
     )
-
-
-def _debug_runtime_from_kwargs(runtime: DebugRuntime | None, runtime_kwargs: dict[str, Any]) -> DebugRuntime | None:
-    if not runtime_kwargs:
-        return runtime
-    allowed = set(DebugRuntime.__dataclass_fields__)
-    unknown = set(runtime_kwargs) - allowed
-    if unknown:
-        raise TypeError(f"unexpected debug runtime argument(s): {', '.join(sorted(unknown))}")
-    if runtime is not None:
-        raise TypeError("pass either runtime or individual debug runtime dependencies, not both")
-    return DebugRuntime(**runtime_kwargs)
 
 
 def debug_read_registers_handler(
@@ -238,17 +226,16 @@ def debug_read_registers_handler(
     artifact_root: Path,
     run_id: str,
     registers: list[str],
+    runtime: DebugRuntime,
     debug_session_id: str | None = None,
-    runtime: DebugRuntime | None = None,
     operation_core: DebugOperationCore = _default_debug_operation_core,
-    **runtime_kwargs: Any,
 ) -> ToolResponse:
     return _debug_operation_handler(
         request=DebugReadRegistersRequest(registers=registers),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
+        runtime=runtime,
         operation_core=operation_core,
     )
 
@@ -258,17 +245,16 @@ def debug_read_symbol_handler(
     artifact_root: Path,
     run_id: str,
     symbol: str,
+    runtime: DebugRuntime,
     debug_session_id: str | None = None,
-    runtime: DebugRuntime | None = None,
     operation_core: DebugOperationCore = _default_debug_operation_core,
-    **runtime_kwargs: Any,
 ) -> ToolResponse:
     return _debug_operation_handler(
         request=DebugReadSymbolRequest(symbol=symbol),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
+        runtime=runtime,
         operation_core=operation_core,
     )
 
@@ -279,17 +265,16 @@ def debug_read_memory_handler(
     run_id: str,
     address: int,
     byte_count: int,
+    runtime: DebugRuntime,
     debug_session_id: str | None = None,
-    runtime: DebugRuntime | None = None,
     operation_core: DebugOperationCore = _default_debug_operation_core,
-    **runtime_kwargs: Any,
 ) -> ToolResponse:
     return _debug_operation_handler(
         request=DebugReadMemoryRequest(address=address, byte_count=byte_count),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
+        runtime=runtime,
         operation_core=operation_core,
     )
 
@@ -299,18 +284,17 @@ def debug_evaluate_handler(
     artifact_root: Path,
     run_id: str,
     inspector: str,
+    runtime: DebugRuntime,
     arguments: dict[str, object] | None = None,
     debug_session_id: str | None = None,
-    runtime: DebugRuntime | None = None,
     operation_core: DebugOperationCore = _default_debug_operation_core,
-    **runtime_kwargs: Any,
 ) -> ToolResponse:
     return _debug_operation_handler(
         request=DebugEvaluateRequest(inspector=inspector, arguments=arguments or {}),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
+        runtime=runtime,
         operation_core=operation_core,
     )
 
@@ -324,17 +308,16 @@ def _make_symbol_control_handler(
         artifact_root: Path,
         run_id: str,
         symbol: str,
+        runtime: DebugRuntime,
         debug_session_id: str | None = None,
-        runtime: DebugRuntime | None = None,
         operation_core: DebugOperationCore = _default_debug_operation_core,
-        **runtime_kwargs: Any,
     ) -> ToolResponse:
         return _debug_operation_handler(
             request=request_factory(symbol),
             artifact_root=artifact_root,
             run_id=run_id,
             debug_session_id=debug_session_id,
-            runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
+            runtime=runtime,
             operation_core=operation_core,
         )
 
@@ -351,17 +334,16 @@ def _make_breakpoint_id_control_handler(
         artifact_root: Path,
         run_id: str,
         breakpoint_id: str,
+        runtime: DebugRuntime,
         debug_session_id: str | None = None,
-        runtime: DebugRuntime | None = None,
         operation_core: DebugOperationCore = _default_debug_operation_core,
-        **runtime_kwargs: Any,
     ) -> ToolResponse:
         return _debug_operation_handler(
             request=request_factory(breakpoint_id),
             artifact_root=artifact_root,
             run_id=run_id,
             debug_session_id=debug_session_id,
-            runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
+            runtime=runtime,
             operation_core=operation_core,
         )
 
@@ -377,17 +359,16 @@ def _make_debug_session_query_handler(
         *,
         artifact_root: Path,
         run_id: str,
+        runtime: DebugRuntime,
         debug_session_id: str | None = None,
-        runtime: DebugRuntime | None = None,
         operation_core: DebugOperationCore = _default_debug_operation_core,
-        **runtime_kwargs: Any,
     ) -> ToolResponse:
         return _debug_operation_handler(
             request=request_factory(),
             artifact_root=artifact_root,
             run_id=run_id,
             debug_session_id=debug_session_id,
-            runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
+            runtime=runtime,
             operation_core=operation_core,
         )
 
@@ -403,18 +384,17 @@ def _make_debug_execution_control_handler(
         *,
         artifact_root: Path,
         run_id: str,
+        runtime: DebugRuntime,
         timeout_seconds: int | None = None,
         debug_session_id: str | None = None,
-        runtime: DebugRuntime | None = None,
         operation_core: DebugOperationCore = _default_debug_operation_core,
-        **runtime_kwargs: Any,
     ) -> ToolResponse:
         return _debug_operation_handler(
             request=request_factory(timeout_seconds),
             artifact_root=artifact_root,
             run_id=run_id,
             debug_session_id=debug_session_id,
-            runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
+            runtime=runtime,
             operation_core=operation_core,
         )
 

@@ -8,6 +8,7 @@ from conftest import FakeMiEngine, build_debug_transport, kernel_provenance_deta
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile
+from kdive.debug.handlers import DebugRuntime
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import GdbMiError, GdbMiSessionRegistry
 from kdive.providers.local.debug.qemu_gdbstub import DebugSession
@@ -69,6 +70,21 @@ def _profiles(**overrides) -> dict[str, DebugProfile]:
     return {"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default", **overrides)}
 
 
+def _debug_runtime(
+    *,
+    profiles: dict[str, DebugProfile] | None = None,
+    registry=None,
+    engine=None,
+    sessions=None,
+) -> DebugRuntime:
+    return DebugRuntime(
+        debug_profiles=profiles or _profiles(),
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
+
+
 class _Fixture:
     """A wired run: transport machinery + a shared engine and live-session registry, so a started
     session stays reachable by the per-op handlers."""
@@ -96,10 +112,12 @@ class _Fixture:
         return debug_read_memory_handler(
             artifact_root=self.artifact_root,
             run_id=self.run_id,
-            debug_profiles=profiles or _profiles(),
-            session_registry=self.registry,
-            gdb_mi_engine=self.engine,
-            gdb_mi_sessions=self.sessions,
+            runtime=_debug_runtime(
+                profiles=profiles,
+                registry=self.registry,
+                engine=self.engine,
+                sessions=self.sessions,
+            ),
             **overrides,
         )
 
@@ -307,10 +325,7 @@ def test_evaluate_unknown_inspector_rejected_through_handler(tmp_path: Path) -> 
         artifact_root=fx.artifact_root,
         run_id=fx.run_id,
         inspector="$(rm -rf /)",
-        debug_profiles=_profiles(),
-        session_registry=fx.registry,
-        gdb_mi_engine=fx.engine,
-        gdb_mi_sessions=fx.sessions,
+        runtime=_debug_runtime(registry=fx.registry, engine=fx.engine, sessions=fx.sessions),
     )
     assert response.ok is False
     assert response.error.category == ErrorCategory.CONFIGURATION_ERROR

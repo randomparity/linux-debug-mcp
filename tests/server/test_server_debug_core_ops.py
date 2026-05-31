@@ -243,6 +243,25 @@ def _profiles() -> dict[str, DebugProfile]:
     return {"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")}
 
 
+def _debug_runtime(
+    *,
+    profiles: dict[str, DebugProfile] | None = None,
+    txn: TransportTransaction | None = None,
+    admission: AdmissionService | None = None,
+    registry: SessionRegistry | None = None,
+    engine: FakeMiEngine | None = None,
+    sessions: GdbMiSessionRegistry | None = None,
+) -> debug_handlers.DebugRuntime:
+    return debug_handlers.DebugRuntime(
+        debug_profiles=profiles or _profiles(),
+        transaction=txn,
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
+
+
 def test_debug_operation_handlers_route_directly_to_core_response() -> None:
     """Public debug.* handlers should be the adapter layer; avoid a second pass-through wrapper tier."""
     assert not hasattr(server_module, "_debug_read_response")
@@ -373,6 +392,7 @@ def test_debug_operation_handlers_accept_runtime_instead_of_dependency_bundle() 
     ):
         params = inspect.signature(handler).parameters
         assert "runtime" in params
+        assert all(param.kind is not inspect.Parameter.VAR_KEYWORD for param in params.values())
         assert dependency_params.isdisjoint(params)
 
     assert not hasattr(debug_tools, "_debug_runtime_kwargs")
@@ -390,6 +410,7 @@ def test_debug_operation_handlers_accept_explicit_operation_core(tmp_path: Path)
         artifact_root=tmp_path / "runs",
         run_id="run-1",
         registers=["rax"],
+        runtime=debug_handlers.DebugRuntime(),
         operation_core=operation_core,
     )
 
@@ -515,11 +536,7 @@ def test_set_breakpoint_dispatches_and_refreshes_persisted_ledger(tmp_path: Path
         run_id=RUN_ID,
         symbol="do_sys_open",
         debug_session_id=session_id,
-        debug_profiles=_profiles(),
-        admission=admission,
-        session_registry=registry,
-        gdb_mi_engine=engine,
-        gdb_mi_sessions=sessions,
+        runtime=_debug_runtime(admission=admission, registry=registry, engine=engine, sessions=sessions),
     )
 
     assert response.ok is True, response
@@ -553,11 +570,7 @@ def test_stateful_op_preserves_transport_binding_and_mi_probe(tmp_path: Path) ->
         run_id=RUN_ID,
         symbol="do_sys_open",
         debug_session_id=session_id,
-        debug_profiles=_profiles(),
-        admission=admission,
-        session_registry=registry,
-        gdb_mi_engine=engine,
-        gdb_mi_sessions=sessions,
+        runtime=_debug_runtime(admission=admission, registry=registry, engine=engine, sessions=sessions),
     )
     assert response.ok is True, response
 
@@ -581,11 +594,7 @@ def test_list_breakpoints_does_not_rewrite_debug_manifest_step(tmp_path: Path) -
         artifact_root=artifact_root,
         run_id=RUN_ID,
         debug_session_id=session_id,
-        debug_profiles=_profiles(),
-        admission=admission,
-        session_registry=registry,
-        gdb_mi_engine=engine,
-        gdb_mi_sessions=sessions,
+        runtime=_debug_runtime(admission=admission, registry=registry, engine=engine, sessions=sessions),
     )
 
     assert response.ok is True, response
@@ -610,11 +619,7 @@ def test_continue_dispatches_onto_live_attachment(tmp_path: Path) -> None:
         run_id=RUN_ID,
         timeout_seconds=5,
         debug_session_id=session_id,
-        debug_profiles=_profiles(),
-        admission=admission,
-        session_registry=registry,
-        gdb_mi_engine=engine,
-        gdb_mi_sessions=sessions,
+        runtime=_debug_runtime(admission=admission, registry=registry, engine=engine, sessions=sessions),
     )
 
     assert response.ok is True, response
@@ -713,11 +718,7 @@ def test_op_raw_engine_fault_reaps_and_returns_structured_failure(tmp_path: Path
         run_id=RUN_ID,
         timeout_seconds=5,
         debug_session_id=session_id,
-        debug_profiles=_profiles(),
-        admission=admission,
-        session_registry=registry,
-        gdb_mi_engine=engine,
-        gdb_mi_sessions=sessions,
+        runtime=_debug_runtime(admission=admission, registry=registry, engine=engine, sessions=sessions),
     )
 
     assert response.ok is False
@@ -750,11 +751,7 @@ def test_op_persist_fault_keeps_healthy_session_registered(tmp_path: Path, monke
         run_id=RUN_ID,
         symbol="do_sys_open",
         debug_session_id=session_id,
-        debug_profiles=_profiles(),
-        admission=admission,
-        session_registry=registry,
-        gdb_mi_engine=engine,
-        gdb_mi_sessions=sessions,
+        runtime=_debug_runtime(admission=admission, registry=registry, engine=engine, sessions=sessions),
     )
 
     assert response.ok is False
@@ -787,11 +784,7 @@ def test_mutator_ledger_rebuild_fault_reaps_and_returns_structured_failure(tmp_p
         run_id=RUN_ID,
         symbol="do_sys_open",
         debug_session_id=session_id,
-        debug_profiles=_profiles(),
-        admission=admission,
-        session_registry=registry,
-        gdb_mi_engine=engine,
-        gdb_mi_sessions=sessions,
+        runtime=_debug_runtime(admission=admission, registry=registry, engine=engine, sessions=sessions),
     )
 
     assert response.ok is False
@@ -832,12 +825,7 @@ def test_transport_stall_reaps_resumes_and_tears_down(tmp_path: Path) -> None:
         run_id=RUN_ID,
         timeout_seconds=5,
         debug_session_id=session_id,
-        debug_profiles=_profiles(),
-        transaction=txn,
-        admission=admission,
-        session_registry=registry,
-        gdb_mi_engine=engine,
-        gdb_mi_sessions=sessions,
+        runtime=_debug_runtime(txn=txn, admission=admission, registry=registry, engine=engine, sessions=sessions),
     )
 
     assert response.ok is False
@@ -877,11 +865,7 @@ def test_read_op_transport_stall_also_tears_down(tmp_path: Path) -> None:
         run_id=RUN_ID,
         registers=["pc"],
         debug_session_id=session_id,
-        debug_profiles=_profiles(),
-        transaction=txn,
-        session_registry=registry,
-        gdb_mi_engine=engine,
-        gdb_mi_sessions=sessions,
+        runtime=_debug_runtime(txn=txn, registry=registry, engine=engine, sessions=sessions),
     )
 
     assert response.ok is False
@@ -915,12 +899,7 @@ def test_benign_gdbmi_error_keeps_session(tmp_path: Path) -> None:
         run_id=RUN_ID,
         symbol="do_sys_open",
         debug_session_id=session_id,
-        debug_profiles=_profiles(),
-        transaction=txn,
-        admission=admission,
-        session_registry=registry,
-        gdb_mi_engine=engine,
-        gdb_mi_sessions=sessions,
+        runtime=_debug_runtime(txn=txn, admission=admission, registry=registry, engine=engine, sessions=sessions),
     )
 
     assert response.ok is False

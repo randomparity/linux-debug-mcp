@@ -41,9 +41,20 @@ from conftest import (
 )
 
 from kdive.config import RootfsProfile
+from kdive.debug.handlers import DebugRuntime
 from kdive.domain import ErrorCategory
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
 from kdive.server import debug_continue_handler, debug_end_session_handler
+
+
+def _debug_runtime(*, admission=None, registry=None, engine=None, sessions=None) -> DebugRuntime:
+    return DebugRuntime(
+        debug_profiles=_profiles(),
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
 
 
 def test_legacy_session_without_ownership_record_is_refused(tmp_path: Path) -> None:
@@ -56,11 +67,12 @@ def test_legacy_session_without_ownership_record_is_refused(tmp_path: Path) -> N
     response = debug_continue_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
-        debug_profiles=_profiles(),
-        admission=admission,
-        session_registry=registry,
-        gdb_mi_engine=FakeMiEngine(),
-        gdb_mi_sessions=GdbMiSessionRegistry(),
+        runtime=_debug_runtime(
+            admission=admission,
+            registry=registry,
+            engine=FakeMiEngine(),
+            sessions=GdbMiSessionRegistry(),
+        ),
     )
 
     assert response.ok is False
@@ -77,11 +89,12 @@ def test_legacy_session_converted_to_tombstone_when_not_executing(tmp_path: Path
     response = debug_continue_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
-        debug_profiles=_profiles(),
-        admission=admission,
-        session_registry=registry,
-        gdb_mi_engine=FakeMiEngine(),
-        gdb_mi_sessions=GdbMiSessionRegistry(),
+        runtime=_debug_runtime(
+            admission=admission,
+            registry=registry,
+            engine=FakeMiEngine(),
+            sessions=GdbMiSessionRegistry(),
+        ),
     )
 
     assert response.ok is False
@@ -117,9 +130,7 @@ def test_legacy_fence_inert_without_injected_deps(tmp_path: Path) -> None:
     response = debug_continue_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
-        debug_profiles=_profiles(),
-        gdb_mi_engine=FakeMiEngine(),
-        gdb_mi_sessions=GdbMiSessionRegistry(),
+        runtime=_debug_runtime(engine=FakeMiEngine(), sessions=GdbMiSessionRegistry()),
     )
 
     assert response.ok is False
@@ -196,10 +207,7 @@ def test_legacy_session_refused_in_debug_read_when_session_registry_wired(tmp_pa
         artifact_root=artifact_root,
         run_id=RUN_ID,
         registers=["pc"],
-        debug_profiles=_profiles(),
-        session_registry=registry,
-        gdb_mi_engine=FakeMiEngine(),
-        gdb_mi_sessions=GdbMiSessionRegistry(),
+        runtime=_debug_runtime(registry=registry, engine=FakeMiEngine(), sessions=GdbMiSessionRegistry()),
     )
     assert response.ok is False
     assert response.error.category == ErrorCategory.DEBUG_ATTACH_FAILURE

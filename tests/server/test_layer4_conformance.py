@@ -67,6 +67,7 @@ from kdive.coordination.registry import (
     SessionRegistry,
 )
 from kdive.coordination.transaction import TransportTransaction
+from kdive.debug.handlers import DebugRuntime
 from kdive.domain import ErrorCategory, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
 from kdive.safety.redaction import REDACTION, Redactor
@@ -912,11 +913,13 @@ def test_legacy_debug_session_refused_on_load(tmp_path: Path) -> None:
     response = debug_continue_handler(
         artifact_root=artifact_root,
         run_id=LEGACY_FENCE_RUN_ID,
-        debug_profiles=legacy_fence_profiles(),
-        admission=admission,
-        session_registry=registry,
-        gdb_mi_engine=FakeMiEngine(),
-        gdb_mi_sessions=GdbMiSessionRegistry(),
+        runtime=DebugRuntime(
+            debug_profiles=legacy_fence_profiles(),
+            admission=admission,
+            session_registry=registry,
+            gdb_mi_engine=FakeMiEngine(),
+            gdb_mi_sessions=GdbMiSessionRegistry(),
+        ),
     )
 
     assert response.ok is False

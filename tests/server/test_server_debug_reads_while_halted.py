@@ -16,6 +16,7 @@ from conftest import FakeMiEngine, build_debug_transport, kernel_provenance_deta
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile
+from kdive.debug.handlers import DebugRuntime
 from kdive.domain import ArtifactRef, RunRequest, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
 from kdive.server import debug_read_registers_handler, debug_start_session_handler
@@ -76,6 +77,15 @@ def _profiles() -> dict[str, DebugProfile]:
     return {"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")}
 
 
+def _debug_runtime(*, registry, engine, sessions) -> DebugRuntime:
+    return DebugRuntime(
+        debug_profiles=_profiles(),
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
+
+
 def test_read_registers_works_while_halted(tmp_path: Path) -> None:
     """A register read SUCCEEDS when the debug session is parked HALTED (stopped).
 
@@ -103,10 +113,7 @@ def test_read_registers_works_while_halted(tmp_path: Path) -> None:
         artifact_root=artifact_root,
         run_id=run_id,
         registers=["rip", "rsp"],
-        debug_profiles=_profiles(),
-        session_registry=registry,
-        gdb_mi_engine=engine,
-        gdb_mi_sessions=sessions,
+        runtime=_debug_runtime(registry=registry, engine=engine, sessions=sessions),
     )
 
     assert response.ok is True, f"expected SUCCEEDED but got: {response}"
@@ -155,10 +162,7 @@ def test_debug_read_not_ssh_gated(tmp_path: Path) -> None:
         artifact_root=artifact_root,
         run_id=run_id,
         registers=["rip"],
-        debug_profiles=_profiles(),
-        session_registry=registry,
-        gdb_mi_engine=engine,
-        gdb_mi_sessions=sessions,
+        runtime=_debug_runtime(registry=registry, engine=engine, sessions=sessions),
     )
 
     assert response.ok is True, (

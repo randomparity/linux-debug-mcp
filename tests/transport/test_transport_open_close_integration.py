@@ -193,6 +193,8 @@ def test_qemu_gdbstub_flow_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     from kdive import server
     from kdive.config import RootfsProfile, TargetProfile
+    from kdive.debug.handlers import DebugRuntime
+    from kdive.providers.local.debug.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
     from kdive.server import (
         _build_transport_machinery,
         create_run_handler,
@@ -271,6 +273,8 @@ def test_qemu_gdbstub_flow_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert boot_resp.ok is True, f"target.boot failed: {boot_resp.model_dump(mode='json')}"
 
     # Step 4: debug.start_session via the MIGRATED transaction path.
+    gdb_mi_engine = GdbMiEngine()
+    gdb_mi_sessions = GdbMiSessionRegistry()
     debug_resp = debug_start_session_handler(
         artifact_root=artifact_root,
         run_id=run_id,
@@ -279,6 +283,8 @@ def test_qemu_gdbstub_flow_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyP
         transaction=machinery.transaction,
         admission=machinery.admission,
         session_registry=machinery.session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
     assert debug_resp.ok is True, f"debug.start_session (migrated) failed: {debug_resp.model_dump(mode='json')}"
 
@@ -302,6 +308,11 @@ def test_qemu_gdbstub_flow_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyP
         run_id=run_id,
         registers=["rip", "rsp"],
         debug_session_id=debug_session_id,
+        runtime=DebugRuntime(
+            session_registry=machinery.session_registry,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+        ),
     )
     assert reg_resp.ok is True, f"debug.read_registers failed: {reg_resp.model_dump(mode='json')}"
     assert reg_resp.data.get("registers"), (

@@ -5,6 +5,7 @@ import pytest
 
 from kdive import server
 from kdive.config import RootfsProfile, TargetProfile
+from kdive.debug.handlers import DebugRuntime
 from kdive.providers.local.debug.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
 from kdive.server import _workflow_handler_dependencies, workflow_build_boot_debug_handler
 
@@ -220,17 +221,20 @@ def test_live_frozen_boot_hits_early_breakpoint(tmp_path: Path, monkeypatch: pyt
         "artifact_root": artifact_root,
         "run_id": run_id,
         "debug_session_id": session_id,
-        "transaction": machinery.transaction,
-        "session_registry": machinery.session_registry,
-        "session_guard": machinery.session_guard,
-        "gdb_mi_engine": engine,
-        "gdb_mi_sessions": sessions,
+        "runtime": DebugRuntime(
+            admission=machinery.admission,
+            transaction=machinery.transaction,
+            session_registry=machinery.session_registry,
+            session_guard=machinery.session_guard,
+            gdb_mi_engine=engine,
+            gdb_mi_sessions=sessions,
+        ),
     }
 
-    bp_resp = debug_set_breakpoint_handler(symbol=early_symbol, admission=machinery.admission, **debug_kwargs)
+    bp_resp = debug_set_breakpoint_handler(symbol=early_symbol, **debug_kwargs)
     assert bp_resp.ok is True, bp_resp.model_dump(mode="json")
 
-    cont_resp = debug_continue_handler(admission=machinery.admission, **debug_kwargs)
+    cont_resp = debug_continue_handler(**debug_kwargs)
     assert cont_resp.ok is True, cont_resp.model_dump(mode="json")
 
     # The CPU ran from the reset vector into the early-init breakpoint; the symbol is inspectable.
