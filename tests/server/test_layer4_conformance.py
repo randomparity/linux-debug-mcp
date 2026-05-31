@@ -866,15 +866,12 @@ def test_cached_running_terminalized_while_halted(tmp_path: Path) -> None:
 
 def test_gdbstub_reads_exempt_from_ssh_gate() -> None:
     """B4 invariant (re-asserted): debug.* read handlers run under the StopCapableGuard, NOT the
-    ssh-tier admission gate, so they take no `admission` parameter. Finding F8 added
-    `session_registry` to the signature so the read path can run `_assert_layer4_ownership`
-    (closes the legacy-fence bypass), but `admission` is still absent — the read/ssh-tier
-    structural separation holds."""
+    ssh-tier admission gate, so they take no `admission` parameter. Ownership dependencies now flow
+    through DebugRuntime instead of individual dependency-forwarding parameters, but `admission` is
+    still absent — the read/ssh-tier structural separation holds."""
     parameters = inspect.signature(debug_read_registers_handler).parameters
     assert "admission" not in parameters
-    # session_registry IS expected now (F8) — it carries the ownership assertion, not ssh-tier
-    # admission. The B4 invariant is specifically about admission, not the registry.
-    assert "session_registry" in parameters
+    assert "runtime" in parameters
 
 
 # ---------------------------------------------------------------------------

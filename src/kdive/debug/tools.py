@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
+from kdive.debug.handlers import DebugRuntime
 from kdive.domain import Model, ToolResponse
 from kdive.providers.debug import GdbMiEngine, GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard
@@ -40,11 +41,7 @@ class DebugReadRegistersHandler(Protocol):
         run_id: str,
         registers: list[str],
         debug_session_id: str | None,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
+        runtime: DebugRuntime,
     ) -> ToolResponse: ...
 
 
@@ -56,11 +53,7 @@ class DebugReadSymbolHandler(Protocol):
         run_id: str,
         symbol: str,
         debug_session_id: str | None,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
+        runtime: DebugRuntime,
     ) -> ToolResponse: ...
 
 
@@ -73,11 +66,7 @@ class DebugReadMemoryHandler(Protocol):
         address: int,
         byte_count: int,
         debug_session_id: str | None,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
+        runtime: DebugRuntime,
     ) -> ToolResponse: ...
 
 
@@ -90,11 +79,7 @@ class DebugEvaluateHandler(Protocol):
         inspector: str,
         arguments: dict[str, object] | None,
         debug_session_id: str | None,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
+        runtime: DebugRuntime,
     ) -> ToolResponse: ...
 
 
@@ -125,12 +110,7 @@ class DebugSymbolControlHandler(Protocol):
         run_id: str,
         symbol: str,
         debug_session_id: str | None,
-        admission: AdmissionService,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
+        runtime: DebugRuntime,
     ) -> ToolResponse: ...
 
 
@@ -142,12 +122,7 @@ class DebugBreakpointIdControlHandler(Protocol):
         run_id: str,
         breakpoint_id: str,
         debug_session_id: str | None,
-        admission: AdmissionService,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
+        runtime: DebugRuntime,
     ) -> ToolResponse: ...
 
 
@@ -158,12 +133,7 @@ class DebugSessionQueryHandler(Protocol):
         artifact_root: Path,
         run_id: str,
         debug_session_id: str | None,
-        admission: AdmissionService,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
+        runtime: DebugRuntime,
     ) -> ToolResponse: ...
 
 
@@ -175,12 +145,7 @@ class DebugExecutionControlHandler(Protocol):
         run_id: str,
         debug_session_id: str | None,
         timeout_seconds: int | None,
-        admission: AdmissionService,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
+        runtime: DebugRuntime,
     ) -> ToolResponse: ...
 
 
@@ -275,18 +240,15 @@ def _session_context(
     return _path(artifact_root), context.debug_session_id
 
 
-def _debug_runtime_kwargs(context: DebugToolContext) -> dict[str, Any]:
-    return {
-        "transaction": context.transaction,
-        "session_registry": context.session_registry,
-        "session_guard": context.session_guard,
-        "gdb_mi_engine": context.gdb_mi_engine,
-        "gdb_mi_sessions": context.gdb_mi_sessions,
-    }
-
-
-def _gated_debug_runtime_kwargs(context: DebugToolContext) -> dict[str, Any]:
-    return {"admission": context.admission, **_debug_runtime_kwargs(context)}
+def _debug_runtime(context: DebugToolContext, *, include_admission: bool) -> DebugRuntime:
+    return DebugRuntime(
+        admission=(context.admission if include_admission else None),
+        transaction=context.transaction,
+        session_registry=context.session_registry,
+        session_guard=context.session_guard,
+        gdb_mi_engine=context.gdb_mi_engine,
+        gdb_mi_sessions=context.gdb_mi_sessions,
+    )
 
 
 def _tool_function_name(tool_name: str) -> str:
@@ -315,7 +277,11 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
                 debug_profile=start_options.debug_profile,
                 new_session=start_options.new_session,
                 admission=tool_context.admission,
-                **_debug_runtime_kwargs(tool_context),
+                transaction=tool_context.transaction,
+                session_registry=tool_context.session_registry,
+                session_guard=tool_context.session_guard,
+                gdb_mi_engine=tool_context.gdb_mi_engine,
+                gdb_mi_sessions=tool_context.gdb_mi_sessions,
             )
         )
 
@@ -335,7 +301,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
                     run_id=run_id,
                     registers=registers,
                     debug_session_id=debug_session_id,
-                    **_debug_runtime_kwargs(tool_context),
+                    runtime=_debug_runtime(tool_context, include_admission=False),
                 )
             )
 
@@ -358,7 +324,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
                     run_id=run_id,
                     symbol=symbol,
                     debug_session_id=debug_session_id,
-                    **_debug_runtime_kwargs(tool_context),
+                    runtime=_debug_runtime(tool_context, include_admission=False),
                 )
             )
 
@@ -386,7 +352,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
                 address=address,
                 byte_count=byte_count,
                 debug_session_id=debug_session_id,
-                **_debug_runtime_kwargs(tool_context),
+                runtime=_debug_runtime(tool_context, include_admission=False),
             )
         )
 
@@ -409,7 +375,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
                 inspector=inspector,
                 arguments=evaluate_options.arguments,
                 debug_session_id=debug_session_id,
-                **_debug_runtime_kwargs(tool_context),
+                runtime=_debug_runtime(tool_context, include_admission=False),
             )
         )
 
@@ -433,7 +399,12 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
                 sections=load_options.sections,
                 ko_path=load_options.ko_path,
                 debug_session_id=debug_session_id,
-                **_gated_debug_runtime_kwargs(tool_context),
+                admission=tool_context.admission,
+                transaction=tool_context.transaction,
+                session_registry=tool_context.session_registry,
+                session_guard=tool_context.session_guard,
+                gdb_mi_engine=tool_context.gdb_mi_engine,
+                gdb_mi_sessions=tool_context.gdb_mi_sessions,
             )
         )
 
@@ -453,7 +424,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
                     run_id=run_id,
                     symbol=symbol,
                     debug_session_id=debug_session_id,
-                    **_gated_debug_runtime_kwargs(tool_context),
+                    runtime=_debug_runtime(tool_context, include_admission=True),
                 )
             )
 
@@ -476,7 +447,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
                     run_id=run_id,
                     breakpoint_id=breakpoint_id,
                     debug_session_id=debug_session_id,
-                    **_gated_debug_runtime_kwargs(tool_context),
+                    runtime=_debug_runtime(tool_context, include_admission=True),
                 )
             )
 
@@ -497,7 +468,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
                     artifact_root=artifact_root,
                     run_id=run_id,
                     debug_session_id=debug_session_id,
-                    **_gated_debug_runtime_kwargs(tool_context),
+                    runtime=_debug_runtime(tool_context, include_admission=True),
                 )
             )
 
@@ -521,7 +492,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
                     run_id=run_id,
                     debug_session_id=debug_session_id,
                     timeout_seconds=execution_options.timeout_seconds,
-                    **_gated_debug_runtime_kwargs(tool_context),
+                    runtime=_debug_runtime(tool_context, include_admission=True),
                 )
             )
 
@@ -570,6 +541,11 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
                 artifact_root=artifact_root,
                 run_id=run_id,
                 debug_session_id=debug_session_id,
-                **_gated_debug_runtime_kwargs(tool_context),
+                admission=tool_context.admission,
+                transaction=tool_context.transaction,
+                session_registry=tool_context.session_registry,
+                session_guard=tool_context.session_guard,
+                gdb_mi_engine=tool_context.gdb_mi_engine,
+                gdb_mi_sessions=tool_context.gdb_mi_sessions,
             )
         )

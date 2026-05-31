@@ -308,9 +308,39 @@ def test_debug_operation_handler_builds_runtime_without_pass_through_layers() ->
     assert response_hints["request"] is debug_handlers.DebugOperationRequest
     assert "request" in params
     assert "operation_core" in params
-    assert "runtime" not in params
+    assert "runtime" in params
     assert "operation_name" not in params
     assert "values" not in params
+
+
+def test_debug_operation_handlers_accept_runtime_instead_of_dependency_bundle() -> None:
+    import inspect
+
+    dependency_params = {
+        "admission",
+        "transaction",
+        "session_registry",
+        "session_guard",
+        "gdb_mi_engine",
+        "gdb_mi_sessions",
+    }
+
+    for handler in (
+        debug_handlers.debug_read_registers_handler,
+        debug_handlers.debug_read_symbol_handler,
+        debug_handlers.debug_read_memory_handler,
+        debug_handlers.debug_evaluate_handler,
+        debug_handlers.debug_set_breakpoint_handler,
+        debug_handlers.debug_clear_breakpoint_handler,
+        debug_handlers.debug_list_breakpoints_handler,
+        debug_handlers.debug_continue_handler,
+    ):
+        params = inspect.signature(handler).parameters
+        assert "runtime" in params
+        assert dependency_params.isdisjoint(params)
+
+    assert not hasattr(debug_tools, "_debug_runtime_kwargs")
+    assert not hasattr(debug_tools, "_gated_debug_runtime_kwargs")
 
 
 def test_debug_operation_handlers_accept_explicit_operation_core(tmp_path: Path) -> None:

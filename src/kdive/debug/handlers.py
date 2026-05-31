@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Protocol
+from typing import Any, ClassVar, Protocol
 
 from kdive.config import DebugProfile
 from kdive.coordination.admission import AdmissionService
@@ -209,31 +209,28 @@ def _debug_operation_handler(
     artifact_root: Path,
     run_id: str,
     debug_session_id: str | None,
-    debug_profiles: dict[str, DebugProfile] | None,
-    admission: AdmissionService | None,
-    transaction: TransportTransaction | None,
-    session_registry: SessionRegistry | None,
-    session_guard: SessionGuard | None,
-    gdb_mi_engine: GdbMiEngine | None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None,
+    runtime: DebugRuntime | None,
     operation_core: DebugOperationCore,
 ) -> ToolResponse:
-    runtime = DebugRuntime(
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
     return operation_core(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
         request=request,
-        runtime=runtime,
+        runtime=runtime or DebugRuntime(),
     )
+
+
+def _debug_runtime_from_kwargs(runtime: DebugRuntime | None, runtime_kwargs: dict[str, Any]) -> DebugRuntime | None:
+    if not runtime_kwargs:
+        return runtime
+    allowed = set(DebugRuntime.__dataclass_fields__)
+    unknown = set(runtime_kwargs) - allowed
+    if unknown:
+        raise TypeError(f"unexpected debug runtime argument(s): {', '.join(sorted(unknown))}")
+    if runtime is not None:
+        raise TypeError("pass either runtime or individual debug runtime dependencies, not both")
+    return DebugRuntime(**runtime_kwargs)
 
 
 def debug_read_registers_handler(
@@ -242,26 +239,16 @@ def debug_read_registers_handler(
     run_id: str,
     registers: list[str],
     debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+    runtime: DebugRuntime | None = None,
     operation_core: DebugOperationCore = _default_debug_operation_core,
+    **runtime_kwargs: Any,
 ) -> ToolResponse:
     return _debug_operation_handler(
         request=DebugReadRegistersRequest(registers=registers),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=None,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
+        runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
         operation_core=operation_core,
     )
 
@@ -272,26 +259,16 @@ def debug_read_symbol_handler(
     run_id: str,
     symbol: str,
     debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+    runtime: DebugRuntime | None = None,
     operation_core: DebugOperationCore = _default_debug_operation_core,
+    **runtime_kwargs: Any,
 ) -> ToolResponse:
     return _debug_operation_handler(
         request=DebugReadSymbolRequest(symbol=symbol),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=None,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
+        runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
         operation_core=operation_core,
     )
 
@@ -303,26 +280,16 @@ def debug_read_memory_handler(
     address: int,
     byte_count: int,
     debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+    runtime: DebugRuntime | None = None,
     operation_core: DebugOperationCore = _default_debug_operation_core,
+    **runtime_kwargs: Any,
 ) -> ToolResponse:
     return _debug_operation_handler(
         request=DebugReadMemoryRequest(address=address, byte_count=byte_count),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=None,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
+        runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
         operation_core=operation_core,
     )
 
@@ -334,26 +301,16 @@ def debug_evaluate_handler(
     inspector: str,
     arguments: dict[str, object] | None = None,
     debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+    runtime: DebugRuntime | None = None,
     operation_core: DebugOperationCore = _default_debug_operation_core,
+    **runtime_kwargs: Any,
 ) -> ToolResponse:
     return _debug_operation_handler(
         request=DebugEvaluateRequest(inspector=inspector, arguments=arguments or {}),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        debug_profiles=debug_profiles,
-        admission=None,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
+        runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
         operation_core=operation_core,
     )
 
@@ -368,27 +325,16 @@ def _make_symbol_control_handler(
         run_id: str,
         symbol: str,
         debug_session_id: str | None = None,
-        debug_profiles: dict[str, DebugProfile] | None = None,
-        admission: AdmissionService | None = None,
-        transaction: TransportTransaction | None = None,
-        session_registry: SessionRegistry | None = None,
-        session_guard: SessionGuard | None = None,
-        gdb_mi_engine: GdbMiEngine | None = None,
-        gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+        runtime: DebugRuntime | None = None,
         operation_core: DebugOperationCore = _default_debug_operation_core,
+        **runtime_kwargs: Any,
     ) -> ToolResponse:
         return _debug_operation_handler(
             request=request_factory(symbol),
             artifact_root=artifact_root,
             run_id=run_id,
             debug_session_id=debug_session_id,
-            debug_profiles=debug_profiles,
-            admission=admission,
-            transaction=transaction,
-            session_registry=session_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
+            runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
             operation_core=operation_core,
         )
 
@@ -406,27 +352,16 @@ def _make_breakpoint_id_control_handler(
         run_id: str,
         breakpoint_id: str,
         debug_session_id: str | None = None,
-        debug_profiles: dict[str, DebugProfile] | None = None,
-        admission: AdmissionService | None = None,
-        transaction: TransportTransaction | None = None,
-        session_registry: SessionRegistry | None = None,
-        session_guard: SessionGuard | None = None,
-        gdb_mi_engine: GdbMiEngine | None = None,
-        gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+        runtime: DebugRuntime | None = None,
         operation_core: DebugOperationCore = _default_debug_operation_core,
+        **runtime_kwargs: Any,
     ) -> ToolResponse:
         return _debug_operation_handler(
             request=request_factory(breakpoint_id),
             artifact_root=artifact_root,
             run_id=run_id,
             debug_session_id=debug_session_id,
-            debug_profiles=debug_profiles,
-            admission=admission,
-            transaction=transaction,
-            session_registry=session_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
+            runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
             operation_core=operation_core,
         )
 
@@ -443,27 +378,16 @@ def _make_debug_session_query_handler(
         artifact_root: Path,
         run_id: str,
         debug_session_id: str | None = None,
-        debug_profiles: dict[str, DebugProfile] | None = None,
-        admission: AdmissionService | None = None,
-        transaction: TransportTransaction | None = None,
-        session_registry: SessionRegistry | None = None,
-        session_guard: SessionGuard | None = None,
-        gdb_mi_engine: GdbMiEngine | None = None,
-        gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+        runtime: DebugRuntime | None = None,
         operation_core: DebugOperationCore = _default_debug_operation_core,
+        **runtime_kwargs: Any,
     ) -> ToolResponse:
         return _debug_operation_handler(
             request=request_factory(),
             artifact_root=artifact_root,
             run_id=run_id,
             debug_session_id=debug_session_id,
-            debug_profiles=debug_profiles,
-            admission=admission,
-            transaction=transaction,
-            session_registry=session_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
+            runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
             operation_core=operation_core,
         )
 
@@ -481,27 +405,16 @@ def _make_debug_execution_control_handler(
         run_id: str,
         timeout_seconds: int | None = None,
         debug_session_id: str | None = None,
-        debug_profiles: dict[str, DebugProfile] | None = None,
-        admission: AdmissionService | None = None,
-        transaction: TransportTransaction | None = None,
-        session_registry: SessionRegistry | None = None,
-        session_guard: SessionGuard | None = None,
-        gdb_mi_engine: GdbMiEngine | None = None,
-        gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+        runtime: DebugRuntime | None = None,
         operation_core: DebugOperationCore = _default_debug_operation_core,
+        **runtime_kwargs: Any,
     ) -> ToolResponse:
         return _debug_operation_handler(
             request=request_factory(timeout_seconds),
             artifact_root=artifact_root,
             run_id=run_id,
             debug_session_id=debug_session_id,
-            debug_profiles=debug_profiles,
-            admission=admission,
-            transaction=transaction,
-            session_registry=session_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
+            runtime=_debug_runtime_from_kwargs(runtime, runtime_kwargs),
             operation_core=operation_core,
         )
 
