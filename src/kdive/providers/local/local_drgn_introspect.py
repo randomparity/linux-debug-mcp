@@ -14,23 +14,35 @@ from kdive.domain import (
     ProviderOperationCapability,
     TargetKind,
 )
+from kdive.providers.introspect import (
+    SCRIPT_BYTE_CAP as SCRIPT_BYTE_CAP,
+)
+from kdive.providers.introspect import (
+    TARGET_PYTHON_ARGV as TARGET_PYTHON_ARGV,
+)
+from kdive.providers.introspect import (
+    WrapperRenderError as WrapperRenderError,
+)
+from kdive.providers.introspect import (
+    render_vmcore_wrapper as render_vmcore_wrapper,
+)
+from kdive.providers.introspect import (
+    render_vmcore_wrapper_skeleton as render_vmcore_wrapper_skeleton,
+)
+from kdive.providers.introspect import (
+    render_wrapper as render_wrapper,
+)
+from kdive.providers.introspect import (
+    render_wrapper_skeleton as render_wrapper_skeleton,
+)
+from kdive.providers.introspect import (
+    user_script_sha256 as user_script_sha256,
+)
 from kdive.providers.local.drgn_live_wrapper import (
     WRAPPER_TEMPLATE as WRAPPER_TEMPLATE,
 )
-from kdive.providers.local.drgn_live_wrapper import (
-    render_wrapper as render_wrapper,
-)
-from kdive.providers.local.drgn_live_wrapper import (
-    render_wrapper_skeleton as render_wrapper_skeleton,
-)
 from kdive.providers.local.drgn_vmcore_wrapper import (
     VMCORE_WRAPPER_TEMPLATE as VMCORE_WRAPPER_TEMPLATE,
-)
-from kdive.providers.local.drgn_vmcore_wrapper import (
-    render_vmcore_wrapper as render_vmcore_wrapper,
-)
-from kdive.providers.local.drgn_vmcore_wrapper import (
-    render_vmcore_wrapper_skeleton as render_vmcore_wrapper_skeleton,
 )
 from kdive.providers.local.drgn_wrapper_common import (
     _WRAPPER_BODY as _WRAPPER_BODY,
@@ -38,25 +50,6 @@ from kdive.providers.local.drgn_wrapper_common import (
 from kdive.providers.local.drgn_wrapper_common import (
     RUNNER_DEFAULT_CAPS as RUNNER_DEFAULT_CAPS,
 )
-from kdive.providers.local.drgn_wrapper_common import (
-    WrapperRenderError as WrapperRenderError,
-)
-from kdive.providers.local.drgn_wrapper_common import (
-    user_script_sha256 as user_script_sha256,
-)
-
-# Spec §3.1: 256 KiB script cap (enforced by the handler, not Pydantic).
-SCRIPT_BYTE_CAP = 256 * 1024
-
-# Spec §4 (shared-interpreter invariant): the single interpreter argv consumed
-# by BOTH debug.introspect.run (server.debug_introspect_run_handler) and
-# debug.introspect.check_prerequisites (the probe). drgn installed for an
-# interpreter other than this one is reported missing by design, because the
-# runner would equally fail to import it. The privilege prefix (``sudo`` for a
-# non-root SSH login) is also part of the shared invocation; both paths build
-# the full remote argv via server._target_python_remote_argv so the probe
-# checks drgn/debuginfo at the same privilege level the runner will use.
-TARGET_PYTHON_ARGV = ["python3", "-"]
 
 
 @dataclass(frozen=True)

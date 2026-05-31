@@ -166,11 +166,22 @@ from kdive.prereqs.drgn_probe import (
 )
 from kdive.prereqs.handlers import prerequisites_handler
 from kdive.prereqs.kdump_probe import build_kdump_checks, render_kdump_probe_script
-from kdive.providers.local.gdb_mi import (
-    CANONICAL_PROBE_SYMBOL,
+from kdive.providers.debug import (
+    DebugSession,
+    DebugSessionState,
     GdbMiEngine,
     GdbMiError,
     GdbMiSessionRegistry,
+    ProviderDebugError,
+)
+from kdive.providers.local.gdb_mi import (
+    CANONICAL_PROBE_SYMBOL,
+)
+from kdive.providers.local.gdb_mi import (
+    GdbMiEngine as LocalGdbMiEngine,
+)
+from kdive.providers.local.gdb_mi import (
+    GdbMiSessionRegistry as LocalGdbMiSessionRegistry,
 )
 from kdive.providers.local.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from kdive.providers.local.local_kernel_build import (
@@ -180,18 +191,9 @@ from kdive.providers.local.local_kernel_build import (
 )
 from kdive.providers.local.local_ssh_tests import (
     LocalSshTestProvider,
-    SshCommandResult,
-    SshRunner,
-    SubprocessSshRunner,
-    TestExecutionResult,
     TestPlan,
-    build_ssh_argv,
 )
-from kdive.providers.local.qemu_gdbstub import (
-    DebugSession,
-    DebugSessionState,
-    ProviderDebugError,
-)
+from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner, TestExecutionResult, build_ssh_argv
 from kdive.rootfs.sources import RootfsSourceError, resolve_rootfs_source
 from kdive.safety.paths import (
     PathSafetyError,
@@ -4565,8 +4567,8 @@ def create_app(
     # The persistent gdb/MI engine (#79) and the in-process live-session registry (#81, ADR 0021).
     # The engine spawns a fresh gdb -i=mi3 per attach; the registry holds each live attachment across
     # MCP tool calls keyed by DebugSession.session_id so the per-op handlers can issue MI verbs.
-    gdb_mi_engine = GdbMiEngine()
-    gdb_mi_sessions = GdbMiSessionRegistry()
+    gdb_mi_engine = LocalGdbMiEngine()
+    gdb_mi_sessions = LocalGdbMiSessionRegistry()
     # Stash the assembled machinery on the FastMCP instance so test-injection and any future
     # in-process lifecycle event source can reach the SAME admission/transaction/dispatcher trio
     # the tool wrappers close over (rather than constructing a parallel set that would not share

@@ -10,7 +10,7 @@ from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ToolResponse
-from kdive.providers.local.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
+from kdive.providers.debug import GdbMiEngine, GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard
 
 

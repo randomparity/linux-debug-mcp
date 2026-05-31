@@ -27,7 +27,7 @@ from kdive.postmortem.crash_handler import (
 )
 from kdive.postmortem.models import DebugPostmortemCrashRequest, DebugPostmortemTriageRequest
 from kdive.postmortem.triage import CrashOutcome, DrgnOutcome, any_section_ok, assemble_report
-from kdive.providers.local.local_ssh_tests import SshRunner
+from kdive.providers.ssh import SshRunner
 from kdive.safety.paths import PathSafetyError, confine_run_relative
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import KernelProvenance

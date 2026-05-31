@@ -1,18 +1,11 @@
 from __future__ import annotations
 
-import contextlib
 import json
-import os
-import shlex
-import shutil
-import signal
-import subprocess  # nosec B404
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import Protocol
 
 from kdive.config import RootfsProfile, TestCommand, TestSuiteProfile
 from kdive.domain import (
@@ -22,6 +15,13 @@ from kdive.domain import (
     ProviderCapability,
     StepStatus,
     TargetKind,
+)
+from kdive.providers.ssh import (
+    SshCommandResult,
+    SshRunner,
+    SubprocessSshRunner,
+    TestExecutionResult,
+    build_ssh_argv,
 )
 from kdive.safety.redaction import Redactor
 
@@ -53,212 +53,6 @@ class TestPlan:
     dmesg_command: PlannedTestCommand | None
     stop_on_failure: bool
     redactor: Redactor
-
-
-@dataclass(frozen=True)
-class SshCommandResult:
-    exit_status: int
-    stdout: str = ""
-    stderr: str = ""
-    stdout_snippet: str = ""
-    stderr_snippet: str = ""
-    timed_out: bool = False
-    cancelled: bool = False
-    # True when the stdin writer thread observed BrokenPipeError / OSError
-    # before delivering the full payload. The caller cannot trust that the
-    # remote process saw the complete script — surface as a transport failure.
-    stdin_failed: bool = False
-    # True when the streaming stdout cap (max_stdout_bytes) was exceeded and the
-    # process group was killed mid-run. The caller surfaces this as an
-    # oversized-output transport failure rather than parsing a truncated stream.
-    oversized_output: bool = False
-
-
-@dataclass(frozen=True)
-class TestExecutionResult:
-    status: StepStatus
-    summary: str
-    artifacts: list[ArtifactRef] = field(default_factory=list)
-    details: dict[str, object] = field(default_factory=dict)
-    error_category: ErrorCategory | None = None
-    diagnostic: str | None = None
-
-
-class SshRunner(Protocol):
-    def which(self, command: str) -> str | None:
-        raise NotImplementedError
-
-    def run(
-        self,
-        argv: list[str],
-        *,
-        timeout: int,
-        stdout_path: Path,
-        stderr_path: Path,
-        cancel: threading.Event | None = None,
-        stdin: str | None = None,
-        max_stdout_bytes: int | None = None,
-    ) -> SshCommandResult:
-        raise NotImplementedError
-
-
-class SubprocessSshRunner:
-    def which(self, command: str) -> str | None:
-        return shutil.which(command)
-
-    def run(
-        self,
-        argv: list[str],
-        *,
-        timeout: int,
-        stdout_path: Path,
-        stderr_path: Path,
-        cancel: threading.Event | None = None,
-        stdin: str | None = None,
-        max_stdout_bytes: int | None = None,
-    ) -> SshCommandResult:
-        stdout_path.parent.mkdir(parents=True, exist_ok=True)
-        stderr_path.parent.mkdir(parents=True, exist_ok=True)
-        cancelled_flag = False
-        timed_out_flag = False
-        oversized_flag = False
-        with (
-            stdout_path.open("w", encoding="utf-8") as stdout_file,
-            stderr_path.open("w", encoding="utf-8") as stderr_file,
-        ):
-            proc = subprocess.Popen(  # nosec B603
-                argv,
-                stdout=stdout_file,
-                stderr=stderr_file,
-                stdin=subprocess.PIPE if stdin is not None else None,
-                text=True,
-                shell=False,
-                start_new_session=True,
-            )
-            stdin_thread: threading.Thread | None = None
-            # The writer thread records partial-write/EPIPE failures here so
-            # the caller can distinguish a transport failure (truncated wrapper
-            # payload) from a clean wrapper run that emitted a non-JSON crash.
-            stdin_write_error: list[BaseException] = []
-            if stdin is not None:
-                # The wrapper payload can be ~264 KiB, which exceeds Linux's default 64 KiB pipe
-                # buffer. Writing in the main thread would block until the remote drains the
-                # buffer, neutering the cancel/timeout poll below. Pushing the
-                # write into a daemon thread keeps the poll loop responsive;
-                # killing the process group closes the pipe so the writer
-                # observes BrokenPipeError and exits.
-                if proc.stdin is None:
-                    raise RuntimeError("stdin pipe was not created for ssh subprocess")
-                stdin_handle = proc.stdin
-                payload = stdin
-
-                def _write_stdin() -> None:
-                    try:
-                        stdin_handle.write(payload)
-                    except (BrokenPipeError, ValueError, OSError) as exc:
-                        stdin_write_error.append(exc)
-                    finally:
-                        with contextlib.suppress(Exception):
-                            stdin_handle.close()
-
-                stdin_thread = threading.Thread(target=_write_stdin, daemon=True)
-                stdin_thread.start()
-            ticks = 0
-            while True:
-                try:
-                    proc.wait(timeout=0.1)
-                    break
-                except subprocess.TimeoutExpired:
-                    ticks += 1
-                    if cancel is not None and cancel.is_set():
-                        with contextlib.suppress(ProcessLookupError):
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        proc.wait()
-                        cancelled_flag = True
-                        break
-                    if ticks * 0.1 >= timeout:
-                        with contextlib.suppress(ProcessLookupError):
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        proc.wait()
-                        timed_out_flag = True
-                        break
-                    if max_stdout_bytes is not None and self._stdout_size(stdout_path) > max_stdout_bytes:
-                        with contextlib.suppress(ProcessLookupError):
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        proc.wait()
-                        oversized_flag = True
-                        break
-            if stdin_thread is not None:
-                stdin_thread.join(timeout=2)
-        # -1 sentinel: process was killed (cancel/timeout/oversized), so there is no real exit code.
-        exit_status = -1 if (cancelled_flag or timed_out_flag or oversized_flag) else proc.returncode
-        return SshCommandResult(
-            exit_status=exit_status,
-            stdout_snippet=self._read_snippet(stdout_path),
-            stderr_snippet=self._read_snippet(stderr_path),
-            timed_out=timed_out_flag,
-            cancelled=cancelled_flag,
-            stdin_failed=bool(stdin_write_error),
-            oversized_output=oversized_flag,
-        )
-
-    def _stdout_size(self, path: Path) -> int:
-        try:
-            return path.stat().st_size
-        except FileNotFoundError:
-            return 0
-
-    def _read_snippet(self, path: Path) -> str:
-        if not path.exists():
-            return ""
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            return handle.read(_SNIPPET_LIMIT)
-
-
-def build_ssh_argv(
-    *,
-    rootfs_profile: RootfsProfile,
-    known_hosts_path: Path,
-    command: list[str],
-    command_timeout: int,
-) -> list[str]:
-    """Construct the canonical ``ssh`` argv for invoking *command* on the
-    rootfs's remote shell.
-
-    Single source of truth for SSH argv shape — both
-    ``LocalSshTestProvider`` (test-run paths, dmesg) and
-    ``debug_introspect_run_handler`` (sudo preflight, wrapper invocation)
-    call this. R6-F5: the introspect handler previously referenced
-    ``RootfsProfile.ssh_args()`` / ``.ssh_argv()`` methods that do not
-    exist on the Pydantic model (config.py:254-277); lifting this helper
-    to module scope eliminates that fictional API.
-    """
-    configured_timeout = rootfs_profile.ssh_options.get("ConnectTimeout")
-    if configured_timeout is not None and int(configured_timeout) > command_timeout:
-        raise ValueError("ConnectTimeout cannot exceed command timeout")
-    connect_timeout = configured_timeout or str(min(command_timeout, 10))
-    strict_host_key_checking = rootfs_profile.ssh_options.get("StrictHostKeyChecking", "accept-new")
-    ssh_argv = [
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        f"UserKnownHostsFile={known_hosts_path}",
-        "-o",
-        f"ConnectTimeout={connect_timeout}",
-        "-o",
-        f"StrictHostKeyChecking={strict_host_key_checking}",
-    ]
-    for key in sorted(rootfs_profile.ssh_options):
-        if key in {"ConnectTimeout", "StrictHostKeyChecking"}:
-            continue
-        ssh_argv.extend(["-o", f"{key}={rootfs_profile.ssh_options[key]}"])
-    ssh_argv.extend(["-p", str(rootfs_profile.ssh_port)])
-    if rootfs_profile.ssh_key_ref:
-        ssh_argv.extend(["-i", rootfs_profile.ssh_key_ref])
-    remote_command = " ".join(shlex.quote(item) for item in command)
-    ssh_argv.extend(["--", f"{rootfs_profile.ssh_user}@{rootfs_profile.ssh_host}", remote_command])
-    return ssh_argv
 
 
 class LocalSshTestProvider:

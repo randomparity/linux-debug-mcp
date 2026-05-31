@@ -13,7 +13,7 @@ from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.default_profiles import DEFAULT_DEBUG_PROFILES
 from kdive.domain import ErrorCategory, ToolResponse
-from kdive.providers.local.qemu_gdbstub import ProviderDebugError
+from kdive.providers.debug import ProviderDebugError
 from kdive.safety.redaction import Redactor
 from kdive.seams.guard import GuardConflict
 from kdive.seams.target import TargetKey

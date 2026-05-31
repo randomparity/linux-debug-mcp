@@ -26,6 +26,7 @@ from kdive.debug import operations as debug_operations
 from kdive.debug import tools as debug_tools
 from kdive.debug.tools import DebugToolContext, DebugToolHandlers
 from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus
+from kdive.providers.debug import GdbMiSessionRegistry as GdbMiSessionRegistryContract
 from kdive.providers.local.gdb_mi import (
     CANONICAL_PROBE_SYMBOL,
     BreakpointRef,
@@ -264,7 +265,7 @@ def test_debug_tool_registration_uses_typed_context_and_handler_protocols() -> N
     assert context_hints["transaction"] is TransportTransaction
     assert context_hints["admission"] is AdmissionService
     assert context_hints["session_registry"] is SessionRegistry
-    assert context_hints["gdb_mi_sessions"] is GdbMiSessionRegistry
+    assert context_hints["gdb_mi_sessions"] is GdbMiSessionRegistryContract
     assert not hasattr(DebugToolContext, "common_kwargs")
     assert not hasattr(DebugToolContext, "gated_kwargs")
 

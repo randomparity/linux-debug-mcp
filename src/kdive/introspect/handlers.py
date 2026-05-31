@@ -43,14 +43,14 @@ from kdive.introspect.execution import (
     _utcnow,
 )
 from kdive.introspect_helpers import get_helper_registry
-from kdive.providers.local.local_drgn_introspect import (
+from kdive.providers.introspect import (
     SCRIPT_BYTE_CAP,
     WrapperRenderError,
     render_vmcore_wrapper,
     render_vmcore_wrapper_skeleton,
     user_script_sha256,
 )
-from kdive.providers.local.local_ssh_tests import SshRunner, SubprocessSshRunner
+from kdive.providers.ssh import SshRunner, SubprocessSshRunner
 from kdive.safety.paths import PathSafetyError, confine_run_relative
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import KernelProvenance

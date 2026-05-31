@@ -18,6 +18,7 @@ from pygdbmi.constants import GdbTimeoutError
 from pygdbmi.gdbmiparser import parse_response
 
 from kdive.domain import ErrorCategory, Model
+from kdive.providers.debug import MAX_INTERACTIVE_WAIT_SEC, MAX_MEMORY_READ_BYTES, GdbMiError
 from kdive.safety.redaction import Redactor
 from kdive.transport.base import Endpoint, TcpEndpoint
 
@@ -51,17 +52,12 @@ _SYMBOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # (the /proc/version string), so it needs no kernel-config gating (ADR 0020 decision 3).
 CANONICAL_PROBE_SYMBOL = "linux_banner"
 
-# Max wall-clock an interactive resume verb blocks (ADR 0021 decision 2). NOT the legacy 1-3600s:
-# the call holds debug_lock, so it must not outlast a client request timeout.
-MAX_INTERACTIVE_WAIT_SEC = 60
 # Fixed bound for the post-timeout -exec-interrupt to land its *stopped (SIGINT).
 _INTERRUPT_STOP_TIMEOUT_SEC = 10.0
 # Poll slice when looping read() toward the deadline.
 _STOP_POLL_SLICE_SEC = 0.5
 # gdb stop reasons meaning the inferior is gone (not a debuggable HALT).
 _TERMINAL_STOP_REASONS = frozenset({"exited", "exited-normally", "exited-signalled"})
-# Per-call read_memory cap (CLAUDE.md invariant; re-homed off the deleted batch validator).
-MAX_MEMORY_READ_BYTES = 4096
 # Snippet bound for variable values so a deep frame cannot bloat the response.
 MAX_RESPONSE_SNIPPET = 4096
 # A register name (passed to -data-list-register-names lookup).
@@ -175,19 +171,6 @@ def parse_mi_records(text: str) -> list[MiRecord]:
             continue
         records.append(MiRecord.from_raw(parse_response(stripped)))
     return records
-
-
-class GdbMiError(Exception):
-    def __init__(
-        self,
-        message: str,
-        *,
-        category: ErrorCategory,
-        details: dict[str, object] | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.category = category
-        self.details = details or {}
 
 
 def _timeout_error(command: str, timeout_sec: float) -> GdbMiError:
