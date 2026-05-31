@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -22,6 +22,8 @@ from kdive.config import (
     TRIAGE_MODULES_HELPER,
     RootfsProfile,
 )
+from kdive.coordination.admission import AdmissionError
+from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES
 from kdive.domain import (
     ArtifactRef,
     DebugIntrospectFromVmcoreHelperRequest,
@@ -29,6 +31,20 @@ from kdive.domain import (
     StepResult,
     StepStatus,
     ToolResponse,
+)
+from kdive.handlers.shared import (
+    PROBE_STDOUT_CAP,
+    _assemble_kdump_response,
+    _chmod_best_effort,
+    _configuration_failure,
+    _parse_probe_stdout,
+    _prepare_probe_dirs,
+    _redact_and_truncate,
+    _reject_if_target_halted,
+    _require_value,
+    _resolve_probe_context,
+    _target_python_remote_argv,
+    _validated_dump_dir,
 )
 from kdive.introspect.execution import _record_terminal_introspect_result, _utcnow
 from kdive.introspect.handlers import debug_introspect_from_vmcore_helper_handler
@@ -39,7 +55,6 @@ from kdive.postmortem.crash_handler import (
     debug_postmortem_crash_handler,
 )
 from kdive.postmortem.dumps import (
-    DEFAULT_DUMP_DIR,
     FetchSpec,
     derive_dump_id,
     is_within_dump_dir,
@@ -67,10 +82,6 @@ from kdive.symbols.resolve import SymbolResolutionError, resolve_symbols
 from kdive.symbols.vmcore_build_id import read_vmcore_build_id
 
 SSH_TIMEOUT_GRACE_SECONDS = 10
-
-
-class _SupportsDumpRequest(Protocol):
-    dump_dir: str | None
 
 
 def build_scp_argv(
@@ -112,24 +123,9 @@ def build_scp_argv(
     return argv
 
 
-def _validated_dump_dir(request: _SupportsDumpRequest, run_id: str) -> tuple[str | None, ToolResponse | None]:
-    from kdive.server import _configuration_failure
-
-    dump_dir = request.dump_dir or DEFAULT_DUMP_DIR
-    if not dump_dir.startswith("/"):
-        return None, _configuration_failure(
-            run_id=run_id,
-            message=f"dump_dir must be an absolute path; got {dump_dir!r}",
-            details={"code": "invalid_dump_dir"},
-        )
-    return dump_dir, None
-
-
 def _parse_enumeration_result(
     ctx: Any, *, ssh_result: SshCommandResult, stdout_path: Path
 ) -> tuple[dict[str, object] | None, ToolResponse | None]:
-    from kdive.server import _parse_probe_stdout
-
     return _parse_probe_stdout(
         ctx,
         ssh_result=ssh_result,
@@ -147,16 +143,6 @@ def _run_dump_enumeration(
     timeout_seconds: int,
     category: tuple[str, ...],
 ) -> tuple[dict[str, object] | None, ToolResponse | None]:
-    from kdive.server import (
-        PROBE_STDOUT_CAP,
-        _chmod_best_effort,
-        _configuration_failure,
-        _prepare_probe_dirs,
-        _redact_and_truncate,
-        _require_value,
-        _target_python_remote_argv,
-    )
-
     run_id = ctx.run_id
     probe_id = uuid.uuid4().hex
     agent_dir, sensitive_dir = _prepare_probe_dirs(ctx.store, run_id, probe_id, category=category)
@@ -210,8 +196,6 @@ _DUMP_LISTING_SHAPE_ERRORS = (KeyError, TypeError, ValueError, AttributeError, V
 def _parse_dump_listing_at_boundary(
     ctx: Any, parsed: dict[str, object]
 ) -> tuple[list[DumpEntry] | None, ToolResponse | None]:
-    from kdive.server import _redact_and_truncate
-
     try:
         return parse_dump_listing(parsed), None
     except _DUMP_LISTING_SHAPE_ERRORS as exc:
@@ -229,8 +213,6 @@ def _parse_dump_listing_at_boundary(
 def _match_dump_at_boundary(
     ctx: Any, parsed: dict[str, object], dump_ref: str
 ) -> tuple[DumpEntry | None, ToolResponse | None]:
-    from kdive.server import _require_value
-
     entries, failure = _parse_dump_listing_at_boundary(ctx, parsed)
     if failure is not None:
         return None, failure
@@ -278,8 +260,6 @@ def _stage_one_file(
     sensitive_dir: Path,
     timeout_seconds: int,
 ) -> tuple[FetchedFile | None, ToolResponse | None]:
-    from kdive.server import _configuration_failure, _redact_and_truncate
-
     run_id = ctx.run_id
     local_dest = dest_dir / spec.local_name
     try:
@@ -356,21 +336,6 @@ def debug_postmortem_check_prereqs_handler(
     admission: Any | None = None,
     session_registry: Any | None = None,
 ) -> ToolResponse:
-    from kdive.server import (
-        DEFAULT_ROOTFS_PROFILES,
-        PROBE_STDOUT_CAP,
-        AdmissionError,
-        _assemble_kdump_response,
-        _chmod_best_effort,
-        _configuration_failure,
-        _prepare_probe_dirs,
-        _redact_and_truncate,
-        _reject_if_target_halted,
-        _require_value,
-        _resolve_probe_context,
-        _target_python_remote_argv,
-    )
-
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
     resolved_ctx, failure = _resolve_probe_context(
         request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles
@@ -444,8 +409,6 @@ def debug_postmortem_check_prereqs_handler(
 def _admit_fetch_entry(
     ctx: Any, *, runner: SshRunner, request: DebugPostmortemFetchRequest, dump_dir: str, dest_dir: Path
 ) -> tuple[DumpEntry | None, ToolResponse | None]:
-    from kdive.server import _configuration_failure, _require_value
-
     run_id = ctx.run_id
     parsed, failure = _run_dump_enumeration(
         ctx,
@@ -519,8 +482,6 @@ def _fetch_under_lock(
     dump_id: str,
     dest_dir: Path,
 ) -> ToolResponse:
-    from kdive.server import _require_value
-
     run_id = ctx.run_id
     step_name = f"postmortem.fetch:{dump_id}"
     with ctx.store.postmortem_fetch_lock(run_id):
@@ -588,14 +549,6 @@ def debug_postmortem_list_dumps_handler(
     admission: Any | None = None,
     session_registry: Any | None = None,
 ) -> ToolResponse:
-    from kdive.server import (
-        DEFAULT_ROOTFS_PROFILES,
-        AdmissionError,
-        _reject_if_target_halted,
-        _require_value,
-        _resolve_probe_context,
-    )
-
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
     resolved_ctx, failure = _resolve_probe_context(
         request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles
@@ -655,14 +608,6 @@ def debug_postmortem_fetch_handler(
     admission: Any | None = None,
     session_registry: Any | None = None,
 ) -> ToolResponse:
-    from kdive.server import (
-        DEFAULT_ROOTFS_PROFILES,
-        AdmissionError,
-        _reject_if_target_halted,
-        _require_value,
-        _resolve_probe_context,
-    )
-
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
     resolved_ctx, failure = _resolve_probe_context(
         request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles, timeout_band=FETCH_TIMEOUT_BAND

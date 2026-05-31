@@ -1,6 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from kdive.server import create_app
+
+
+def test_postmortem_handlers_do_not_import_server_privates() -> None:
+    source = (Path(__file__).parents[2] / "src" / "kdive" / "postmortem" / "handlers.py").read_text(encoding="utf-8")
+
+    assert "from kdive.server import" not in source
 
 
 def test_create_app_registers_postmortem_tools_through_package_module() -> None:
