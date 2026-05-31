@@ -18,11 +18,11 @@ def probe_execution_state(
     the current generation + execution epoch so the gate can fence a stale proof. Fail-closed:
     no record (or no executing fact) ⇒ UNKNOWN — never an optimistic EXECUTING.
 
-    **Scope (Finding F2/F5):** this is the ssh-tier admit-fact path against a READY/DEBUGGING
-    target — the controller's last-known write IS authoritative there, defended by Finding F8
-    closing the legacy out-of-band halt bypass. The post-break confirmation path uses
-    `probe_rsp_halted` instead (a real bounded RSP exchange), because the inject_break handler
-    has just written HALTED itself and reading that cached flag back would be circular."""
+    This is the ssh-tier admit-fact path against a READY/DEBUGGING target: the controller's
+    last-known durable write is authoritative because legacy out-of-band halt bypasses are fenced.
+    The post-break confirmation path uses `probe_rsp_halted` instead (a real bounded RSP exchange),
+    because the inject_break handler has just written HALTED itself and reading that cached flag
+    back would be circular."""
     record = registry.read_record(target_key)
     state = record.execution_state if record is not None else ExecutionState.UNKNOWN
     return ExecutionProof(
@@ -34,16 +34,15 @@ def probe_execution_state(
 
 # RSP stop replies start with `T` (stop reply with optional register state) or `S` (signal),
 # per the GDB Remote Serial Protocol (`gdb/doc/gdb.texinfo`, "Stop Reply Packets"). Either one
-# means the target is halted at a stop point — exactly the post-break confirmation Finding F2/F4
-# requires. Any other reply (or no reply / a malformed frame / a connection failure) is False:
-# fail closed.
+# means the target is halted at a stop point, which is the post-break confirmation invariant. Any
+# other reply (or no reply / a malformed frame / a connection failure) is False: fail closed.
 def probe_rsp_halted(
     session: TransportSession,
     *,
     deadline_s: float = 1.0,
 ) -> bool:
-    """Bounded liveness probe (Finding F2): perform one RSP `?` exchange against `session`'s
-    `rsp_endpoint` and return True iff the peer answers with a stop reply (`T..` or `S..`)
+    """Bounded liveness probe: perform one RSP `?` exchange against `session`'s `rsp_endpoint` and
+    return True iff the peer answers with a stop reply (`T..` or `S..`)
     within `deadline_s`. False on any I/O error, timeout, malformed frame, or non-stop reply.
 
     This is the `transport.inject_break` post-break confirmation. The handler's earlier

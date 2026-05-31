@@ -27,6 +27,7 @@ from kdive.seams.target import (
     TargetKey,
     TargetState,
 )
+from kdive.transport.break_types import BreakProxy, BreakSshRunner
 
 DEFAULT_MIN_LEASE_TTL_SECONDS = 300
 
@@ -346,9 +347,9 @@ class BreakResources:
     agent-proxy and its handle for a UART/agent break, and the ssh prefix/runner for a sysrq-g
     write. A transport that injects no out-of-band break (gdbstub-native) returns None instead."""
 
-    proxy: object
-    proxy_handle: object
-    ssh_runner: object | None = None
+    proxy: BreakProxy | None
+    proxy_handle: Any
+    ssh_runner: BreakSshRunner | None = None
     ssh_argv_prefix: tuple[str, ...] = ()
     work_dir: Path | None = None
 

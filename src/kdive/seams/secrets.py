@@ -55,7 +55,7 @@ class KeyringSecretsBackend(SecretsBackend):
     def __init__(self, *, get_password: Callable[[str, str], str | None] | None = None) -> None:
         if get_password is None:
             try:
-                import keyring  # ty: ignore[unresolved-import]
+                import keyring  # ty: ignore[unresolved-import]  # optional extra; ImportError becomes SecretsResolutionError
             except ImportError as exc:
                 raise SecretsResolutionError(
                     "keyring backend requires the 'keyring' extra: install kdive[keyring]"

@@ -77,7 +77,7 @@ class InProcessStopCapableGuard:
         """Coarse, **tokenless** force-free of the current holder — the §5.6 contract primitive for
         an invalidator that does not hold the session's token. The §5.4 invalidation path in this
         codebase does NOT use it: `TransportTransaction` holds the `GuardToken` in-process and frees
-        the guard by the fenced `release(target_key, token)` instead (ADR 0002 Finding #4, ADR 0015),
+        the guard by the fenced `release(target_key, token)` instead (ADR 0002 / ADR 0015),
         so `revoke` has no in-process caller today. It is retained as a Protocol primitive a swapped
         #08 impl (or a tokenless force-reap path) can use.
 

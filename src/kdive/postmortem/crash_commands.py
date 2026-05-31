@@ -15,7 +15,7 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _MODULES_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 
-def validate_crash_command(command: str, allowlist: set[str]) -> str | None:
+def crash_command_rejection_reason(command: str, allowlist: set[str]) -> str | None:
     """Return ``None`` if the command is permitted, else a human-readable reason.
 
     Two layers (spec §3.4): a security-critical denylist (newline/control chars,

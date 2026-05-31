@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from kdive.domain import ErrorCategory
 from kdive.transport.base import BreakMethod, BreakPlan
+from kdive.transport.break_types import BreakProxy, BreakSshRunner
+
+BreakRequestMethod = Literal["auto"] | BreakMethod
 
 
 class InjectBreakError(Exception):
@@ -16,39 +20,52 @@ class InjectBreakError(Exception):
     ) -> None:
         super().__init__(message)
         self.category = category
-        # Finding F15: optional structured details carried into the failure response. The handler
-        # passes the dict through `Redactor.redact_value` before surfacing it, so a mechanism that
-        # attaches an endpoint path or secret-looking value to context never leaks raw.
+        # Optional structured details carried into the failure response. The handler passes the dict
+        # through `Redactor.redact_value` before surfacing it, so a mechanism that attaches an
+        # endpoint path or secret-looking value to context never leaks raw.
         self.details: dict[str, object] = dict(details or {})
 
 
-_REQUESTABLE = {"auto", "uart_break", "agent_proxy_break", "sysrq_g"}
+_REQUESTABLE = frozenset(method for method in BreakMethod if method is not BreakMethod.GDBSTUB_NATIVE)
+
+
+def _normalize_break_request_method(method: BreakRequestMethod) -> BreakMethod | None:
+    return None if method == "auto" else BreakMethod(method)
 
 
 def inject_break(
     *,
-    method: str,
+    method: BreakRequestMethod,
     break_plan: BreakPlan,
-    proxy,
-    proxy_handle,
-    ssh_runner,
-    ssh_argv_prefix,
+    proxy: BreakProxy | None,
+    proxy_handle: object | None,
+    ssh_runner: BreakSshRunner | None,
+    ssh_argv_prefix: tuple[str, ...],
     work_dir: Path | None = None,
 ) -> None:
     """Execute the admitted break plan (§6.4). gdbstub_native is not a valid argument
     (gdb interrupts directly). A requested method not equal to the admitted plan's method
     is rejected, not attempted. No kernel is halted in tests — proxy/ssh are fakes."""
-    if method == "gdbstub_native" or break_plan.method is BreakMethod.GDBSTUB_NATIVE:
+    if method == BreakMethod.GDBSTUB_NATIVE or break_plan.method is BreakMethod.GDBSTUB_NATIVE:
         raise InjectBreakError("gdbstub_native needs no break injection", category=ErrorCategory.CONFIGURATION_ERROR)
-    if method not in _REQUESTABLE:
-        raise InjectBreakError(f"unknown break method: {method}", category=ErrorCategory.CONFIGURATION_ERROR)
-    resolved = break_plan.method if method == "auto" else BreakMethod(method)
+    try:
+        resolved = _normalize_break_request_method(method) or break_plan.method
+    except ValueError as exc:
+        raise InjectBreakError(f"unknown break method: {method}", category=ErrorCategory.CONFIGURATION_ERROR) from exc
+    if resolved not in _REQUESTABLE:
+        raise InjectBreakError(f"unsupported method {resolved.value}", category=ErrorCategory.CONFIGURATION_ERROR)
     if resolved is not break_plan.method:
         raise InjectBreakError(
             f"requested {resolved.value} is not the admitted plan method {break_plan.method.value}",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     if resolved in (BreakMethod.UART_BREAK, BreakMethod.AGENT_PROXY_BREAK):
+        if proxy is None:
+            raise InjectBreakError(
+                f"{resolved.value} break requires a proxy handle, but none is wired for this transport",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"code": "break_inject_unavailable"},
+            )
         proxy.send_break(proxy_handle)
         return
     if resolved is BreakMethod.SYSRQ_G:

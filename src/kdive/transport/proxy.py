@@ -316,8 +316,8 @@ class AgentProxyBackend:
         # refuses to signal (leak > kill-wrong-process). os.kill is safe here precisely
         # because the fingerprint match proves it is still our old child.
         #
-        # Returns True iff we issued a kill against a fingerprint-matched live backend (Finding
-        # F1). False on a None fingerprint, a missing/mismatched live identity, or an immediate
+        # Returns True iff we issued a kill against a fingerprint-matched live backend. False on a
+        # None fingerprint, a missing/mismatched live identity, or an immediate
         # ProcessLookupError/PermissionError — i.e. no live backend was reaped. Reconciliation
         # uses this to decide whether to close admission (live orphan we just killed) vs. only
         # emit the lifecycle event (record present but backend already dead / unfenceable).

@@ -14,6 +14,7 @@ from kdive.transport.base import (
     Transport,
     TransportCapability,
     TransportLocality,
+    TransportSession,
 )
 from kdive.transport.bounded import Deadline
 from kdive.transport.rsp_probe import rsp_reachable
@@ -27,7 +28,8 @@ class QemuGdbstubAttachError(Exception):
 
 class QemuGdbstubTransport(Transport):
     """RSP passthrough to QEMU's gdbstub (§6.3). No agent-proxy, no console, no halt.
-    The existing QemuGdbstubProvider batch-gdb engine is untouched in Layer 3."""
+    This transport only exposes bounded RSP connectivity; gdb/MI session ownership lives
+    in the MCP handlers and ``kdive.providers.local.gdb_mi``."""
 
     @property
     def capability(self) -> TransportCapability:
@@ -93,12 +95,12 @@ class QemuGdbstubTransport(Transport):
             backend_start_time=None,
         )
 
-    def close(self, session: object) -> None:
+    def close(self, session: TransportSession) -> None:
         return None
 
-    def health(self, session: object) -> str:
-        endpoint = getattr(session, "rsp_endpoint", None)
-        if endpoint is None:
+    def health(self, session: TransportSession) -> str:
+        endpoint = session.rsp_endpoint
+        if not isinstance(endpoint, TcpEndpoint):
             return "degraded"
         ok = rsp_reachable(endpoint.host, endpoint.port, deadline=Deadline.after(2.0), cancel=threading.Event())
         return "ready" if ok else "degraded"

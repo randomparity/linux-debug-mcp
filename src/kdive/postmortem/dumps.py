@@ -18,7 +18,7 @@ from pathlib import PurePosixPath
 from string import Template
 from typing import Any
 
-from kdive.domain import DumpEntry
+from kdive.postmortem.models import DumpEntry
 
 DEFAULT_DUMP_DIR = "/var/crash"
 # Plausible upper bound for a remote-supplied mtime: 2100-01-01T00:00:00Z. A value outside
@@ -141,7 +141,7 @@ def plan_fetch(entry: DumpEntry, *, vmcore_name: str = VMCORE_NAME) -> list[Fetc
     """Ordered scp plan: always the core file, then co-located symbol files present.
 
     Each spec carries the expected size from ``entry.file_sizes`` so every staged file
-    gets the size-match truncation guard (ADR 0029 decision 4 / review finding 3).
+    gets the size-match truncation guard.
     """
     specs = [
         FetchSpec(

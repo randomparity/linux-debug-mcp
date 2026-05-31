@@ -74,10 +74,8 @@ def validate_artifact_root(
 def validate_run_id(run_id: str) -> str:
     if not _RUN_ID_PATTERN.match(run_id):
         raise PathSafetyError("run ID contains unsafe characters")
-    if run_id.startswith(".") or ".." in run_id or "/" in run_id:
+    if ".." in run_id:
         raise PathSafetyError("run ID contains unsafe path syntax")
-    if any(char in _SHELL_METACHARS for char in run_id):
-        raise PathSafetyError("run ID contains shell metacharacters")
     return run_id
 
 
