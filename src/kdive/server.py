@@ -26,7 +26,6 @@ from kdive.artifacts.handlers import artifacts_collect_handler
 from kdive.artifacts.manifest import BootAttempt, RunManifest
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import (
-    ALLOWED_DEBUG_OPERATIONS,
     DEFAULT_FETCH_MAX_BYTES,
     FETCH_DISK_HEADROOM_BYTES,
     FETCH_TIMEOUT_BAND,
@@ -252,8 +251,10 @@ from kdive.transport.base import (
 )
 from kdive.transport.break_inject import InjectBreakError
 from kdive.transport.handlers import (
+    _ensure_debug_operation_enabled,
     _halt_debug_transport,
     _require_snapshot,
+    _resolve_debug_profile,
     transport_close_handler,
     transport_inject_break_handler,
     transport_open_handler,
@@ -954,37 +955,6 @@ def _debug_session_manifest_details(*, store: ArtifactStore, run_id: str, sessio
     if session.ended_at is not None:
         details["ended_at"] = session.ended_at
     return details
-
-
-def _ensure_debug_operation_enabled(profile: DebugProfile, operation: str) -> None:
-    if operation not in set(ALLOWED_DEBUG_OPERATIONS):
-        raise ProviderDebugError(
-            "unsupported debug operation",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"operation": operation},
-        )
-    if operation not in profile.enabled_operations:
-        raise ProviderDebugError(
-            "debug operation is disabled by selected profile",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"debug_profile": profile.name, "operation": operation},
-        )
-
-
-def _resolve_debug_profile(
-    *,
-    profile_name: str,
-    debug_profiles: dict[str, DebugProfile] | None,
-) -> DebugProfile:
-    profiles = debug_profiles if debug_profiles is not None else DEFAULT_DEBUG_PROFILES
-    try:
-        return profiles[profile_name]
-    except KeyError as exc:
-        raise ProviderDebugError(
-            "unknown debug profile",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"debug_profile": profile_name},
-        ) from exc
 
 
 def _require_run_debug_path(path: Path, *, run_dir: Path, description: str) -> Path:
