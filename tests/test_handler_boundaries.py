@@ -4,6 +4,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 SERVER_SOURCE = ROOT / "src" / "kdive" / "server.py"
+INTROSPECT_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "introspect" / "handlers.py"
+INTROSPECT_EXECUTION_SOURCE = ROOT / "src" / "kdive" / "introspect" / "execution.py"
 
 
 def test_extracted_handler_modules_do_not_import_server_module() -> None:
@@ -35,3 +37,11 @@ def test_server_does_not_own_shared_probe_helpers() -> None:
     ]
 
     assert [helper for helper in duplicated_helpers if f"def {helper}(" in server_source] == []
+
+
+def test_live_introspection_does_not_keep_passthrough_wrappers() -> None:
+    handler_source = INTROSPECT_HANDLERS_SOURCE.read_text(encoding="utf-8")
+    execution_source = INTROSPECT_EXECUTION_SOURCE.read_text(encoding="utf-8")
+
+    assert "def _execute_live_introspect_call(" not in handler_source
+    assert "def _prepare_live_wrapper(" not in execution_source

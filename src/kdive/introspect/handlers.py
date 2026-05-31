@@ -192,37 +192,6 @@ class VmcoreIntrospectRun:
     duration_ms: int
 
 
-def _execute_live_introspect_call(
-    request: DebugIntrospectRunRequest,
-    *,
-    artifact_root: Path,
-    target_profiles: dict[str, TargetProfile] | None,
-    rootfs_profiles: dict[str, RootfsProfile] | None,
-    debug_profiles: dict[str, DebugProfile] | None,
-    ssh_runner: SshRunner | None,
-    admission: AdmissionService | None,
-    session_registry: SessionRegistry | None,
-    clock: Callable[[], datetime] | None,
-    operation_name: str,
-    caps: dict[str, int] | None,
-    post_validator: IntrospectPostValidator | None,
-) -> ToolResponse:
-    return _execute_introspect_call(
-        request,
-        artifact_root=artifact_root,
-        target_profiles=target_profiles,
-        rootfs_profiles=rootfs_profiles,
-        debug_profiles=debug_profiles,
-        ssh_runner=ssh_runner,
-        admission=admission,
-        session_registry=session_registry,
-        clock=clock,
-        operation_name=operation_name,
-        caps=caps,
-        post_validator=post_validator,
-    )
-
-
 def debug_introspect_run_handler(
     request: DebugIntrospectRunRequest,
     *,
@@ -235,7 +204,7 @@ def debug_introspect_run_handler(
     session_registry: SessionRegistry | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> ToolResponse:
-    return _execute_live_introspect_call(
+    return _execute_introspect_call(
         request,
         artifact_root=artifact_root,
         target_profiles=target_profiles,
@@ -294,7 +263,7 @@ def debug_introspect_helper_handler(
         rootfs_profile=request.rootfs_profile,
         args=validated_args.model_dump(mode="json"),
     )
-    return _execute_live_introspect_call(
+    return _execute_introspect_call(
         run_request,
         artifact_root=artifact_root,
         target_profiles=target_profiles,

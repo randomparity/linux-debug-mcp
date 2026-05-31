@@ -641,12 +641,6 @@ def _resolve_pre_admission_introspect_context(
     )
 
 
-def _prepare_live_wrapper(
-    **kwargs: Any,
-) -> tuple[_IntrospectCallWorkspace | None, ToolResponse | None]:
-    return _prepare_introspect_call_workspace(**kwargs)
-
-
 def _prepare_introspect_call_workspace(
     *,
     store: ArtifactStore,
@@ -1029,7 +1023,7 @@ def _execute_admitted_introspect_ssh(
     # handle. Mirrors target_run_tests_handler:1588-1620.
     admission_disposed = False
     try:
-        workspace, workspace_failure = _prepare_live_wrapper(
+        workspace, workspace_failure = _prepare_introspect_call_workspace(
             store=store,
             run_id=run_id,
             request=request,
