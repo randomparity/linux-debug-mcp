@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import json
 import logging
 import os
 import re
@@ -13,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any, Protocol, TypeVar, cast
+from typing import Any, TypeVar
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
@@ -38,7 +37,6 @@ from kdive.coordination.admission import (
     AdmissionService,
     SnapshotStore,
 )
-from kdive.coordination.exec_probe import probe_execution_state
 from kdive.coordination.lease import ConsoleLeaseManager
 from kdive.coordination.registry import OrphanReap, SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
@@ -93,19 +91,13 @@ from kdive.default_profiles import (
     DEFAULT_TARGET_PROFILES as _DEFAULT_TARGET_PROFILES,
 )
 from kdive.domain import (
-    ArtifactRef,
     ErrorCategory,
-    PrerequisiteCheck,
-    PrerequisiteStatus,
     StepResult,
     StepStatus,
     ToolResponse,
 )
 from kdive.introspect.execution import (
     _record_introspect_failure as _record_introspect_failure,
-)
-from kdive.introspect.execution import (
-    _redact_and_truncate,
 )
 from kdive.introspect.execution import (
     _rollback_introspect_admission as _rollback_introspect_admission,
@@ -135,14 +127,7 @@ from kdive.postmortem.handlers import (
     debug_postmortem_triage_handler,
 )
 from kdive.postmortem.tools import register_postmortem_tools
-from kdive.prereqs.drgn_probe import (
-    UNKNOWN,
-    USABLE,
-    build_probe_checks,
-    python_missing_checks,
-)
 from kdive.prereqs.handlers import prerequisites_handler
-from kdive.prereqs.kdump_probe import build_kdump_checks
 from kdive.prereqs.tools import register_prereq_tools
 from kdive.providers.debug import (
     DebugSessionState,
@@ -157,7 +142,7 @@ from kdive.providers.local.debug.gdb_mi import (
 from kdive.providers.local.debug.gdb_mi import (
     GdbMiSessionRegistry as LocalGdbMiSessionRegistry,
 )
-from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner, build_ssh_argv
+from kdive.providers.ssh import SshRunner, SubprocessSshRunner, build_ssh_argv
 from kdive.safety.logging import SECRET_REGISTRY, configure_logging
 from kdive.safety.paths import (
     PathSafetyError,
@@ -205,14 +190,12 @@ from kdive.tools.artifacts import register_artifact_tools
 from kdive.tools.providers import register_provider_tools
 from kdive.transport.base import (
     EndpointExposure,
-    ExecutionState,
     Transport,
     TransportLocality,
     TransportRegistry,
 )
 from kdive.transport.handlers import (
     _ensure_debug_operation_enabled,
-    _require_snapshot,
     _resolve_debug_profile,
     transport_close_handler,
     transport_inject_break_handler,
@@ -248,12 +231,6 @@ def _require_value(value: _RequiredT | None, message: str) -> _RequiredT:
     if value is None:
         raise RuntimeError(message)
     return value
-
-
-def _require_dict(value: object, message: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise RuntimeError(message)
-    return cast(dict[str, Any], value)
 
 
 DEFAULT_ARTIFACT_ROOT = Path(".kdive/runs")
@@ -341,450 +318,12 @@ def _record_terminal_introspect_result(store: ArtifactStore, run_id: str, result
     _record_step_with_retry(store, run_id, result, append=True)
 
 
-def _reject_if_target_halted(
-    *,
-    run_id: str,
-    admission: AdmissionService | None,
-    session_registry: SessionRegistry | None,
-    action: str = "probing kdump prerequisites",
-) -> ToolResponse | None:
-    """§5.6 rule 2 proof-only fast-reject for the read-only kdump prereq probe.
-
-    Returns a READINESS_FAILURE/target_halted response when the target is HALTED, else
-    None (proceed). Inert when admission/registry are absent (handler-test and legacy
-    callers run ungated). Unlike `_admit_run_tests_ssh_tier` it does NOT promote the
-    ssh tier — a bounded single-shot read-only probe only needs the immediate
-    rejection; the SSH command timeout bounds the residual TOCTOU window (ADR 0028
-    decision 3). May raise AdmissionError(snapshot_missing); the caller maps it to its
-    carried category/code.
-    """
-    if admission is None or session_registry is None:
-        return None
-    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
-    snapshot = _require_snapshot(admission, target_key)
-    proof = probe_execution_state(
-        registry=session_registry, admission=admission, target_key=target_key, generation=snapshot.generation
-    )
-    if proof.state is ExecutionState.HALTED:
-        return ToolResponse.failure(
-            category=ErrorCategory.READINESS_FAILURE,
-            run_id=run_id,
-            message=f"target halted in debugger; resume or detach before {action}",
-            details={"code": "target_halted"},
-            suggested_next_actions=["debug.continue", "debug.end_session"],
-        )
-    return None
-
-
 def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any] | None = None) -> ToolResponse:
     return ToolResponse.failure(
         category=ErrorCategory.CONFIGURATION_ERROR,
         message=message,
         run_id=run_id,
         details=details,
-    )
-
-
-class _SupportsProbeRequest(Protocol):
-    """Structural type for the run-scoped fields ``_resolve_probe_context`` reads.
-
-    Lets ``DebugIntrospectCheckPrerequisitesRequest`` and
-    ``DebugPostmortemCheckPrereqsRequest`` (field-identical, distinct tools) share the
-    resolver without ``ty`` rejecting the second model (it does not duck-type Pydantic
-    models by structure unless the parameter is a Protocol). See ADR 0028 decision 8.
-    """
-
-    run_id: str
-    manifest_target_profile: str
-    timeout_seconds: int
-    debug_profile: str | None
-    target_profile: str | None
-    rootfs_profile: str | None
-
-
-class _SupportsDumpRequest(Protocol):
-    """Structural type for the ``dump_dir`` field both retrieval requests carry (#95)."""
-
-    dump_dir: str | None
-
-
-@dataclass(frozen=True)
-class _ProbeContext:
-    store: ArtifactStore
-    run_id: str
-    rootfs: RootfsProfile
-    host_build_id: str | None
-    redactor: Redactor
-
-
-def _resolve_probe_context(
-    request: _SupportsProbeRequest,
-    *,
-    artifact_root: Path,
-    rootfs_profiles: dict[str, RootfsProfile],
-    timeout_band: tuple[int, int] = (5, 60),
-) -> tuple[_ProbeContext | None, ToolResponse | None]:
-    """Spec §6: all pre-SSH validation. Returns (context, None) on success or
-    (None, failure-response) on any short-circuit."""
-    run_id = request.run_id
-    try:
-        store = ArtifactStore(artifact_root, create_root=False)
-        if not (store.run_dir(run_id) / "manifest.json").is_file():
-            return None, _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
-        manifest = store.load_manifest(run_id)
-    except ManifestStateError as exc:
-        return None, ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-
-    for field_name, requested, recorded in (
-        ("target_profile", request.target_profile, manifest.request.target_profile),
-        ("rootfs_profile", request.rootfs_profile, manifest.request.rootfs_profile),
-        ("debug_profile", request.debug_profile, manifest.request.debug_profile),
-    ):
-        if requested is not None and recorded is not None and requested != recorded:
-            return None, _configuration_failure(
-                run_id=run_id,
-                message=f"{field_name} must match the immutable run manifest request",
-                details={
-                    "requested_profile": requested,
-                    "manifest_profile": recorded,
-                    "code": "manifest_profile_mismatch",
-                },
-            )
-    if request.manifest_target_profile != manifest.request.target_profile:
-        return None, _configuration_failure(
-            run_id=run_id,
-            message="manifest_target_profile must match the immutable run manifest target_profile",
-            details={
-                "requested_target_profile": request.manifest_target_profile,
-                "manifest_target_profile": manifest.request.target_profile,
-                "code": "manifest_profile_mismatch",
-            },
-        )
-    lo, hi = timeout_band
-    if not (lo <= request.timeout_seconds <= hi):
-        return None, _configuration_failure(
-            run_id=run_id,
-            message=f"timeout_seconds must be in [{lo}, {hi}]; got {request.timeout_seconds}",
-            details={"code": "invalid_timeout"},
-        )
-
-    boot = manifest.step_results.get("boot")
-    if boot is None or boot.status != StepStatus.SUCCEEDED:
-        return None, ToolResponse.failure(
-            category=ErrorCategory.READINESS_FAILURE,
-            run_id=run_id,
-            message="target has not booted; boot it before probing prerequisites",
-            details={"code": "target_not_booted"},
-            suggested_next_actions=["target.boot"],
-        )
-
-    rootfs_name = request.rootfs_profile or manifest.request.rootfs_profile
-    try:
-        rootfs = rootfs_profiles[rootfs_name]
-    except KeyError:
-        return None, _configuration_failure(run_id=run_id, message=f"unknown rootfs profile: {rootfs_name}")
-    if rootfs.access_method not in {"ssh", "ssh_and_serial"}:
-        return None, _configuration_failure(
-            run_id=run_id,
-            message=f"rootfs access_method must be ssh; got {rootfs.access_method}",
-            details={"code": "unsupported_access_method"},
-        )
-    for field_name, value in (("ssh_host", rootfs.ssh_host), ("ssh_user", rootfs.ssh_user)):
-        if not value:
-            return None, _configuration_failure(
-                run_id=run_id,
-                message=f"rootfs profile is missing required SSH field: {field_name}",
-                details={"code": "missing_ssh_field", "field": field_name},
-            )
-
-    build = manifest.step_results.get("build")
-    host_build_id = build.details.get("build_id") if build is not None else None
-    redactor = Redactor(secret_values=[rootfs.ssh_key_ref] if rootfs.ssh_key_ref else [])
-    return (
-        _ProbeContext(
-            store=store,
-            run_id=run_id,
-            rootfs=rootfs,
-            host_build_id=host_build_id,
-            redactor=redactor,
-        ),
-        None,
-    )
-
-
-def _read_capped(path: Path, cap: int) -> str | None:
-    """Read the file iff its byte size is within *cap*; None if oversized."""
-    if not path.exists():
-        return ""
-    if path.stat().st_size > cap:
-        return None
-    return path.read_text(encoding="utf-8", errors="replace")
-
-
-def _prepare_probe_dirs(
-    store: ArtifactStore,
-    run_id: str,
-    probe_id: str,
-    *,
-    category: tuple[str, ...] = ("debug", "checkprereq"),
-) -> tuple[Path, Path]:
-    """Create the agent-visible and sensitive probe directories with 0o700.
-
-    ``category`` is the path under the run dir (and under ``sensitive/``) the probe
-    writes to; defaults to the introspect ``debug/checkprereq`` layout. Postmortem
-    passes ``("debug", "postmortem", "check_prereqs")``. Returns ``(agent_dir,
-    sensitive_dir)``.
-    """
-    run_dir = store.run_dir(run_id)
-    agent_dir = run_dir.joinpath(*category, probe_id)
-    sensitive_dir = run_dir.joinpath("sensitive", *category, probe_id)
-    agent_dir.mkdir(parents=True, mode=0o700)
-    sensitive_dir.mkdir(parents=True, mode=0o700)
-    sensitive_root = run_dir / "sensitive"
-    current = sensitive_dir
-    while current != sensitive_root and current != run_dir:
-        _chmod_best_effort(current, 0o700)
-        current = current.parent
-    return agent_dir, sensitive_dir
-
-
-def _no_json_response(
-    ctx: _ProbeContext,
-    *,
-    ssh_result: SshCommandResult,
-    agent_dir: Path,
-    stdout_path: Path,
-    stderr_path: Path,
-    probe_id: str,
-    parsed: Any,
-) -> ToolResponse | None:
-    """Handle the cases where the probe returned no parseable JSON dict.
-
-    Returns the 127-success / 255-failure / non-dict-failure response, or
-    ``None`` to fall through to the normal ``build_probe_checks`` path.
-    """
-    if isinstance(parsed, dict):
-        return None
-    run_id = ctx.run_id
-    if ssh_result.exit_status == 127:
-        checks, verdict = python_missing_checks()
-        return _probe_success(
-            ctx,
-            agent_dir=agent_dir,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-            probe_id=probe_id,
-            checks=checks,
-            verdict=verdict,
-            parsed=None,
-        )
-    if ssh_result.exit_status == 255:
-        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="probe ssh transport failed before the target ran",
-            details={"code": "ssh_connect_failure", "stderr": snippet},
-        )
-    snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
-    return ToolResponse.failure(
-        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-        run_id=run_id,
-        message=f"probe did not return parseable JSON (exit {ssh_result.exit_status})",
-        details={"code": "probe_unparseable", "stderr": snippet},
-    )
-
-
-def _assemble_probe_response(
-    ctx: _ProbeContext,
-    *,
-    ssh_result: SshCommandResult,
-    stdout_path: Path,
-    stderr_path: Path,
-    agent_dir: Path,
-    probe_id: str,
-) -> ToolResponse:
-    run_id = ctx.run_id
-    if ssh_result.oversized_output:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"probe stdout exceeded {PROBE_STDOUT_CAP} bytes",
-            details={"code": "oversized_output"},
-        )
-    raw_stdout = _read_capped(stdout_path, PROBE_STDOUT_CAP)
-    if raw_stdout is None:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"probe stdout exceeded {PROBE_STDOUT_CAP} bytes",
-            details={"code": "oversized_output"},
-        )
-    if ssh_result.cancelled or ssh_result.timed_out or ssh_result.stdin_failed:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="probe ssh round trip failed",
-            details={"code": "ssh_failure"},
-        )
-    try:
-        parsed = json.loads(raw_stdout) if raw_stdout else None
-    except json.JSONDecodeError:
-        parsed = None
-
-    no_json = _no_json_response(
-        ctx,
-        ssh_result=ssh_result,
-        agent_dir=agent_dir,
-        stdout_path=stdout_path,
-        stderr_path=stderr_path,
-        probe_id=probe_id,
-        parsed=parsed,
-    )
-    if no_json is not None:
-        return no_json
-
-    parsed = _require_dict(parsed, "probe stdout parser returned non-dict without failure")
-    checks, verdict = build_probe_checks(parsed, host_build_id=ctx.host_build_id)
-    return _probe_success(
-        ctx,
-        agent_dir=agent_dir,
-        stdout_path=stdout_path,
-        stderr_path=stderr_path,
-        probe_id=probe_id,
-        checks=checks,
-        verdict=verdict,
-        parsed=parsed,
-    )
-
-
-def _probe_success(
-    ctx: _ProbeContext,
-    *,
-    agent_dir: Path,
-    stdout_path: Path,
-    stderr_path: Path,
-    probe_id: str,
-    checks: list[PrerequisiteCheck],
-    verdict: str,
-    parsed: dict[str, Any] | None,
-) -> ToolResponse:
-    artifacts = [
-        ArtifactRef(path=str(stdout_path), kind="probe-stdout", sensitive=True),
-        ArtifactRef(path=str(stderr_path), kind="probe-stderr", sensitive=True),
-    ]
-    if parsed is not None:
-        report_path = agent_dir / "probe.json"
-        report_path.write_text(json.dumps(ctx.redactor.redact_value(parsed)), encoding="utf-8")
-        artifacts.append(ArtifactRef(path=str(report_path), kind="probe-report", sensitive=False))
-    failed = sum(1 for c in checks if c.status == PrerequisiteStatus.FAILED)
-    next_actions = ["debug.introspect.run"] if verdict in {USABLE, UNKNOWN} else ["host.check_prerequisites"]
-    return ToolResponse.success(
-        summary=f"introspect prerequisites: {verdict} ({failed} failed checks)",
-        run_id=ctx.run_id,
-        data={
-            "introspect_usable": verdict,
-            "probe_id": probe_id,
-            "checks": ctx.redactor.redact_value([c.model_dump(mode="json") for c in checks]),
-        },
-        artifacts=artifacts,
-        suggested_next_actions=next_actions,
-    )
-
-
-def _parse_probe_stdout(
-    ctx: _ProbeContext,
-    *,
-    ssh_result: SshCommandResult,
-    stdout_path: Path,
-    noun: str,
-    no_python_message: str,
-) -> tuple[dict[str, Any] | None, ToolResponse | None]:
-    """Shared SSH-probe stdout gate (TD-100): the oversized → cap → cancelled/timeout → exit-255 →
-    exit-127 → unparseable-JSON ladder the kdump-readiness and dump-enumeration probes both ran
-    byte-for-byte (modulo the ``noun`` in each message and the no-python text). Returns
-    ``(parsed_object, None)`` when the target produced a JSON object, else ``(None, failure)``.
-
-    (`_assemble_probe_response` deliberately does NOT use this: its introspect prereq check is
-    advisory, so a no-JSON / no-python target gets a degraded report via ``_no_json_response``, not
-    the hard INFRASTRUCTURE_FAILURE this gate returns.)"""
-    run_id = ctx.run_id
-
-    def fail(message: str, code: str, **extra: object) -> ToolResponse:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=message,
-            details={"code": code, **extra},
-        )
-
-    oversized = f"{noun} stdout exceeded {PROBE_STDOUT_CAP} bytes"
-    if ssh_result.oversized_output:
-        return None, fail(oversized, "oversized_output")
-    raw_stdout = _read_capped(stdout_path, PROBE_STDOUT_CAP)
-    if raw_stdout is None:
-        return None, fail(oversized, "oversized_output")
-    if ssh_result.cancelled or ssh_result.timed_out or ssh_result.stdin_failed:
-        return None, fail(f"{noun} ssh round trip failed", "ssh_failure")
-    if ssh_result.exit_status == 255:
-        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
-        return None, fail(f"{noun} ssh transport failed before the target ran", "ssh_connect_failure", stderr=snippet)
-    if ssh_result.exit_status == 127:
-        return None, fail(no_python_message, "probe_no_python")
-    try:
-        parsed = json.loads(raw_stdout) if raw_stdout else None
-    except json.JSONDecodeError:
-        parsed = None
-    if not isinstance(parsed, dict):
-        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
-        return None, fail(
-            f"{noun} did not return parseable JSON (exit {ssh_result.exit_status})", "probe_unparseable", stderr=snippet
-        )
-    return parsed, None
-
-
-def _assemble_kdump_response(
-    ctx: _ProbeContext,
-    *,
-    ssh_result: SshCommandResult,
-    stdout_path: Path,
-    stderr_path: Path,
-    agent_dir: Path,
-    probe_id: str,
-) -> ToolResponse:
-    run_id = ctx.run_id
-    parsed, failure = _parse_probe_stdout(
-        ctx,
-        ssh_result=ssh_result,
-        stdout_path=stdout_path,
-        noun="probe",
-        no_python_message="python3 is not available on the target; cannot probe kdump readiness",
-    )
-    if failure is not None:
-        return failure
-    parsed = _require_value(parsed, "kdump probe parser returned no data without failure")
-
-    checks, mechanism = build_kdump_checks(parsed)
-    kdump_ready = not any(c.status == PrerequisiteStatus.FAILED for c in checks)
-    report_path = agent_dir / "probe.json"
-    report_path.write_text(json.dumps(ctx.redactor.redact_value(parsed)), encoding="utf-8")
-    artifacts = [
-        ArtifactRef(path=str(stdout_path), kind="probe-stdout", sensitive=True),
-        ArtifactRef(path=str(stderr_path), kind="probe-stderr", sensitive=True),
-        ArtifactRef(path=str(report_path), kind="probe-report", sensitive=False),
-    ]
-    failed = sum(1 for c in checks if c.status == PrerequisiteStatus.FAILED)
-    return ToolResponse.success(
-        summary=f"kdump prerequisites: {'ready' if kdump_ready else 'not ready'} ({mechanism}, {failed} failed)",
-        run_id=run_id,
-        data={
-            "kdump_ready": kdump_ready,
-            "mechanism": mechanism,
-            "probe_id": probe_id,
-            "checks": ctx.redactor.redact_value([c.model_dump(mode="json") for c in checks]),
-        },
-        artifacts=artifacts,
-        suggested_next_actions=["artifacts.get_manifest"],
     )
 
 

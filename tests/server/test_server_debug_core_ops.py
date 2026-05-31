@@ -414,9 +414,11 @@ def test_server_private_helpers_are_canonical_imports() -> None:
     for name in ("_resume_debug_transport", "_teardown_debug_transport"):
         assert not hasattr(server_module, name)
 
-    for name in ("_target_python_remote_argv", "_redact_and_truncate", "_record_introspect_failure"):
+    for name in ("_target_python_remote_argv", "_record_introspect_failure"):
         assert getattr(server_module, name) is getattr(introspect_execution, name)
         assert getattr(server_module, name).__module__ == "kdive.introspect.execution"
+
+    assert not hasattr(server_module, "_redact_and_truncate")
 
 
 def _start(

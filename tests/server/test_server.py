@@ -43,8 +43,7 @@ def tool_names() -> set[str]:
     return set(create_app()._tool_manager._tools)
 
 
-def test_server_reuses_transport_debug_helpers() -> None:
-    assert server._require_snapshot is transport_handlers._require_snapshot
+def test_server_reuses_transport_halt_helper() -> None:
     assert server._halt_debug_transport is transport_handlers._halt_debug_transport
 
 
