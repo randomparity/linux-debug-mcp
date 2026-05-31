@@ -135,7 +135,6 @@ from kdive.introspect.handlers import (
 )
 from kdive.introspect.tools import register_introspect_tools
 from kdive.kernel import tools as kernel_tools
-from kdive.logging import SECRET_REGISTRY, configure_logging
 from kdive.model import Model
 from kdive.postmortem.crash_handler import (
     debug_postmortem_crash_handler,
@@ -188,6 +187,7 @@ from kdive.providers.local.local_ssh_tests import (
 from kdive.providers.local.target.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner, TestExecutionResult, build_ssh_argv
 from kdive.rootfs.sources import RootfsSourceError, resolve_rootfs_source
+from kdive.safety.logging import SECRET_REGISTRY, configure_logging
 from kdive.safety.paths import (
     PathSafetyError,
     validate_rootfs_source,

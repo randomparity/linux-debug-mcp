@@ -1,7 +1,7 @@
 import io
 import logging
 
-from kdive.logging import SECRET_REGISTRY, attach_redaction_filter, configure_logging
+from kdive.safety.logging import SECRET_REGISTRY, attach_redaction_filter, configure_logging
 from kdive.safety.redaction import REDACTION, SecretRedactionFilter
 
 
