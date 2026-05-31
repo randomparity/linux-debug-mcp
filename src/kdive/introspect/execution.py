@@ -325,6 +325,16 @@ class _LiveIntrospectPolicy:
     use_sudo: bool
 
 
+@dataclass(frozen=True)
+class _LiveIntrospectPreAdmissionContext:
+    store: ArtifactStore
+    resolved_rootfs: RootfsProfile
+    redactor: Redactor
+    build_id: str
+    write_mode_permissions: list[str]
+    use_sudo: bool
+
+
 def _load_validate_manifest_context(
     *, artifact_root: Path, run_id: str
 ) -> tuple[_LiveManifestContext | None, ToolResponse | None]:
@@ -578,6 +588,52 @@ def _enforce_live_introspect_policy(
         _LiveIntrospectPolicy(
             write_mode_permissions=write_mode_permissions,
             use_sudo=context.resolved_rootfs.ssh_user != "root",
+        ),
+        None,
+    )
+
+
+def _resolve_pre_admission_introspect_context(
+    *,
+    request: DebugIntrospectRunRequest,
+    artifact_root: Path,
+    rootfs_profiles: dict[str, RootfsProfile],
+    debug_profiles: dict[str, DebugProfile],
+    operation_name: str,
+) -> tuple[_LiveIntrospectPreAdmissionContext | None, ToolResponse | None]:
+    manifest_context, manifest_failure = _load_validate_manifest_context(
+        artifact_root=artifact_root, run_id=request.run_id
+    )
+    if manifest_failure is not None:
+        return None, manifest_failure
+
+    context, context_failure = _resolve_live_introspect_context(
+        request=request,
+        manifest_context=_require_value(manifest_context, "manifest context missing after successful load"),
+        rootfs_profiles=rootfs_profiles,
+        debug_profiles=debug_profiles,
+    )
+    if context_failure is not None:
+        return None, context_failure
+    context = _require_value(context, "live introspect context missing after successful resolution")
+
+    policy, policy_failure = _enforce_live_introspect_policy(
+        request=request,
+        context=context,
+        operation_name=operation_name,
+    )
+    if policy_failure is not None:
+        return None, policy_failure
+    policy = _require_value(policy, "live introspect policy missing after successful enforcement")
+
+    return (
+        _LiveIntrospectPreAdmissionContext(
+            store=context.store,
+            resolved_rootfs=context.resolved_rootfs,
+            redactor=context.redactor,
+            build_id=context.build_id,
+            write_mode_permissions=policy.write_mode_permissions,
+            use_sudo=policy.use_sudo,
         ),
         None,
     )
@@ -945,83 +1001,25 @@ def _run_live_wrapper(
     return ssh_run, None, True
 
 
-def _execute_introspect_call(
-    request: DebugIntrospectRunRequest,
+def _execute_admitted_introspect_ssh(
     *,
-    artifact_root: Path,
-    target_profiles: dict[str, TargetProfile] | None = None,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    ssh_runner: SshRunner | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
-    clock: Callable[[], datetime] | None = None,
-    operation_name: str = "debug.introspect.run",
-    caps: dict[str, int] | None = None,
-    post_validator: IntrospectPostValidator | None = None,
+    request: DebugIntrospectRunRequest,
+    pre_admission: _LiveIntrospectPreAdmissionContext,
+    runner: SshRunner,
+    admission: AdmissionService,
+    introspect_admission: _IntrospectAdmission,
+    now: Callable[[], datetime],
+    operation_name: str,
+    caps: dict[str, int] | None,
+    post_validator: IntrospectPostValidator | None,
 ) -> ToolResponse:
-    """Shared core for `debug.introspect.run` (§5.2) and `debug.introspect.helper`
-    (§6). Execute a user-supplied drgn Python script over SSH against a live
-    target VM and return structured JSON.
-    """
+    store = pre_admission.store
+    resolved_rootfs = pre_admission.resolved_rootfs
+    redactor = pre_admission.redactor
+    build_id = pre_admission.build_id
+    write_mode_permissions = pre_admission.write_mode_permissions
+    use_sudo = pre_admission.use_sudo
     run_id = request.run_id
-    now = clock or _utcnow
-
-    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
-    target_profiles = target_profiles if target_profiles is not None else DEFAULT_TARGET_PROFILES
-    debug_profiles = debug_profiles if debug_profiles is not None else DEFAULT_DEBUG_PROFILES
-
-    manifest_context, manifest_failure = _load_validate_manifest_context(artifact_root=artifact_root, run_id=run_id)
-    if manifest_failure is not None:
-        return manifest_failure
-    context, context_failure = _resolve_live_introspect_context(
-        request=request,
-        manifest_context=_require_value(manifest_context, "manifest context missing after successful load"),
-        rootfs_profiles=rootfs_profiles,
-        debug_profiles=debug_profiles,
-    )
-    if context_failure is not None:
-        return context_failure
-    context = _require_value(context, "live introspect context missing after successful resolution")
-    policy, policy_failure = _enforce_live_introspect_policy(
-        request=request,
-        context=context,
-        operation_name=operation_name,
-    )
-    if policy_failure is not None:
-        return policy_failure
-    policy = _require_value(policy, "live introspect policy missing after successful enforcement")
-    store = context.store
-    resolved_rootfs = context.resolved_rootfs
-    redactor = context.redactor
-    build_id = context.build_id
-    write_mode_permissions = policy.write_mode_permissions
-
-    runner: SshRunner = ssh_runner or SubprocessSshRunner()
-    use_sudo = policy.use_sudo
-
-    # Spec §5.2 step 5: sudo preflight (only when sudo is needed).
-    if use_sudo:
-        preflight_failure = _run_introspect_sudo_preflight(
-            runner=runner,
-            store=store,
-            run_id=run_id,
-            resolved_rootfs=resolved_rootfs,
-            redactor=redactor,
-        )
-        if preflight_failure is not None:
-            return preflight_failure
-
-    # Spec §5.2 step 6: admission gate.
-    introspect_admission, admission_failure = _admit_introspect_call(
-        admission=admission,
-        session_registry=session_registry,
-        run_id=run_id,
-    )
-    if admission_failure is not None:
-        return admission_failure
-    admission = _require_value(admission, "admission service missing after successful admission")
-    introspect_admission = _require_value(introspect_admission, "admission handle missing after successful admission")
     handle = introspect_admission.handle
 
     # R6-F3: Step 9.4 admitted us — Steps 9.5–9.10 must always complete
@@ -1046,11 +1044,6 @@ def _execute_introspect_call(
             admission_disposed = True
             return workspace_failure
         workspace = _require_value(workspace, "introspection workspace missing after successful preparation")
-        call_id = workspace.call_id
-        agent_dir = workspace.agent_dir
-        sensitive_call_dir = workspace.sensitive_call_dir
-        stdout_path = workspace.stdout_path
-        stderr_path = workspace.stderr_path
 
         ssh_run, runner_failure, admission_disposed = _run_live_wrapper(
             runner=runner,
@@ -1068,7 +1061,6 @@ def _execute_introspect_call(
         if runner_failure is not None:
             return runner_failure
         ssh_run = _require_value(ssh_run, "SSH run missing after successful live wrapper execution")
-        ssh_result = ssh_run.result
 
         # Spec §5.2 step 11+: shared post-runner finalization (live + vmcore).
         finished_at = now()
@@ -1076,12 +1068,12 @@ def _execute_introspect_call(
         return _finalize_introspect_call(
             store=store,
             run_id=run_id,
-            call_id=call_id,
-            ssh_result=ssh_result,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-            agent_dir=agent_dir,
-            sensitive_call_dir=sensitive_call_dir,
+            call_id=workspace.call_id,
+            ssh_result=ssh_run.result,
+            stdout_path=workspace.stdout_path,
+            stderr_path=workspace.stderr_path,
+            agent_dir=workspace.agent_dir,
+            sensitive_call_dir=workspace.sensitive_call_dir,
             redactor=redactor,
             expected_build_id=build_id,
             request_timeout_seconds=request.timeout_seconds,
@@ -1112,6 +1104,81 @@ def _execute_introspect_call(
                 # failure still needs admission-state diagnostics.
                 logger.exception("admission rollback failed while unwinding introspect handler for run_id=%s", run_id)
         raise
+
+
+def _execute_introspect_call(
+    request: DebugIntrospectRunRequest,
+    *,
+    artifact_root: Path,
+    target_profiles: dict[str, TargetProfile] | None = None,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    ssh_runner: SshRunner | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    clock: Callable[[], datetime] | None = None,
+    operation_name: str = "debug.introspect.run",
+    caps: dict[str, int] | None = None,
+    post_validator: IntrospectPostValidator | None = None,
+) -> ToolResponse:
+    """Shared core for `debug.introspect.run` (§5.2) and `debug.introspect.helper`
+    (§6). Execute a user-supplied drgn Python script over SSH against a live
+    target VM and return structured JSON.
+    """
+    run_id = request.run_id
+    now = clock or _utcnow
+
+    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    target_profiles = target_profiles if target_profiles is not None else DEFAULT_TARGET_PROFILES
+    debug_profiles = debug_profiles if debug_profiles is not None else DEFAULT_DEBUG_PROFILES
+
+    pre_admission, pre_admission_failure = _resolve_pre_admission_introspect_context(
+        request=request,
+        artifact_root=artifact_root,
+        rootfs_profiles=rootfs_profiles,
+        debug_profiles=debug_profiles,
+        operation_name=operation_name,
+    )
+    if pre_admission_failure is not None:
+        return pre_admission_failure
+    pre_admission = _require_value(pre_admission, "pre-admission context missing after successful resolution")
+
+    runner: SshRunner = ssh_runner or SubprocessSshRunner()
+
+    # Spec §5.2 step 5: sudo preflight (only when sudo is needed).
+    if pre_admission.use_sudo:
+        preflight_failure = _run_introspect_sudo_preflight(
+            runner=runner,
+            store=pre_admission.store,
+            run_id=run_id,
+            resolved_rootfs=pre_admission.resolved_rootfs,
+            redactor=pre_admission.redactor,
+        )
+        if preflight_failure is not None:
+            return preflight_failure
+
+    # Spec §5.2 step 6: admission gate.
+    introspect_admission, admission_failure = _admit_introspect_call(
+        admission=admission,
+        session_registry=session_registry,
+        run_id=run_id,
+    )
+    if admission_failure is not None:
+        return admission_failure
+    admission = _require_value(admission, "admission service missing after successful admission")
+    introspect_admission = _require_value(introspect_admission, "admission handle missing after successful admission")
+
+    return _execute_admitted_introspect_ssh(
+        request=request,
+        pre_admission=pre_admission,
+        runner=runner,
+        admission=admission,
+        introspect_admission=introspect_admission,
+        now=now,
+        operation_name=operation_name,
+        caps=caps,
+        post_validator=post_validator,
+    )
 
 
 def _persist_introspect_success_artifacts(
