@@ -63,6 +63,17 @@ def test_vmcore_handlers_live_in_introspect_package() -> None:
     )
 
 
+def test_vmcore_introspect_handler_uses_explicit_phase_helpers() -> None:
+    for helper_name in (
+        "VmcoreIntrospectContext",
+        "VmcoreIntrospectWorkspace",
+        "_resolve_vmcore_introspect_context",
+        "_prepare_vmcore_introspect_workspace",
+        "_run_vmcore_introspect_wrapper",
+    ):
+        assert hasattr(introspect_handlers, helper_name)
+
+
 # ---------------------------------------------------------------------------
 # Shared handler-test fixtures (Tasks 6-9)
 # ---------------------------------------------------------------------------
