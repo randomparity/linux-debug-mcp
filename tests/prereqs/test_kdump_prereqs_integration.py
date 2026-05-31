@@ -15,7 +15,7 @@ from kdive.domain import PrerequisiteStatus
 from kdive.postmortem.models import DebugPostmortemCheckPrereqsRequest
 from kdive.providers.local.local_ssh_tests import SubprocessSshRunner
 from kdive.server import debug_postmortem_check_prereqs_handler
-from tests.test_drgn_introspect_integration import _bootstrap_booted_run, _require_integration_env
+from tests.introspect.test_drgn_introspect_integration import _bootstrap_booted_run, _require_integration_env
 
 
 def test_real_target_reports_consistent_kdump_readiness(tmp_path: Path) -> None:

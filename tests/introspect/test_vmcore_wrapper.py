@@ -21,7 +21,7 @@ from kdive.providers.local.local_drgn_introspect import (
     render_vmcore_wrapper_skeleton,
 )
 
-GOLDEN = Path(__file__).parent / "golden" / "live_wrapper_template.txt"
+GOLDEN = Path(__file__).parents[1] / "golden" / "live_wrapper_template.txt"
 EXPECTED_BUILD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 CALL_ID = "0" * 32
 
