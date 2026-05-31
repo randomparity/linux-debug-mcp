@@ -685,6 +685,13 @@ def test_target_boot_tool_accepts_grouped_boot_overrides() -> None:
     assert set(params) == {"context", "profiles", "options"}
 
 
+def test_core_tools_register_through_dedicated_adapter_modules() -> None:
+    app = create_app()
+
+    assert app._tool_manager._tools["kernel.create_run"].fn.__module__ == "kdive.kernel.tools"
+    assert app._tool_manager._tools["target.boot"].fn.__module__ == "kdive.target.tools"
+
+
 def test_introspect_tool_is_registered() -> None:
     assert "debug.introspect.run" in tool_names()
     tool = create_app()._tool_manager._tools["debug.introspect.run"]
