@@ -2035,6 +2035,246 @@ def _validated_guest_ip(value: object) -> str | None:
     return str(parsed)
 
 
+@dataclass(frozen=True)
+class _RunTestsInputs:
+    provider: LocalSshTestProvider
+    rootfs_profile: RootfsProfile
+    suite_profile: TestSuiteProfile | None
+    adhoc_commands: list[TestCommand]
+    existing: StepResult | None
+
+
+@dataclass(frozen=True)
+class _CompletedRunTests:
+    execution: TestExecutionResult
+    summary: str
+    details: dict[str, Any]
+    diagnostic: str
+    artifacts: list[ArtifactRef]
+
+
+def _resolve_run_tests_inputs(
+    *,
+    run_id: str,
+    manifest: RunManifest,
+    boot_result: StepResult,
+    test_suite: str | None,
+    commands: list[list[str]] | None,
+    force_rerun: bool,
+    attempt: int | None,
+    provider: LocalSshTestProvider | None,
+    rootfs_profiles: dict[str, RootfsProfile] | None,
+    test_suites: dict[str, TestSuiteProfile] | None,
+) -> tuple[_RunTestsInputs | None, ToolResponse | None]:
+    try:
+        adhoc_commands = _validate_adhoc_commands(commands)
+    except ValueError as exc:
+        return None, _configuration_failure(run_id=run_id, message=str(exc))
+
+    requested_suite = test_suite or manifest.request.test_suite
+    if manifest.request.test_suite is not None and requested_suite != manifest.request.test_suite:
+        return None, _configuration_failure(
+            run_id=run_id,
+            message="test_suite must match the immutable run manifest request",
+            details={"requested_suite": requested_suite, "manifest_suite": manifest.request.test_suite},
+        )
+    if requested_suite is None and not adhoc_commands:
+        requested_suite = "smoke-basic"
+
+    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    test_suites = test_suites if test_suites is not None else DEFAULT_TEST_SUITES
+    if manifest.boot_attempts:
+        try:
+            resolved_rootfs_profile = _select_boot_attempt(manifest.boot_attempts, attempt).resolved_rootfs_profile
+        except ValueError as exc:
+            return None, _configuration_failure(run_id=run_id, message=str(exc))
+    elif attempt is not None:
+        return None, _configuration_failure(
+            run_id=run_id, message=f"boot attempt {attempt} not found: no boot attempts recorded for this run"
+        )
+    else:
+        try:
+            resolved_rootfs_profile = rootfs_profiles[manifest.request.rootfs_profile]
+        except KeyError:
+            return None, _configuration_failure(
+                run_id=run_id,
+                message=f"unknown rootfs profile: {manifest.request.rootfs_profile}",
+            )
+
+    boot_details = boot_result.details if isinstance(boot_result.details, dict) else {}
+    guest_ip = _validated_guest_ip(boot_details.get("guest_ip"))
+    if guest_ip is not None and _ssh_host_is_unset_or_loopback(resolved_rootfs_profile.ssh_host):
+        resolved_rootfs_profile = resolved_rootfs_profile.model_copy(update={"ssh_host": guest_ip})
+    elif boot_details.get("guest_ip") is not None and guest_ip is None:
+        logger.warning(
+            "run %s: discarding invalid persisted guest_ip %r; using configured ssh_host",
+            run_id,
+            boot_details.get("guest_ip"),
+        )
+
+    try:
+        suite_profile = test_suites[requested_suite] if requested_suite is not None else None
+    except KeyError:
+        return None, _configuration_failure(run_id=run_id, message=f"unknown test suite: {requested_suite}")
+
+    existing = manifest.step_results.get("run_tests")
+    if existing and existing.status == StepStatus.SUCCEEDED and not force_rerun:
+        return None, _recorded_test_success_response(run_id=run_id, result=existing)
+    if existing and existing.status == StepStatus.FAILED and not force_rerun:
+        return None, _recorded_test_failure_response(run_id=run_id, result=existing)
+
+    return (
+        _RunTestsInputs(
+            provider=provider or LocalSshTestProvider(),
+            rootfs_profile=resolved_rootfs_profile,
+            suite_profile=suite_profile,
+            adhoc_commands=adhoc_commands,
+            existing=existing,
+        ),
+        None,
+    )
+
+
+def _record_run_tests_post_admission_failure(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    provider_name: str,
+    force_rerun: bool,
+    summary: str,
+    details: dict[str, Any],
+    category: ErrorCategory,
+    message: str,
+) -> ToolResponse:
+    terminal = StepResult(
+        step_name="run_tests",
+        status=StepStatus.FAILED,
+        summary=summary,
+        details={"provider": provider_name, **details},
+    )
+    store.record_step_result(run_id, terminal, replace_succeeded=force_rerun)
+    return ToolResponse.failure(
+        category=category,
+        message=message,
+        run_id=run_id,
+        details=Redactor().redact_value(terminal.details),
+        suggested_next_actions=["artifacts.collect"],
+    )
+
+
+def _locked_run_tests_execution(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    inputs: _RunTestsInputs,
+    force_rerun: bool,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+) -> _CompletedRunTests | ToolResponse:
+    with store.tests_lock(run_id):
+        locked_manifest = store.load_manifest(run_id)
+        existing = locked_manifest.step_results.get("run_tests")
+        if existing and existing.status == StepStatus.SUCCEEDED and not force_rerun:
+            return _recorded_test_success_response(run_id=run_id, result=existing)
+        if existing and existing.status == StepStatus.FAILED and not force_rerun:
+            return _recorded_test_failure_response(run_id=run_id, result=existing)
+        if existing and existing.status == StepStatus.RUNNING:
+            stale_failed = StepResult(
+                step_name="run_tests",
+                status=StepStatus.FAILED,
+                summary=existing.summary,
+                artifacts=existing.artifacts,
+                details={**existing.details, "stale_running_recovered": True},
+            )
+            store.record_step_result(run_id, stale_failed)
+
+        attempt = _next_test_attempt(store.run_dir(run_id))
+        try:
+            plan = inputs.provider.plan_tests(
+                run_id=run_id,
+                run_dir=store.run_dir(run_id),
+                rootfs_profile=inputs.rootfs_profile,
+                suite=inputs.suite_profile,
+                adhoc_commands=inputs.adhoc_commands,
+                attempt=attempt,
+            )
+        except ValueError as exc:
+            return _configuration_failure(run_id=run_id, message=str(exc))
+        try:
+            handle = _admit_run_tests_ssh_tier(run_id=run_id, admission=admission, session_registry=session_registry)
+        except AdmissionError as exc:
+            return ToolResponse.failure(
+                category=exc.category,
+                message=str(exc),
+                run_id=run_id,
+                details={"code": exc.code},
+                suggested_next_actions=["artifacts.collect"],
+            )
+        running = StepResult(
+            step_name="run_tests",
+            status=StepStatus.RUNNING,
+            summary="target tests running",
+            details={
+                "provider": inputs.provider.name,
+                "suite": inputs.suite_profile.name if inputs.suite_profile is not None else "adhoc",
+                "attempt": attempt,
+            },
+        )
+        store.record_step_result(run_id, running, replace_succeeded=force_rerun)
+        try:
+            execution = _execute_tests_under_gate(
+                provider=inputs.provider, plan=plan, admission=admission, handle=handle
+            )
+        except AdmissionError as exc:
+            if handle is not None and admission is not None:
+                with contextlib.suppress(Exception):
+                    admission.rollback(handle)
+            return _record_run_tests_post_admission_failure(
+                store=store,
+                run_id=run_id,
+                provider_name=inputs.provider.name,
+                force_rerun=force_rerun,
+                summary="test run spanned an execution-state transition (target halted)",
+                details={"code": exc.code, "error": str(exc)},
+                category=exc.category,
+                message=str(exc),
+            )
+        except Exception as exc:
+            if handle is not None and admission is not None:
+                with contextlib.suppress(Exception):
+                    admission.rollback(handle)
+            return _record_run_tests_post_admission_failure(
+                store=store,
+                run_id=run_id,
+                provider_name=inputs.provider.name,
+                force_rerun=force_rerun,
+                summary="unexpected test provider failure",
+                details={"exception_type": type(exc).__name__, "error": str(exc)},
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                message="unexpected test provider failure",
+            )
+        redactor = Redactor()
+        safe_details = redactor.redact_value(execution.details)
+        safe_summary = redactor.redact_text(execution.summary)
+        safe_diagnostic = redactor.redact_text(execution.diagnostic or "")
+        safe_artifacts = _redacted_artifacts(execution.artifacts, redactor)
+        terminal = StepResult(
+            step_name="run_tests",
+            status=execution.status,
+            summary=safe_summary,
+            artifacts=safe_artifacts,
+            details=safe_details,
+        )
+        store.record_step_result(run_id, terminal, replace_succeeded=force_rerun)
+    return _CompletedRunTests(
+        execution=execution,
+        summary=safe_summary,
+        details=safe_details,
+        diagnostic=safe_diagnostic,
+        artifacts=safe_artifacts,
+    )
+
+
 def target_run_tests_handler(
     *,
     artifact_root: Path,
@@ -2062,177 +2302,33 @@ def target_run_tests_handler(
     if boot_result is None or boot_result.status != StepStatus.SUCCEEDED:
         return _configuration_failure(run_id=run_id, message="target run tests requires a succeeded boot")
 
-    try:
-        adhoc_commands = _validate_adhoc_commands(commands)
-    except ValueError as exc:
-        return _configuration_failure(run_id=run_id, message=str(exc))
+    inputs, input_failure = _resolve_run_tests_inputs(
+        run_id=run_id,
+        manifest=manifest,
+        boot_result=boot_result,
+        test_suite=test_suite,
+        commands=commands,
+        force_rerun=force_rerun,
+        attempt=attempt,
+        provider=provider,
+        rootfs_profiles=rootfs_profiles,
+        test_suites=test_suites,
+    )
+    if input_failure is not None:
+        return input_failure
+    inputs = _require_value(inputs, "run tests inputs missing after successful resolution")
 
-    requested_suite = test_suite or manifest.request.test_suite
-    if manifest.request.test_suite is not None and requested_suite != manifest.request.test_suite:
-        return _configuration_failure(
+    try:
+        completed = _locked_run_tests_execution(
+            store=store,
             run_id=run_id,
-            message="test_suite must match the immutable run manifest request",
-            details={"requested_suite": requested_suite, "manifest_suite": manifest.request.test_suite},
+            inputs=inputs,
+            force_rerun=force_rerun,
+            admission=admission,
+            session_registry=session_registry,
         )
-    if requested_suite is None and not adhoc_commands:
-        requested_suite = "smoke-basic"
-
-    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
-    test_suites = test_suites if test_suites is not None else DEFAULT_TEST_SUITES
-    if manifest.boot_attempts:
-        try:
-            resolved_rootfs_profile = _select_boot_attempt(manifest.boot_attempts, attempt).resolved_rootfs_profile
-        except ValueError as exc:
-            return _configuration_failure(run_id=run_id, message=str(exc))
-    elif attempt is not None:
-        return _configuration_failure(
-            run_id=run_id, message=f"boot attempt {attempt} not found: no boot attempts recorded for this run"
-        )
-    else:
-        try:
-            resolved_rootfs_profile = rootfs_profiles[manifest.request.rootfs_profile]
-        except KeyError:
-            return _configuration_failure(
-                run_id=run_id,
-                message=f"unknown rootfs profile: {manifest.request.rootfs_profile}",
-            )
-
-    boot_details = boot_result.details if isinstance(boot_result.details, dict) else {}
-    guest_ip = _validated_guest_ip(boot_details.get("guest_ip"))
-    if guest_ip is not None and _ssh_host_is_unset_or_loopback(resolved_rootfs_profile.ssh_host):
-        resolved_rootfs_profile = resolved_rootfs_profile.model_copy(update={"ssh_host": guest_ip})
-    elif boot_details.get("guest_ip") is not None and guest_ip is None:
-        logger.warning(
-            "run %s: discarding invalid persisted guest_ip %r; using configured ssh_host",
-            run_id,
-            boot_details.get("guest_ip"),
-        )
-
-    try:
-        suite_profile = test_suites[requested_suite] if requested_suite is not None else None
-    except KeyError:
-        return _configuration_failure(run_id=run_id, message=f"unknown test suite: {requested_suite}")
-
-    existing = manifest.step_results.get("run_tests")
-    if existing and existing.status == StepStatus.SUCCEEDED and not force_rerun:
-        return _recorded_test_success_response(run_id=run_id, result=existing)
-    if existing and existing.status == StepStatus.FAILED and not force_rerun:
-        return _recorded_test_failure_response(run_id=run_id, result=existing)
-
-    provider = provider or LocalSshTestProvider()
-    try:
-        with store.tests_lock(run_id):
-            locked_manifest = store.load_manifest(run_id)
-            existing = locked_manifest.step_results.get("run_tests")
-            if existing and existing.status == StepStatus.SUCCEEDED and not force_rerun:
-                return _recorded_test_success_response(run_id=run_id, result=existing)
-            if existing and existing.status == StepStatus.FAILED and not force_rerun:
-                return _recorded_test_failure_response(run_id=run_id, result=existing)
-            if existing and existing.status == StepStatus.RUNNING:
-                stale_failed = StepResult(
-                    step_name="run_tests",
-                    status=StepStatus.FAILED,
-                    summary=existing.summary,
-                    artifacts=existing.artifacts,
-                    details={**existing.details, "stale_running_recovered": True},
-                )
-                store.record_step_result(run_id, stale_failed)
-
-            attempt = _next_test_attempt(store.run_dir(run_id))
-            try:
-                plan = provider.plan_tests(
-                    run_id=run_id,
-                    run_dir=store.run_dir(run_id),
-                    rootfs_profile=resolved_rootfs_profile,
-                    suite=suite_profile,
-                    adhoc_commands=adhoc_commands,
-                    attempt=attempt,
-                )
-            except ValueError as exc:
-                return _configuration_failure(run_id=run_id, message=str(exc))
-            try:
-                handle = _admit_run_tests_ssh_tier(
-                    run_id=run_id, admission=admission, session_registry=session_registry
-                )
-            except AdmissionError as exc:
-                return ToolResponse.failure(
-                    category=exc.category,
-                    message=str(exc),
-                    run_id=run_id,
-                    details={"code": exc.code},
-                    suggested_next_actions=["artifacts.collect"],
-                )
-            running = StepResult(
-                step_name="run_tests",
-                status=StepStatus.RUNNING,
-                summary="target tests running",
-                details={
-                    "provider": provider.name,
-                    "suite": suite_profile.name if suite_profile is not None else "adhoc",
-                    "attempt": attempt,
-                },
-            )
-            store.record_step_result(run_id, running, replace_succeeded=force_rerun)
-            try:
-                execution = _execute_tests_under_gate(provider=provider, plan=plan, admission=admission, handle=handle)
-            except AdmissionError as exc:
-                # The op spanned a halt (cancel_ssh_tier set the fence). The PROMOTED ssh-tier
-                # handle is cancelled but undisposed; without rollback it lingers in
-                # admission._bindings and would block reopen()/admit (`bindings_outstanding`). The
-                # target is NOT torn down by cancel_ssh_tier (admission stays open, §5.6), so the
-                # standard rollback path applies (no confirm_reaped gate). Guarded so a disposal
-                # hiccup never masks the original AdmissionError.
-                if handle is not None and admission is not None:
-                    with contextlib.suppress(Exception):
-                        admission.rollback(handle)
-                terminal = StepResult(
-                    step_name="run_tests",
-                    status=StepStatus.FAILED,
-                    summary="test run spanned an execution-state transition (target halted)",
-                    details={"provider": provider.name, "code": exc.code, "error": str(exc)},
-                )
-                store.record_step_result(run_id, terminal, replace_succeeded=force_rerun)
-                return ToolResponse.failure(
-                    category=exc.category,
-                    message=str(exc),
-                    run_id=run_id,
-                    details={"code": exc.code},
-                    suggested_next_actions=["artifacts.collect"],
-                )
-            except Exception as exc:
-                # The provider blew up after admit but before complete(). Symmetric to the halt path
-                # above: the PROMOTED handle is undisposed and would linger; rollback deregisters it
-                # cleanly. Guarded so the cleanup never masks the original exception detail.
-                if handle is not None and admission is not None:
-                    with contextlib.suppress(Exception):
-                        admission.rollback(handle)
-                terminal = StepResult(
-                    step_name="run_tests",
-                    status=StepStatus.FAILED,
-                    summary="unexpected test provider failure",
-                    details={"provider": provider.name, "exception_type": type(exc).__name__, "error": str(exc)},
-                )
-                store.record_step_result(run_id, terminal, replace_succeeded=force_rerun)
-                return ToolResponse.failure(
-                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                    message=terminal.summary,
-                    run_id=run_id,
-                    details=Redactor().redact_value(terminal.details),
-                    suggested_next_actions=["artifacts.collect"],
-                )
-            redactor = Redactor()
-            safe_details = redactor.redact_value(execution.details)
-            safe_summary = redactor.redact_text(execution.summary)
-            safe_diagnostic = redactor.redact_text(execution.diagnostic or "")
-            safe_artifacts = _redacted_artifacts(execution.artifacts, redactor)
-            terminal = StepResult(
-                step_name="run_tests",
-                status=execution.status,
-                summary=safe_summary,
-                artifacts=safe_artifacts,
-                details=safe_details,
-            )
-            store.record_step_result(run_id, terminal, replace_succeeded=force_rerun)
+        if isinstance(completed, ToolResponse):
+            return completed
     except ManifestStateError as exc:
         if "tests are locked" in str(exc):
             try:
@@ -2241,27 +2337,27 @@ def target_run_tests_handler(
                 refreshed = None
             if refreshed and refreshed.status == StepStatus.RUNNING:
                 return _running_tests_response(run_id=run_id, result=refreshed)
-            if existing and existing.status == StepStatus.RUNNING:
-                return _running_tests_response(run_id=run_id, result=existing)
+            if inputs.existing and inputs.existing.status == StepStatus.RUNNING:
+                return _running_tests_response(run_id=run_id, result=inputs.existing)
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
 
-    if execution.status == StepStatus.SUCCEEDED:
+    if completed.execution.status == StepStatus.SUCCEEDED:
         return ToolResponse.success(
-            summary=safe_summary,
+            summary=completed.summary,
             run_id=run_id,
-            data=safe_details,
-            artifacts=safe_artifacts,
+            data=completed.details,
+            artifacts=completed.artifacts,
             suggested_next_actions=["artifacts.collect"],
         )
     return ToolResponse.failure(
-        category=execution.error_category or ErrorCategory.TEST_FAILURE,
-        message=safe_summary,
+        category=completed.execution.error_category or ErrorCategory.TEST_FAILURE,
+        message=completed.summary,
         run_id=run_id,
         details={
-            **safe_details,
-            "diagnostic": safe_diagnostic,
+            **completed.details,
+            "diagnostic": completed.diagnostic,
         },
-        artifacts=safe_artifacts,
+        artifacts=completed.artifacts,
         suggested_next_actions=["artifacts.collect"],
     )
 
