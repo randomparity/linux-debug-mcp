@@ -211,6 +211,9 @@ from kdive.symbols.verify import (
 )
 from kdive.target import tools as target_tools
 from kdive.target.handlers import DEFAULT_TEST_SUITES as _DEFAULT_TEST_SUITES
+from kdive.target.handlers import _admit_run_tests_ssh_tier as _admit_run_tests_ssh_tier
+from kdive.target.handlers import _ssh_host_is_unset_or_loopback as _ssh_host_is_unset_or_loopback
+from kdive.target.handlers import _validated_guest_ip as _validated_guest_ip
 from kdive.target.handlers import target_run_tests_handler
 from kdive.tools.artifacts import register_artifact_tools
 from kdive.tools.providers import register_provider_tools
