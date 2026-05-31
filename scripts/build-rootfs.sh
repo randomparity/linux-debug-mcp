@@ -31,6 +31,27 @@ IMAGE_SIZE="${KDIVE_ROOTFS_SIZE:-2G}"
 SSH_USER="${KDIVE_ROOTFS_SSH_USER:-root}"
 MARKER="kdive-ready"
 
+# Validate the guest username before it reaches a `virt-builder --run-command` guest shell or the
+# colon-delimited `--ssh-inject "user:file:key"` selector. Restricting to the useradd NAME_REGEX
+# envelope (lowercase-start, max 32) means the value cannot carry shell metacharacters (guest
+# command injection) or a stray ':' that would misparse the ssh-inject format. See ADR 0038.
+if [[ ! "${SSH_USER}" =~ ^[a-z_][a-z0-9_-]*$ || ${#SSH_USER} -gt 32 ]]; then
+  echo "error: KDIVE_ROOTFS_SSH_USER='${SSH_USER}' is not a valid username." >&2
+  echo "       Allowed: ^[a-z_][a-z0-9_-]*\$, at most 32 characters." >&2
+  exit 1
+fi
+
+# Refuse a pre-existing symlink at the output path so the chmod / virt-make-fs writes below cannot
+# be redirected onto an attacker-chosen target, then canonicalize the parent (collapsing '..' and
+# resolving parent symlinks) while keeping the final component literal. We do NOT pin the path under
+# a fixed base — it is operator-configurable (tmp builds, custom virt_image_t dirs). See ADR 0038.
+if [[ -L "${ROOTFS_PATH}" ]]; then
+  echo "error: KDIVE_ROOTFS='${ROOTFS_PATH}' is a symlink; refusing to write through it." >&2
+  exit 1
+fi
+rootfs_parent="$(realpath -m -- "$(dirname -- "${ROOTFS_PATH}")")"
+ROOTFS_PATH="${rootfs_parent}/$(basename -- "${ROOTFS_PATH}")"
+
 invoking_user="${USER:-$(id -un)}"
 invoking_home="${HOME:-$(getent passwd "${invoking_user}" | cut -d: -f6)}"
 
@@ -75,6 +96,11 @@ if ! virt-builder --list 2>/dev/null | grep -qE "^fedora-${RELEASEVER}[[:space:]
   exit 1
 fi
 
+# mktemp creates each file 0600 regardless of umask, and the `>`-redirect writes below preserve that
+# mode — so the config temps are never world-readable. scratch and rootfs_tar, however, are written
+# by external tools (virt-builder --output / virt-tar-out) that may unlink+recreate the path at the
+# default umask; rootfs_tar is a tar of the whole guest filesystem. They are chmod'd 0600 right after
+# each tool write below so their mode is deterministic regardless of tool behavior. See ADR 0038 (TD-38).
 unit_file="$(mktemp)"
 fstab_file="$(mktemp)"
 selinux_file="$(mktemp)"
@@ -121,10 +147,12 @@ builder_args+=(
 
 echo "Stage 1: customizing fedora-${RELEASEVER} scratch image ..."
 virt-builder "${builder_args[@]}"
+chmod 0600 "${scratch}"
 
 echo "Stage 2: repacking to whole-disk ext4 ${ROOTFS_PATH} ..."
 mkdir -p "$(dirname "${ROOTFS_PATH}")"
 virt-tar-out -a "${scratch}" / "${rootfs_tar}"
+chmod 0600 "${rootfs_tar}"
 virt-make-fs --type=ext4 --format=qcow2 --size="${IMAGE_SIZE}" "${rootfs_tar}" "${ROOTFS_PATH}"
 
 # Normalize the inherited mount config and disable guest-internal SELinux. Disabling SELinux
@@ -132,6 +160,9 @@ virt-make-fs --type=ext4 --format=qcow2 --size="${IMAGE_SIZE}" "${rootfs_tar}" "
 # relabel+reboot (which would risk a false BOOT_TIMEOUT). This is the guest's internal SELinux
 # only; it is independent of the host-side virt_image_t/0644 labeling of the image file (which
 # still applies — see §2 / ADR #6).
+# The GFEOF delimiter is intentionally UNQUOTED: ${fstab_file}/${selinux_file} are host-side temp
+# paths that must expand here so guestfish receives real filenames (quoting the delimiter would
+# pass them literally and break the upload). The guest-side paths are fixed literals. See ADR 0038.
 guestfish --rw -a "${ROOTFS_PATH}" -i <<GFEOF
 upload ${fstab_file} /etc/fstab
 upload ${selinux_file} /etc/selinux/config
@@ -139,7 +170,12 @@ rm-f /etc/crypttab
 GFEOF
 
 # The caller owns the file it just wrote; chmod is unprivileged. 0644 lets the separate
-# qemu user read the base image as a backing file under qemu:///system.
+# qemu user read the base image as a backing file under qemu:///system. Re-assert the target is a
+# regular file (not a symlink swapped in during the build) before chmod redirects onto it.
+if [[ ! -f "${ROOTFS_PATH}" || -L "${ROOTFS_PATH}" ]]; then
+  echo "error: ${ROOTFS_PATH} is not a regular file after build; refusing to chmod." >&2
+  exit 1
+fi
 chmod 0644 "${ROOTFS_PATH}"
 
 echo "Done: ${ROOTFS_PATH}"
