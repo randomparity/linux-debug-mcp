@@ -159,3 +159,23 @@ Low-effort (S), high-confidence, low-risk cleanups safe to do immediately:
 - **TD-91 / TD-92 / TD-93** — standardize the prereqs comparison/exception patterns and validate the `rel` path component.
 - **TD-94** — quote the guestfish heredoc delimiter (`<<'GFEOF'`).
 - **Magic-number sweep (TD-19, TD-53, TD-56–59, TD-64, TD-67, TD-73–79, TD-81, TD-87, TD-98)** — a single pass extracting named timeout/byte-cap constants with one-line rationale comments closes the largest cluster of low findings.
+
+## Disposition
+
+**Fixed in-branch (`refactor/workflow-run`):**
+- **TD-01** — `safety/redaction.py` now masks non-string values under secret-named keys.
+- **TD-02** — `symbols/build_id.py` bounds the ELF program-header table (e_phentsize sanity + EOF containment) before reading it.
+- **TD-03** — `transport/qemu_gdbstub.py` validates the gdbstub port (parse + 1–65535 range) → `CONFIGURATION_ERROR`.
+
+**Tracked for follow-up** — the Medium-and-higher remainder is grouped into GitHub issues:
+
+| Issue | Theme | Findings |
+|-------|-------|----------|
+| [#124](https://github.com/randomparity/kdive/issues/124) | Harden `build-rootfs.sh` (env-var injection, unsafe paths) | TD-05, TD-06, TD-37, TD-38 |
+| [#125](https://github.com/randomparity/kdive/issues/125) | Validate untrusted input & redaction at trust boundaries | TD-04, TD-14, TD-16, TD-17, TD-22, TD-23, TD-29, TD-34, TD-35 |
+| [#126](https://github.com/randomparity/kdive/issues/126) | Decompose & de-duplicate `server.py` handlers | TD-08–13, TD-15, TD-99, TD-100, TD-102 |
+| [#127](https://github.com/randomparity/kdive/issues/127) | De-duplicate coordination teardown & document atomicity | TD-07, TD-25, TD-26, TD-27 |
+| [#128](https://github.com/randomparity/kdive/issues/128) | Replace magic timeouts/limits with named constants | TD-18, TD-19, TD-21, TD-30, TD-31, TD-104 |
+| [#129](https://github.com/randomparity/kdive/issues/129) | Provider/prereq/seam robustness & test gaps | TD-20, TD-24, TD-28, TD-32, TD-33, TD-36, TD-39 |
+
+The Low-severity findings remain in the table above and the Quick wins list; they are not separately tracked.
