@@ -99,6 +99,7 @@ from kdive.debug.operations import (
 from kdive.debug.operations import (
     _interrupt_op_data as _interrupt_op_data,
 )
+from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.debug.tools import DebugToolContext, DebugToolHandlers, register_debug_tools
 from kdive.default_profiles import (
     DEFAULT_BUILD_PROFILES,
@@ -2789,7 +2790,7 @@ def _verify_gdb_symbol_version_lock(
     return None
 
 
-def debug_start_session_handler(
+def _debug_start_session_handler(
     *,
     artifact_root: Path,
     run_id: str,

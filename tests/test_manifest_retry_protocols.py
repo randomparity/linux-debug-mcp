@@ -1,4 +1,5 @@
 from kdive import server
+from kdive.debug import session_handlers
 from kdive.introspect import execution as introspect_execution
 from kdive.postmortem import crash_handler
 from kdive.postmortem import handlers as postmortem_handlers
@@ -22,3 +23,8 @@ def test_postmortem_dump_handlers_are_owned_by_postmortem_module() -> None:
     assert server.debug_postmortem_check_prereqs_handler is postmortem_handlers.debug_postmortem_check_prereqs_handler
     assert server.debug_postmortem_list_dumps_handler is postmortem_handlers.debug_postmortem_list_dumps_handler
     assert server.debug_postmortem_fetch_handler is postmortem_handlers.debug_postmortem_fetch_handler
+
+
+def test_debug_start_session_handler_is_owned_by_debug_module() -> None:
+    assert session_handlers.debug_start_session_handler.__module__ == "kdive.debug.session_handlers"
+    assert server.debug_start_session_handler is session_handlers.debug_start_session_handler
