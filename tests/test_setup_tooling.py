@@ -22,7 +22,7 @@ def test_justfile_defines_setup_workflow() -> None:
     assert "uv venv --allow-existing" in justfile
     assert "uv pip install -e '.[dev,test]'" in justfile
     assert "uv run pre-commit install" in justfile
-    assert "uv run python -m kdive.dev_setup check-host" in justfile
+    assert "uv run python -m kdive.prereqs.dev_setup check-host" in justfile
     assert "detect-secrets scan > .secrets.baseline" not in justfile
     assert "python -c" not in justfile
     assert "host.check_prerequisites" in justfile
@@ -134,8 +134,8 @@ def test_setup_dependency_check_accepts_clang_as_c_compiler(tmp_path: Path) -> N
 
 
 def test_dev_setup_formats_prerequisite_checks() -> None:
-    from kdive.dev_setup import format_prerequisite_checks
     from kdive.domain import PrerequisiteCheck, PrerequisiteStatus
+    from kdive.prereqs.dev_setup import format_prerequisite_checks
 
     assert format_prerequisite_checks(
         [
@@ -151,7 +151,7 @@ def test_dev_setup_formats_prerequisite_checks() -> None:
 def test_dev_setup_imports_prerequisites_from_prereq_package() -> None:
     import ast
 
-    from kdive import dev_setup
+    from kdive.prereqs import dev_setup
 
     tree = ast.parse(Path(dev_setup.__file__).read_text(encoding="utf-8"))
     imports = [
@@ -163,8 +163,8 @@ def test_dev_setup_imports_prerequisites_from_prereq_package() -> None:
 
 
 def test_dev_setup_check_host_returns_nonzero_for_failed_checks(monkeypatch, capsys) -> None:
-    from kdive import dev_setup
     from kdive.domain import PrerequisiteCheck, PrerequisiteStatus, ToolResponse
+    from kdive.prereqs import dev_setup
 
     def fake_prerequisites_handler(**_kwargs: object) -> ToolResponse:
         return ToolResponse.success(
@@ -189,7 +189,7 @@ def test_dev_setup_check_host_returns_nonzero_for_failed_checks(monkeypatch, cap
 
 
 def test_dev_setup_main_rejects_unknown_command(capsys) -> None:
-    from kdive.dev_setup import main
+    from kdive.prereqs.dev_setup import main
 
     try:
         main(["unknown"])

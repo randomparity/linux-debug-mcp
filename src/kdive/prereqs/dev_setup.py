@@ -6,7 +6,7 @@ from pathlib import Path
 from kdive.domain import PrerequisiteCheck, PrerequisiteStatus
 from kdive.prereqs.handlers import prerequisites_handler
 
-USAGE = "Usage: python -m kdive.dev_setup check-host"
+USAGE = "Usage: python -m kdive.prereqs.dev_setup check-host"
 
 
 def _parse_prerequisite_checks(raw_checks: list[object]) -> list[PrerequisiteCheck]:

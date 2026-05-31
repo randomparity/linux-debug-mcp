@@ -99,7 +99,7 @@ Environment variables fall in two classes. The 14 `LINUX_DEBUG_MCP_*` → `KDIVE
 ### Config / build / CI
 - `pyproject.toml`: `[project].name`, `[project.scripts]`, and
   `[tool.coverage.run] source = ["src/kdive"]`.
-- `justfile`: `python -m kdive.dev_setup`; the ipmi-guard glob
+- `justfile`: `python -m kdive.prereqs.dev_setup`; the ipmi-guard glob
   `src/kdive/safety/ipmi.py`.
 - `.github/workflows/ci.yml`: `--cov=src/kdive`; `.venv/bin/kdive` smoke check.
 - Regenerate `uv.lock` with `uv lock` (do not hand-edit).
@@ -137,7 +137,7 @@ which legitimately names the old project).
 5. Editable install produces a working `kdive` console script:
    `timeout 2 uv run kdive || test $? -eq 124`.
 6. `just lint`, `ty check src`, and the full `just test` are all green.
-7. `just check-host` runs via `kdive.dev_setup`.
+7. `just check-host` runs via `kdive.prereqs.dev_setup`.
 8. pre-commit / `detect-secrets` run clean against `.secrets.baseline`.
 
 ## Post-merge manual checklist (out of branch scope)

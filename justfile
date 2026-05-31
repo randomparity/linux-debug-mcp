@@ -16,7 +16,7 @@ sync-dev: check-deps
 
 check-host: sync-dev
     @echo "Running host.check_prerequisites"
-    uv run python -m kdive.dev_setup check-host
+    uv run python -m kdive.prereqs.dev_setup check-host
 
 rootfs:
     ./scripts/build-rootfs.sh
