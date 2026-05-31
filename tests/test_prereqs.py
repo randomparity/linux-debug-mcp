@@ -231,3 +231,26 @@ def test_gdbstub_port_fails_on_unparseable_endpoint() -> None:
     assert check.status == "failed"
     assert "could not parse" in check.message
     assert probed == []
+
+
+def test_rootfs_builder_passes_when_toolchain_present() -> None:
+    from kdive.prereqs.checks import check_rootfs_builder
+
+    check = check_rootfs_builder(runner=FakeRunner({"virt-builder", "qemu-img"}))
+    assert check.check_id == "rootfs.builder"
+    assert check.status == "passed"
+
+
+def test_rootfs_builder_fails_naming_libguestfs_tools_when_virt_builder_missing() -> None:
+    from kdive.prereqs.checks import check_rootfs_builder
+
+    check = check_rootfs_builder(runner=FakeRunner({"qemu-img"}))
+    assert check.status == "failed"
+    assert "libguestfs-tools" in (check.suggested_fix or "")
+
+
+def test_rootfs_builder_fails_when_qemu_img_missing() -> None:
+    from kdive.prereqs.checks import check_rootfs_builder
+
+    check = check_rootfs_builder(runner=FakeRunner({"virt-builder"}))
+    assert check.status == "failed"
