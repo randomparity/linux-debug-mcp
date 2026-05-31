@@ -347,6 +347,16 @@ def test_create_app_registers_sprint_4_tools_as_real_handlers() -> None:
     assert "context" in tools["debug.end_session"].parameters["properties"]
 
 
+def test_debug_tool_malformed_grouped_input_returns_configuration_error() -> None:
+    response = _get_tool_fn(create_app(), "debug.start_session")(
+        run_id="run-abc123",
+        context={"unexpected": "field"},
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["category"] == "configuration_error"
+
+
 def test_create_app_registers_future_provider_tools() -> None:
     app = create_app()
     tools = app._tool_manager._tools

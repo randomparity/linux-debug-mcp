@@ -12,6 +12,7 @@ from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import Model, ToolResponse
 from kdive.providers.debug import GdbMiEngine, GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard
+from kdive.tools.adapter_boundary import adapter_validation_failure, optional_model_arg
 
 
 class DebugStartSessionHandler(Protocol):
@@ -264,19 +265,12 @@ def _dump(response: ToolResponse) -> dict[str, Any]:
     return response.model_dump(mode="json")
 
 
-def _model(value: Model | dict[str, Any] | None, model_type: type[Model]) -> Model:
-    if value is None:
-        return model_type()
-    return value if isinstance(value, model_type) else model_type.model_validate(value)
-
-
 def _session_context(
     value: DebugSessionContext | dict[str, Any] | None,
     *,
     default_artifact_root: str,
 ) -> tuple[Path, str | None]:
-    context = _model(value, DebugSessionContext)
-    assert isinstance(context, DebugSessionContext)
+    context = optional_model_arg(value, DebugSessionContext)
     artifact_root = default_artifact_root if context.artifact_root is None else context.artifact_root
     return _path(artifact_root), context.debug_session_id
 
@@ -306,12 +300,14 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
     @app.tool(name="debug.start_session")
     def debug_start_session(
         run_id: str,
-        context: DebugSessionContext | None = None,
-        options: DebugStartSessionOptions | None = None,
+        context: DebugSessionContext | dict[str, Any] | None = None,
+        options: DebugStartSessionOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        artifact_root, _debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
-        start_options = _model(options, DebugStartSessionOptions)
-        assert isinstance(start_options, DebugStartSessionOptions)
+        try:
+            artifact_root, _debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            start_options = optional_model_arg(options, DebugStartSessionOptions)
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return _dump(
             handlers.start_session(
                 artifact_root=artifact_root,
@@ -327,9 +323,12 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         def debug_registers_query(
             run_id: str,
             registers: list[str],
-            context: DebugSessionContext | None = None,
+            context: DebugSessionContext | dict[str, Any] | None = None,
         ) -> dict[str, Any]:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            try:
+                artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            except (TypeError, ValueError) as exc:
+                return adapter_validation_failure(exc)
             return _dump(
                 handler(
                     artifact_root=artifact_root,
@@ -347,9 +346,12 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         def debug_symbol_query(
             run_id: str,
             symbol: str,
-            context: DebugSessionContext | None = None,
+            context: DebugSessionContext | dict[str, Any] | None = None,
         ) -> dict[str, Any]:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            try:
+                artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            except (TypeError, ValueError) as exc:
+                return adapter_validation_failure(exc)
             return _dump(
                 handler(
                     artifact_root=artifact_root,
@@ -371,9 +373,12 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         run_id: str,
         address: int,
         byte_count: int,
-        context: DebugSessionContext | None = None,
+        context: DebugSessionContext | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+        try:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return _dump(
             handlers.read_memory(
                 artifact_root=artifact_root,
@@ -389,12 +394,14 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
     def debug_evaluate(
         run_id: str,
         inspector: str,
-        context: DebugSessionContext | None = None,
-        options: DebugEvaluateOptions | None = None,
+        context: DebugSessionContext | dict[str, Any] | None = None,
+        options: DebugEvaluateOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
-        evaluate_options = _model(options, DebugEvaluateOptions)
-        assert isinstance(evaluate_options, DebugEvaluateOptions)
+        try:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            evaluate_options = optional_model_arg(options, DebugEvaluateOptions)
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return _dump(
             handlers.evaluate(
                 artifact_root=artifact_root,
@@ -410,12 +417,14 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
     def debug_load_module_symbols(
         run_id: str,
         module: str,
-        context: DebugSessionContext | None = None,
-        options: DebugLoadModuleSymbolsOptions | None = None,
+        context: DebugSessionContext | dict[str, Any] | None = None,
+        options: DebugLoadModuleSymbolsOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
-        load_options = _model(options, DebugLoadModuleSymbolsOptions)
-        assert isinstance(load_options, DebugLoadModuleSymbolsOptions)
+        try:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            load_options = optional_model_arg(options, DebugLoadModuleSymbolsOptions)
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return _dump(
             handlers.load_module_symbols(
                 artifact_root=artifact_root,
@@ -432,9 +441,12 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         def debug_symbol_control(
             run_id: str,
             symbol: str,
-            context: DebugSessionContext | None = None,
+            context: DebugSessionContext | dict[str, Any] | None = None,
         ) -> dict[str, Any]:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            try:
+                artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            except (TypeError, ValueError) as exc:
+                return adapter_validation_failure(exc)
             return _dump(
                 handler(
                     artifact_root=artifact_root,
@@ -452,9 +464,12 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         def debug_breakpoint_id_control(
             run_id: str,
             breakpoint_id: str,
-            context: DebugSessionContext | None = None,
+            context: DebugSessionContext | dict[str, Any] | None = None,
         ) -> dict[str, Any]:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            try:
+                artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            except (TypeError, ValueError) as exc:
+                return adapter_validation_failure(exc)
             return _dump(
                 handler(
                     artifact_root=artifact_root,
@@ -471,9 +486,12 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
     def _register_gated_query(tool_name: str, handler: DebugSessionQueryHandler) -> None:
         def debug_session_query(
             run_id: str,
-            context: DebugSessionContext | None = None,
+            context: DebugSessionContext | dict[str, Any] | None = None,
         ) -> dict[str, Any]:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            try:
+                artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            except (TypeError, ValueError) as exc:
+                return adapter_validation_failure(exc)
             return _dump(
                 handler(
                     artifact_root=artifact_root,
@@ -489,12 +507,14 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
     def _register_execution_control(tool_name: str, handler: DebugExecutionControlHandler) -> None:
         def debug_execution_control(
             run_id: str,
-            context: DebugSessionContext | None = None,
-            options: DebugExecutionOptions | None = None,
+            context: DebugSessionContext | dict[str, Any] | None = None,
+            options: DebugExecutionOptions | dict[str, Any] | None = None,
         ) -> dict[str, Any]:
-            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
-            execution_options = _model(options, DebugExecutionOptions)
-            assert isinstance(execution_options, DebugExecutionOptions)
+            try:
+                artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+                execution_options = optional_model_arg(options, DebugExecutionOptions)
+            except (TypeError, ValueError) as exc:
+                return adapter_validation_failure(exc)
             return _dump(
                 handler(
                     artifact_root=artifact_root,
@@ -539,9 +559,12 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
     @app.tool(name="debug.end_session")
     def debug_end_session(
         run_id: str,
-        context: DebugSessionContext | None = None,
+        context: DebugSessionContext | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+        try:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return _dump(
             handlers.end_session(
                 artifact_root=artifact_root,
