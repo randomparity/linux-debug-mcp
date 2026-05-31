@@ -43,6 +43,7 @@ from kdive.providers.local.local_ssh_tests import LocalSshTestProvider
 from kdive.providers.registry import ProviderRegistry
 from kdive.providers.stubs import remote_build_stub_capability
 from kdive.server import create_app
+from kdive.tools import providers as provider_tools
 
 VALID_CALLS = [
     (
@@ -196,6 +197,9 @@ def test_future_provider_handlers_are_generated_from_operation_table() -> None:
 
 def test_create_app_registers_future_tools_through_shared_helper() -> None:
     app = create_app()
+
+    assert not hasattr(provider_tools, "_FutureProviderPayloadAdapter")
+    assert not hasattr(provider_tools, "_provider_payload")
 
     for _, _, _, operation in VALID_CALLS:
         tool = app._tool_manager._tools[operation]

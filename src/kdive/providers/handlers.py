@@ -64,6 +64,10 @@ def _future_request_validation_failure(exc: ValidationError) -> ToolResponse:
     )
 
 
+def future_request_validation_failure_response(exc: ValidationError) -> dict[str, Any]:
+    return _future_request_validation_failure(exc).model_dump(mode="json")
+
+
 def _future_stub_handler(
     *,
     request: ProviderRequest,
@@ -151,16 +155,3 @@ for _operation, _request_type, _handler_name in _FUTURE_PROVIDER_HANDLER_ROWS:
         request_type=_request_type,
         handler=_handler,
     )
-
-
-def validate_and_call_future_provider_tool(
-    *,
-    contract: type[ProviderRequest],
-    payload: dict[str, Any],
-    handler: Callable[..., ToolResponse],
-) -> dict[str, Any]:
-    try:
-        request = contract(**payload)
-    except ValidationError as exc:
-        return _future_request_validation_failure(exc).model_dump(mode="json")
-    return handler(request=request).model_dump(mode="json")
