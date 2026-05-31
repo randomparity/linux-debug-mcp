@@ -26,6 +26,7 @@ from kdive.debug import operations as debug_operations
 from kdive.debug import tools as debug_tools
 from kdive.debug.tools import DebugToolContext, DebugToolHandlers
 from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus
+from kdive.introspect import execution as introspect_execution
 from kdive.providers.debug import GdbMiSessionRegistry as GdbMiSessionRegistryContract
 from kdive.providers.local.gdb_mi import (
     CANONICAL_PROBE_SYMBOL,
@@ -334,6 +335,25 @@ def test_debug_operation_response_uses_runtime_bundle() -> None:
         "gdb_mi_sessions",
     ):
         assert dependency_name not in params
+
+
+def test_server_private_helpers_are_canonical_imports() -> None:
+    for name in (
+        "_debug_operation_response",
+        "_debug_session_manifest_details",
+        "_load_active_debug_session",
+        "_persist_mi_debug_session",
+        "_recorded_transport_session_id",
+        "_resume_debug_transport",
+        "_teardown_debug_transport",
+        "_teardown_stalled_debug_session",
+    ):
+        assert getattr(server_module, name) is getattr(debug_operations, name)
+        assert getattr(server_module, name).__module__ == "kdive.debug.operations"
+
+    for name in ("_target_python_remote_argv", "_redact_and_truncate", "_record_introspect_failure"):
+        assert getattr(server_module, name) is getattr(introspect_execution, name)
+        assert getattr(server_module, name).__module__ == "kdive.introspect.execution"
 
 
 def _start(
