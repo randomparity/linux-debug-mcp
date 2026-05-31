@@ -189,6 +189,15 @@ def test_future_provider_handlers_take_typed_request_models() -> None:
     assert remote_build_kernel_handler.__module__ == "kdive.providers.handlers"
 
 
+def test_future_provider_handlers_are_real_static_functions() -> None:
+    from kdive.providers import handlers
+
+    source = inspect.getsource(handlers)
+
+    assert "globals()[" not in source
+    assert ".__annotations__" not in source
+
+
 def test_future_provider_handler_validates_direct_call_request_type() -> None:
     response = remote_build_kernel_handler(request=ProviderRequest(architecture="ppc64le"))
 

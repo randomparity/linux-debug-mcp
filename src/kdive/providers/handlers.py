@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Generic, Protocol, TypeVar
 
 from pydantic import ValidationError
 
@@ -96,67 +95,213 @@ def _future_stub_handler(
     )
 
 
-FutureProviderHandler = Callable[..., ToolResponse]
+_RequestT = TypeVar("_RequestT", bound=ProviderRequest)
+
+
+class FutureProviderHandler(Protocol[_RequestT]):
+    def __call__(
+        self,
+        *,
+        request: _RequestT,
+        registry: ProviderRegistry | None = None,
+    ) -> ToolResponse: ...
 
 
 @dataclass(frozen=True)
-class FutureProviderOperationSpec:
+class FutureProviderOperationSpec(Generic[_RequestT]):
     operation: str
-    request_type: type[ProviderRequest]
-    handler: FutureProviderHandler
+    request_type: type[_RequestT]
+    handler: FutureProviderHandler[_RequestT]
 
 
-def _make_future_provider_handler(
+def _future_typed_stub_handler(
     *,
+    request: ProviderRequest,
     operation: str,
-    request_type: type[ProviderRequest],
-    handler_name: str,
-) -> FutureProviderHandler:
-    def handler(*, request: ProviderRequest, registry: ProviderRegistry | None = None) -> ToolResponse:
-        if not isinstance(request, request_type):
-            try:
-                request = request_type.model_validate(request.model_dump(mode="python"))
-            except ValidationError as exc:
-                return _future_request_validation_failure(exc)
-        return _future_stub_handler(
-            request=request,
-            operation=operation,
-            registry=registry,
-        )
-
-    handler.__name__ = handler_name
-    handler.__annotations__ = {
-        "request": request_type,
-        "registry": ProviderRegistry | None,
-        "return": ToolResponse,
-    }
-    return handler
-
-
-_FUTURE_PROVIDER_HANDLER_ROWS: tuple[tuple[str, type[ProviderRequest], str], ...] = (
-    ("remote.build_kernel", RemoteBuildRequest, "remote_build_kernel_handler"),
-    ("remote.sync_artifacts", RemoteArtifactSyncRequest, "remote_sync_artifacts_handler"),
-    ("reservation.request_host", ReservationRequest, "reservation_request_host_handler"),
-    ("reservation.release_host", ReservationReleaseRequest, "reservation_release_host_handler"),
-    ("provision.prepare_target", ProvisioningRequest, "provision_prepare_target_handler"),
-    ("hardware.power_control", HardwareControlRequest, "hardware_power_control_handler"),
-    ("hardware.boot_kernel", RealBootRequest, "hardware_boot_kernel_handler"),
-    ("console.open_session", ConsoleSessionRequest, "console_open_session_handler"),
-    ("console.read", ConsoleReadRequest, "console_read_handler"),
-    ("console.write", ConsoleWriteRequest, "console_write_handler"),
-    ("workflow.reserve_provision_boot", ReserveProvisionBootRequest, "workflow_reserve_provision_boot_handler"),
-)
-
-FUTURE_PROVIDER_OPERATIONS: dict[str, FutureProviderOperationSpec] = {}
-for _operation, _request_type, _handler_name in _FUTURE_PROVIDER_HANDLER_ROWS:
-    _handler = _make_future_provider_handler(
-        operation=_operation,
-        request_type=_request_type,
-        handler_name=_handler_name,
+    request_type: type[_RequestT],
+    registry: ProviderRegistry | None = None,
+) -> ToolResponse:
+    if not isinstance(request, request_type):
+        try:
+            request = request_type.model_validate(request.model_dump(mode="python"))
+        except ValidationError as exc:
+            return _future_request_validation_failure(exc)
+    return _future_stub_handler(
+        request=request,
+        operation=operation,
+        registry=registry,
     )
-    globals()[_handler_name] = _handler
-    FUTURE_PROVIDER_OPERATIONS[_operation] = FutureProviderOperationSpec(
-        operation=_operation,
-        request_type=_request_type,
-        handler=_handler,
+
+
+def remote_build_kernel_handler(
+    *, request: RemoteBuildRequest, registry: ProviderRegistry | None = None
+) -> ToolResponse:
+    return _future_typed_stub_handler(
+        request=request,
+        operation="remote.build_kernel",
+        request_type=RemoteBuildRequest,
+        registry=registry,
     )
+
+
+def remote_sync_artifacts_handler(
+    *, request: RemoteArtifactSyncRequest, registry: ProviderRegistry | None = None
+) -> ToolResponse:
+    return _future_typed_stub_handler(
+        request=request,
+        operation="remote.sync_artifacts",
+        request_type=RemoteArtifactSyncRequest,
+        registry=registry,
+    )
+
+
+def reservation_request_host_handler(
+    *, request: ReservationRequest, registry: ProviderRegistry | None = None
+) -> ToolResponse:
+    return _future_typed_stub_handler(
+        request=request,
+        operation="reservation.request_host",
+        request_type=ReservationRequest,
+        registry=registry,
+    )
+
+
+def reservation_release_host_handler(
+    *, request: ReservationReleaseRequest, registry: ProviderRegistry | None = None
+) -> ToolResponse:
+    return _future_typed_stub_handler(
+        request=request,
+        operation="reservation.release_host",
+        request_type=ReservationReleaseRequest,
+        registry=registry,
+    )
+
+
+def provision_prepare_target_handler(
+    *, request: ProvisioningRequest, registry: ProviderRegistry | None = None
+) -> ToolResponse:
+    return _future_typed_stub_handler(
+        request=request,
+        operation="provision.prepare_target",
+        request_type=ProvisioningRequest,
+        registry=registry,
+    )
+
+
+def hardware_power_control_handler(
+    *, request: HardwareControlRequest, registry: ProviderRegistry | None = None
+) -> ToolResponse:
+    return _future_typed_stub_handler(
+        request=request,
+        operation="hardware.power_control",
+        request_type=HardwareControlRequest,
+        registry=registry,
+    )
+
+
+def hardware_boot_kernel_handler(*, request: RealBootRequest, registry: ProviderRegistry | None = None) -> ToolResponse:
+    return _future_typed_stub_handler(
+        request=request,
+        operation="hardware.boot_kernel",
+        request_type=RealBootRequest,
+        registry=registry,
+    )
+
+
+def console_open_session_handler(
+    *, request: ConsoleSessionRequest, registry: ProviderRegistry | None = None
+) -> ToolResponse:
+    return _future_typed_stub_handler(
+        request=request,
+        operation="console.open_session",
+        request_type=ConsoleSessionRequest,
+        registry=registry,
+    )
+
+
+def console_read_handler(*, request: ConsoleReadRequest, registry: ProviderRegistry | None = None) -> ToolResponse:
+    return _future_typed_stub_handler(
+        request=request,
+        operation="console.read",
+        request_type=ConsoleReadRequest,
+        registry=registry,
+    )
+
+
+def console_write_handler(*, request: ConsoleWriteRequest, registry: ProviderRegistry | None = None) -> ToolResponse:
+    return _future_typed_stub_handler(
+        request=request,
+        operation="console.write",
+        request_type=ConsoleWriteRequest,
+        registry=registry,
+    )
+
+
+def workflow_reserve_provision_boot_handler(
+    *, request: ReserveProvisionBootRequest, registry: ProviderRegistry | None = None
+) -> ToolResponse:
+    return _future_typed_stub_handler(
+        request=request,
+        operation="workflow.reserve_provision_boot",
+        request_type=ReserveProvisionBootRequest,
+        registry=registry,
+    )
+
+
+FUTURE_PROVIDER_OPERATIONS: dict[str, FutureProviderOperationSpec[Any]] = {
+    "remote.build_kernel": FutureProviderOperationSpec(
+        operation="remote.build_kernel",
+        request_type=RemoteBuildRequest,
+        handler=remote_build_kernel_handler,
+    ),
+    "remote.sync_artifacts": FutureProviderOperationSpec(
+        operation="remote.sync_artifacts",
+        request_type=RemoteArtifactSyncRequest,
+        handler=remote_sync_artifacts_handler,
+    ),
+    "reservation.request_host": FutureProviderOperationSpec(
+        operation="reservation.request_host",
+        request_type=ReservationRequest,
+        handler=reservation_request_host_handler,
+    ),
+    "reservation.release_host": FutureProviderOperationSpec(
+        operation="reservation.release_host",
+        request_type=ReservationReleaseRequest,
+        handler=reservation_release_host_handler,
+    ),
+    "provision.prepare_target": FutureProviderOperationSpec(
+        operation="provision.prepare_target",
+        request_type=ProvisioningRequest,
+        handler=provision_prepare_target_handler,
+    ),
+    "hardware.power_control": FutureProviderOperationSpec(
+        operation="hardware.power_control",
+        request_type=HardwareControlRequest,
+        handler=hardware_power_control_handler,
+    ),
+    "hardware.boot_kernel": FutureProviderOperationSpec(
+        operation="hardware.boot_kernel",
+        request_type=RealBootRequest,
+        handler=hardware_boot_kernel_handler,
+    ),
+    "console.open_session": FutureProviderOperationSpec(
+        operation="console.open_session",
+        request_type=ConsoleSessionRequest,
+        handler=console_open_session_handler,
+    ),
+    "console.read": FutureProviderOperationSpec(
+        operation="console.read",
+        request_type=ConsoleReadRequest,
+        handler=console_read_handler,
+    ),
+    "console.write": FutureProviderOperationSpec(
+        operation="console.write",
+        request_type=ConsoleWriteRequest,
+        handler=console_write_handler,
+    ),
+    "workflow.reserve_provision_boot": FutureProviderOperationSpec(
+        operation="workflow.reserve_provision_boot",
+        request_type=ReserveProvisionBootRequest,
+        handler=workflow_reserve_provision_boot_handler,
+    ),
+}
