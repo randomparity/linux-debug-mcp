@@ -181,6 +181,21 @@ RUN_STDOUT_CAP = 2 * 1024 * 1024
 # a clean result before the SSH layer itself times out.
 SSH_TIMEOUT_GRACE_SECONDS = 10
 
+__all__ = (
+    "DEFAULT_ARTIFACT_ROOT",
+    "DEFAULT_BUILD_PROFILES",
+    "DEFAULT_DEBUG_PROFILES",
+    "DEFAULT_ROOTFS_PROFILES",
+    "DEFAULT_TARGET_PROFILES",
+    "DEFAULT_TEST_SUITES",
+    "RUN_STDOUT_CAP",
+    "SERVER_CONFIG_ENV_VAR",
+    "SSH_TIMEOUT_GRACE_SECONDS",
+    "create_app",
+    "load_server_config",
+    "main",
+)
+
 
 _INTROSPECT_STEP_NAME_RE = re.compile(r"^introspect:")
 _POSTMORTEM_CRASH_STEP_RE = re.compile(r"^postmortem\.crash:[0-9a-f]{32}$")

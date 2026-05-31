@@ -89,3 +89,24 @@ def test_server_does_not_reexport_private_feature_helpers() -> None:
     leaked = sorted(name for name in private_feature_helpers if hasattr(server, name))
 
     assert leaked == []
+
+
+def test_server_public_api_is_explicit_and_composition_scoped() -> None:
+    import kdive.server as server
+
+    assert set(server.__all__) == {
+        "DEFAULT_ARTIFACT_ROOT",
+        "DEFAULT_BUILD_PROFILES",
+        "DEFAULT_DEBUG_PROFILES",
+        "DEFAULT_ROOTFS_PROFILES",
+        "DEFAULT_TARGET_PROFILES",
+        "DEFAULT_TEST_SUITES",
+        "RUN_STDOUT_CAP",
+        "SERVER_CONFIG_ENV_VAR",
+        "SSH_TIMEOUT_GRACE_SECONDS",
+        "create_app",
+        "load_server_config",
+        "main",
+    }
+    assert not any(name.endswith("_handler") for name in server.__all__)
+    assert not any(name.endswith(("Context", "Options", "Profiles")) for name in server.__all__)
