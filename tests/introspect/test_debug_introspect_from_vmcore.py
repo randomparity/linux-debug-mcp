@@ -67,7 +67,9 @@ def test_vmcore_introspect_handler_uses_explicit_phase_helpers() -> None:
     for helper_name in (
         "VmcoreIntrospectContext",
         "VmcoreIntrospectWorkspace",
+        "_validate_vmcore_introspect_request",
         "_resolve_vmcore_introspect_context",
+        "_resolve_vmcore_introspect_inputs",
         "_prepare_vmcore_introspect_workspace",
         "_run_vmcore_introspect_wrapper",
     ):

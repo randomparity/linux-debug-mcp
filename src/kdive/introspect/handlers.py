@@ -167,6 +167,14 @@ class VmcoreIntrospectContext:
 
 
 @dataclass(frozen=True)
+class VmcoreIntrospectInputs:
+    vmcore_path: Path
+    vmlinux_path: Path
+    modules_path: str | None
+    expected_build_id: str
+
+
+@dataclass(frozen=True)
 class VmcoreIntrospectWorkspace:
     call_id: str
     agent_dir: Path
@@ -302,30 +310,22 @@ def debug_introspect_helper_handler(
     )
 
 
-def _resolve_vmcore_introspect_context(
+def _validate_vmcore_introspect_request(
     request: DebugIntrospectFromVmcoreRequest,
     *,
-    artifact_root: Path,
-    build_id_reader: Callable[[Path], str],
-) -> tuple[VmcoreIntrospectContext | None, ToolResponse | None]:
+    store: ArtifactStore,
+    manifest: Any,
+) -> ToolResponse | None:
     run_id = request.run_id
-    try:
-        store = ArtifactStore(artifact_root, create_root=False)
-        if not (store.run_dir(run_id) / "manifest.json").is_file():
-            return None, _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
-        manifest = store.load_manifest(run_id)
-    except ManifestStateError as exc:
-        return None, ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-
     if request.allow_write:
-        return None, ToolResponse.failure(
+        return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
             run_id=run_id,
             message="write mode is not applicable to offline vmcore analysis; the core file is immutable",
             details={"code": "write_mode_not_applicable"},
         )
     if not (5 <= request.timeout_seconds <= 300):
-        return None, ToolResponse.failure(
+        return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
             run_id=run_id,
             message=f"timeout_seconds must be in [5, 300]; got {request.timeout_seconds}",
@@ -333,7 +333,7 @@ def _resolve_vmcore_introspect_context(
         )
     script_bytes = request.script.encode("utf-8")
     if not script_bytes or len(script_bytes) > SCRIPT_BYTE_CAP:
-        return None, ToolResponse.failure(
+        return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
             run_id=run_id,
             message="script must be non-empty and <= the script byte cap",
@@ -341,7 +341,7 @@ def _resolve_vmcore_introspect_context(
         )
 
     if _count_introspect_calls(manifest) >= MAX_INTROSPECT_CALLS_PER_RUN:
-        return None, ToolResponse.failure(
+        return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
             run_id=run_id,
             message=(
@@ -351,25 +351,33 @@ def _resolve_vmcore_introspect_context(
             details={"code": "manifest_call_budget_exhausted"},
         )
 
-    run_dir = store.run_dir(run_id)
-    sensitive_dir = run_dir / "sensitive"
+    sensitive_dir = store.run_dir(run_id) / "sensitive"
     try:
         mode = sensitive_dir.stat().st_mode & 0o777
     except FileNotFoundError:
-        return None, ToolResponse.failure(
+        return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
             run_id=run_id,
             message=f"{sensitive_dir} is missing; re-run kernel.create_run to recreate the run layout.",
             details={"code": "sensitive_dir_missing"},
         )
     if mode & 0o077:
-        return None, ToolResponse.failure(
+        return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
             run_id=run_id,
             message=(f"{sensitive_dir} mode is {oct(mode)}; expected 0o700. Re-run kernel.create_run."),
             details={"code": "sensitive_dir_too_permissive", "actual_mode": oct(mode)},
         )
+    return None
 
+
+def _resolve_vmcore_introspect_inputs(
+    request: DebugIntrospectFromVmcoreRequest,
+    *,
+    run_dir: Path,
+    build_id_reader: Callable[[Path], str],
+) -> tuple[VmcoreIntrospectInputs | None, ToolResponse | None]:
+    run_id = request.run_id
     provenance_shell = KernelProvenance(
         build_id="",
         release="",
@@ -422,15 +430,50 @@ def _resolve_vmcore_introspect_context(
         )
 
     return (
+        VmcoreIntrospectInputs(
+            vmcore_path=vmcore_path,
+            vmlinux_path=resolved.vmlinux_path,
+            modules_path=str(resolved.modules_path) if resolved.modules_path is not None else None,
+            expected_build_id=expected_build_id,
+        ),
+        None,
+    )
+
+
+def _resolve_vmcore_introspect_context(
+    request: DebugIntrospectFromVmcoreRequest,
+    *,
+    artifact_root: Path,
+    build_id_reader: Callable[[Path], str],
+) -> tuple[VmcoreIntrospectContext | None, ToolResponse | None]:
+    run_id = request.run_id
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        if not (store.run_dir(run_id) / "manifest.json").is_file():
+            return None, _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return None, ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    validation_failure = _validate_vmcore_introspect_request(request, store=store, manifest=manifest)
+    if validation_failure is not None:
+        return None, validation_failure
+
+    run_dir = store.run_dir(run_id)
+    inputs, input_failure = _resolve_vmcore_introspect_inputs(request, run_dir=run_dir, build_id_reader=build_id_reader)
+    if input_failure is not None:
+        return None, input_failure
+    inputs = _require_value(inputs, "vmcore introspect inputs missing after successful resolution")
+    return (
         VmcoreIntrospectContext(
             store=store,
             run_id=run_id,
             run_dir=run_dir,
             redactor=Redactor(secret_values=[]),
-            vmcore_path=vmcore_path,
-            vmlinux_path=resolved.vmlinux_path,
-            modules_path=str(resolved.modules_path) if resolved.modules_path is not None else None,
-            expected_build_id=expected_build_id,
+            vmcore_path=inputs.vmcore_path,
+            vmlinux_path=inputs.vmlinux_path,
+            modules_path=inputs.modules_path,
+            expected_build_id=inputs.expected_build_id,
         ),
         None,
     )
