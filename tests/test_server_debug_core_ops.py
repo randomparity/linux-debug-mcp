@@ -22,6 +22,7 @@ from kdive.coordination.admission import AdmissionService, publish_ready_snapsho
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.debug import handlers as debug_handlers
+from kdive.debug import operations as debug_operations
 from kdive.debug import tools as debug_tools
 from kdive.debug.tools import DebugToolContext, DebugToolHandlers
 from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus
@@ -341,6 +342,8 @@ def test_debug_tool_registration_groups_same_shaped_operations() -> None:
 def test_debug_operation_response_uses_runtime_bundle() -> None:
     import inspect
 
+    assert debug_operations._debug_operation_response.__module__ == "kdive.debug.operations"
+    assert server_module._debug_operation_response is debug_operations._debug_operation_response
     assert hasattr(debug_handlers, "DebugRuntime")
     params = inspect.signature(debug_handlers.debug_tool_operation_response).parameters
     assert get_type_hints(debug_handlers.debug_tool_operation_response)["runtime"] is debug_handlers.DebugRuntime
@@ -680,7 +683,7 @@ def test_op_persist_fault_keeps_healthy_session_registered(tmp_path: Path, monke
     def _boom(*_args, **_kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(server_module, "_persist_mi_debug_session", _boom)
+    monkeypatch.setattr(debug_operations, "_persist_mi_debug_session", _boom)
     response = debug_set_breakpoint_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
