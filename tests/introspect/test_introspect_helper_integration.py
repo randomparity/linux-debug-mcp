@@ -9,15 +9,14 @@ Gated identically to ``tests/test_drgn_introspect_integration.py``:
 Runs require a configured libvirt VM host with the env vars set; they SKIP
 cleanly without them.  Every test asserts ``resp.ok is True`` first so any
 handler failure surfaces the full error details.
-
-NOTE: Real-VM behavior is unverifiable without a configured libvirt host.
-These tests were authored to be structurally correct (import, collect, skip)
-but their live assertions have NOT been confirmed against a running VM.
-They must be validated on a VM host before being declared fully green.
+This is a manual/live VM suite; deterministic helper output contracts live in
+``tests/introspect/test_introspect_helpers.py``.
 """
 
 import contextlib
 import time
+
+import pytest
 
 # Re-use the shared gate, bootstrap helper, and _guest_ssh from the drgn
 # introspect integration module.  Cross-test imports work here because pytest
@@ -32,6 +31,24 @@ from test_drgn_introspect_integration import (
 
 from kdive.domain import DebugIntrospectHelperRequest
 from kdive.server import debug_introspect_helper_handler
+
+pytestmark = pytest.mark.live_vm
+
+
+def _poll_until(label: str, probe, predicate, *, timeout_seconds: float = 10.0, interval_seconds: float = 0.1):
+    deadline = time.monotonic() + timeout_seconds
+    last = None
+    while time.monotonic() < deadline:
+        last = probe()
+        if predicate(last):
+            return last
+        time.sleep(interval_seconds)
+    raise AssertionError(f"{label} did not become true within {timeout_seconds}s; last={last!r}")
+
+
+def test_live_helper_suite_is_marked_and_has_no_unvalidated_notice() -> None:
+    assert pytestmark.name == "live_vm"
+    assert "NOT been confirmed" not in (__doc__ or "")
 
 
 def _call_helper(
@@ -158,10 +175,11 @@ def test_tasks_dstate_blocker(tmp_path) -> None:
         ctx.rootfs_profile,
         ["sh", "-c", "nohup dd if=/dev/vda of=/dev/null bs=1M >/dev/null 2>&1 &"],
     )
-    # Give the process time to enter D state.
-    time.sleep(0.5)
-
-    resp = _call_helper(ctx, "tasks", {"states": ["D"], "limit": 100})
+    resp = _poll_until(
+        "D-state task appears",
+        lambda: _call_helper(ctx, "tasks", {"states": ["D"], "limit": 100}),
+        lambda response: response.ok and bool(response.data["result"]["tasks"]),
+    )
     assert resp.ok is True, resp.error
     d_tasks = resp.data["result"]["tasks"]
     assert d_tasks, "no D-state tasks found; is the blocker running and entering D state?"
@@ -189,28 +207,32 @@ def test_sysinfo_no_stop_the_world(tmp_path) -> None:
         ["sh", "-c", "nohup sh -c 'while :; do date +%s.%N >>/tmp/hb; sleep 0.05; done' >/dev/null 2>&1 &"],
     )
 
-    # Let the heartbeat accumulate samples before we run sysinfo.
-    time.sleep(0.5)
+    def heartbeat_samples() -> list[float]:
+        hb_text = _guest_ssh(ctx.run_id, ctx.store, ctx.rootfs_profile, ["cat", "/tmp/hb"])
+        samples = []
+        for line in hb_text.splitlines():
+            line = line.strip()
+            if line:
+                with contextlib.suppress(ValueError):
+                    samples.append(float(line))
+        samples.sort()
+        return samples
+
+    before_samples = _poll_until(
+        "heartbeat pre-samples",
+        heartbeat_samples,
+        lambda samples: len(samples) >= 4,
+    )
 
     sysinfo_resp = _call_helper(ctx, "sysinfo", {})
     assert sysinfo_resp.ok is True, sysinfo_resp.error
 
-    # Let the heartbeat accumulate more samples after sysinfo.
-    time.sleep(0.5)
-
-    hb_text = _guest_ssh(ctx.run_id, ctx.store, ctx.rootfs_profile, ["cat", "/tmp/hb"])
-    samples = []
-    for line in hb_text.splitlines():
-        line = line.strip()
-        if line:
-            with contextlib.suppress(ValueError):
-                samples.append(float(line))
-
-    assert len(samples) >= 4, (
-        f"heartbeat produced only {len(samples)} samples; expected several from the ~1 second window"
+    samples = _poll_until(
+        "heartbeat post-samples",
+        heartbeat_samples,
+        lambda current: len(current) >= len(before_samples) + 4,
     )
 
-    samples.sort()
     gaps = [samples[i + 1] - samples[i] for i in range(len(samples) - 1)]
     max_gap = max(gaps)
     # Threshold is ~10× the 0.05s heartbeat interval.  A multi-hundred-ms

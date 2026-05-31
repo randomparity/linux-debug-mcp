@@ -64,3 +64,6 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra"
+markers = [
+  "live_vm: requires an operator-provided live libvirt VM environment",
+]
