@@ -12,6 +12,7 @@ from kdive.domain import ToolResponse
 from kdive.model import Model
 from kdive.providers.debug import GdbMiEngine, GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard
+from kdive.workflow.handlers import WorkflowHandlerDependencies
 
 
 class BuildBootTestHandler(Protocol):
@@ -33,6 +34,7 @@ class BuildBootTestHandler(Protocol):
         acknowledged_permissions: list[str] | None,
         admission: AdmissionService,
         session_registry: SessionRegistry,
+        dependencies: WorkflowHandlerDependencies,
     ) -> ToolResponse: ...
 
 
@@ -57,6 +59,7 @@ class BuildBootDebugHandler(Protocol):
         session_guard: SessionGuard,
         gdb_mi_engine: GdbMiEngine,
         gdb_mi_sessions: GdbMiSessionRegistry,
+        dependencies: WorkflowHandlerDependencies,
     ) -> ToolResponse: ...
 
 
@@ -100,6 +103,7 @@ def register_workflow_tools(
     session_guard: SessionGuard,
     gdb_mi_engine: GdbMiEngine,
     gdb_mi_sessions: GdbMiSessionRegistry,
+    dependencies: WorkflowHandlerDependencies,
     build_boot_test_handler: BuildBootTestHandler,
     build_boot_debug_handler: BuildBootDebugHandler,
 ) -> None:
@@ -129,6 +133,7 @@ def register_workflow_tools(
             acknowledged_permissions=options.acknowledged_permissions,
             admission=admission,
             session_registry=session_registry,
+            dependencies=dependencies,
         ).model_dump(mode="json")
 
     @app.tool(name="workflow.build_boot_debug")
@@ -157,4 +162,5 @@ def register_workflow_tools(
             session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
+            dependencies=dependencies,
         ).model_dump(mode="json")

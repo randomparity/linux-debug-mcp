@@ -1,3 +1,4 @@
+from functools import partial
 from pathlib import Path
 
 from conftest import make_source_tree
@@ -202,9 +203,14 @@ def test_prerequisites_handler_lives_outside_server_catch_all() -> None:
 
 
 def test_debug_operation_handlers_live_outside_server_catch_all() -> None:
-    assert server.debug_read_registers_handler.__module__ == "kdive.debug.handlers"
-    assert server.debug_set_breakpoint_handler.__module__ == "kdive.debug.handlers"
-    assert server.debug_continue_handler.__module__ == "kdive.debug.handlers"
+    for handler in (
+        server.debug_read_registers_handler,
+        server.debug_set_breakpoint_handler,
+        server.debug_continue_handler,
+    ):
+        assert isinstance(handler, partial)
+        assert handler.func.__module__ == "kdive.debug.handlers"
+        assert handler.keywords == {"operation_core": server._debug_operation_response}
 
 
 def test_live_introspect_handlers_live_outside_server_catch_all() -> None:

@@ -25,7 +25,7 @@ from kdive.debug import handlers as debug_handlers
 from kdive.debug import operations as debug_operations
 from kdive.debug import tools as debug_tools
 from kdive.debug.tools import DebugToolContext, DebugToolHandlers
-from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus
+from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from kdive.introspect import execution as introspect_execution
 from kdive.providers.debug import GdbMiSessionRegistry as GdbMiSessionRegistryContract
 from kdive.providers.local.gdb_mi import (
@@ -335,6 +335,26 @@ def test_debug_operation_response_uses_runtime_bundle() -> None:
         "gdb_mi_sessions",
     ):
         assert dependency_name not in params
+
+
+def test_debug_operation_handlers_accept_explicit_operation_core(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def operation_core(**kwargs):
+        captured.update(kwargs)
+        return ToolResponse.success(summary="read", run_id=kwargs["run_id"], data={})
+
+    response = debug_handlers.debug_read_registers_handler(
+        artifact_root=tmp_path / "runs",
+        run_id="run-1",
+        registers=["rax"],
+        operation_core=operation_core,
+    )
+
+    assert response.ok is True
+    assert captured["artifact_root"] == tmp_path / "runs"
+    assert captured["run_id"] == "run-1"
+    assert isinstance(captured["request"], debug_handlers.DebugReadRegistersRequest)
 
 
 def test_server_private_helpers_are_canonical_imports() -> None:

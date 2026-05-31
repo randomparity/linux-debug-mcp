@@ -185,8 +185,9 @@ def workflow_build_boot_test_handler(
     acknowledged_permissions: list[str] | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
+    dependencies: WorkflowHandlerDependencies | None = None,
 ) -> ToolResponse:
-    dependencies = _workflow_dependencies()
+    dependencies = dependencies or _workflow_dependencies()
     if run_id is not None:
         try:
             store = ArtifactStore(artifact_root, create_root=False)
@@ -369,8 +370,9 @@ def workflow_build_boot_debug_handler(
     session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+    dependencies: WorkflowHandlerDependencies | None = None,
 ) -> ToolResponse:
-    dependencies = _workflow_dependencies()
+    dependencies = dependencies or _workflow_dependencies()
     if run_id is not None:
         try:
             store = ArtifactStore(artifact_root, create_root=False)

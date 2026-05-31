@@ -48,6 +48,7 @@ from kdive.seams.target import (
     TargetKey,
 )
 from kdive.server import (
+    _workflow_handler_dependencies,
     workflow_build_boot_debug_handler,
     workflow_build_boot_test_handler,
 )
@@ -179,6 +180,7 @@ def test_workflow_run_tests_rejects_when_target_halted(tmp_path: Path, monkeypat
         run_id=RUN_ID,
         admission=admission,
         session_registry=registry,
+        dependencies=_workflow_handler_dependencies(),
     )
 
     assert response.ok is False
@@ -290,6 +292,7 @@ def test_workflow_debug_acquires_guard_and_writes_halted_record(tmp_path: Path, 
         transaction=txn,
         gdb_mi_engine=FakeMiEngine(),
         gdb_mi_sessions=GdbMiSessionRegistry(),
+        dependencies=_workflow_handler_dependencies(),
     )
 
     assert response.ok is True

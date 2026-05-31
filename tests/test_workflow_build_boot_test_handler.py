@@ -50,19 +50,21 @@ def _install_workflow_dependencies(
     target_boot=server_module.target_boot_handler,
     target_run_tests=server_module.target_run_tests_handler,
     artifacts_collect=server_module.artifacts_collect_handler,
-) -> None:
+) -> WorkflowHandlerDependencies:
+    dependencies = WorkflowHandlerDependencies(
+        create_run_handler=create_run,
+        kernel_build_handler=kernel_build,
+        target_boot_handler=target_boot,
+        target_run_tests_handler=target_run_tests,
+        debug_start_session_handler=server_module.debug_start_session_handler,
+        artifacts_collect_handler=artifacts_collect,
+    )
     monkeypatch.setattr(
         workflow_handlers,
         "_WORKFLOW_DEPENDENCIES",
-        WorkflowHandlerDependencies(
-            create_run_handler=create_run,
-            kernel_build_handler=kernel_build,
-            target_boot_handler=target_boot,
-            target_run_tests_handler=target_run_tests,
-            debug_start_session_handler=server_module.debug_start_session_handler,
-            artifacts_collect_handler=artifacts_collect,
-        ),
+        dependencies,
     )
+    return dependencies
 
 
 def test_workflow_runs_build_boot_tests_and_collects(tmp_path: Path, monkeypatch) -> None:
@@ -88,6 +90,31 @@ def test_workflow_runs_build_boot_tests_and_collects(tmp_path: Path, monkeypatch
     assert response.ok is True
     assert calls == ["build", "boot", "tests", "collect"]
     assert response.data["latest_successful_step"] == "collect_artifacts"
+
+
+def test_workflow_accepts_explicit_dependencies_without_global_configuration(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(workflow_handlers, "_WORKFLOW_DEPENDENCIES", None)
+    calls: list[str] = []
+    dependencies = WorkflowHandlerDependencies(
+        create_run_handler=lambda **kwargs: success("created"),
+        kernel_build_handler=lambda **kwargs: calls.append("build") or success("built"),
+        target_boot_handler=lambda **kwargs: calls.append("boot") or success("booted"),
+        target_run_tests_handler=lambda **kwargs: calls.append("tests") or success("tested"),
+        debug_start_session_handler=server_module.debug_start_session_handler,
+        artifacts_collect_handler=lambda **kwargs: calls.append("collect") or success("collected"),
+    )
+
+    response = workflow_build_boot_test_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=str(tmp_path),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        dependencies=dependencies,
+    )
+
+    assert response.ok is True
+    assert calls == ["build", "boot", "tests", "collect"]
 
 
 def test_workflow_collects_and_returns_build_failure(tmp_path: Path, monkeypatch) -> None:
@@ -166,6 +193,14 @@ def test_workflow_rejects_existing_run_request_mismatch(tmp_path: Path) -> None:
         rootfs_profile="minimal",
         run_id="run-abc123",
         test_suite="smoke-basic",
+        dependencies=WorkflowHandlerDependencies(
+            create_run_handler=create_run_handler,
+            kernel_build_handler=server_module.kernel_build_handler,
+            target_boot_handler=server_module.target_boot_handler,
+            target_run_tests_handler=server_module.target_run_tests_handler,
+            debug_start_session_handler=server_module.debug_start_session_handler,
+            artifacts_collect_handler=server_module.artifacts_collect_handler,
+        ),
     )
 
     assert response.ok is False

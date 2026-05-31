@@ -276,6 +276,7 @@ def _debug_operation_handler(
     session_guard: SessionGuard | None,
     gdb_mi_engine: GdbMiEngine | None,
     gdb_mi_sessions: GdbMiSessionRegistry | None,
+    operation_core: DebugOperationCore,
 ) -> ToolResponse:
     return debug_tool_operation_response(
         request=request,
@@ -291,6 +292,7 @@ def _debug_operation_handler(
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ),
+        operation_core=operation_core,
     )
 
 
@@ -306,6 +308,7 @@ def debug_read_registers_handler(
     session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+    operation_core: DebugOperationCore = _default_debug_operation_core,
 ) -> ToolResponse:
     return _debug_operation_handler(
         request=DebugReadRegistersRequest(registers=registers),
@@ -319,6 +322,7 @@ def debug_read_registers_handler(
         session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
+        operation_core=operation_core,
     )
 
 
@@ -334,6 +338,7 @@ def debug_read_symbol_handler(
     session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+    operation_core: DebugOperationCore = _default_debug_operation_core,
 ) -> ToolResponse:
     return _debug_operation_handler(
         request=DebugReadSymbolRequest(symbol=symbol),
@@ -347,6 +352,7 @@ def debug_read_symbol_handler(
         session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
+        operation_core=operation_core,
     )
 
 
@@ -363,6 +369,7 @@ def debug_read_memory_handler(
     session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+    operation_core: DebugOperationCore = _default_debug_operation_core,
 ) -> ToolResponse:
     return _debug_operation_handler(
         request=DebugReadMemoryRequest(address=address, byte_count=byte_count),
@@ -376,6 +383,7 @@ def debug_read_memory_handler(
         session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
+        operation_core=operation_core,
     )
 
 
@@ -392,6 +400,7 @@ def debug_evaluate_handler(
     session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+    operation_core: DebugOperationCore = _default_debug_operation_core,
 ) -> ToolResponse:
     return _debug_operation_handler(
         request=DebugEvaluateRequest(inspector=inspector, arguments=arguments or {}),
@@ -405,6 +414,7 @@ def debug_evaluate_handler(
         session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
+        operation_core=operation_core,
     )
 
 
@@ -425,6 +435,7 @@ def _make_symbol_control_handler(
         session_guard: SessionGuard | None = None,
         gdb_mi_engine: GdbMiEngine | None = None,
         gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+        operation_core: DebugOperationCore = _default_debug_operation_core,
     ) -> ToolResponse:
         return _debug_operation_handler(
             request=request_factory(symbol),
@@ -438,6 +449,7 @@ def _make_symbol_control_handler(
             session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
+            operation_core=operation_core,
         )
 
     handler.__name__ = name
@@ -461,6 +473,7 @@ def _make_breakpoint_id_control_handler(
         session_guard: SessionGuard | None = None,
         gdb_mi_engine: GdbMiEngine | None = None,
         gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+        operation_core: DebugOperationCore = _default_debug_operation_core,
     ) -> ToolResponse:
         return _debug_operation_handler(
             request=request_factory(breakpoint_id),
@@ -474,6 +487,7 @@ def _make_breakpoint_id_control_handler(
             session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
+            operation_core=operation_core,
         )
 
     handler.__name__ = name
@@ -496,6 +510,7 @@ def _make_debug_session_query_handler(
         session_guard: SessionGuard | None = None,
         gdb_mi_engine: GdbMiEngine | None = None,
         gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+        operation_core: DebugOperationCore = _default_debug_operation_core,
     ) -> ToolResponse:
         return _debug_operation_handler(
             request=request_factory(),
@@ -509,6 +524,7 @@ def _make_debug_session_query_handler(
             session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
+            operation_core=operation_core,
         )
 
     handler.__name__ = name
@@ -532,6 +548,7 @@ def _make_debug_execution_control_handler(
         session_guard: SessionGuard | None = None,
         gdb_mi_engine: GdbMiEngine | None = None,
         gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+        operation_core: DebugOperationCore = _default_debug_operation_core,
     ) -> ToolResponse:
         return _debug_operation_handler(
             request=request_factory(timeout_seconds),
@@ -545,6 +562,7 @@ def _make_debug_execution_control_handler(
             session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
+            operation_core=operation_core,
         )
 
     handler.__name__ = name

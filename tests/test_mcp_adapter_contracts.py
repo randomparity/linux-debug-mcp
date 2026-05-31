@@ -14,6 +14,7 @@ from kdive.postmortem.tools import (
     register_postmortem_tools,
 )
 from kdive.transport.tools import TransportToolContext, TransportToolHandlers, register_transport_tools
+from kdive.workflow.handlers import WorkflowHandlerDependencies
 from kdive.workflow.tools import (
     WorkflowBuildBootDebugOptions,
     WorkflowProfileInputs,
@@ -249,6 +250,14 @@ def test_workflow_adapter_forwards_debug_collaborators_and_converts_artifact_roo
         calls.append(kwargs)
         return _success(run_id=kwargs["run_id"])
 
+    dependencies = WorkflowHandlerDependencies(
+        create_run_handler=lambda **_kwargs: _success(),
+        kernel_build_handler=lambda **_kwargs: _success(),
+        target_boot_handler=lambda **_kwargs: _success(),
+        target_run_tests_handler=lambda **_kwargs: _success(),
+        debug_start_session_handler=lambda **_kwargs: _success(),
+        artifacts_collect_handler=lambda **_kwargs: _success(),
+    )
     register_workflow_tools(
         app,
         default_artifact_root=tmp_path / "default",
@@ -258,6 +267,7 @@ def test_workflow_adapter_forwards_debug_collaborators_and_converts_artifact_roo
         session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
+        dependencies=dependencies,
         build_boot_test_handler=lambda **_kwargs: _success(),
         build_boot_debug_handler=build_boot_debug_handler,
     )
@@ -299,5 +309,6 @@ def test_workflow_adapter_forwards_debug_collaborators_and_converts_artifact_roo
             "session_guard": session_guard,
             "gdb_mi_engine": gdb_mi_engine,
             "gdb_mi_sessions": gdb_mi_sessions,
+            "dependencies": dependencies,
         }
     ]

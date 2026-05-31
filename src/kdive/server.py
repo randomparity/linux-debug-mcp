@@ -16,6 +16,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, cast
 
@@ -61,7 +62,6 @@ from kdive.coordination.lease import ConsoleLeaseManager
 from kdive.coordination.registry import OrphanReap, SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.debug.handlers import (
-    configure_debug_operation_core,
     debug_backtrace_handler,
     debug_clear_breakpoint_handler,
     debug_clear_watchpoint_handler,
@@ -264,7 +264,7 @@ from kdive.transport.proxy import AgentProxyBackend
 from kdive.transport.qemu_gdbstub import QemuGdbstubTransport
 from kdive.transport.tools import TransportToolContext, TransportToolHandlers, register_transport_tools
 from kdive.workflow.handlers import (
-    configure_workflow_handlers,
+    WorkflowHandlerDependencies,
     workflow_build_boot_debug_handler,
     workflow_build_boot_test_handler,
 )
@@ -4065,17 +4065,33 @@ def debug_end_session_handler(
     return response
 
 
-configure_debug_operation_core(_debug_operation_response)
+def _workflow_handler_dependencies() -> WorkflowHandlerDependencies:
+    return WorkflowHandlerDependencies(
+        create_run_handler=create_run_handler,
+        kernel_build_handler=kernel_build_handler,
+        target_boot_handler=target_boot_handler,
+        target_run_tests_handler=target_run_tests_handler,
+        debug_start_session_handler=debug_start_session_handler,
+        artifacts_collect_handler=artifacts_collect_handler,
+    )
 
 
-configure_workflow_handlers(
-    create_run_handler=create_run_handler,
-    kernel_build_handler=kernel_build_handler,
-    target_boot_handler=target_boot_handler,
-    target_run_tests_handler=target_run_tests_handler,
-    debug_start_session_handler=debug_start_session_handler,
-    artifacts_collect_handler=artifacts_collect_handler,
-)
+debug_read_registers_handler = partial(debug_read_registers_handler, operation_core=_debug_operation_response)
+debug_read_symbol_handler = partial(debug_read_symbol_handler, operation_core=_debug_operation_response)
+debug_read_memory_handler = partial(debug_read_memory_handler, operation_core=_debug_operation_response)
+debug_evaluate_handler = partial(debug_evaluate_handler, operation_core=_debug_operation_response)
+debug_set_breakpoint_handler = partial(debug_set_breakpoint_handler, operation_core=_debug_operation_response)
+debug_set_watchpoint_handler = partial(debug_set_watchpoint_handler, operation_core=_debug_operation_response)
+debug_clear_breakpoint_handler = partial(debug_clear_breakpoint_handler, operation_core=_debug_operation_response)
+debug_clear_watchpoint_handler = partial(debug_clear_watchpoint_handler, operation_core=_debug_operation_response)
+debug_list_breakpoints_handler = partial(debug_list_breakpoints_handler, operation_core=_debug_operation_response)
+debug_backtrace_handler = partial(debug_backtrace_handler, operation_core=_debug_operation_response)
+debug_list_variables_handler = partial(debug_list_variables_handler, operation_core=_debug_operation_response)
+debug_continue_handler = partial(debug_continue_handler, operation_core=_debug_operation_response)
+debug_step_handler = partial(debug_step_handler, operation_core=_debug_operation_response)
+debug_next_handler = partial(debug_next_handler, operation_core=_debug_operation_response)
+debug_finish_handler = partial(debug_finish_handler, operation_core=_debug_operation_response)
+debug_interrupt_handler = partial(debug_interrupt_handler, operation_core=_debug_operation_response)
 
 
 def not_implemented_handler(tool_name: str, *, run_id: str | None = None) -> ToolResponse:
@@ -4587,6 +4603,7 @@ def create_app(
         session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
+        dependencies=_workflow_handler_dependencies(),
         build_boot_test_handler=workflow_build_boot_test_handler,
         build_boot_debug_handler=workflow_build_boot_debug_handler,
     )
