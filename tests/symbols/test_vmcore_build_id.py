@@ -89,6 +89,26 @@ def test_truncated_elf_raises_error(tmp_path) -> None:
         read_vmcore_build_id(p)
 
 
+def test_implausibly_small_program_header_entry_raises_error(tmp_path) -> None:
+    blob = bytearray(_elf64_with_notes(_note(b"VMCOREINFO", 0, b"BUILD-ID=" + BUILD_ID.encode() + b"\n")))
+    struct.pack_into("<H", blob, 54, 8)
+    p = tmp_path / "vmcore"
+    p.write_bytes(blob)
+
+    with pytest.raises(VmcoreBuildIdError, match="implausible e_phentsize"):
+        read_vmcore_build_id(p)
+
+
+def test_program_header_table_past_eof_raises_error(tmp_path) -> None:
+    blob = bytearray(_elf64_with_notes(_note(b"VMCOREINFO", 0, b"BUILD-ID=" + BUILD_ID.encode() + b"\n")))
+    struct.pack_into("<H", blob, 56, 8)
+    p = tmp_path / "vmcore"
+    p.write_bytes(blob)
+
+    with pytest.raises(VmcoreBuildIdError, match="extends past EOF"):
+        read_vmcore_build_id(p)
+
+
 def test_uppercase_build_id_is_lowercased(tmp_path) -> None:
     vmcoreinfo = b"BUILD-ID=ABCDEF0123456789ABCDEF0123456789ABCDEF01\n"
     blob = _note(b"VMCOREINFO", 0, vmcoreinfo)

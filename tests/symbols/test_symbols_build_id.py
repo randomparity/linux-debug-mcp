@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from kdive.symbols import BuildIdReadError, read_elf_build_id
+import kdive.symbols as symbols_package
+from kdive.symbols.build_id import BuildIdReadError, read_elf_build_id
+
+
+def test_symbols_package_does_not_reexport_leaf_apis() -> None:
+    assert not hasattr(symbols_package, "__all__")
+    assert not hasattr(symbols_package, "read_elf_build_id")
+
 
 BUILD_ID = bytes.fromhex("0123456789abcdef0123456789abcdef01234567")
 

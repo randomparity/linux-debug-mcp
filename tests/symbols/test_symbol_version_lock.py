@@ -18,7 +18,7 @@ from conftest import (
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.providers.local.gdb_mi import GdbMiSessionRegistry
 from kdive.server import debug_start_session_handler
 from kdive.symbols.build_id import BuildIdReadError
 
