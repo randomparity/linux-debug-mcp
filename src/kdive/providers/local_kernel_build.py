@@ -90,6 +90,10 @@ class BuildIdMissing(Exception):
 
 _BUILD_ID_LINE = re.compile(r"\s*Build ID:\s*([0-9a-fA-F]+)")
 
+# Wall-clock ceiling for the `readelf -n` build-id probe. Reading the note headers of a local
+# vmlinux is near-instant; the cap only guards against a hung/blocked subprocess.
+READELF_TIMEOUT_SECONDS = 10
+
 
 def _extract_build_id(vmlinux: Path) -> str:
     """Return the lower-case hex ``.note.gnu.build-id`` of *vmlinux*.
@@ -104,7 +108,7 @@ def _extract_build_id(vmlinux: Path) -> str:
             capture_output=True,
             text=True,
             check=False,
-            timeout=10,
+            timeout=READELF_TIMEOUT_SECONDS,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         raise ReadelfUnavailable(str(exc)) from exc

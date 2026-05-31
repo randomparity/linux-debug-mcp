@@ -98,6 +98,11 @@ def _tool_check(tool: str, runner: PrerequisiteRunner) -> PrerequisiteCheck:
 _GDB_VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.\d+)?")
 _MI_MIN_VERSION = (9, 1)
 
+# Wall-clock ceilings for prerequisite probes. These are local `--version`/`uri`/`capabilities`
+# calls that normally return in well under a second; the cap only bounds a hung tool.
+GDB_CHECK_TIMEOUT_SECONDS = 10
+VIRSH_CHECK_TIMEOUT_SECONDS = 10
+
 
 def _parse_gdb_version(text: str) -> tuple[int, int] | None:
     """Parse gdb's OWN version from ``gdb --version``. gdb prints it as the last whitespace-delimited
@@ -129,13 +134,14 @@ def _gdb_mi_capability_check(runner: PrerequisiteRunner) -> PrerequisiteCheck:
             suggested_fix=f"Install gdb >= {required} with your distribution package manager.",
         )
     try:
-        _code, version_out, _err = runner.run(["gdb", "--version"], 10)
+        _code, version_out, _err = runner.run(["gdb", "--version"], GDB_CHECK_TIMEOUT_SECONDS)
         # Run a real mi3 MI command and require a well-formed `^done`, not merely that the `mi3` name
         # is accepted. `-ex "interpreter-exec mi3 ..."` runs the MI command from CLI mode and prints
         # its MI records to stdout, so no stdin is needed (the runner has no stdin channel). On a gdb
         # without a working mi3 interpreter, interpreter-exec errors and no `^done` is produced.
         mi_code, mi_out, _mi_err = runner.run(
-            ["gdb", "-nx", "-q", "-ex", 'interpreter-exec mi3 "-list-features"', "-ex", "quit"], 10
+            ["gdb", "-nx", "-q", "-ex", 'interpreter-exec mi3 "-list-features"', "-ex", "quit"],
+            GDB_CHECK_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
         return PrerequisiteCheck(
@@ -291,7 +297,7 @@ def _libvirt_check(enable_libvirt_check: bool, runner: PrerequisiteRunner) -> Pr
             suggested_fix="Install libvirt client tools before enabling the libvirt URI check.",
         )
     try:
-        code, stdout, stderr = runner.run(["virsh", "uri"], timeout=10)
+        code, stdout, stderr = runner.run(["virsh", "uri"], timeout=VIRSH_CHECK_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as exc:
         return PrerequisiteCheck(
             check_id="libvirt.uri",
@@ -600,7 +606,7 @@ def check_libvirt_connect(
             suggested_fix="Install libvirt client tools.",
         )
     try:
-        code, _stdout, stderr = runner.run(["virsh", "-c", uri, "capabilities"], timeout=10)
+        code, _stdout, stderr = runner.run(["virsh", "-c", uri, "capabilities"], timeout=VIRSH_CHECK_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as exc:
         return PrerequisiteCheck(
             check_id="libvirt.connect",

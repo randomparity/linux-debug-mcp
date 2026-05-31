@@ -25,6 +25,13 @@ from kdive.domain import (
 
 MCP_METADATA_NS = "urn:kdive:domain"
 QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
+
+# Default guest sizing for the local libvirt/QEMU boot. One vCPU and 1 GiB suffice for the
+# smoke/boot/gdbstub workflows kdive runs today; revisit (or expose via TargetProfile) if a
+# workload needs more.
+QEMU_DOMAIN_MEMORY_MIB = 1024
+QEMU_DOMAIN_VCPU_COUNT = 1
+
 ElementTree.register_namespace("ldmcp", MCP_METADATA_NS)
 ElementTree.register_namespace("qemu", QEMU_NS)
 
@@ -645,8 +652,8 @@ class LibvirtQemuProvider:
     def render_domain_xml(self, plan: BootPlan) -> str:
         domain = ElementTree.Element("domain", {"type": "kvm"})
         ElementTree.SubElement(domain, "name").text = plan.domain_name
-        ElementTree.SubElement(domain, "memory", {"unit": "MiB"}).text = "1024"
-        ElementTree.SubElement(domain, "vcpu").text = "1"
+        ElementTree.SubElement(domain, "memory", {"unit": "MiB"}).text = str(QEMU_DOMAIN_MEMORY_MIB)
+        ElementTree.SubElement(domain, "vcpu").text = str(QEMU_DOMAIN_VCPU_COUNT)
 
         metadata = ElementTree.SubElement(domain, "metadata")
         ownership = ElementTree.SubElement(metadata, self._metadata_tag("kdive"))

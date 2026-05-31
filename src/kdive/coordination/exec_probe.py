@@ -7,7 +7,7 @@ from kdive.coordination.registry import SessionRegistry
 from kdive.seams.target import TargetKey
 from kdive.transport.base import ExecutionState, TcpEndpoint, TransportSession
 from kdive.transport.bounded import BoundedIOTimeout, Deadline, connect_tcp
-from kdive.transport.rsp_probe import rsp_frame
+from kdive.transport.rsp_probe import RSP_MAX_ACCUMULATE_BYTES, rsp_frame
 
 
 def probe_execution_state(
@@ -81,7 +81,7 @@ def probe_rsp_halted(
             stop_reply = _first_stop_reply(buffer)
             if stop_reply is not None:
                 return True
-            if len(buffer) > 4096:  # bounded: do not accumulate unboundedly
+            if len(buffer) > RSP_MAX_ACCUMULATE_BYTES:
                 break
     except OSError:
         return False
