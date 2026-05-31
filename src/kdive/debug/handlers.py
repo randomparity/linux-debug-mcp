@@ -203,24 +203,6 @@ def _default_debug_operation_core(
     )
 
 
-def _debug_operation_handler(
-    *,
-    request: DebugOperationRequest,
-    artifact_root: Path,
-    run_id: str,
-    debug_session_id: str | None,
-    runtime: DebugRuntime,
-    operation_core: DebugOperationCore,
-) -> ToolResponse:
-    return operation_core(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        request=request,
-        runtime=runtime,
-    )
-
-
 def debug_read_registers_handler(
     *,
     artifact_root: Path,
@@ -230,13 +212,12 @@ def debug_read_registers_handler(
     debug_session_id: str | None = None,
     operation_core: DebugOperationCore = _default_debug_operation_core,
 ) -> ToolResponse:
-    return _debug_operation_handler(
-        request=DebugReadRegistersRequest(registers=registers),
+    return operation_core(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
+        request=DebugReadRegistersRequest(registers=registers),
         runtime=runtime,
-        operation_core=operation_core,
     )
 
 
@@ -249,13 +230,12 @@ def debug_read_symbol_handler(
     debug_session_id: str | None = None,
     operation_core: DebugOperationCore = _default_debug_operation_core,
 ) -> ToolResponse:
-    return _debug_operation_handler(
-        request=DebugReadSymbolRequest(symbol=symbol),
+    return operation_core(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
+        request=DebugReadSymbolRequest(symbol=symbol),
         runtime=runtime,
-        operation_core=operation_core,
     )
 
 
@@ -269,13 +249,12 @@ def debug_read_memory_handler(
     debug_session_id: str | None = None,
     operation_core: DebugOperationCore = _default_debug_operation_core,
 ) -> ToolResponse:
-    return _debug_operation_handler(
-        request=DebugReadMemoryRequest(address=address, byte_count=byte_count),
+    return operation_core(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
+        request=DebugReadMemoryRequest(address=address, byte_count=byte_count),
         runtime=runtime,
-        operation_core=operation_core,
     )
 
 
@@ -289,13 +268,12 @@ def debug_evaluate_handler(
     debug_session_id: str | None = None,
     operation_core: DebugOperationCore = _default_debug_operation_core,
 ) -> ToolResponse:
-    return _debug_operation_handler(
-        request=DebugEvaluateRequest(inspector=inspector, arguments=arguments or {}),
+    return operation_core(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
+        request=DebugEvaluateRequest(inspector=inspector, arguments=arguments or {}),
         runtime=runtime,
-        operation_core=operation_core,
     )
 
 
@@ -312,13 +290,12 @@ def _make_symbol_control_handler(
         debug_session_id: str | None = None,
         operation_core: DebugOperationCore = _default_debug_operation_core,
     ) -> ToolResponse:
-        return _debug_operation_handler(
-            request=request_factory(symbol),
+        return operation_core(
             artifact_root=artifact_root,
             run_id=run_id,
             debug_session_id=debug_session_id,
+            request=request_factory(symbol),
             runtime=runtime,
-            operation_core=operation_core,
         )
 
     handler.__name__ = name
@@ -338,13 +315,12 @@ def _make_breakpoint_id_control_handler(
         debug_session_id: str | None = None,
         operation_core: DebugOperationCore = _default_debug_operation_core,
     ) -> ToolResponse:
-        return _debug_operation_handler(
-            request=request_factory(breakpoint_id),
+        return operation_core(
             artifact_root=artifact_root,
             run_id=run_id,
             debug_session_id=debug_session_id,
+            request=request_factory(breakpoint_id),
             runtime=runtime,
-            operation_core=operation_core,
         )
 
     handler.__name__ = name
@@ -363,13 +339,12 @@ def _make_debug_session_query_handler(
         debug_session_id: str | None = None,
         operation_core: DebugOperationCore = _default_debug_operation_core,
     ) -> ToolResponse:
-        return _debug_operation_handler(
-            request=request_factory(),
+        return operation_core(
             artifact_root=artifact_root,
             run_id=run_id,
             debug_session_id=debug_session_id,
+            request=request_factory(),
             runtime=runtime,
-            operation_core=operation_core,
         )
 
     handler.__name__ = name
@@ -389,13 +364,12 @@ def _make_debug_execution_control_handler(
         debug_session_id: str | None = None,
         operation_core: DebugOperationCore = _default_debug_operation_core,
     ) -> ToolResponse:
-        return _debug_operation_handler(
-            request=request_factory(timeout_seconds),
+        return operation_core(
             artifact_root=artifact_root,
             run_id=run_id,
             debug_session_id=debug_session_id,
+            request=request_factory(timeout_seconds),
             runtime=runtime,
-            operation_core=operation_core,
         )
 
     handler.__name__ = name

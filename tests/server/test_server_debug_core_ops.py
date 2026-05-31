@@ -359,23 +359,14 @@ def test_debug_tool_registration_is_split_by_operation_family() -> None:
 
 
 def test_debug_operation_handler_builds_runtime_without_pass_through_layers() -> None:
-    import inspect
-
     assert debug_operations._debug_operation_response.__module__ == "kdive.debug.operations"
     assert hasattr(debug_handlers, "DebugRuntime")
     assert not hasattr(debug_handlers, "debug_tool_operation_response")
     assert not hasattr(debug_handlers, "_runtime_from_operation_args")
+    assert not hasattr(debug_handlers, "_debug_operation_handler")
     assert not hasattr(server_module, "_debug_operation_response")
     server_source = Path(server_module.__file__).read_text(encoding="utf-8")
     assert "operation_core=_debug_operation_response" not in server_source
-    params = inspect.signature(debug_handlers._debug_operation_handler).parameters
-    response_hints = get_type_hints(debug_handlers._debug_operation_handler)
-    assert response_hints["request"] is debug_handlers.DebugOperationRequest
-    assert "request" in params
-    assert "operation_core" in params
-    assert "runtime" in params
-    assert "operation_name" not in params
-    assert "values" not in params
 
 
 def test_debug_operation_handlers_accept_runtime_instead_of_dependency_bundle() -> None:
