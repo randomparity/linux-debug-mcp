@@ -6,6 +6,8 @@ ROOT = Path(__file__).parents[1]
 SERVER_SOURCE = ROOT / "src" / "kdive" / "server.py"
 INTROSPECT_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "introspect" / "handlers.py"
 INTROSPECT_EXECUTION_SOURCE = ROOT / "src" / "kdive" / "introspect" / "execution.py"
+POSTMORTEM_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "handlers.py"
+SHARED_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "handlers" / "shared.py"
 
 
 def test_extracted_handler_modules_do_not_import_server_module() -> None:
@@ -47,3 +49,14 @@ def test_live_introspection_does_not_keep_passthrough_wrappers() -> None:
 
     assert "def _execute_live_introspect_call(" not in handler_source
     assert "def _prepare_live_wrapper(" not in execution_source
+
+
+def test_target_probe_helpers_live_in_domain_named_module() -> None:
+    shared_source = SHARED_HANDLERS_SOURCE.read_text(encoding="utf-8")
+    introspect_source = INTROSPECT_HANDLERS_SOURCE.read_text(encoding="utf-8")
+    postmortem_source = POSTMORTEM_HANDLERS_SOURCE.read_text(encoding="utf-8")
+
+    assert "def _resolve_probe_context(" not in shared_source
+    assert "def _parse_probe_stdout(" not in shared_source
+    assert "from kdive.target.probes import" in introspect_source
+    assert "from kdive.target.probes import" in postmortem_source

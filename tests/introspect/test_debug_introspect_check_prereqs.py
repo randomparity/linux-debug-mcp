@@ -17,10 +17,10 @@ from kdive.domain import (
     StepResult,
     StepStatus,
 )
-from kdive.handlers.shared import PROBE_STDOUT_CAP
 from kdive.introspect.handlers import debug_introspect_check_prerequisites_handler
 from kdive.providers.local.local_ssh_tests import SshCommandResult
 from kdive.server import create_app
+from kdive.target.probes import PROBE_STDOUT_CAP
 from kdive.transport.base import ExecutionState
 
 VALID_BUILD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret

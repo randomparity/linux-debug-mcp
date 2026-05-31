@@ -32,14 +32,6 @@ from kdive.domain import (
     StepStatus,
     ToolResponse,
 )
-from kdive.handlers.shared import (
-    PROBE_STDOUT_CAP,
-    _assemble_probe_response,
-    _prepare_probe_dirs,
-    _reject_if_target_halted,
-    _require_value,
-    _resolve_probe_context,
-)
 from kdive.introspect.execution import (
     HELPER_CAP_PROFILE,
     RUN_STDOUT_CAP,
@@ -72,6 +64,14 @@ from kdive.seams.target import KernelProvenance
 from kdive.symbols.build_id import BuildIdReadError, read_elf_build_id
 from kdive.symbols.resolve import SymbolResolutionError, resolve_symbols
 from kdive.symbols.verify import BUILD_ID_RE
+from kdive.target.probes import (
+    PROBE_STDOUT_CAP,
+    _assemble_probe_response,
+    _prepare_probe_dirs,
+    _reject_if_target_halted,
+    _require_value,
+    _resolve_probe_context,
+)
 
 
 def debug_introspect_check_prerequisites_handler(

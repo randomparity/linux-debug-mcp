@@ -32,20 +32,6 @@ from kdive.domain import (
     StepStatus,
     ToolResponse,
 )
-from kdive.handlers.shared import (
-    PROBE_STDOUT_CAP,
-    _assemble_kdump_response,
-    _chmod_best_effort,
-    _configuration_failure,
-    _parse_probe_stdout,
-    _prepare_probe_dirs,
-    _redact_and_truncate,
-    _reject_if_target_halted,
-    _require_value,
-    _resolve_probe_context,
-    _target_python_remote_argv,
-    _validated_dump_dir,
-)
 from kdive.introspect.execution import _record_terminal_introspect_result, _utcnow
 from kdive.introspect.handlers import debug_introspect_from_vmcore_helper_handler
 from kdive.postmortem.crash_handler import (
@@ -75,6 +61,20 @@ from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner
 from kdive.safety.redaction import Redactor
 from kdive.symbols.build_id import read_elf_build_id
 from kdive.symbols.vmcore_build_id import read_vmcore_build_id
+from kdive.target.probes import (
+    PROBE_STDOUT_CAP,
+    _assemble_kdump_response,
+    _chmod_best_effort,
+    _configuration_failure,
+    _parse_probe_stdout,
+    _prepare_probe_dirs,
+    _redact_and_truncate,
+    _reject_if_target_halted,
+    _require_value,
+    _resolve_probe_context,
+    _target_python_remote_argv,
+    _validated_dump_dir,
+)
 
 SSH_TIMEOUT_GRACE_SECONDS = 10
 
