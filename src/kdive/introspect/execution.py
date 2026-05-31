@@ -33,9 +33,7 @@ from kdive.coordination.exec_probe import probe_execution_state
 from kdive.coordination.registry import SessionRegistry
 from kdive.default_profiles import DEFAULT_DEBUG_PROFILES, DEFAULT_ROOTFS_PROFILES, DEFAULT_TARGET_PROFILES
 from kdive.domain import ArtifactRef, DebugIntrospectRunRequest, ErrorCategory, StepResult, StepStatus, ToolResponse
-from kdive.introspect_helpers import HelperSpec
-from kdive.providers.debug import ProviderDebugError
-from kdive.providers.introspect import (
+from kdive.introspect.wrappers import (
     SCRIPT_BYTE_CAP,
     TARGET_PYTHON_ARGV,
     WrapperRenderError,
@@ -43,6 +41,8 @@ from kdive.providers.introspect import (
     render_wrapper_skeleton,
     user_script_sha256,
 )
+from kdive.introspect_helpers import HelperSpec
+from kdive.providers.debug import ProviderDebugError
 from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner, build_ssh_argv
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import TargetKey

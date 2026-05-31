@@ -25,6 +25,12 @@ def test_local_provider_modules_are_grouped_by_capability_family() -> None:
         assert (local_root / family / "__init__.py").is_file()
 
 
+def test_provider_package_has_no_local_introspect_facade() -> None:
+    provider_root = Path(__file__).parents[2] / "src" / "kdive" / "providers"
+
+    assert not (provider_root / "introspect.py").exists()
+
+
 def capability(name: str) -> ProviderCapability:
     return ProviderCapability(
         provider_name=name,

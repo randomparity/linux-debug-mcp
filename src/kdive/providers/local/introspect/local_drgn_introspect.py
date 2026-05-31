@@ -14,28 +14,28 @@ from kdive.domain import (
     ProviderOperationCapability,
     TargetKind,
 )
-from kdive.providers.introspect import (
+from kdive.introspect.wrappers import (
     SCRIPT_BYTE_CAP as SCRIPT_BYTE_CAP,
 )
-from kdive.providers.introspect import (
+from kdive.introspect.wrappers import (
     TARGET_PYTHON_ARGV as TARGET_PYTHON_ARGV,
 )
-from kdive.providers.introspect import (
+from kdive.introspect.wrappers import (
     WrapperRenderError as WrapperRenderError,
 )
-from kdive.providers.introspect import (
+from kdive.introspect.wrappers import (
     render_vmcore_wrapper as render_vmcore_wrapper,
 )
-from kdive.providers.introspect import (
+from kdive.introspect.wrappers import (
     render_vmcore_wrapper_skeleton as render_vmcore_wrapper_skeleton,
 )
-from kdive.providers.introspect import (
+from kdive.introspect.wrappers import (
     render_wrapper as render_wrapper,
 )
-from kdive.providers.introspect import (
+from kdive.introspect.wrappers import (
     render_wrapper_skeleton as render_wrapper_skeleton,
 )
-from kdive.providers.introspect import (
+from kdive.introspect.wrappers import (
     user_script_sha256 as user_script_sha256,
 )
 from kdive.providers.local.introspect.drgn_live_wrapper import (

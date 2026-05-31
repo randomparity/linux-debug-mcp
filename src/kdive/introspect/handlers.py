@@ -43,14 +43,14 @@ from kdive.introspect.execution import (
     _redact_and_truncate,
     _utcnow,
 )
-from kdive.introspect_helpers import get_helper_registry
-from kdive.providers.introspect import (
+from kdive.introspect.wrappers import (
     SCRIPT_BYTE_CAP,
     WrapperRenderError,
     render_vmcore_wrapper,
     render_vmcore_wrapper_skeleton,
     user_script_sha256,
 )
+from kdive.introspect_helpers import get_helper_registry
 from kdive.providers.ssh import SshRunner, SubprocessSshRunner
 from kdive.safety.paths import PathSafetyError, confine_run_relative
 from kdive.safety.redaction import Redactor
