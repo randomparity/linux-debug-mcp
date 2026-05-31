@@ -62,7 +62,7 @@ def test_engine_attaches_reads_one_record_and_detaches(tmp_path: Path, monkeypat
 
     from kdive import server
     from kdive.config import RootfsProfile, TargetProfile
-    from kdive.providers.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiEngine, MiRecord
+    from kdive.providers.local.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiEngine, MiRecord
     from kdive.seams.target import TargetKey
     from kdive.server import (
         _build_transport_machinery,

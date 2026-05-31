@@ -50,13 +50,14 @@ from conftest import (
 )
 
 from kdive.artifacts.store import ArtifactStore
-from kdive.config import TRANSPORT_DESTRUCTIVE_PERMISSIONS
+from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, TRANSPORT_DESTRUCTIVE_PERMISSIONS
 from kdive.coordination.admission import (
     AdmissionError,
     AdmissionOp,
     AdmissionService,
     SnapshotStore,
     TargetSnapshot,
+    publish_ready_snapshot,
 )
 from kdive.coordination.endpoint_safety import EndpointSafetyError
 from kdive.coordination.exec_probe import probe_execution_state
@@ -68,7 +69,7 @@ from kdive.coordination.registry import (
 )
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ErrorCategory, StepResult, StepStatus
-from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.providers.local.gdb_mi import GdbMiSessionRegistry
 from kdive.safety.redaction import REDACTION, Redactor
 from kdive.seams.guard import InProcessStopCapableGuard
 from kdive.seams.lifecycle import (
@@ -79,7 +80,6 @@ from kdive.seams.lifecycle import (
 from kdive.seams.target import (
     TargetKey,
     TargetState,
-    publish_ready_snapshot,
 )
 from kdive.server import (
     _halt_debug_transport,
@@ -279,6 +279,50 @@ def test_writeahead_record_found_and_released_on_restart(tmp_path: Path) -> None
     restarted.reconcile(proxy=proxy, admission=AdmissionService(SnapshotStore()))
     assert proxy.reaped == [(9999, "t-99")]
     assert restarted.read_record(KEY) is None
+
+
+def test_close_releases_owned_lines_when_backend_close_raises(tmp_path: Path) -> None:
+    class FailingCloseTransport(FakeQemuTransport):
+        def close(self, session) -> None:  # type: ignore[override]
+            super().close(session)
+            raise RuntimeError("backend close failed")
+
+    registry = SessionRegistry(directory=tmp_path)
+    transport = FailingCloseTransport()
+    txn, admission = build_txn(transport, registry=registry)
+    session = txn.open(make_request())
+
+    with pytest.raises(RuntimeError, match="backend close failed"):
+        txn.close(session.session_id)
+
+    assert transport.closed == [session.session_id]
+    assert registry.read_record(KEY) is None
+    assert admission._bindings.get(KEY, []) == []
+
+    reopened = txn.open(make_request())
+    assert reopened.session_id != session.session_id
+
+
+def test_open_rollback_unsubscribes_lifecycle_subscriber_after_subscribe_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = SessionRegistry(directory=tmp_path)
+    txn, _admission = build_txn(FakeQemuTransport(), registry=registry)
+    dispatcher = InProcessLifecycleDispatcher()
+    txn.bind_lifecycle(dispatcher)
+    original_subscribe = txn._subscribe_session
+
+    def subscribe_then_fail(session, state) -> None:
+        original_subscribe(session, state)
+        raise RuntimeError("post-subscribe failure")
+
+    monkeypatch.setattr(txn, "_subscribe_session", subscribe_then_fail)
+
+    with pytest.raises(RuntimeError, match="post-subscribe failure"):
+        txn.open(make_request())
+
+    assert registry.read_record(KEY) is None
+    assert dispatcher._subscribers.get(KEY, {}) == {}
 
 
 def test_second_server_instance_fails_loud_on_flock(tmp_path: Path) -> None:
@@ -1012,6 +1056,7 @@ def _boot_run(artifact_root, tmp_path, admission, *, force_reboot: bool = False)
         provider=FakeBootProvider(),
         admission=admission,
         force_reboot=force_reboot,
+        acknowledged_permissions=TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"],
         **profiles(tmp_path, target=_debug_target_profile()),
     )
 

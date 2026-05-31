@@ -9,7 +9,7 @@ import pytest
 
 from kdive.config import RootfsProfile, TargetProfile
 from kdive.domain import ErrorCategory, StepStatus
-from kdive.providers.libvirt_qemu import (
+from kdive.providers.local.libvirt_qemu import (
     CommandResult,
     ConsoleResult,
     LibvirtQemuProvider,
@@ -84,6 +84,11 @@ def make_plan(
         target_profile=target_profile(cleanup_policy=cleanup_policy),
         rootfs_profile=rootfs_profile(rootfs, mutability=mutability),
     )
+
+
+def test_provider_uses_boot_planner_collaborator() -> None:
+    provider = LibvirtQemuProvider()
+    assert type(provider._boot_planner).__name__ == "_BootPlanner"
 
 
 @pytest.mark.parametrize("mutability", ["read_only", "mutable"])
@@ -1002,6 +1007,29 @@ def test_execute_boot_stop_on_failure_destroys_after_start_failure(
     assert result.details["cleanup"]["exit_status"] == 0
 
 
+def test_execute_boot_cleanup_exception_preserves_start_failure(tmp_path: Path) -> None:
+    class RaisingDestroyRunner(FakeLibvirtRunner):
+        def run(self, argv: list[str], *, timeout: int, log_path: Path | None = None) -> CommandResult:
+            if argv == plan.destroy_argv:
+                self.commands.append(argv)
+                raise RuntimeError("virsh destroy exploded")
+            return super().run(argv, timeout=timeout, log_path=log_path)
+
+    plan = make_plan(tmp_path, cleanup_policy="stop_on_failure")
+    runner = RaisingDestroyRunner(start=CommandResult(plan.start_argv, 1, stderr="start failed\n"))
+
+    result = LibvirtQemuProvider(runner=runner).execute_boot(plan)
+
+    assert result.status == StepStatus.FAILED
+    assert result.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert result.summary == "libvirt start command failed"
+    assert result.details["command"] == "start"
+    assert result.details["exit_status"] == 1
+    assert result.details["cleanup"]["argv"] == plan.destroy_argv
+    assert result.details["cleanup"]["exception_type"] == "RuntimeError"
+    assert result.details["cleanup"]["error"] == "virsh destroy exploded"
+
+
 def test_execute_boot_stop_on_failure_destroys_after_console_evidence(tmp_path: Path) -> None:
     plan = make_plan(tmp_path, cleanup_policy="stop_on_failure")
     console = ConsoleResult(
@@ -1188,7 +1216,7 @@ def test_render_domain_xml_copy_on_write_points_at_overlay_and_is_writable(tmp_p
 
 
 def test_capability_advertises_qemu_img() -> None:
-    from kdive.providers.libvirt_qemu import local_libvirt_qemu_capability
+    from kdive.providers.local.libvirt_qemu import local_libvirt_qemu_capability
 
     capability = local_libvirt_qemu_capability()
     assert "qemu-img" in capability.required_host_tools

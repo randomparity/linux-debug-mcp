@@ -1,6 +1,8 @@
 import pytest
 
-from kdive.introspect_helpers import HELPER_REGISTRY, built_in_helper_specs
+import kdive.introspect_helpers as helpers_module
+import kdive.server as server_module
+from kdive.introspect_helpers import built_in_helper_specs, get_helper_registry
 from kdive.introspect_helpers.base import HelperSpec
 
 
@@ -11,8 +13,15 @@ def test_registry_names_are_unique_and_expected() -> None:
 
 
 def test_registry_maps_name_to_spec() -> None:
-    assert isinstance(HELPER_REGISTRY["sysinfo"], HelperSpec)
-    assert HELPER_REGISTRY["sysinfo"].version >= 1
+    registry = get_helper_registry()
+    assert isinstance(registry["sysinfo"], HelperSpec)
+    assert registry["sysinfo"].version >= 1
+
+
+def test_server_uses_cached_helper_registry_accessor() -> None:
+    assert get_helper_registry() is get_helper_registry()
+    assert "HELPER_REGISTRY" not in server_module.__dict__
+    assert "HELPER_REGISTRY" not in helpers_module.__dict__
 
 
 def test_every_spec_script_calls_emit() -> None:
@@ -229,7 +238,7 @@ def test_helper_op_in_allowlist() -> None:
 
 
 def test_capability_advertises_helper_op() -> None:
-    from kdive.providers.local_drgn_introspect import local_drgn_introspect_capability
+    from kdive.providers.local.local_drgn_introspect import local_drgn_introspect_capability
 
     assert "debug.introspect.helper" in local_drgn_introspect_capability().operations
 
@@ -242,7 +251,7 @@ def test_capability_advertises_helper_op() -> None:
 def test_post_validator_drift_on_zero_emits() -> None:
     from kdive.server import _make_helper_post_validator
 
-    v = _make_helper_post_validator(HELPER_REGISTRY["sysinfo"])
+    v = _make_helper_post_validator(get_helper_registry()["sysinfo"])
     verdict = v({"emits": []})
     assert verdict is not None and verdict.ok is False
     assert verdict.failure_code == "helper_schema_drift"
@@ -251,14 +260,14 @@ def test_post_validator_drift_on_zero_emits() -> None:
 def test_post_validator_drift_on_two_emits() -> None:
     from kdive.server import _make_helper_post_validator
 
-    v = _make_helper_post_validator(HELPER_REGISTRY["sysinfo"])
+    v = _make_helper_post_validator(get_helper_registry()["sysinfo"])
     assert v({"emits": [{}, {}]}).ok is False
 
 
 def test_post_validator_ok_on_valid_single_emit() -> None:
     from kdive.server import _make_helper_post_validator
 
-    v = _make_helper_post_validator(HELPER_REGISTRY["sysinfo"])
+    v = _make_helper_post_validator(get_helper_registry()["sysinfo"])
     good = {
         "emits": [
             {
@@ -280,7 +289,7 @@ def test_post_validator_ok_on_valid_single_emit() -> None:
 def test_post_validator_redacted_emit_still_validates() -> None:
     from kdive.server import _make_helper_post_validator
 
-    v = _make_helper_post_validator(HELPER_REGISTRY["dmesg"])
+    v = _make_helper_post_validator(get_helper_registry()["dmesg"])
     payload = {"emits": [{"entries": [{"ts_usec": 1, "level": 6, "text": "[REDACTED]"}], "truncated": False}]}
     assert v(payload).ok is True
 
@@ -312,7 +321,7 @@ def test_default_list_helpers_fit_helper_cap_profile() -> None:
 def test_post_validator_script_error_is_not_drift() -> None:
     from kdive.server import _make_helper_post_validator
 
-    v = _make_helper_post_validator(HELPER_REGISTRY["sysinfo"])
+    v = _make_helper_post_validator(get_helper_registry()["sysinfo"])
     payload = {
         "outcome": {
             "status": "error",

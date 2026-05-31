@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from kdive.domain import ErrorCategory
-from kdive.providers.gdb_mi import (
+from kdive.providers.local.gdb_mi import (
     BreakpointRef,
     Frame,
     GdbMiEngine,
@@ -93,6 +94,12 @@ def _attached(tmp_path: Path, writes: list[object], reads: list[object] | None =
 def test_fakecontroller_with_read_satisfies_protocol() -> None:
     controller = FakeController([[{"type": "result", "message": "done", "payload": None, "token": None}]])
     assert isinstance(controller, MiController)
+
+
+def test_engine_uses_execution_control_collaborator() -> None:
+    engine = _engine(FakeController([]))
+    assert type(engine._execution).__name__ == "_ExecutionControl"
+    assert "return self._execution.resume" in inspect.getsource(GdbMiEngine.resume)
 
 
 # --- Task 3: typed records ------------------------------------------------------------------------

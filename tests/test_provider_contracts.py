@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from kdive.providers.contracts import (
+from kdive.providers.contracts.models import (
     ConsoleReadRequest,
     ConsoleReadResult,
     ConsoleSessionRequest,

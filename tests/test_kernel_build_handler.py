@@ -6,10 +6,10 @@ from unittest.mock import patch
 from conftest import NoopBuildRunner as NoopRunner
 from conftest import add_merge_config_script, make_source_tree
 
-from kdive.providers.local_kernel_build import (
+from kdive.providers.local.local_kernel_build import (
     LocalKernelBuildProvider,
 )
-from kdive.providers.local_kernel_build import (
+from kdive.providers.local.local_kernel_build import (
     _extract_build_id as _REAL_EXTRACT_BUILD_ID,
 )
 from kdive.server import create_run_handler, kernel_build_handler
@@ -485,7 +485,7 @@ def test_readelf_unavailable_fails_build(tmp_path: Path) -> None:
     # ErrorCategory.INFRASTRUCTURE_FAILURE; code=readelf_unavailable.
     from kdive.artifacts.store import ArtifactStore
     from kdive.domain import StepStatus
-    from kdive.providers.local_kernel_build import ReadelfUnavailable
+    from kdive.providers.local.local_kernel_build import ReadelfUnavailable
 
     _, artifact_root = create_run(tmp_path)
     build_dir = artifact_root / "run-abc123" / "build"
@@ -493,7 +493,7 @@ def test_readelf_unavailable_fails_build(tmp_path: Path) -> None:
     (build_dir / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
 
     with patch(
-        "kdive.providers.local_kernel_build._extract_build_id",
+        "kdive.providers.local.local_kernel_build._extract_build_id",
         side_effect=ReadelfUnavailable("readelf not found"),
     ):
         response = kernel_build_handler(
@@ -515,7 +515,7 @@ def test_build_id_missing_fails_build(tmp_path: Path) -> None:
     # ErrorCategory.BUILD_FAILURE; code=build_id_missing.
     from kdive.artifacts.store import ArtifactStore
     from kdive.domain import StepStatus
-    from kdive.providers.local_kernel_build import BuildIdMissing
+    from kdive.providers.local.local_kernel_build import BuildIdMissing
 
     _, artifact_root = create_run(tmp_path)
     build_dir = artifact_root / "run-abc123" / "build"
@@ -523,7 +523,7 @@ def test_build_id_missing_fails_build(tmp_path: Path) -> None:
     (build_dir / "arch" / "x86" / "boot" / "bzImage").write_text("kernel", encoding="utf-8")
 
     with patch(
-        "kdive.providers.local_kernel_build._extract_build_id",
+        "kdive.providers.local.local_kernel_build._extract_build_id",
         side_effect=BuildIdMissing("no Build ID note"),
     ):
         response = kernel_build_handler(
@@ -569,11 +569,11 @@ def test_build_id_missing_failure_preserves_vmlinux_artifact(tmp_path: Path) -> 
     # `subprocess.run` seam underneath so readelf returns "no Build ID note".
     with (
         patch(
-            "kdive.providers.local_kernel_build._extract_build_id",
+            "kdive.providers.local.local_kernel_build._extract_build_id",
             _REAL_EXTRACT_BUILD_ID,
         ),
         patch(
-            "kdive.providers.local_kernel_build.subprocess.run",
+            "kdive.providers.local.local_kernel_build.subprocess.run",
             return_value=fake,
         ),
     ):

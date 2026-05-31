@@ -5,7 +5,7 @@ import pytest
 
 from kdive import server
 from kdive.config import RootfsProfile, TargetProfile
-from kdive.providers.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
+from kdive.providers.local.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
 from kdive.server import workflow_build_boot_debug_handler
 
 MANAGED_DOMAIN_PREFIX = "kdive-"

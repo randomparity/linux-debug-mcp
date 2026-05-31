@@ -1,5 +1,6 @@
 import socket
 import threading
+from typing import get_type_hints
 
 import pytest
 
@@ -13,6 +14,7 @@ from kdive.transport.base import (
     TcpEndpoint,
     TransportLocality,
     TransportRef,
+    TransportSession,
 )
 from kdive.transport.bounded import Deadline
 from kdive.transport.qemu_gdbstub import QemuGdbstubAttachError, QemuGdbstubTransport
@@ -44,6 +46,11 @@ def test_capability_flags():
     assert cap.provides_rsp and not cap.provides_console and not cap.supports_uart_break
     assert cap.locality is TransportLocality.LOCAL
     assert cap.endpoint_exposure is EndpointExposure.LOOPBACK_LOCAL
+
+
+def test_close_and_health_match_transport_session_protocol() -> None:
+    assert get_type_hints(QemuGdbstubTransport.close)["session"] is TransportSession
+    assert get_type_hints(QemuGdbstubTransport.health)["session"] is TransportSession
 
 
 def _serve(handler):

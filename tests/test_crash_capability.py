@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kdive.providers.local_crash_postmortem import local_crash_postmortem_capability
+from kdive.providers.local.local_crash_postmortem import local_crash_postmortem_capability
 from kdive.providers.plugins import local_provider_plugin_specs
 
 

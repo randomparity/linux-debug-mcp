@@ -1,5 +1,7 @@
 import pytest
 
+from kdive import providers
+from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS
 from kdive.domain import (
     ImplementationState,
     OperationSemantics,
@@ -7,6 +9,9 @@ from kdive.domain import (
     ProviderOperationCapability,
     TargetKind,
 )
+from kdive.model import Model
+from kdive.providers.compat import LEGACY_PROVIDER_MODULES
+from kdive.providers.local.qemu_gdbstub import DebugSession
 from kdive.providers.plugins import ProviderPluginSpec, local_provider_plugin_specs
 from kdive.providers.registry import ProviderRegistry
 
@@ -47,6 +52,37 @@ def test_registry_rejects_duplicate_names() -> None:
         registry.register(capability("local-artifacts"))
 
 
+def test_debug_session_uses_shared_model_base() -> None:
+    assert issubclass(DebugSession, Model)
+    assert DebugSession.__bases__ == (Model,)
+
+
+def test_registry_get_unknown_provider_has_contextual_error() -> None:
+    registry = ProviderRegistry()
+
+    with pytest.raises(KeyError, match="unknown provider: missing-provider") as exc_info:
+        registry.get("missing-provider")
+
+    assert isinstance(exc_info.value.__cause__, KeyError)
+
+
+def test_root_provider_legacy_shim_surface_is_explicit() -> None:
+    expected = {
+        "kdive.providers.drgn_vmcore_wrapper": "kdive.providers.local.drgn_vmcore_wrapper",
+        "kdive.providers.drgn_wrapper_common": "kdive.providers.local.drgn_wrapper_common",
+        "kdive.providers.gdb_mi": "kdive.providers.local.gdb_mi",
+        "kdive.providers.libvirt_qemu": "kdive.providers.local.libvirt_qemu",
+        "kdive.providers.local_crash_postmortem": "kdive.providers.local.local_crash_postmortem",
+        "kdive.providers.local_drgn_introspect": "kdive.providers.local.local_drgn_introspect",
+        "kdive.providers.local_kernel_build": "kdive.providers.local.local_kernel_build",
+        "kdive.providers.local_ssh_tests": "kdive.providers.local.local_ssh_tests",
+        "kdive.providers.local_vmcore_retrieval": "kdive.providers.local.local_vmcore_retrieval",
+        "kdive.providers.qemu_gdbstub": "kdive.providers.local.qemu_gdbstub",
+    }
+    assert expected == LEGACY_PROVIDER_MODULES
+    assert providers.LEGACY_PROVIDER_MODULES is LEGACY_PROVIDER_MODULES
+
+
 def test_default_registry_exposes_sprint_1_providers() -> None:
     registry = ProviderRegistry.with_defaults()
 
@@ -68,13 +104,7 @@ def test_default_registry_exposes_sprint_1_providers() -> None:
     assert libvirt_qemu.required_host_tools == ["virsh", "qemu-img"]
     assert libvirt_qemu.target_kinds == [TargetKind.VIRTUAL]
     assert libvirt_qemu.access_methods == ["libvirt", "serial-console", "filesystem"]
-    assert libvirt_qemu.destructive_permissions == [
-        "define MCP-owned libvirt domains",
-        "update MCP-owned libvirt domains",
-        "start MCP-owned libvirt domains",
-        "stop MCP-owned libvirt domains",
-        "destroy MCP-owned libvirt domains",
-    ]
+    assert libvirt_qemu.destructive_permissions == TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"]
     assert libvirt_qemu.semantics.idempotent is True
     assert libvirt_qemu.semantics.retryable is True
     assert libvirt_qemu.semantics.destructive is True
@@ -85,6 +115,10 @@ def test_default_registry_exposes_sprint_1_providers() -> None:
     assert ssh_tests.operations == ["target.run_tests"]
     assert ssh_tests.required_host_tools == ["ssh"]
     assert ssh_tests.target_kinds == [TargetKind.VIRTUAL]
+
+    qemu_gdbstub = providers["local-qemu-gdbstub"]
+    assert qemu_gdbstub.destructive_permissions == []
+    assert all(capability.destructive_permissions == [] for capability in qemu_gdbstub.operation_capabilities)
 
 
 def test_default_providers_expose_richer_metadata() -> None:

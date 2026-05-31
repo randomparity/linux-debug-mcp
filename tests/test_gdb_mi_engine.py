@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from kdive.domain import ErrorCategory
-from kdive.providers.gdb_mi import (
+from kdive.providers.local.gdb_mi import (
     CANONICAL_PROBE_SYMBOL,
     GdbMiEngine,
     GdbMiError,

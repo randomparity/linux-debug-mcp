@@ -37,7 +37,10 @@ class ProviderRegistry:
             )
 
     def get(self, name: str) -> ProviderCapability:
-        return self._providers[name]
+        try:
+            return self._providers[name]
+        except KeyError as exc:
+            raise KeyError(f"unknown provider: {name}") from exc
 
     def list_capabilities(self) -> list[ProviderCapability]:
         return list(self._providers.values())

@@ -10,7 +10,7 @@ from conftest import add_merge_config_script
 
 from kdive.config import BuildProfile
 from kdive.domain import ErrorCategory
-from kdive.providers.local_kernel_build import (
+from kdive.providers.local.local_kernel_build import (
     BuildIdMissing,
     ConfigGenerationError,
     LocalKernelBuildProvider,
@@ -57,7 +57,7 @@ def test_plan_build_appends_make_variables_after_provider_owned_args(tmp_path: P
         make_variables={"LLVM": "1", "CC": "clang"},
     )
 
-    with patch("kdive.providers.local_kernel_build._default_job_count", return_value=4):
+    with patch("kdive.providers.local.local_kernel_build._default_job_count", return_value=4):
         plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
 
     assert plan.argv == [
@@ -80,7 +80,7 @@ def test_plan_build_defaults_jobs_to_half_cpus_when_unset(tmp_path: Path) -> Non
     provider = LocalKernelBuildProvider()
     profile = BuildProfile(name="x86_64-default", architecture="x86_64")
 
-    with patch("kdive.providers.local_kernel_build._default_job_count", return_value=24):
+    with patch("kdive.providers.local.local_kernel_build._default_job_count", return_value=24):
         plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
 
     assert plan.argv == ["make", "-C", str(source), f"O={output}", "ARCH=x86_64", "-j24", "bzImage"]
@@ -92,7 +92,7 @@ def test_plan_build_explicit_jobs_overrides_the_default(tmp_path: Path) -> None:
     provider = LocalKernelBuildProvider()
     profile = BuildProfile(name="x86_64-default", architecture="x86_64", jobs=3)
 
-    with patch("kdive.providers.local_kernel_build._default_job_count", return_value=24):
+    with patch("kdive.providers.local.local_kernel_build._default_job_count", return_value=24):
         plan = provider.plan_build(source_path=source, output_path=output, profile=profile)
 
     assert "-j3" in plan.argv
@@ -105,7 +105,7 @@ def test_plan_build_explicit_jobs_overrides_the_default(tmp_path: Path) -> None:
 )
 def test_default_job_count_is_at_least_half_of_usable_cpus(usable: int, expected: int) -> None:
     with patch(
-        "kdive.providers.local_kernel_build.os.sched_getaffinity",
+        "kdive.providers.local.local_kernel_build.os.sched_getaffinity",
         return_value=set(range(usable)),
     ):
         assert _default_job_count() == expected
@@ -114,10 +114,10 @@ def test_default_job_count_is_at_least_half_of_usable_cpus(usable: int, expected
 def test_default_job_count_falls_back_to_cpu_count_without_affinity() -> None:
     with (
         patch(
-            "kdive.providers.local_kernel_build.os.sched_getaffinity",
+            "kdive.providers.local.local_kernel_build.os.sched_getaffinity",
             side_effect=AttributeError,
         ),
-        patch("kdive.providers.local_kernel_build.os.cpu_count", return_value=8),
+        patch("kdive.providers.local.local_kernel_build.os.cpu_count", return_value=8),
     ):
         assert _default_job_count() == 4
 
@@ -849,7 +849,7 @@ def test_extract_build_id_returns_hex_on_success(tmp_path: Path) -> None:
         stderr="",
     )
     with patch(
-        "kdive.providers.local_kernel_build.subprocess.run",
+        "kdive.providers.local.local_kernel_build.subprocess.run",
         return_value=fake,
     ):
         assert _extract_build_id(vmlinux) == "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
@@ -860,7 +860,7 @@ def test_extract_build_id_raises_readelf_unavailable_on_missing_binary(tmp_path:
     vmlinux.write_bytes(b"")
     with (
         patch(
-            "kdive.providers.local_kernel_build.subprocess.run",
+            "kdive.providers.local.local_kernel_build.subprocess.run",
             side_effect=FileNotFoundError("readelf"),
         ),
         pytest.raises(ReadelfUnavailable),
@@ -874,7 +874,7 @@ def test_extract_build_id_raises_readelf_unavailable_on_nonzero_exit(tmp_path: P
     fake = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="error")
     with (
         patch(
-            "kdive.providers.local_kernel_build.subprocess.run",
+            "kdive.providers.local.local_kernel_build.subprocess.run",
             return_value=fake,
         ),
         pytest.raises(ReadelfUnavailable),
@@ -887,7 +887,7 @@ def test_extract_build_id_raises_readelf_unavailable_on_timeout(tmp_path: Path) 
     vmlinux.write_bytes(b"")
     with (
         patch(
-            "kdive.providers.local_kernel_build.subprocess.run",
+            "kdive.providers.local.local_kernel_build.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd=["readelf"], timeout=10),
         ),
         pytest.raises(ReadelfUnavailable),
@@ -901,7 +901,7 @@ def test_extract_build_id_raises_build_id_missing_when_no_note(tmp_path: Path) -
     fake = subprocess.CompletedProcess(args=[], returncode=0, stdout="no notes here\n", stderr="")
     with (
         patch(
-            "kdive.providers.local_kernel_build.subprocess.run",
+            "kdive.providers.local.local_kernel_build.subprocess.run",
             return_value=fake,
         ),
         pytest.raises(BuildIdMissing),

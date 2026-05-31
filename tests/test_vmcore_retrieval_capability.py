@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kdive.providers.local_vmcore_retrieval import local_vmcore_retrieval_capability
+from kdive.providers.local.local_vmcore_retrieval import local_vmcore_retrieval_capability
 from kdive.providers.plugins import built_in_provider_plugin_specs
 
 
