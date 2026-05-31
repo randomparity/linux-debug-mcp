@@ -458,24 +458,35 @@ def _build_profile_from_manifest(manifest: RunManifest) -> BuildProfile:
         raise ValueError(f"unknown build profile: {profile_name}") from exc
 
 
-def _record_terminal_build_result(
+def _record_step_with_retry(
     store: ArtifactStore,
     run_id: str,
     result: StepResult,
     *,
+    append: bool = False,
+    replace_succeeded: bool = False,
     attempts: int = 5,
     initial_delay_seconds: float = 0.01,
 ) -> None:
+    """Single manifest-lock retry-with-backoff for recording a terminal step (TD-99). The build,
+    introspect (``append=True`` — every ``introspect:<call_id>`` is a fresh entry, never a replace),
+    and fetch (``replace_succeeded`` — a ``force`` re-fetch overwrites the SUCCEEDED step) paths all
+    funnel through this one loop instead of cloning it. Only a transient "manifest is locked"
+    ManifestStateError is retried; any other error (or the final attempt) propagates."""
     delay_seconds = initial_delay_seconds
     for attempt in range(attempts):
         try:
-            store.record_step_result(run_id, result)
+            store.record_step_result(run_id, result, append=append, replace_succeeded=replace_succeeded)
             return
         except ManifestStateError as exc:
             if "manifest is locked" not in str(exc) or attempt == attempts - 1:
                 raise
             time.sleep(delay_seconds)
             delay_seconds *= 2
+
+
+def _record_terminal_build_result(store: ArtifactStore, run_id: str, result: StepResult) -> None:
+    _record_step_with_retry(store, run_id, result)
 
 
 _INTROSPECT_STEP_NAME_RE = re.compile(r"^introspect:")
@@ -485,6 +496,18 @@ _POSTMORTEM_CRASH_STEP_RE = re.compile(r"^postmortem\.crash:[0-9a-f]{32}$")
 def _count_introspect_calls(manifest: RunManifest) -> int:
     """Spec §5.2 step 4a / R3-F5. Named so tests can monkey-patch it."""
     return sum(1 for name in manifest.step_results if _INTROSPECT_STEP_NAME_RE.match(name))
+
+
+def _rollback_introspect_admission(
+    admission: AdmissionService, handle: AdmissionHandle, *, call_id: str, run_id: str
+) -> None:
+    """Roll back a promoted admission handle on an introspect-call failure, logging (never
+    swallowing) a rollback failure — a corrupt admission state for this target_key must be visible
+    to the operator (Iter-2 finding 3 / TD-08)."""
+    try:
+        admission.rollback(handle)
+    except Exception:  # noqa: BLE001 - surface, don't swallow: operator must see admission corruption
+        logger.exception("admission rollback failed for introspect call_id=%s run_id=%s", call_id, run_id)
 
 
 def _redact_and_truncate(redactor: Redactor, text: str, cap: int = 256) -> str:
@@ -510,28 +533,18 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _record_terminal_introspect_result(
-    store: ArtifactStore,
-    run_id: str,
-    result: StepResult,
-    *,
-    attempts: int = 5,
-    initial_delay_seconds: float = 0.01,
-) -> None:
-    """Clone of ``_record_terminal_build_result`` that appends rather than
-    replaces. Spec §5.2 step 13: every ``introspect:<call_id>`` is a fresh
-    entry — collisions are an internal bug (UUIDv4).
-    """
-    delay_seconds = initial_delay_seconds
-    for attempt in range(attempts):
-        try:
-            store.record_step_result(run_id, result, append=True)
-            return
-        except ManifestStateError as exc:
-            if "manifest is locked" not in str(exc) or attempt == attempts - 1:
-                raise
-            time.sleep(delay_seconds)
-            delay_seconds *= 2
+def _chmod_best_effort(path: Path, mode: int) -> None:
+    """chmod that tolerates concurrent deletion (TD-15). A path removed between its enumeration
+    (e.g. a ``glob``) and this call raises FileNotFoundError — the expected benign race on the
+    sensitive/ tree — which is suppressed; any other OSError still propagates. Centralizing the
+    TOCTOU handling here keeps the several sensitive-file tightening sites from each re-deriving it."""
+    with contextlib.suppress(FileNotFoundError):
+        path.chmod(mode)
+
+
+def _record_terminal_introspect_result(store: ArtifactStore, run_id: str, result: StepResult) -> None:
+    # Spec §5.2 step 13: every introspect:<call_id> is a fresh entry (UUIDv4) — append, never replace.
+    _record_step_with_retry(store, run_id, result, append=True)
 
 
 def _record_introspect_failure(
@@ -1742,50 +1755,293 @@ def _publish_boot_ready_snapshot(
     )
 
 
-def target_boot_handler(
+def _finalize_boot_execution(
+    execution: Any,
     *,
-    artifact_root: Path,
+    store: ArtifactStore,
     run_id: str,
-    target_profile: str | None = None,
-    rootfs_profile: str | None = None,
-    force_reboot: bool = False,
-    provider: LibvirtQemuProvider | None = None,
-    target_profiles: dict[str, TargetProfile] | None = None,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
-    default_libvirt_uri: str | None = None,
-    boot_overrides: BootOverrides | None = None,
-    sensitive_paths: list[Path] | None = None,
-    admission: AdmissionService | None = None,
+    attempt: int,
+    manifest: RunManifest,
+    kernel_image: ArtifactRef,
+    resolved_target_profile: TargetProfile,
+    resolved_rootfs_profile: RootfsProfile,
+    admission: AdmissionService | None,
+    plan_gdbstub_endpoint: dict[str, Any] | None,
 ) -> ToolResponse:
-    try:
-        store = ArtifactStore(artifact_root, create_root=False)
-        manifest_path = store.run_dir(run_id) / "manifest.json"
-        if not manifest_path.is_file():
-            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
-        manifest = store.load_manifest(run_id)
-    except ManifestStateError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    """Record the terminal boot step + BootAttempt, capture kernel provenance on success, publish
+    the READY snapshot, and map the execution outcome to a ToolResponse (TD-102)."""
+    terminal_details: dict[str, Any] = {**execution.details, "kernel_image_path": str(kernel_image.path)}
+    if execution.status == StepStatus.SUCCEEDED:
+        try:
+            terminal_details.update(
+                _capture_kernel_provenance(
+                    build_step=manifest.step_results.get("build"),
+                    boot_details=execution.details,
+                    run_dir=store.run_dir(run_id),
+                )
+            )
+        except Exception as capture_exc:  # provenance capture must never fail an otherwise-good boot
+            # Broad catch is deliberate (a good boot must not be lost to a
+            # capture defect) but must NOT be silent: log with traceback so a
+            # masked programming bug is observable, then record a typed error.
+            logger.warning("kernel provenance capture failed: %s", capture_exc, exc_info=True)
+            terminal_details["kernel_provenance_capture_error"] = {
+                "code": "capture_unexpected_error",
+                "message": f"{type(capture_exc).__name__}: {capture_exc}",
+            }
+    terminal = StepResult(
+        step_name="boot",
+        status=execution.status,
+        summary=execution.summary,
+        artifacts=execution.artifacts,
+        details=terminal_details,
+    )
+    attempt_record = BootAttempt(
+        attempt=attempt,
+        resolved_target_profile=resolved_target_profile,
+        resolved_rootfs_profile=resolved_rootfs_profile,
+        status=execution.status,
+    )
+    store.record_boot_attempt(run_id, attempt=attempt_record, boot_result=terminal)
+    if execution.status == StepStatus.SUCCEEDED and admission is not None:
+        _publish_boot_ready_snapshot(
+            admission,
+            run_id=run_id,
+            generation=attempt,
+            gdbstub_endpoint=plan_gdbstub_endpoint,
+            rootfs_profile=resolved_rootfs_profile,
+        )
+    if execution.status == StepStatus.SUCCEEDED:
+        return ToolResponse.success(
+            summary=execution.summary,
+            run_id=run_id,
+            data=_redacted_boot_data(terminal.details),
+            artifacts=execution.artifacts,
+            suggested_next_actions=_boot_success_next_actions(terminal.details),
+        )
+    return ToolResponse.failure(
+        category=execution.error_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
+        message=execution.summary,
+        run_id=run_id,
+        details=_redacted_boot_data({**execution.details, "diagnostic": execution.diagnostic}),
+        artifacts=execution.artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
 
+
+def _record_boot_attempt_failure(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    attempt_record: BootAttempt,
+    failed: StepResult,
+    category: ErrorCategory,
+) -> ToolResponse:
+    """Record a FAILED BootAttempt + terminal boot step and return the matching ToolResponse — the
+    shared tail of _execute_boot_attempt's provider-error and unexpected-error arms (TD-102)."""
+    store.record_boot_attempt(run_id, attempt=attempt_record, boot_result=failed)
+    return ToolResponse.failure(
+        category=category,
+        message=failed.summary,
+        run_id=run_id,
+        details=_redacted_boot_data(failed.details),
+        artifacts=failed.artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
+def _execute_boot_attempt(
+    *,
+    plan: Any,
+    retrying_after_failure: bool,
+    replace_succeeded: bool,
+    attempt: int,
+    manifest: RunManifest,
+    provider: LibvirtQemuProvider,
+    store: ArtifactStore,
+    run_id: str,
+    resolved_target_profile: TargetProfile,
+    resolved_rootfs_profile: RootfsProfile,
+    kernel_image: ArtifactRef,
+    force_reboot: bool,
+    admission: AdmissionService | None,
+) -> ToolResponse:
+    """Run one boot attempt: write the RUNNING step, execute the provider, capture provenance on
+    success, record the BootAttempt + terminal step, publish the READY snapshot, and map the
+    outcome to a ToolResponse. Extracted from target_boot_handler (TD-102)."""
+
+    def _failed_attempt_record() -> BootAttempt:
+        return BootAttempt(
+            attempt=attempt,
+            resolved_target_profile=resolved_target_profile,
+            resolved_rootfs_profile=resolved_rootfs_profile,
+            status=StepStatus.FAILED,
+        )
+
+    plan_gdbstub_endpoint = getattr(plan, "gdbstub_endpoint", None)
+    if plan_gdbstub_endpoint is not None and hasattr(plan_gdbstub_endpoint, "as_dict"):
+        plan_gdbstub_endpoint = plan_gdbstub_endpoint.as_dict()
+    running = StepResult(
+        step_name="boot",
+        status=StepStatus.RUNNING,
+        summary="target boot running",
+        details={
+            "provider": provider.name,
+            "domain": plan.domain_name,
+            "target_profile": resolved_target_profile.name,
+            "rootfs_profile": resolved_rootfs_profile.name,
+            "kernel_image_path": str(kernel_image.path),
+            "boot_log_path": str(plan.boot_log_path),
+            "boot_plan_path": str(plan.boot_plan_path),
+            "debug_boot": getattr(plan, "debug_gdbstub", False),
+            "gdbstub_endpoint": plan_gdbstub_endpoint,
+            "nokaslr_source": getattr(plan, "nokaslr_source", "not_applicable"),
+        },
+        artifacts=[ArtifactRef(path=str(plan.boot_log_path), kind="boot-log")],
+    )
+    store.record_step_result(run_id, running, replace_succeeded=replace_succeeded)
+    try:
+        execution = provider.execute_boot(
+            plan,
+            force_reboot=force_reboot,
+            retrying_after_failure=retrying_after_failure,
+        )
+    except ProviderBootError as exc:
+        failed = StepResult(
+            step_name="boot", status=StepStatus.FAILED, summary=str(exc), artifacts=exc.artifacts, details=exc.details
+        )
+        return _record_boot_attempt_failure(
+            store=store, run_id=run_id, attempt_record=_failed_attempt_record(), failed=failed, category=exc.category
+        )
+    except Exception as exc:
+        failed = StepResult(
+            step_name="boot",
+            status=StepStatus.FAILED,
+            summary="unexpected boot provider failure",
+            artifacts=[ArtifactRef(path=str(plan.boot_log_path), kind="boot-log")],
+            details={
+                "provider": provider.name,
+                "domain": plan.domain_name,
+                "exception_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        return _record_boot_attempt_failure(
+            store=store,
+            run_id=run_id,
+            attempt_record=_failed_attempt_record(),
+            failed=failed,
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
+    return _finalize_boot_execution(
+        execution,
+        store=store,
+        run_id=run_id,
+        attempt=attempt,
+        manifest=manifest,
+        kernel_image=kernel_image,
+        resolved_target_profile=resolved_target_profile,
+        resolved_rootfs_profile=resolved_rootfs_profile,
+        admission=admission,
+        plan_gdbstub_endpoint=plan_gdbstub_endpoint,
+    )
+
+
+def _assert_profile_matches_manifest(
+    *, kind: str, requested: str | None, manifest_value: str | None, run_id: str
+) -> ToolResponse | None:
+    """The {target,rootfs}_profile passed to a step must equal the immutable manifest request
+    (manifest invariant / TD-102). Returns a CONFIGURATION_ERROR on mismatch, else None."""
+    if requested == manifest_value:
+        return None
+    return _configuration_failure(
+        run_id=run_id,
+        message=f"{kind}_profile must match the immutable run manifest request",
+        details={"requested_profile": requested, "manifest_profile": manifest_value},
+    )
+
+
+def _apply_boot_overrides(
+    *,
+    resolved_target_profile: TargetProfile,
+    resolved_rootfs_profile: RootfsProfile,
+    overrides: BootOverrides,
+    manifest: RunManifest,
+    sensitive_paths: list[Path] | None,
+    run_id: str,
+) -> tuple[TargetProfile, RootfsProfile] | ToolResponse:
+    """Merge a BootOverrides into the resolved target/rootfs profiles (TD-102): kernel_args are
+    merged, wait_for_debugger is replaced, and the rootfs source/fields are validated and copied in.
+    Returns the updated ``(target, rootfs)`` pair, or a CONFIGURATION_ERROR ToolResponse if a rootfs
+    source fails path-safety validation."""
+    try:
+        if overrides.kernel_args:
+            resolved_target_profile = resolved_target_profile.model_copy(
+                update={"kernel_args": merge_kernel_args(resolved_target_profile.kernel_args, overrides.kernel_args)}
+            )
+        if overrides.wait_for_debugger is not None:
+            resolved_target_profile = resolved_target_profile.model_copy(
+                update={"wait_for_debugger": overrides.wait_for_debugger}
+            )
+        rootfs_update: dict[str, object] = {}
+        if overrides.rootfs_source is not None:
+            validated = validate_rootfs_source(
+                Path(overrides.rootfs_source),
+                source_paths=[Path(manifest.request.source_path)],
+                # Operator-configured sensitive paths threaded in by create_app (empty when no
+                # ServerConfig is loaded); the built-in guards always apply.
+                sensitive_paths=sensitive_paths or [],
+            )
+            rootfs_update["source"] = str(validated)
+        if overrides.rootfs is not None:
+            # Each override field was validated at BootOverrides construction; RootfsProfile has no
+            # cross-field validators, so model_copy yields a valid profile.
+            rootfs_update.update(overrides.rootfs.as_profile_update())
+        if rootfs_update:
+            resolved_rootfs_profile = resolved_rootfs_profile.model_copy(update=rootfs_update)
+    except (PathSafetyError, ValueError) as exc:
+        return _configuration_failure(run_id=run_id, message=str(exc))
+    return resolved_target_profile, resolved_rootfs_profile
+
+
+@dataclass(frozen=True)
+class _ResolvedBootInputs:
+    """The profile/kernel inputs target_boot_handler resolves before taking the boot locks."""
+
+    resolved_target_profile: TargetProfile
+    resolved_rootfs_profile: RootfsProfile
+    target_ref: str
+    kernel_image: ArtifactRef
+
+
+def _resolve_boot_inputs(
+    *,
+    manifest: RunManifest,
+    run_id: str,
+    target_profile: str | None,
+    rootfs_profile: str | None,
+    target_profiles: dict[str, TargetProfile] | None,
+    rootfs_profiles: dict[str, RootfsProfile] | None,
+    default_libvirt_uri: str | None,
+    boot_overrides: BootOverrides | None,
+    sensitive_paths: list[Path] | None,
+) -> _ResolvedBootInputs | ToolResponse:
+    """Resolve and validate the boot inputs (TD-102): the requested profiles must match the
+    immutable manifest request; named profiles resolve from the registry (inline ones come frozen
+    off the manifest); boot_overrides are merged into the resolved profiles; and the build must
+    have succeeded with a kernel-image artifact of the matching architecture. Returns the resolved
+    inputs, or a CONFIGURATION_ERROR ToolResponse on the first failed check."""
     requested_target_profile = target_profile or manifest.request.target_profile
     requested_rootfs_profile = rootfs_profile or manifest.request.rootfs_profile
-    if requested_target_profile != manifest.request.target_profile:
-        return _configuration_failure(
-            run_id=run_id,
-            message="target_profile must match the immutable run manifest request",
-            details={
-                "requested_profile": requested_target_profile,
-                "manifest_profile": manifest.request.target_profile,
-            },
+    for kind, requested, manifest_value in (
+        ("target", requested_target_profile, manifest.request.target_profile),
+        ("rootfs", requested_rootfs_profile, manifest.request.rootfs_profile),
+    ):
+        mismatch = _assert_profile_matches_manifest(
+            kind=kind, requested=requested, manifest_value=manifest_value, run_id=run_id
         )
-    if requested_rootfs_profile != manifest.request.rootfs_profile:
-        return _configuration_failure(
-            run_id=run_id,
-            message="rootfs_profile must match the immutable run manifest request",
-            details={
-                "requested_profile": requested_rootfs_profile,
-                "manifest_profile": manifest.request.rootfs_profile,
-            },
-        )
+        if mismatch is not None:
+            return mismatch
 
     target_profiles = target_profiles if target_profiles is not None else DEFAULT_TARGET_PROFILES
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
@@ -1815,37 +2071,17 @@ def target_boot_handler(
     if effective_boot_overrides is None and not manifest.boot_attempts:
         effective_boot_overrides = manifest.request.boot_overrides
     if effective_boot_overrides is not None:
-        try:
-            if effective_boot_overrides.kernel_args:
-                resolved_target_profile = resolved_target_profile.model_copy(
-                    update={
-                        "kernel_args": merge_kernel_args(
-                            resolved_target_profile.kernel_args, effective_boot_overrides.kernel_args
-                        )
-                    }
-                )
-            if effective_boot_overrides.wait_for_debugger is not None:
-                resolved_target_profile = resolved_target_profile.model_copy(
-                    update={"wait_for_debugger": effective_boot_overrides.wait_for_debugger}
-                )
-            rootfs_update: dict[str, object] = {}
-            if effective_boot_overrides.rootfs_source is not None:
-                validated = validate_rootfs_source(
-                    Path(effective_boot_overrides.rootfs_source),
-                    source_paths=[Path(manifest.request.source_path)],
-                    # Operator-configured sensitive paths threaded in by create_app (empty when
-                    # no ServerConfig is loaded); the built-in guards always apply.
-                    sensitive_paths=sensitive_paths or [],
-                )
-                rootfs_update["source"] = str(validated)
-            if effective_boot_overrides.rootfs is not None:
-                # Each override field was validated at BootOverrides construction; RootfsProfile
-                # has no cross-field validators, so model_copy yields a valid profile.
-                rootfs_update.update(effective_boot_overrides.rootfs.as_profile_update())
-            if rootfs_update:
-                resolved_rootfs_profile = resolved_rootfs_profile.model_copy(update=rootfs_update)
-        except (PathSafetyError, ValueError) as exc:
-            return _configuration_failure(run_id=run_id, message=str(exc))
+        merged = _apply_boot_overrides(
+            resolved_target_profile=resolved_target_profile,
+            resolved_rootfs_profile=resolved_rootfs_profile,
+            overrides=effective_boot_overrides,
+            manifest=manifest,
+            sensitive_paths=sensitive_paths,
+            run_id=run_id,
+        )
+        if isinstance(merged, ToolResponse):
+            return merged
+        resolved_target_profile, resolved_rootfs_profile = merged
 
     build_result = manifest.step_results.get("build")
     if build_result is None or build_result.status != StepStatus.SUCCEEDED:
@@ -1864,161 +2100,94 @@ def target_boot_handler(
             },
         )
 
-    has_new_boot_overrides = boot_overrides is not None and (
-        bool(boot_overrides.kernel_args)
-        or boot_overrides.rootfs_source is not None
-        or boot_overrides.has_rootfs_field_overrides()
-        or boot_overrides.wait_for_debugger is not None
+    return _ResolvedBootInputs(
+        resolved_target_profile=resolved_target_profile,
+        resolved_rootfs_profile=resolved_rootfs_profile,
+        target_ref=target_ref,
+        kernel_image=kernel_image,
     )
 
-    existing = manifest.step_results.get("boot")
-    if existing and existing.status == StepStatus.SUCCEEDED and not force_reboot and not has_new_boot_overrides:
-        return _short_circuit_boot_success(
+
+def _plan_boot_or_failure(
+    *,
+    provider: LibvirtQemuProvider,
+    store: ArtifactStore,
+    run_id: str,
+    kernel_image: ArtifactRef,
+    resolved_target_profile: TargetProfile,
+    resolved_rootfs_profile: RootfsProfile,
+    next_attempt: int,
+    replace_succeeded: bool,
+    force_reboot: bool,
+) -> Any:
+    """Resolve the rootfs source and plan the boot under the target lock (TD-102), recording a
+    FAILED step + returning a ToolResponse on a rootfs/provider/manifest error. Returns the boot
+    plan on success (the caller runs the attempt)."""
+    try:
+        resolve_rootfs_source(resolved_rootfs_profile)
+        plan = provider.plan_boot(
             run_id=run_id,
-            result=existing,
-            admission=admission,
-            manifest=manifest,
+            run_dir=store.run_dir(run_id),
+            kernel_image_path=Path(kernel_image.path),
+            target_profile=resolved_target_profile,
             rootfs_profile=resolved_rootfs_profile,
+            attempt=next_attempt,
         )
-
-    provider = provider or LibvirtQemuProvider()
-
-    def execute_boot(
-        *, plan: Any, retrying_after_failure: bool, replace_succeeded: bool, attempt: int, manifest: RunManifest
-    ) -> ToolResponse:
-        def _failed_attempt_record() -> BootAttempt:
-            return BootAttempt(
-                attempt=attempt,
-                resolved_target_profile=resolved_target_profile,
-                resolved_rootfs_profile=resolved_rootfs_profile,
-                status=StepStatus.FAILED,
-            )
-
-        plan_gdbstub_endpoint = getattr(plan, "gdbstub_endpoint", None)
-        if plan_gdbstub_endpoint is not None and hasattr(plan_gdbstub_endpoint, "as_dict"):
-            plan_gdbstub_endpoint = plan_gdbstub_endpoint.as_dict()
-        running = StepResult(
+    except RootfsSourceError as exc:
+        fix_details = {"suggested_fix": exc.suggested_fix} if exc.suggested_fix else {}
+        failed = StepResult(
             step_name="boot",
-            status=StepStatus.RUNNING,
-            summary="target boot running",
-            details={
-                "provider": provider.name,
-                "domain": plan.domain_name,
-                "target_profile": resolved_target_profile.name,
-                "rootfs_profile": resolved_rootfs_profile.name,
-                "kernel_image_path": str(kernel_image.path),
-                "boot_log_path": str(plan.boot_log_path),
-                "boot_plan_path": str(plan.boot_plan_path),
-                "debug_boot": getattr(plan, "debug_gdbstub", False),
-                "gdbstub_endpoint": plan_gdbstub_endpoint,
-                "nokaslr_source": getattr(plan, "nokaslr_source", "not_applicable"),
-            },
-            artifacts=[ArtifactRef(path=str(plan.boot_log_path), kind="boot-log")],
+            status=StepStatus.FAILED,
+            summary=str(exc),
+            details=fix_details,
         )
-        store.record_step_result(run_id, running, replace_succeeded=replace_succeeded)
-        try:
-            execution = provider.execute_boot(
-                plan,
-                force_reboot=force_reboot,
-                retrying_after_failure=retrying_after_failure,
-            )
-        except ProviderBootError as exc:
-            failed = StepResult(
-                step_name="boot",
-                status=StepStatus.FAILED,
-                summary=str(exc),
-                artifacts=exc.artifacts,
-                details=exc.details,
-            )
-            store.record_boot_attempt(run_id, attempt=_failed_attempt_record(), boot_result=failed)
-            return ToolResponse.failure(
-                category=exc.category,
-                message=str(exc),
-                run_id=run_id,
-                details=_redacted_boot_data(exc.details),
-                artifacts=exc.artifacts,
-                suggested_next_actions=["artifacts.get_manifest"],
-            )
-        except Exception as exc:
-            failed = StepResult(
-                step_name="boot",
-                status=StepStatus.FAILED,
-                summary="unexpected boot provider failure",
-                artifacts=[ArtifactRef(path=str(plan.boot_log_path), kind="boot-log")],
-                details={
-                    "provider": provider.name,
-                    "domain": plan.domain_name,
-                    "exception_type": type(exc).__name__,
-                    "error": str(exc),
-                },
-            )
-            store.record_boot_attempt(run_id, attempt=_failed_attempt_record(), boot_result=failed)
-            return ToolResponse.failure(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                message=failed.summary,
-                run_id=run_id,
-                details=_redacted_boot_data(failed.details),
-                artifacts=failed.artifacts,
-                suggested_next_actions=["artifacts.get_manifest"],
-            )
-        terminal_details: dict[str, Any] = {**execution.details, "kernel_image_path": str(kernel_image.path)}
-        if execution.status == StepStatus.SUCCEEDED:
-            try:
-                terminal_details.update(
-                    _capture_kernel_provenance(
-                        build_step=manifest.step_results.get("build"),
-                        boot_details=execution.details,
-                        run_dir=store.run_dir(run_id),
-                    )
-                )
-            except Exception as capture_exc:  # provenance capture must never fail an otherwise-good boot
-                # Broad catch is deliberate (a good boot must not be lost to a
-                # capture defect) but must NOT be silent: log with traceback so a
-                # masked programming bug is observable, then record a typed error.
-                logger.warning("kernel provenance capture failed: %s", capture_exc, exc_info=True)
-                terminal_details["kernel_provenance_capture_error"] = {
-                    "code": "capture_unexpected_error",
-                    "message": f"{type(capture_exc).__name__}: {capture_exc}",
-                }
-        terminal = StepResult(
-            step_name="boot",
-            status=execution.status,
-            summary=execution.summary,
-            artifacts=execution.artifacts,
-            details=terminal_details,
-        )
-        attempt_record = BootAttempt(
-            attempt=attempt,
-            resolved_target_profile=resolved_target_profile,
-            resolved_rootfs_profile=resolved_rootfs_profile,
-            status=execution.status,
-        )
-        store.record_boot_attempt(run_id, attempt=attempt_record, boot_result=terminal)
-        if execution.status == StepStatus.SUCCEEDED and admission is not None:
-            _publish_boot_ready_snapshot(
-                admission,
-                run_id=run_id,
-                generation=attempt,
-                gdbstub_endpoint=plan_gdbstub_endpoint,
-                rootfs_profile=resolved_rootfs_profile,
-            )
-        if execution.status == StepStatus.SUCCEEDED:
-            return ToolResponse.success(
-                summary=execution.summary,
-                run_id=run_id,
-                data=_redacted_boot_data(terminal.details),
-                artifacts=execution.artifacts,
-                suggested_next_actions=_boot_success_next_actions(terminal.details),
-            )
+        store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded or force_reboot)
         return ToolResponse.failure(
-            category=execution.error_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
-            message=execution.summary,
+            category=exc.category,
+            message=str(exc),
             run_id=run_id,
-            details=_redacted_boot_data({**execution.details, "diagnostic": execution.diagnostic}),
-            artifacts=execution.artifacts,
+            details=fix_details,
             suggested_next_actions=["artifacts.get_manifest"],
         )
+    except ProviderBootError as exc:
+        failed = StepResult(
+            step_name="boot",
+            status=StepStatus.FAILED,
+            summary=str(exc),
+            artifacts=exc.artifacts,
+            details=exc.details,
+        )
+        store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded or force_reboot)
+        return ToolResponse.failure(
+            category=exc.category,
+            message=str(exc),
+            run_id=run_id,
+            details=_redacted_boot_data(exc.details),
+            artifacts=exc.artifacts,
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+    except (ManifestStateError, OSError, ValueError) as exc:
+        return _configuration_failure(run_id=run_id, message=str(exc))
+    return plan
 
+
+def _boot_under_locks(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    target_ref: str,
+    resolved_target_profile: TargetProfile,
+    resolved_rootfs_profile: RootfsProfile,
+    kernel_image: ArtifactRef,
+    force_reboot: bool,
+    has_new_boot_overrides: bool,
+    existing: StepResult | None,
+    provider: LibvirtQemuProvider,
+    admission: AdmissionService | None,
+) -> ToolResponse:
+    """Take boot_lock then target_lock, re-check the SUCCEEDED short-circuit under the lock,
+    recover a stale RUNNING step, plan the boot, and run the attempt (TD-102). A concurrent
+    holder surfaces as a RUNNING response via the boot-locked ManifestStateError arm."""
     try:
         with store.boot_lock(run_id):
             locked_manifest = store.load_manifest(run_id)
@@ -2052,57 +2221,33 @@ def target_boot_handler(
                     )
                     store.record_step_result(run_id, stale_failed)
                     retrying_after_failure = True
-                try:
-                    resolve_rootfs_source(resolved_rootfs_profile)
-                    plan = provider.plan_boot(
-                        run_id=run_id,
-                        run_dir=store.run_dir(run_id),
-                        kernel_image_path=Path(kernel_image.path),
-                        target_profile=resolved_target_profile,
-                        rootfs_profile=resolved_rootfs_profile,
-                        attempt=next_attempt,
-                    )
-                except RootfsSourceError as exc:
-                    fix_details = {"suggested_fix": exc.suggested_fix} if exc.suggested_fix else {}
-                    failed = StepResult(
-                        step_name="boot",
-                        status=StepStatus.FAILED,
-                        summary=str(exc),
-                        details=fix_details,
-                    )
-                    store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded or force_reboot)
-                    return ToolResponse.failure(
-                        category=exc.category,
-                        message=str(exc),
-                        run_id=run_id,
-                        details=fix_details,
-                        suggested_next_actions=["artifacts.get_manifest"],
-                    )
-                except ProviderBootError as exc:
-                    failed = StepResult(
-                        step_name="boot",
-                        status=StepStatus.FAILED,
-                        summary=str(exc),
-                        artifacts=exc.artifacts,
-                        details=exc.details,
-                    )
-                    store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded or force_reboot)
-                    return ToolResponse.failure(
-                        category=exc.category,
-                        message=str(exc),
-                        run_id=run_id,
-                        details=_redacted_boot_data(exc.details),
-                        artifacts=exc.artifacts,
-                        suggested_next_actions=["artifacts.get_manifest"],
-                    )
-                except (ManifestStateError, OSError, ValueError) as exc:
-                    return _configuration_failure(run_id=run_id, message=str(exc))
-                return execute_boot(
+                plan = _plan_boot_or_failure(
+                    provider=provider,
+                    store=store,
+                    run_id=run_id,
+                    kernel_image=kernel_image,
+                    resolved_target_profile=resolved_target_profile,
+                    resolved_rootfs_profile=resolved_rootfs_profile,
+                    next_attempt=next_attempt,
+                    replace_succeeded=replace_succeeded,
+                    force_reboot=force_reboot,
+                )
+                if isinstance(plan, ToolResponse):
+                    return plan
+                return _execute_boot_attempt(
                     plan=plan,
                     retrying_after_failure=retrying_after_failure,
                     replace_succeeded=replace_succeeded or force_reboot,
                     attempt=next_attempt,
                     manifest=locked_manifest,
+                    provider=provider,
+                    store=store,
+                    run_id=run_id,
+                    resolved_target_profile=resolved_target_profile,
+                    resolved_rootfs_profile=resolved_rootfs_profile,
+                    kernel_image=kernel_image,
+                    force_reboot=force_reboot,
+                    admission=admission,
                 )
     except ManifestStateError as exc:
         if "boot is locked" in str(exc):
@@ -2115,6 +2260,82 @@ def target_boot_handler(
             if existing and existing.status == StepStatus.RUNNING:
                 return _running_boot_response(run_id=run_id, result=existing)
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+
+def target_boot_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    target_profile: str | None = None,
+    rootfs_profile: str | None = None,
+    force_reboot: bool = False,
+    provider: LibvirtQemuProvider | None = None,
+    target_profiles: dict[str, TargetProfile] | None = None,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    default_libvirt_uri: str | None = None,
+    boot_overrides: BootOverrides | None = None,
+    sensitive_paths: list[Path] | None = None,
+    admission: AdmissionService | None = None,
+) -> ToolResponse:
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        manifest_path = store.run_dir(run_id) / "manifest.json"
+        if not manifest_path.is_file():
+            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    resolved_inputs = _resolve_boot_inputs(
+        manifest=manifest,
+        run_id=run_id,
+        target_profile=target_profile,
+        rootfs_profile=rootfs_profile,
+        target_profiles=target_profiles,
+        rootfs_profiles=rootfs_profiles,
+        default_libvirt_uri=default_libvirt_uri,
+        boot_overrides=boot_overrides,
+        sensitive_paths=sensitive_paths,
+    )
+    if isinstance(resolved_inputs, ToolResponse):
+        return resolved_inputs
+    resolved_target_profile = resolved_inputs.resolved_target_profile
+    resolved_rootfs_profile = resolved_inputs.resolved_rootfs_profile
+    target_ref = resolved_inputs.target_ref
+    kernel_image = resolved_inputs.kernel_image
+
+    has_new_boot_overrides = boot_overrides is not None and (
+        bool(boot_overrides.kernel_args)
+        or boot_overrides.rootfs_source is not None
+        or boot_overrides.has_rootfs_field_overrides()
+        or boot_overrides.wait_for_debugger is not None
+    )
+
+    existing = manifest.step_results.get("boot")
+    if existing and existing.status == StepStatus.SUCCEEDED and not force_reboot and not has_new_boot_overrides:
+        return _short_circuit_boot_success(
+            run_id=run_id,
+            result=existing,
+            admission=admission,
+            manifest=manifest,
+            rootfs_profile=resolved_rootfs_profile,
+        )
+
+    provider = provider or LibvirtQemuProvider()
+
+    return _boot_under_locks(
+        store=store,
+        run_id=run_id,
+        target_ref=target_ref,
+        resolved_target_profile=resolved_target_profile,
+        resolved_rootfs_profile=resolved_rootfs_profile,
+        kernel_image=kernel_image,
+        force_reboot=force_reboot,
+        has_new_boot_overrides=has_new_boot_overrides,
+        existing=existing,
+        provider=provider,
+        admission=admission,
+    )
 
 
 def _ssh_host_is_unset_or_loopback(host: str | None) -> bool:
@@ -2565,8 +2786,7 @@ def debug_introspect_check_prerequisites_handler(
             details={"code": "ssh_failure"},
         )
     for _path in (stdout_path, stderr_path):
-        with contextlib.suppress(FileNotFoundError):
-            _path.chmod(0o600)
+        _chmod_best_effort(_path, 0o600)
 
     return _assemble_probe_response(
         ctx,
@@ -2609,8 +2829,7 @@ def _prepare_probe_dirs(
     sensitive_root = run_dir / "sensitive"
     current = sensitive_dir
     while current != sensitive_root and current != run_dir:
-        with contextlib.suppress(FileNotFoundError):
-            current.chmod(0o700)
+        _chmod_best_effort(current, 0o700)
         current = current.parent
     return agent_dir, sensitive_dir
 
@@ -2826,8 +3045,7 @@ def debug_postmortem_check_prereqs_handler(
             details={"code": "ssh_failure"},
         )
     for _path in (stdout_path, stderr_path):
-        with contextlib.suppress(FileNotFoundError):
-            _path.chmod(0o600)
+        _chmod_best_effort(_path, 0o600)
 
     return _assemble_kdump_response(
         ctx,
@@ -2837,6 +3055,57 @@ def debug_postmortem_check_prereqs_handler(
         agent_dir=agent_dir,
         probe_id=probe_id,
     )
+
+
+def _parse_probe_stdout(
+    ctx: _ProbeContext,
+    *,
+    ssh_result: SshCommandResult,
+    stdout_path: Path,
+    noun: str,
+    no_python_message: str,
+) -> tuple[dict[str, Any] | None, ToolResponse | None]:
+    """Shared SSH-probe stdout gate (TD-100): the oversized → cap → cancelled/timeout → exit-255 →
+    exit-127 → unparseable-JSON ladder the kdump-readiness and dump-enumeration probes both ran
+    byte-for-byte (modulo the ``noun`` in each message and the no-python text). Returns
+    ``(parsed_object, None)`` when the target produced a JSON object, else ``(None, failure)``.
+
+    (`_assemble_probe_response` deliberately does NOT use this: its introspect prereq check is
+    advisory, so a no-JSON / no-python target gets a degraded report via ``_no_json_response``, not
+    the hard INFRASTRUCTURE_FAILURE this gate returns.)"""
+    run_id = ctx.run_id
+
+    def fail(message: str, code: str, **extra: object) -> ToolResponse:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=message,
+            details={"code": code, **extra},
+        )
+
+    oversized = f"{noun} stdout exceeded {PROBE_STDOUT_CAP} bytes"
+    if ssh_result.oversized_output:
+        return None, fail(oversized, "oversized_output")
+    raw_stdout = _read_capped(stdout_path, PROBE_STDOUT_CAP)
+    if raw_stdout is None:
+        return None, fail(oversized, "oversized_output")
+    if ssh_result.cancelled or ssh_result.timed_out or ssh_result.stdin_failed:
+        return None, fail(f"{noun} ssh round trip failed", "ssh_failure")
+    if ssh_result.exit_status == 255:
+        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
+        return None, fail(f"{noun} ssh transport failed before the target ran", "ssh_connect_failure", stderr=snippet)
+    if ssh_result.exit_status == 127:
+        return None, fail(no_python_message, "probe_no_python")
+    try:
+        parsed = json.loads(raw_stdout) if raw_stdout else None
+    except json.JSONDecodeError:
+        parsed = None
+    if not isinstance(parsed, dict):
+        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
+        return None, fail(
+            f"{noun} did not return parseable JSON (exit {ssh_result.exit_status})", "probe_unparseable", stderr=snippet
+        )
+    return parsed, None
 
 
 def _assemble_kdump_response(
@@ -2849,55 +3118,16 @@ def _assemble_kdump_response(
     probe_id: str,
 ) -> ToolResponse:
     run_id = ctx.run_id
-    if ssh_result.oversized_output:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"probe stdout exceeded {PROBE_STDOUT_CAP} bytes",
-            details={"code": "oversized_output"},
-        )
-    raw_stdout = _read_capped(stdout_path, PROBE_STDOUT_CAP)
-    if raw_stdout is None:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"probe stdout exceeded {PROBE_STDOUT_CAP} bytes",
-            details={"code": "oversized_output"},
-        )
-    if ssh_result.cancelled or ssh_result.timed_out or ssh_result.stdin_failed:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="probe ssh round trip failed",
-            details={"code": "ssh_failure"},
-        )
-    if ssh_result.exit_status == 255:
-        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="probe ssh transport failed before the target ran",
-            details={"code": "ssh_connect_failure", "stderr": snippet},
-        )
-    if ssh_result.exit_status == 127:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="python3 is not available on the target; cannot probe kdump readiness",
-            details={"code": "probe_no_python"},
-        )
-    try:
-        parsed = json.loads(raw_stdout) if raw_stdout else None
-    except json.JSONDecodeError:
-        parsed = None
-    if not isinstance(parsed, dict):
-        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"probe did not return parseable JSON (exit {ssh_result.exit_status})",
-            details={"code": "probe_unparseable", "stderr": snippet},
-        )
+    parsed, failure = _parse_probe_stdout(
+        ctx,
+        ssh_result=ssh_result,
+        stdout_path=stdout_path,
+        noun="probe",
+        no_python_message="python3 is not available on the target; cannot probe kdump readiness",
+    )
+    if failure is not None:
+        return failure
+    assert parsed is not None
 
     checks, mechanism = build_kdump_checks(parsed)
     kdump_ready = not any(c.status == PrerequisiteStatus.FAILED for c in checks)
@@ -2937,57 +3167,13 @@ def _validated_dump_dir(request: _SupportsDumpRequest, run_id: str) -> tuple[str
 def _parse_enumeration_result(
     ctx: _ProbeContext, *, ssh_result: SshCommandResult, stdout_path: Path
 ) -> tuple[dict[str, Any] | None, ToolResponse | None]:
-    run_id = ctx.run_id
-    if ssh_result.oversized_output:
-        return None, ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"enumeration stdout exceeded {PROBE_STDOUT_CAP} bytes",
-            details={"code": "oversized_output"},
-        )
-    raw = _read_capped(stdout_path, PROBE_STDOUT_CAP)
-    if raw is None:
-        return None, ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"enumeration stdout exceeded {PROBE_STDOUT_CAP} bytes",
-            details={"code": "oversized_output"},
-        )
-    if ssh_result.cancelled or ssh_result.timed_out or ssh_result.stdin_failed:
-        return None, ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="enumeration ssh round trip failed",
-            details={"code": "ssh_failure"},
-        )
-    if ssh_result.exit_status == 255:
-        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
-        return None, ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="enumeration ssh transport failed before the target ran",
-            details={"code": "ssh_connect_failure", "stderr": snippet},
-        )
-    if ssh_result.exit_status == 127:
-        return None, ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="python3 is not available on the target; cannot enumerate dumps",
-            details={"code": "probe_no_python"},
-        )
-    try:
-        parsed = json.loads(raw) if raw else None
-    except json.JSONDecodeError:
-        parsed = None
-    if not isinstance(parsed, dict):
-        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
-        return None, ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"enumeration did not return parseable JSON (exit {ssh_result.exit_status})",
-            details={"code": "probe_unparseable", "stderr": snippet},
-        )
-    return parsed, None
+    return _parse_probe_stdout(
+        ctx,
+        ssh_result=ssh_result,
+        stdout_path=stdout_path,
+        noun="enumeration",
+        no_python_message="python3 is not available on the target; cannot enumerate dumps",
+    )
 
 
 def _run_dump_enumeration(
@@ -3037,8 +3223,7 @@ def _run_dump_enumeration(
             details={"code": "ssh_failure"},
         )
     for _path in (stdout_path, stderr_path):
-        with contextlib.suppress(FileNotFoundError):
-            _path.chmod(0o600)
+        _chmod_best_effort(_path, 0o600)
     parsed, failure = _parse_enumeration_result(ctx, ssh_result=ssh_result, stdout_path=stdout_path)
     if failure is not None:
         return None, failure
@@ -3125,31 +3310,10 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _record_fetch_result(
-    store: ArtifactStore,
-    run_id: str,
-    result: StepResult,
-    *,
-    replace_succeeded: bool,
-    attempts: int = 5,
-    initial_delay_seconds: float = 0.01,
-) -> None:
-    """Record a postmortem.fetch step under the manifest-lock retry-with-backoff.
-
-    Clone of ``_record_terminal_build_result`` that threads ``replace_succeeded`` so a
-    ``force`` re-fetch replaces the SUCCEEDED step rather than no-op-ing (ADR 0029
-    decision 6 / review finding 2).
-    """
-    delay = initial_delay_seconds
-    for attempt in range(attempts):
-        try:
-            store.record_step_result(run_id, result, replace_succeeded=replace_succeeded)
-            return
-        except ManifestStateError as exc:
-            if "manifest is locked" not in str(exc) or attempt == attempts - 1:
-                raise
-            time.sleep(delay)
-            delay *= 2
+def _record_fetch_result(store: ArtifactStore, run_id: str, result: StepResult, *, replace_succeeded: bool) -> None:
+    # A postmortem.fetch step: a `force` re-fetch replaces the SUCCEEDED step rather than no-op-ing
+    # (ADR 0029 decision 6 / review finding 2).
+    _record_step_with_retry(store, run_id, result, replace_succeeded=replace_succeeded)
 
 
 def _stage_one_file(
@@ -3730,8 +3894,7 @@ def _execute_introspect_call(
         # tooling sees a stable artifact path even when the raw file is sealed
         # under sensitive/.
         if sensitive_preflight_stderr.exists():
-            with contextlib.suppress(FileNotFoundError):
-                sensitive_preflight_stderr.chmod(0o600)
+            _chmod_best_effort(sensitive_preflight_stderr, 0o600)
             raw_preflight_stderr = sensitive_preflight_stderr.read_text(encoding="utf-8", errors="replace")
             preflight_stderr.write_text(redactor.redact_text(raw_preflight_stderr), encoding="utf-8")
         if sudo_result.exit_status != 0:
@@ -3836,13 +3999,7 @@ def _execute_introspect_call(
             # handle, clean up the orphan directories, and write a forensic
             # FAILED StepResult directly (no SSH means no stderr/stdout to
             # redact via _record_introspect_failure).
-            try:
-                admission.rollback(handle)
-            except Exception:
-                # Iter-2 finding 3: surface rollback failures rather than
-                # swallowing them; the operator needs to know if the
-                # admission state for this target_key is now corrupt.
-                logger.exception("admission rollback failed for introspect call_id=%s run_id=%s", call_id, run_id)
+            _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=run_id)
             shutil.rmtree(agent_dir, ignore_errors=True)
             shutil.rmtree(sensitive_call_dir, ignore_errors=True)
             failed = StepResult(
@@ -3910,10 +4067,7 @@ def _execute_introspect_call(
             # build_ssh_argv raises when RootfsProfile.ssh_options['ConnectTimeout']
             # exceeds the command timeout — surface as CONFIGURATION_ERROR rather
             # than letting it fall into the outer broad-except.
-            try:
-                admission.rollback(handle)
-            except Exception:
-                logger.exception("admission rollback failed for introspect call_id=%s run_id=%s", call_id, run_id)
+            _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=run_id)
             admission_disposed = True
             shutil.rmtree(agent_dir, ignore_errors=True)
             shutil.rmtree(sensitive_call_dir, ignore_errors=True)
@@ -3971,8 +4125,7 @@ def _execute_introspect_call(
         # between exists() and chmod() would turn a benign race into a
         # handler crash that drops the call's manifest record.
         for _raw_path in (stdout_path, stderr_path):
-            with contextlib.suppress(FileNotFoundError):
-                _raw_path.chmod(0o600)
+            _chmod_best_effort(_raw_path, 0o600)
 
         # admission_disposed flips True as soon as either complete() succeeds
         # or rollback() runs — the outer `except` then skips a redundant
@@ -3987,13 +4140,7 @@ def _execute_introspect_call(
             # artifacts orphaned with no manifest trace. Roll back the
             # admission binding and append a FAILED introspect:<call_id>
             # record so the manifest reflects the on-disk state.
-            try:
-                admission.rollback(handle)
-            except Exception:
-                # Iter-2 finding 3: silent suppression hides real
-                # admission-state corruption from operators. Log the
-                # exception with enough context to find the offending call.
-                logger.exception("admission rollback failed for introspect call_id=%s run_id=%s", call_id, run_id)
+            _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=run_id)
             admission_disposed = True
             raw_stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
             duration_ms = int((time.monotonic() - started_monotonic) * 1000)
@@ -4831,8 +4978,7 @@ def _execute_vmcore_introspect_call(
         max_stdout_bytes=RUN_STDOUT_CAP,
     )
     for raw_path in (stdout_path, stderr_path):
-        with contextlib.suppress(FileNotFoundError):
-            raw_path.chmod(0o600)
+        _chmod_best_effort(raw_path, 0o600)
 
     finished_at = now()
     duration_ms = int((time.monotonic() - started_monotonic) * 1000)
@@ -5116,8 +5262,7 @@ def debug_postmortem_crash_handler(
     if mod_load_path.exists():
         raw_files.append(mod_load_path)
     for raw_path in raw_files:
-        with contextlib.suppress(FileNotFoundError):
-            raw_path.chmod(0o600)
+        _chmod_best_effort(raw_path, 0o600)
     duration_ms = int((time.monotonic() - started_monotonic) * 1000)
     return _finalize_crash_call(
         store=store,
@@ -6241,6 +6386,27 @@ def _assert_layer4_ownership(
     )
 
 
+def _is_legacy_debug_session(
+    *,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+    transport_session_id: str | None,
+    run_id: str,
+) -> bool:
+    """A DebugSession that predates the transport-ownership model: on a WIRED server (admission +
+    registry both present) it has no bound ``transport_session_id`` and no durable SessionRegistry
+    record for ``TargetKey("local-qemu", run_id)``. The canonical predicate `debug_end_session_handler`
+    uses to route its post-detach tombstone (TD-11), replacing an inline boolean. (The mutating-op
+    pre-detach fence `_fence_legacy_debug_session` runs a related check in its own raise-path scope,
+    which does not carry ``transport_session_id``.)"""
+    return (
+        admission is not None
+        and session_registry is not None
+        and transport_session_id is None
+        and session_registry.read_record(TargetKey(provisioner="local-qemu", target_id=run_id)) is None
+    )
+
+
 def _fence_legacy_debug_session(
     *,
     run_id: str,
@@ -6279,9 +6445,32 @@ def _fence_legacy_debug_session(
     )
 
 
+def _enforce_debug_ownership_fence(
+    *,
+    run_id: str,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+) -> None:
+    """Single enforcement point for the debug.* ownership fence (Finding F8 / TD-10). Every debug.*
+    path that connects gdb funnels the choice through here so it cannot drift between call sites: a
+    stateful mutating op (admission wired) runs the legacy fence — which tombstones and refuses a
+    legacy session — while a read/probe path (no admission) runs the lighter Layer-4 ownership
+    assertion. Both raise ProviderDebugError on a legacy session with no durable record."""
+    if admission is not None:
+        _fence_legacy_debug_session(run_id=run_id, admission=admission, session_registry=session_registry)
+    else:
+        _assert_layer4_ownership(run_id=run_id, session_registry=session_registry)
+
+
 # Stateful debug.* ops whose effect changes the persisted breakpoint ledger; after each, the ledger
 # is rebuilt from gdb's authoritative -break-list so the manifest matches the engine.
-_BREAKPOINT_MUTATORS = frozenset({"set_breakpoint", "set_watchpoint", "clear_breakpoint", "clear_watchpoint"})
+# Derived from DEBUG_METHOD_OPERATIONS so a new breakpoint/watchpoint op cannot drift out of sync
+# (TD-13): every set_/clear_ of a break/watchpoint mutates the breakpoint ledger.
+_BREAKPOINT_MUTATORS = frozenset(
+    name
+    for name in DEBUG_METHOD_OPERATIONS
+    if name.startswith(("set_", "clear_")) and name.endswith(("breakpoint", "watchpoint"))
+)
 # Interactive resume verbs (continue/step/next/finish): engine method + how the timeout maps.
 _EXEC_VERBS = {
     "continue_execution": lambda engine, att, timeout: engine.continue_(att, timeout_sec=timeout),
@@ -6289,6 +6478,15 @@ _EXEC_VERBS = {
     "next": lambda engine, att, timeout: engine.next(att, timeout_sec=timeout),
     "finish": lambda engine, att, timeout: engine.finish(att, timeout_sec=timeout),
 }
+
+
+def _required_kwarg(kwargs: dict[str, object], key: str) -> object:
+    """Fetch a required debug-op parameter, raising a structured CONFIGURATION_ERROR rather than a
+    raw KeyError when the handler layer did not supply it (TD-12). Optional params keep using
+    ``kwargs.get(...)`` directly; required ones go through here so access is uniform."""
+    if key not in kwargs:
+        raise GdbMiError(f"missing required debug parameter {key!r}", category=ErrorCategory.CONFIGURATION_ERROR)
+    return kwargs[key]
 
 
 def _engine_op_data(
@@ -6299,14 +6497,14 @@ def _engine_op_data(
     dedicated reap path. An unknown method is a CONFIGURATION_ERROR (defence in depth; the handler
     layer already gated the op name)."""
     if method_name == "read_registers":
-        registers = kwargs["registers"]
+        registers = _required_kwarg(kwargs, "registers")
         names = [str(name) for name in registers] if isinstance(registers, list) else []
         return engine.read_registers(attachment, names)
     if method_name == "read_symbol":
-        return engine.read_symbol(attachment, str(kwargs["symbol"]))
+        return engine.read_symbol(attachment, str(_required_kwarg(kwargs, "symbol")))
     if method_name == "read_memory":
-        address = kwargs["address"]
-        byte_count = kwargs["byte_count"]
+        address = _required_kwarg(kwargs, "address")
+        byte_count = _required_kwarg(kwargs, "byte_count")
         if not isinstance(address, int) or not isinstance(byte_count, int):
             raise GdbMiError("address and byte_count must be integers", category=ErrorCategory.CONFIGURATION_ERROR)
         if address < 0:
@@ -6322,16 +6520,26 @@ def _engine_op_data(
         evaluate_args: dict[str, object] = (
             {str(key): value for key, value in arguments.items()} if isinstance(arguments, dict) else {}
         )
-        return engine.evaluate_inspector(attachment, inspector=str(kwargs["inspector"]), arguments=evaluate_args)
+        return engine.evaluate_inspector(
+            attachment, inspector=str(_required_kwarg(kwargs, "inspector")), arguments=evaluate_args
+        )
     if method_name == "set_breakpoint":
-        return {"breakpoint": engine.set_breakpoint(attachment, str(kwargs["symbol"])).model_dump(mode="json")}
+        return {
+            "breakpoint": engine.set_breakpoint(attachment, str(_required_kwarg(kwargs, "symbol"))).model_dump(
+                mode="json"
+            )
+        }
     if method_name == "set_watchpoint":
-        return {"breakpoint": engine.set_watchpoint(attachment, str(kwargs["symbol"])).model_dump(mode="json")}
+        return {
+            "breakpoint": engine.set_watchpoint(attachment, str(_required_kwarg(kwargs, "symbol"))).model_dump(
+                mode="json"
+            )
+        }
     if method_name == "clear_breakpoint":
-        engine.clear_breakpoint(attachment, str(kwargs["breakpoint_id"]))
+        engine.clear_breakpoint(attachment, str(_required_kwarg(kwargs, "breakpoint_id")))
         return {}
     if method_name == "clear_watchpoint":
-        engine.clear_watchpoint(attachment, str(kwargs["breakpoint_id"]))
+        engine.clear_watchpoint(attachment, str(_required_kwarg(kwargs, "breakpoint_id")))
         return {}
     if method_name == "list_breakpoints":
         return {"breakpoints": [ref.model_dump(mode="json") for ref in engine.list_breakpoints(attachment)]}
@@ -6429,6 +6637,151 @@ def _preserved_debug_step_details(store: ArtifactStore, run_id: str) -> dict[str
     return {key: existing.details[key] for key in ("transport_session_id", "mi_probe") if key in existing.details}
 
 
+def _run_debug_engine_op(
+    *,
+    engine: GdbMiEngine,
+    gdb_mi_sessions: GdbMiSessionRegistry,
+    attachment: GdbMiAttachment,
+    session: DebugSession,
+    method_name: str,
+    kwargs: dict[str, object],
+    redactor: Redactor,
+    artifact_root: Path,
+    run_id: str,
+    transaction: TransportTransaction | None,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+    session_guard: SessionGuard | None,
+) -> tuple[dict[str, object], DebugSession] | ToolResponse:
+    """Run one debug.* op on the live attachment and rebuild the breakpoint ledger after a mutator
+    (TD-09 — extracted from ``_debug_operation_response`` so the handler stays under the size limit).
+
+    Returns ``(op_data, updated_session)`` on success. Returns a ``ToolResponse`` for the two cases
+    that abort the op while keeping the handler structure: a ``transport_stall`` GdbMiError (the RSP
+    link is dead — reap + force_resume + tear the transport down here inside debug_lock) and an
+    ``InjectBreakError``. A benign GdbMiError / ProviderDebugError is re-raised for the caller's outer
+    handler; any other exception reaps the unusable attachment and returns a structured failure."""
+    try:
+        if method_name == "interrupt":
+            data = _interrupt_op_data(
+                engine=engine,
+                attachment=attachment,
+                transport_session=_lookup_transport_session(
+                    session_registry=session_registry,
+                    artifact_root=artifact_root,
+                    run_id=run_id,
+                    transaction=transaction,
+                ),
+                transaction=transaction,
+            )
+        else:
+            data = _engine_op_data(engine=engine, attachment=attachment, method_name=method_name, kwargs=kwargs)
+        updated_session = session
+        if method_name in _BREAKPOINT_MUTATORS:
+            ledger = {ref.number: ref.model_dump(mode="json") for ref in engine.list_breakpoints(attachment)}
+            updated_session = session.model_copy(update={"breakpoints": ledger})
+        return data, updated_session
+    except GdbMiError as exc:
+        if exc.details.get("code") == "transport_stall":
+            reaped = gdb_mi_sessions.reap(session.session_id)
+            if reaped is not None:
+                with contextlib.suppress(Exception):
+                    engine.force_resume(reaped)
+            _teardown_stalled_debug_session(
+                run_id=run_id,
+                admission=admission,
+                session_registry=session_registry,
+                transaction=transaction,
+                session_guard=session_guard,
+            )
+            return ToolResponse.failure(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                message=redactor.redact_text(str(exc)),
+                run_id=run_id,
+                details={"code": "transport_stall"},
+                suggested_next_actions=["debug.start_session", "debug.kdb", "debug.introspect.run"],
+            )
+        raise
+    except InjectBreakError as exc:
+        return ToolResponse.failure(
+            category=exc.category,
+            message=redactor.redact_text(str(exc)),
+            run_id=run_id,
+            details=redactor.redact_value(exc.details),
+            suggested_next_actions=["debug.kdb", "debug.introspect.run", "artifacts.get_manifest"],
+        )
+    except ProviderDebugError:
+        raise
+    except Exception as exc:
+        reaped = gdb_mi_sessions.reap(session.session_id)
+        if reaped is not None:
+            with contextlib.suppress(Exception):
+                engine.force_resume(reaped)
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            message=redactor.redact_text(f"the gdb/MI engine faulted during debug.{method_name}: {exc}"),
+            run_id=run_id,
+            details={"code": "debug_engine_faulted"},
+            suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
+        )
+
+
+def _persist_debug_op_details(
+    *, store: ArtifactStore, run_id: str, method_name: str, session: DebugSession, data: dict[str, object]
+) -> dict[str, object]:
+    """Persist the post-op DebugSession + a SUCCEEDED ``debug`` step, returning the merged details
+    (manifest details + preserved step details + op data). Extracted from _debug_operation_response
+    (TD-09)."""
+    _persist_mi_debug_session(store=store, run_id=run_id, session=session)
+    details = {
+        **_debug_session_manifest_details(store=store, run_id=run_id, session=session),
+        **_preserved_debug_step_details(store, run_id),
+        **data,
+    }
+    terminal = StepResult(
+        step_name="debug",
+        status=StepStatus.SUCCEEDED,
+        summary=f"debug.{method_name} succeeded",
+        artifacts=_mi_session_artifacts(store=store, run_id=run_id, session=session),
+        details=details,
+    )
+    store.record_step_result(run_id, terminal, replace_succeeded=True)
+    return details
+
+
+def _map_debug_op_exception(exc: Exception, *, run_id: str, method_name: str, redactor: Redactor) -> ToolResponse:
+    """Map the terminal exceptions of _debug_operation_response's op block to a structured failure
+    (TD-09), preserving the original per-type handling order."""
+    if isinstance(exc, ManifestStateError):
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    if isinstance(exc, ProviderDebugError):
+        return ToolResponse.failure(
+            category=exc.category,
+            message=redactor.redact_text(str(exc)),
+            run_id=run_id,
+            details=redactor.redact_value(exc.details),
+            artifacts=_redacted_artifacts(exc.artifacts, redactor),
+            suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+        )
+    if isinstance(exc, GdbMiError):
+        return ToolResponse.failure(
+            category=exc.category,
+            message=redactor.redact_text(str(exc)),
+            run_id=run_id,
+            details=redactor.redact_value(exc.details),
+            suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+        )
+    # OSError: the engine op already ran (live session healthy); only persist/record bookkeeping
+    # faulted. Surface a structured failure WITHOUT reaping — the caller can retry the op.
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        message=redactor.redact_text(f"failed to record debug.{method_name}: {exc}"),
+        run_id=run_id,
+        details={"code": "debug_session_op_record_failed"},
+        suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
+    )
+
+
 def _debug_operation_response(
     *,
     artifact_root: Path,
@@ -6471,10 +6824,7 @@ def _debug_operation_response(
             # ownership assertion, so a legacy session can never silently halt the kernel as a side
             # effect of `target remote` against a run target.run_tests is unaware of. This runs BEFORE
             # the live-attachment lookup (ADR 0021 fence-then-lookup).
-            if admission is not None:
-                _fence_legacy_debug_session(run_id=run_id, admission=admission, session_registry=session_registry)
-            else:
-                _assert_layer4_ownership(run_id=run_id, session_registry=session_registry)
+            _enforce_debug_ownership_fence(run_id=run_id, admission=admission, session_registry=session_registry)
             profile = _resolve_debug_profile(
                 profile_name=session.selected_debug_profile,
                 debug_profiles=debug_profiles,
@@ -6482,133 +6832,36 @@ def _debug_operation_response(
             _ensure_debug_operation_enabled(profile, DEBUG_METHOD_OPERATIONS[method_name])
             attachment = gdb_mi_sessions.require(session.session_id)
             # Every engine interaction for this op — the op itself AND the post-mutator ledger rebuild
-            # (-break-list) — shares one guard: a raw non-protocol fault (dead gdb pipe / crashed
-            # engine) reaps the unusable attachment, best-effort un-halts the kernel, and returns a
-            # structured failure (defence-in-depth matching start_session's guaranteed-resume
-            # teardown). A GdbMiError means gdb answered (alive) — keep the session, surface it below.
-            try:
-                if method_name == "interrupt":
-                    # ADR 0024: break entry routes off the admitted break_plan, not a hardcoded
-                    # method. Native (the loopback QEMU default) interrupts the inferior directly;
-                    # any other admitted method is injected over the console via the transaction.
-                    data = _interrupt_op_data(
-                        engine=gdb_mi_engine,
-                        attachment=attachment,
-                        transport_session=_lookup_transport_session(
-                            session_registry=session_registry,
-                            artifact_root=artifact_root,
-                            run_id=run_id,
-                            transaction=transaction,
-                        ),
-                        transaction=transaction,
-                    )
-                else:
-                    data = _engine_op_data(
-                        engine=gdb_mi_engine, attachment=attachment, method_name=method_name, kwargs=kwargs
-                    )
-                updated_session = session
-                if method_name in _BREAKPOINT_MUTATORS:
-                    ledger = {
-                        ref.number: ref.model_dump(mode="json") for ref in gdb_mi_engine.list_breakpoints(attachment)
-                    }
-                    updated_session = session.model_copy(update={"breakpoints": ledger})
-            except GdbMiError as exc:
-                # A transport_stall means the RSP link is dead (ADR 0023): unlike a benign GdbMiError
-                # (bad symbol), the session cannot make progress, so reap + force_resume + tear the
-                # transport down here INSIDE debug_lock (no concurrent op can require() the stalled
-                # attachment), then return a structured INFRASTRUCTURE_FAILURE routing the agent to
-                # re-attach. Every other GdbMiError stays contained (re-raised, session kept).
-                if exc.details.get("code") == "transport_stall":
-                    reaped = gdb_mi_sessions.reap(session.session_id)
-                    if reaped is not None:
-                        with contextlib.suppress(Exception):
-                            gdb_mi_engine.force_resume(reaped)
-                    _teardown_stalled_debug_session(
-                        run_id=run_id,
-                        admission=admission,
-                        session_registry=session_registry,
-                        transaction=transaction,
-                        session_guard=session_guard,
-                    )
-                    return ToolResponse.failure(
-                        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                        message=redactor.redact_text(str(exc)),
-                        run_id=run_id,
-                        details={"code": "transport_stall"},
-                        suggested_next_actions=["debug.start_session", "debug.kdb", "debug.introspect.run"],
-                    )
-                raise
-            except InjectBreakError as exc:
-                # The admitted break plan could not be injected (no break handle on this transport,
-                # or a requested method that does not match the plan). The live attachment is
-                # healthy — keep it, surface a CONFIGURATION_ERROR with the mechanism's own details.
-                return ToolResponse.failure(
-                    category=exc.category,
-                    message=redactor.redact_text(str(exc)),
-                    run_id=run_id,
-                    details=redactor.redact_value(exc.details),
-                    suggested_next_actions=["debug.kdb", "debug.introspect.run", "artifacts.get_manifest"],
-                )
-            except ProviderDebugError:
-                raise
-            except Exception as exc:
-                reaped = gdb_mi_sessions.reap(session.session_id)
-                if reaped is not None:
-                    with contextlib.suppress(Exception):
-                        gdb_mi_engine.force_resume(reaped)
-                return ToolResponse.failure(
-                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                    message=redactor.redact_text(f"the gdb/MI engine faulted during debug.{method_name}: {exc}"),
-                    run_id=run_id,
-                    details={"code": "debug_engine_faulted"},
-                    suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
-                )
+            # (-break-list) — shares one guard (inside debug_lock, no concurrent op can require() a
+            # stalled attachment). _run_debug_engine_op returns a ToolResponse for the abort cases
+            # (transport_stall / inject-break) and (data, session) on success; a benign
+            # GdbMiError/ProviderDebugError propagates to the outer handler below.
+            op_result = _run_debug_engine_op(
+                engine=gdb_mi_engine,
+                gdb_mi_sessions=gdb_mi_sessions,
+                attachment=attachment,
+                session=session,
+                method_name=method_name,
+                kwargs=kwargs,
+                redactor=redactor,
+                artifact_root=artifact_root,
+                run_id=run_id,
+                transaction=transaction,
+                admission=admission,
+                session_registry=session_registry,
+                session_guard=session_guard,
+            )
+            if isinstance(op_result, ToolResponse):
+                return op_result
+            data, updated_session = op_result
             if persist_manifest:
-                _persist_mi_debug_session(store=store, run_id=run_id, session=updated_session)
-                details = {
-                    **_debug_session_manifest_details(store=store, run_id=run_id, session=updated_session),
-                    **_preserved_debug_step_details(store, run_id),
-                    **data,
-                }
-                terminal = StepResult(
-                    step_name="debug",
-                    status=StepStatus.SUCCEEDED,
-                    summary=f"debug.{method_name} succeeded",
-                    artifacts=_mi_session_artifacts(store=store, run_id=run_id, session=updated_session),
-                    details=details,
+                details = _persist_debug_op_details(
+                    store=store, run_id=run_id, method_name=method_name, session=updated_session, data=data
                 )
-                store.record_step_result(run_id, terminal, replace_succeeded=True)
             else:
                 details = data
-    except ManifestStateError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-    except ProviderDebugError as exc:
-        return ToolResponse.failure(
-            category=exc.category,
-            message=redactor.redact_text(str(exc)),
-            run_id=run_id,
-            details=redactor.redact_value(exc.details),
-            artifacts=_redacted_artifacts(exc.artifacts, redactor),
-            suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
-        )
-    except GdbMiError as exc:
-        return ToolResponse.failure(
-            category=exc.category,
-            message=redactor.redact_text(str(exc)),
-            run_id=run_id,
-            details=redactor.redact_value(exc.details),
-            suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
-        )
-    except OSError as exc:
-        # The engine op already ran (the live session is healthy); only the persist/record bookkeeping
-        # faulted. Surface a structured failure WITHOUT reaping — the caller can retry the op.
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            message=redactor.redact_text(f"failed to record debug.{method_name}: {exc}"),
-            run_id=run_id,
-            details={"code": "debug_session_op_record_failed"},
-            suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
-        )
+    except (ManifestStateError, ProviderDebugError, GdbMiError, OSError) as exc:
+        return _map_debug_op_exception(exc, run_id=run_id, method_name=method_name, redactor=redactor)
 
     op_artifacts = _mi_session_artifacts(store=store, run_id=run_id, session=updated_session)
     return ToolResponse.success(
@@ -6902,10 +7155,7 @@ def debug_load_module_symbols_handler(
     try:
         with store.debug_lock(run_id):
             session = _load_active_debug_session(store, run_id, debug_session_id)
-            if admission is not None:
-                _fence_legacy_debug_session(run_id=run_id, admission=admission, session_registry=session_registry)
-            else:
-                _assert_layer4_ownership(run_id=run_id, session_registry=session_registry)
+            _enforce_debug_ownership_fence(run_id=run_id, admission=admission, session_registry=session_registry)
             profile = _resolve_debug_profile(profile_name=session.selected_debug_profile, debug_profiles=debug_profiles)
             _ensure_debug_operation_enabled(profile, "debug.load_module_symbols")
             if not _MODULE_NAME_RE.match(module):
@@ -7603,11 +7853,11 @@ def debug_end_session_handler(
     # has no SessionRegistry ownership record; detect it BEFORE the detach so the post-detach tombstone
     # path below runs even though end_session rewrites the manifest's debug step. A Layer-4-owned
     # session has a record AND a `transport_session_id` — the transaction.close() branch governs it.
-    is_legacy_session = (
-        admission is not None
-        and session_registry is not None
-        and transport_session_id is None
-        and session_registry.read_record(TargetKey(provisioner="local-qemu", target_id=run_id)) is None
+    is_legacy_session = _is_legacy_debug_session(
+        admission=admission,
+        session_registry=session_registry,
+        transport_session_id=transport_session_id,
+        run_id=run_id,
     )
     response = _end_mi_debug_session(
         artifact_root=artifact_root,
