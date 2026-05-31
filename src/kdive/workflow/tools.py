@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 
@@ -14,7 +13,51 @@ from kdive.model import Model
 from kdive.providers.local.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard
 
-WorkflowHandler = Callable[..., ToolResponse]
+
+class BuildBootTestHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        source_path: str,
+        build_profile: str,
+        target_profile: str,
+        rootfs_profile: str,
+        run_id: str | None,
+        test_suite: str | None,
+        commands: list[list[str]] | None,
+        force_rebuild: bool,
+        force_reboot: bool,
+        force_rerun_tests: bool,
+        force_recollect: bool,
+        acknowledged_permissions: list[str] | None,
+        admission: AdmissionService,
+        session_registry: SessionRegistry,
+    ) -> ToolResponse: ...
+
+
+class BuildBootDebugHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        source_path: str,
+        build_profile: str,
+        target_profile: str,
+        rootfs_profile: str,
+        run_id: str | None,
+        debug_profile: str | None,
+        force_rebuild: bool,
+        force_reboot: bool,
+        new_session: bool,
+        acknowledged_permissions: list[str] | None,
+        admission: AdmissionService,
+        session_registry: SessionRegistry,
+        transaction: TransportTransaction,
+        session_guard: SessionGuard,
+        gdb_mi_engine: GdbMiEngine,
+        gdb_mi_sessions: GdbMiSessionRegistry,
+    ) -> ToolResponse: ...
 
 
 class WorkflowRunContext(Model):
@@ -57,8 +100,8 @@ def register_workflow_tools(
     session_guard: SessionGuard,
     gdb_mi_engine: GdbMiEngine,
     gdb_mi_sessions: GdbMiSessionRegistry,
-    build_boot_test_handler: WorkflowHandler,
-    build_boot_debug_handler: WorkflowHandler,
+    build_boot_test_handler: BuildBootTestHandler,
+    build_boot_debug_handler: BuildBootDebugHandler,
 ) -> None:
     default_artifact_root_text = str(default_artifact_root)
 

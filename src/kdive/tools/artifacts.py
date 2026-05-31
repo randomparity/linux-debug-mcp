@@ -1,14 +1,21 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 
 from kdive.domain import ToolResponse
 
-ArtifactCollectHandler = Callable[..., ToolResponse]
+
+class ArtifactCollectHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        run_id: str,
+        force_recollect: bool,
+    ) -> ToolResponse: ...
 
 
 def register_artifact_tools(

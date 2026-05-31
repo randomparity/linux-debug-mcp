@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 
@@ -17,7 +16,25 @@ from kdive.domain import (
     ToolResponse,
 )
 
-IntrospectHandler = Callable[..., ToolResponse]
+
+class LiveIntrospectHandler(Protocol):
+    def __call__(
+        self,
+        request: DebugIntrospectRunRequest | DebugIntrospectHelperRequest | DebugIntrospectCheckPrerequisitesRequest,
+        *,
+        artifact_root: Path,
+        admission: AdmissionService,
+        session_registry: SessionRegistry,
+    ) -> ToolResponse: ...
+
+
+class VmcoreIntrospectHandler(Protocol):
+    def __call__(
+        self,
+        request: DebugIntrospectFromVmcoreRequest | DebugIntrospectFromVmcoreHelperRequest,
+        *,
+        artifact_root: Path,
+    ) -> ToolResponse: ...
 
 
 def register_introspect_tools(
@@ -26,11 +43,11 @@ def register_introspect_tools(
     default_artifact_root: Path,
     admission: AdmissionService,
     session_registry: SessionRegistry,
-    run_handler: IntrospectHandler,
-    helper_handler: IntrospectHandler,
-    check_prereqs_handler: IntrospectHandler,
-    from_vmcore_handler: IntrospectHandler,
-    from_vmcore_helper_handler: IntrospectHandler,
+    run_handler: LiveIntrospectHandler,
+    helper_handler: LiveIntrospectHandler,
+    check_prereqs_handler: LiveIntrospectHandler,
+    from_vmcore_handler: VmcoreIntrospectHandler,
+    from_vmcore_helper_handler: VmcoreIntrospectHandler,
 ) -> None:
     default_artifact_root_text = str(default_artifact_root)
 

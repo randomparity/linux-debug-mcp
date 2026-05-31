@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 
@@ -12,14 +11,49 @@ from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ToolResponse
 
-TransportHandler = Callable[..., ToolResponse]
+
+class TransportOpenHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        run_id: str,
+        recovery: bool,
+        transaction: TransportTransaction,
+        admission: AdmissionService,
+        session_registry: SessionRegistry,
+    ) -> ToolResponse: ...
+
+
+class TransportCloseHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        transaction: TransportTransaction,
+        session_registry: SessionRegistry,
+    ) -> ToolResponse: ...
+
+
+class TransportInjectBreakHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        acknowledged_permissions: list[str] | None,
+        artifact_root: Path,
+        transaction: TransportTransaction,
+        admission: AdmissionService,
+        session_registry: SessionRegistry,
+    ) -> ToolResponse: ...
 
 
 @dataclass(frozen=True)
 class TransportToolHandlers:
-    open: TransportHandler
-    close: TransportHandler
-    inject_break: TransportHandler
+    open: TransportOpenHandler
+    close: TransportCloseHandler
+    inject_break: TransportInjectBreakHandler
 
 
 @dataclass(frozen=True)

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 
@@ -17,7 +16,25 @@ from kdive.postmortem.models import (
     DebugPostmortemTriageRequest,
 )
 
-PostmortemHandler = Callable[..., ToolResponse]
+
+class VmcorePostmortemHandler(Protocol):
+    def __call__(
+        self,
+        request: DebugPostmortemCrashRequest | DebugPostmortemTriageRequest,
+        *,
+        artifact_root: Path,
+    ) -> ToolResponse: ...
+
+
+class LivePostmortemHandler(Protocol):
+    def __call__(
+        self,
+        request: DebugPostmortemCheckPrereqsRequest | DebugPostmortemListDumpsRequest | DebugPostmortemFetchRequest,
+        *,
+        artifact_root: Path,
+        admission: AdmissionService,
+        session_registry: SessionRegistry,
+    ) -> ToolResponse: ...
 
 
 def register_postmortem_tools(
@@ -26,11 +43,11 @@ def register_postmortem_tools(
     default_artifact_root: Path,
     admission: AdmissionService,
     session_registry: SessionRegistry,
-    crash_handler: PostmortemHandler,
-    triage_handler: PostmortemHandler,
-    check_prereqs_handler: PostmortemHandler,
-    list_dumps_handler: PostmortemHandler,
-    fetch_handler: PostmortemHandler,
+    crash_handler: VmcorePostmortemHandler,
+    triage_handler: VmcorePostmortemHandler,
+    check_prereqs_handler: LivePostmortemHandler,
+    list_dumps_handler: LivePostmortemHandler,
+    fetch_handler: LivePostmortemHandler,
 ) -> None:
     default_artifact_root_text = str(default_artifact_root)
 
