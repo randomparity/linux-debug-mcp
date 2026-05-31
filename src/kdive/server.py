@@ -3219,8 +3219,7 @@ def _build_mi_debug_session(
     """Build the persisted DebugSession for the live gdb/MI attach (ADR 0021). The id is minted once
     in the handler BEFORE the probe and threaded here, so the registry key and the persisted id are
     identical. Symbol-identity validation is empty: the #70 build-id version-lock gate ran before the
-    attach and is authoritative (ADR 0021 decision 2b) — there is no live-banner scrape. The legacy
-    ``controller_*`` fields are inert: the in-process registry is the liveness source, not a pid."""
+    attach and is authoritative (ADR 0021 decision 2b) — there is no live-banner scrape."""
     attempt_dir = transcript_path.parent
     return DebugSession(
         session_id=session_id,
@@ -3234,10 +3233,6 @@ def _build_mi_debug_session(
         ended_at=None,
         current_execution_state=DebugSessionState.STOPPED,
         breakpoints={},
-        controller_mode="attached",
-        active_controller_pid=None,
-        controller_last_observed_state="attached",
-        active_controller_identity={},
         transcript_path=str(transcript_path),
         command_metadata_path=str(attempt_dir / "commands.jsonl"),
         latest_summary_path=str(attempt_dir / "debug-summary.json"),

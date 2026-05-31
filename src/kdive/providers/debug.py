@@ -36,10 +36,10 @@ class DebugSession(Model):
     current_execution_state: DebugSessionState = DebugSessionState.UNKNOWN
     breakpoints: dict[str, dict[str, object]] = Field(default_factory=dict)
     loaded_modules: dict[str, dict[str, str]] = Field(default_factory=dict)
-    controller_mode: Literal["batch", "attached"] = "batch"
-    active_controller_pid: int | None = None
-    controller_last_observed_state: str = "not_started"
-    active_controller_identity: dict[str, object] = Field(default_factory=dict)
+    controller_mode: Literal["batch", "attached"] = Field(default="batch", exclude=True)
+    active_controller_pid: int | None = Field(default=None, exclude=True)
+    controller_last_observed_state: str = Field(default="not_started", exclude=True)
+    active_controller_identity: dict[str, object] = Field(default_factory=dict, exclude=True)
     transcript_path: str
     command_metadata_path: str
     latest_summary_path: str

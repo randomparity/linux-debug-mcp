@@ -74,7 +74,26 @@ def test_debug_session_state_is_typed_and_serializes_as_string() -> None:
     assert session.current_execution_state is DebugSessionState.STOPPED
     reloaded = DebugSession.model_validate_json(session.model_dump_json())
     assert reloaded.current_execution_state is DebugSessionState.STOPPED
-    assert session.model_dump(mode="json")["current_execution_state"] == "stopped"
+    dumped = session.model_dump(mode="json")
+    assert dumped["current_execution_state"] == "stopped"
+    assert {
+        "controller_mode",
+        "active_controller_pid",
+        "controller_last_observed_state",
+        "active_controller_identity",
+    }.isdisjoint(dumped)
+
+    legacy = DebugSession.model_validate(
+        {
+            **dumped,
+            "controller_mode": "attached",
+            "active_controller_pid": 1234,
+            "controller_last_observed_state": "running",
+            "active_controller_identity": {"pid": 1234},
+        }
+    )
+    assert legacy.controller_mode == "attached"
+    assert legacy.active_controller_pid == 1234
 
 
 def test_registry_get_unknown_provider_has_contextual_error() -> None:

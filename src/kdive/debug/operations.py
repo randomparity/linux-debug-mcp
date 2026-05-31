@@ -102,9 +102,6 @@ def _debug_session_manifest_details(*, store: ArtifactStore, run_id: str, sessio
         "latest_summary_path": session.latest_summary_path,
         "symbol_identity_validation": session.symbol_identity_validation,
         "breakpoints": session.breakpoints,
-        "controller_mode": session.controller_mode,
-        "active_controller_pid": session.active_controller_pid,
-        "controller_last_observed_state": session.controller_last_observed_state,
     }
     if session.ended_at is not None:
         details["ended_at"] = session.ended_at
