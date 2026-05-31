@@ -91,6 +91,17 @@ def test_provider_uses_boot_planner_collaborator() -> None:
     assert type(provider._boot_planner).__name__ == "_BootPlanner"
 
 
+def test_execute_boot_state_transitions_are_private_steps() -> None:
+    provider = LibvirtQemuProvider()
+    for helper_name in (
+        "_reconcile_existing_domain",
+        "_execute_domain_start_sequence",
+        "_frozen_debug_boot_result",
+        "_console_readiness_result",
+    ):
+        assert hasattr(provider, helper_name)
+
+
 @pytest.mark.parametrize("mutability", ["read_only", "mutable"])
 def test_plan_boot_accepts_existing_disk_image_for_supported_mutability(tmp_path: Path, mutability: str) -> None:
     kernel, rootfs, run_dir = make_inputs(tmp_path)

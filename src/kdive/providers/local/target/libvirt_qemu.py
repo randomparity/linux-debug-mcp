@@ -609,14 +609,37 @@ class LibvirtQemuProvider:
             artifacts = [*artifacts, rotated_console_artifact]
         self._write_boot_plan(plan)
 
+        existing_domain, failure = self._reconcile_existing_domain(plan, artifacts)
+        if failure is not None:
+            return failure
+
+        plan.domain_xml_path.write_text(self.render_domain_xml(plan), encoding="utf-8")
+
+        failure = self._execute_domain_start_sequence(plan, artifacts, existing_domain=existing_domain)
+        if failure is not None:
+            return failure
+
+        if plan.wait_for_debugger:
+            return self._frozen_debug_boot_result(plan, artifacts)
+
+        console = self.runner.stream_console(
+            plan.domain_name,
+            libvirt_uri=plan.libvirt_uri,
+            output_path=plan.console_log_path,
+            timeout=plan.timeout_seconds,
+            readiness_marker=plan.readiness_marker,
+        )
+        return self._console_readiness_result(plan, artifacts, console)
+
+    def _reconcile_existing_domain(
+        self, plan: BootPlan, artifacts: list[ArtifactRef]
+    ) -> tuple[bool, BootExecutionResult | None]:
         dumpxml = self.runner.run(plan.dumpxml_argv, timeout=plan.timeout_seconds, log_path=plan.boot_log_path)
-        existing_domain = False
         if dumpxml.exit_status == 0:
-            existing_domain = True
             try:
                 self.validate_existing_domain_ownership(plan, dumpxml.stdout)
             except ProviderBootError as exc:
-                return self._boot_result(
+                return False, self._boot_result(
                     plan=plan,
                     status=StepStatus.FAILED,
                     summary=str(exc),
@@ -625,11 +648,16 @@ class LibvirtQemuProvider:
                     artifacts=self._existing_artifacts(artifacts),
                     diagnostic=dumpxml.stderr or dumpxml.stdout,
                 )
-        elif not self._is_domain_not_found(dumpxml):
-            return self._command_failure_result(plan=plan, command="dumpxml", result=dumpxml, artifacts=artifacts)
+            return True, None
+        if not self._is_domain_not_found(dumpxml):
+            return False, self._command_failure_result(
+                plan=plan, command="dumpxml", result=dumpxml, artifacts=artifacts
+            )
+        return False, None
 
-        plan.domain_xml_path.write_text(self.render_domain_xml(plan), encoding="utf-8")
-
+    def _execute_domain_start_sequence(
+        self, plan: BootPlan, artifacts: list[ArtifactRef], *, existing_domain: bool
+    ) -> BootExecutionResult | None:
         if existing_domain:
             destroy = self.runner.run(plan.destroy_argv, timeout=plan.timeout_seconds, log_path=plan.boot_log_path)
             if (destroy.exit_status != 0 or destroy.timed_out) and not self._is_inactive_destroy_failure(destroy):
@@ -652,8 +680,7 @@ class LibvirtQemuProvider:
         if start.exit_status != 0 or start.timed_out:
             details: dict[str, object] | None = None
             if plan.cleanup_policy == "stop_on_failure":
-                cleanup = self._cleanup_after_failure(plan)
-                details = {"cleanup": cleanup}
+                details = {"cleanup": self._cleanup_after_failure(plan)}
             return self._command_failure_result(
                 plan=plan,
                 command="start",
@@ -661,40 +688,37 @@ class LibvirtQemuProvider:
                 artifacts=artifacts,
                 details=details,
             )
+        return None
 
-        if plan.wait_for_debugger:
-            # The vCPU is blocked at the gdbstub and prints nothing, but create an empty console
-            # log so the frozen success returns the same artifact set as the normal success branch.
-            plan.console_log_path.write_text("", encoding="utf-8")
-            frozen_details: dict[str, object] = {
-                "domain": plan.domain_name,
-                "console_status": "frozen",
-                "wait_for_debugger": True,
-                "matched_marker": None,
-                "console_snippet": "",
-                "kernel_args": plan.kernel_args,
-                "guest_ip": None,
-                "guest_ip_discovery": {
-                    "status": "skipped",
-                    "source": "lease",
-                    "reason": "wait_for_debugger",
-                },
-            }
-            return self._boot_result(
-                plan=plan,
-                status=StepStatus.SUCCEEDED,
-                summary="target booted frozen, waiting for debugger attach",
-                details=frozen_details,
-                artifacts=self._existing_artifacts(artifacts),
-            )
-
-        console = self.runner.stream_console(
-            plan.domain_name,
-            libvirt_uri=plan.libvirt_uri,
-            output_path=plan.console_log_path,
-            timeout=plan.timeout_seconds,
-            readiness_marker=plan.readiness_marker,
+    def _frozen_debug_boot_result(self, plan: BootPlan, artifacts: list[ArtifactRef]) -> BootExecutionResult:
+        # The vCPU is blocked at the gdbstub and prints nothing, but create an empty console
+        # log so the frozen success returns the same artifact set as the normal success branch.
+        plan.console_log_path.write_text("", encoding="utf-8")
+        frozen_details: dict[str, object] = {
+            "domain": plan.domain_name,
+            "console_status": "frozen",
+            "wait_for_debugger": True,
+            "matched_marker": None,
+            "console_snippet": "",
+            "kernel_args": plan.kernel_args,
+            "guest_ip": None,
+            "guest_ip_discovery": {
+                "status": "skipped",
+                "source": "lease",
+                "reason": "wait_for_debugger",
+            },
+        }
+        return self._boot_result(
+            plan=plan,
+            status=StepStatus.SUCCEEDED,
+            summary="target booted frozen, waiting for debugger attach",
+            details=frozen_details,
+            artifacts=self._existing_artifacts(artifacts),
         )
+
+    def _console_readiness_result(
+        self, plan: BootPlan, artifacts: list[ArtifactRef], console: ConsoleResult
+    ) -> BootExecutionResult:
         details: dict[str, object] = {
             "domain": plan.domain_name,
             "console_status": console.status,
