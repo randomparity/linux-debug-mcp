@@ -214,8 +214,14 @@ def test_debug_operation_handlers_live_outside_server_catch_all() -> None:
 
 
 def test_live_introspect_handlers_live_outside_server_catch_all() -> None:
+    from kdive.introspect import handlers as introspect_handlers
+
     assert server.debug_introspect_run_handler.__module__ == "kdive.introspect.handlers"
     assert server.debug_introspect_helper_handler.__module__ == "kdive.introspect.handlers"
+    assert server.debug_introspect_check_prerequisites_handler is (
+        introspect_handlers.debug_introspect_check_prerequisites_handler
+    )
+    assert server.debug_introspect_check_prerequisites_handler.__module__ == "kdive.introspect.handlers"
 
 
 def test_prerequisites_handler_readiness_skipped_without_profiles(tmp_path: Path) -> None:

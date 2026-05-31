@@ -17,10 +17,12 @@ from pydantic import ValidationError
 
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import MAX_INTROSPECT_CALLS_PER_RUN, DebugProfile, RootfsProfile, TargetProfile
-from kdive.coordination.admission import AdmissionService
+from kdive.coordination.admission import AdmissionError, AdmissionService
 from kdive.coordination.registry import SessionRegistry
+from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES
 from kdive.domain import (
     ArtifactRef,
+    DebugIntrospectCheckPrerequisitesRequest,
     DebugIntrospectFromVmcoreHelperRequest,
     DebugIntrospectFromVmcoreRequest,
     DebugIntrospectHelperRequest,
@@ -29,6 +31,14 @@ from kdive.domain import (
     StepResult,
     StepStatus,
     ToolResponse,
+)
+from kdive.handlers.shared import (
+    PROBE_STDOUT_CAP,
+    _assemble_probe_response,
+    _prepare_probe_dirs,
+    _reject_if_target_halted,
+    _require_value,
+    _resolve_probe_context,
 )
 from kdive.introspect.execution import (
     HELPER_CAP_PROFILE,
@@ -43,6 +53,7 @@ from kdive.introspect.execution import (
     _make_helper_post_validator,
     _record_terminal_introspect_result,
     _redact_and_truncate,
+    _target_python_remote_argv,
     _utcnow,
 )
 from kdive.introspect.wrappers import (
@@ -53,13 +64,94 @@ from kdive.introspect.wrappers import (
     user_script_sha256,
 )
 from kdive.introspect_helpers import get_helper_registry
-from kdive.providers.ssh import SshRunner, SubprocessSshRunner
+from kdive.prereqs.drgn_probe import PROBE_SCRIPT
+from kdive.providers.ssh import SshRunner, SubprocessSshRunner, build_ssh_argv
 from kdive.safety.paths import PathSafetyError, confine_run_relative
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import KernelProvenance
 from kdive.symbols.build_id import BuildIdReadError, read_elf_build_id
 from kdive.symbols.resolve import SymbolResolutionError, resolve_symbols
 from kdive.symbols.verify import BUILD_ID_RE
+
+
+def debug_introspect_check_prerequisites_handler(
+    request: DebugIntrospectCheckPrerequisitesRequest,
+    *,
+    artifact_root: Path,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    ssh_runner: SshRunner | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+) -> ToolResponse:
+    """Target-side drgn prerequisite probe."""
+    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    _ctx, failure = _resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
+    if failure is not None:
+        return failure
+    ctx = _require_value(_ctx, "probe context missing after successful resolution")
+    run_id = ctx.run_id
+
+    try:
+        halted = _reject_if_target_halted(
+            run_id=run_id,
+            admission=admission,
+            session_registry=session_registry,
+            action="probing introspect prerequisites",
+        )
+    except AdmissionError as exc:
+        return ToolResponse.failure(category=exc.category, run_id=run_id, message=str(exc), details={"code": exc.code})
+    if halted is not None:
+        return halted
+
+    runner: SshRunner = ssh_runner or SubprocessSshRunner()
+    probe_id = uuid.uuid4().hex
+    agent_dir, sensitive_dir = _prepare_probe_dirs(ctx.store, run_id, probe_id)
+
+    use_sudo = ctx.rootfs.ssh_user != "root"
+    remote_argv = _target_python_remote_argv(timeout_seconds=request.timeout_seconds, use_sudo=use_sudo)
+    try:
+        ssh_argv = build_ssh_argv(
+            rootfs_profile=ctx.rootfs,
+            known_hosts_path=ctx.store.run_dir(run_id) / "sensitive" / "known_hosts",
+            command=remote_argv,
+            command_timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
+        )
+    except ValueError as exc:
+        return _configuration_failure(
+            run_id=run_id,
+            message=_redact_and_truncate(ctx.redactor, str(exc), cap=256),
+            details={"code": "invalid_ssh_options"},
+        )
+
+    stdout_path = sensitive_dir / "stdout.raw"
+    stderr_path = sensitive_dir / "stderr.raw"
+    try:
+        ssh_result = runner.run(
+            ssh_argv,
+            timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            stdin=PROBE_SCRIPT,
+            max_stdout_bytes=PROBE_STDOUT_CAP,
+        )
+    except Exception as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=_redact_and_truncate(ctx.redactor, f"ssh probe raised: {exc}", cap=256),
+            details={"code": "ssh_failure"},
+        )
+    for _path in (stdout_path, stderr_path):
+        _chmod_best_effort(_path, 0o600)
+
+    return _assemble_probe_response(
+        ctx,
+        ssh_result=ssh_result,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        agent_dir=agent_dir,
+        probe_id=probe_id,
+    )
 
 
 @dataclass(frozen=True)

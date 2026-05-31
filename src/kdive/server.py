@@ -8,7 +8,6 @@ import re
 import shlex
 import tempfile
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -40,7 +39,6 @@ from kdive.config import (
     missing_destructive_permissions,
 )
 from kdive.coordination.admission import (
-    AdmissionError,
     AdmissionService,
     SnapshotStore,
     publish_ready_snapshot,
@@ -101,7 +99,6 @@ from kdive.default_profiles import (
 )
 from kdive.domain import (
     ArtifactRef,
-    DebugIntrospectCheckPrerequisitesRequest,
     ErrorCategory,
     PrerequisiteCheck,
     PrerequisiteStatus,
@@ -114,12 +111,12 @@ from kdive.introspect.execution import (
 )
 from kdive.introspect.execution import (
     _redact_and_truncate,
-    _target_python_remote_argv,
 )
 from kdive.introspect.execution import (
     _rollback_introspect_admission as _rollback_introspect_admission,
 )
 from kdive.introspect.handlers import (
+    debug_introspect_check_prerequisites_handler,
     debug_introspect_from_vmcore_handler,
     debug_introspect_from_vmcore_helper_handler,
     debug_introspect_helper_handler,
@@ -143,7 +140,6 @@ from kdive.postmortem.handlers import (
 )
 from kdive.postmortem.tools import register_postmortem_tools
 from kdive.prereqs.drgn_probe import (
-    PROBE_SCRIPT,
     UNKNOWN,
     USABLE,
     build_probe_checks,
@@ -1384,86 +1380,6 @@ def _resolve_probe_context(
             redactor=redactor,
         ),
         None,
-    )
-
-
-def debug_introspect_check_prerequisites_handler(
-    request: DebugIntrospectCheckPrerequisitesRequest,
-    *,
-    artifact_root: Path,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
-    ssh_runner: SshRunner | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
-) -> ToolResponse:
-    """Spec §3-§7: target-side drgn prerequisite probe."""
-    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
-    _ctx, failure = _resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
-    if failure is not None:
-        return failure
-    ctx = _require_value(_ctx, "probe context missing after successful resolution")
-    run_id = ctx.run_id
-
-    try:
-        halted = _reject_if_target_halted(
-            run_id=run_id,
-            admission=admission,
-            session_registry=session_registry,
-            action="probing introspect prerequisites",
-        )
-    except AdmissionError as exc:
-        return ToolResponse.failure(category=exc.category, run_id=run_id, message=str(exc), details={"code": exc.code})
-    if halted is not None:
-        return halted
-
-    runner: SshRunner = ssh_runner or SubprocessSshRunner()
-    probe_id = uuid.uuid4().hex
-    agent_dir, sensitive_dir = _prepare_probe_dirs(ctx.store, run_id, probe_id)
-
-    use_sudo = ctx.rootfs.ssh_user != "root"
-    remote_argv = _target_python_remote_argv(timeout_seconds=request.timeout_seconds, use_sudo=use_sudo)
-    try:
-        ssh_argv = build_ssh_argv(
-            rootfs_profile=ctx.rootfs,
-            known_hosts_path=ctx.store.run_dir(run_id) / "sensitive" / "known_hosts",
-            command=remote_argv,
-            command_timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
-        )
-    except ValueError as exc:
-        return _configuration_failure(
-            run_id=run_id,
-            message=_redact_and_truncate(ctx.redactor, str(exc), cap=256),
-            details={"code": "invalid_ssh_options"},
-        )
-
-    stdout_path = sensitive_dir / "stdout.raw"
-    stderr_path = sensitive_dir / "stderr.raw"
-    try:
-        ssh_result = runner.run(
-            ssh_argv,
-            timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-            stdin=PROBE_SCRIPT,
-            max_stdout_bytes=PROBE_STDOUT_CAP,
-        )
-    except Exception as exc:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=_redact_and_truncate(ctx.redactor, f"ssh probe raised: {exc}", cap=256),
-            details={"code": "ssh_failure"},
-        )
-    for _path in (stdout_path, stderr_path):
-        _chmod_best_effort(_path, 0o600)
-
-    return _assemble_probe_response(
-        ctx,
-        ssh_result=ssh_result,
-        stdout_path=stdout_path,
-        stderr_path=stderr_path,
-        agent_dir=agent_dir,
-        probe_id=probe_id,
     )
 
 
