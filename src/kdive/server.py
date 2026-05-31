@@ -1755,50 +1755,293 @@ def _publish_boot_ready_snapshot(
     )
 
 
-def target_boot_handler(
+def _finalize_boot_execution(
+    execution: Any,
     *,
-    artifact_root: Path,
+    store: ArtifactStore,
     run_id: str,
-    target_profile: str | None = None,
-    rootfs_profile: str | None = None,
-    force_reboot: bool = False,
-    provider: LibvirtQemuProvider | None = None,
-    target_profiles: dict[str, TargetProfile] | None = None,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
-    default_libvirt_uri: str | None = None,
-    boot_overrides: BootOverrides | None = None,
-    sensitive_paths: list[Path] | None = None,
-    admission: AdmissionService | None = None,
+    attempt: int,
+    manifest: RunManifest,
+    kernel_image: ArtifactRef,
+    resolved_target_profile: TargetProfile,
+    resolved_rootfs_profile: RootfsProfile,
+    admission: AdmissionService | None,
+    plan_gdbstub_endpoint: dict[str, Any] | None,
 ) -> ToolResponse:
-    try:
-        store = ArtifactStore(artifact_root, create_root=False)
-        manifest_path = store.run_dir(run_id) / "manifest.json"
-        if not manifest_path.is_file():
-            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
-        manifest = store.load_manifest(run_id)
-    except ManifestStateError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    """Record the terminal boot step + BootAttempt, capture kernel provenance on success, publish
+    the READY snapshot, and map the execution outcome to a ToolResponse (TD-102)."""
+    terminal_details: dict[str, Any] = {**execution.details, "kernel_image_path": str(kernel_image.path)}
+    if execution.status == StepStatus.SUCCEEDED:
+        try:
+            terminal_details.update(
+                _capture_kernel_provenance(
+                    build_step=manifest.step_results.get("build"),
+                    boot_details=execution.details,
+                    run_dir=store.run_dir(run_id),
+                )
+            )
+        except Exception as capture_exc:  # provenance capture must never fail an otherwise-good boot
+            # Broad catch is deliberate (a good boot must not be lost to a
+            # capture defect) but must NOT be silent: log with traceback so a
+            # masked programming bug is observable, then record a typed error.
+            logger.warning("kernel provenance capture failed: %s", capture_exc, exc_info=True)
+            terminal_details["kernel_provenance_capture_error"] = {
+                "code": "capture_unexpected_error",
+                "message": f"{type(capture_exc).__name__}: {capture_exc}",
+            }
+    terminal = StepResult(
+        step_name="boot",
+        status=execution.status,
+        summary=execution.summary,
+        artifacts=execution.artifacts,
+        details=terminal_details,
+    )
+    attempt_record = BootAttempt(
+        attempt=attempt,
+        resolved_target_profile=resolved_target_profile,
+        resolved_rootfs_profile=resolved_rootfs_profile,
+        status=execution.status,
+    )
+    store.record_boot_attempt(run_id, attempt=attempt_record, boot_result=terminal)
+    if execution.status == StepStatus.SUCCEEDED and admission is not None:
+        _publish_boot_ready_snapshot(
+            admission,
+            run_id=run_id,
+            generation=attempt,
+            gdbstub_endpoint=plan_gdbstub_endpoint,
+            rootfs_profile=resolved_rootfs_profile,
+        )
+    if execution.status == StepStatus.SUCCEEDED:
+        return ToolResponse.success(
+            summary=execution.summary,
+            run_id=run_id,
+            data=_redacted_boot_data(terminal.details),
+            artifacts=execution.artifacts,
+            suggested_next_actions=_boot_success_next_actions(terminal.details),
+        )
+    return ToolResponse.failure(
+        category=execution.error_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
+        message=execution.summary,
+        run_id=run_id,
+        details=_redacted_boot_data({**execution.details, "diagnostic": execution.diagnostic}),
+        artifacts=execution.artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
 
+
+def _record_boot_attempt_failure(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    attempt_record: BootAttempt,
+    failed: StepResult,
+    category: ErrorCategory,
+) -> ToolResponse:
+    """Record a FAILED BootAttempt + terminal boot step and return the matching ToolResponse — the
+    shared tail of _execute_boot_attempt's provider-error and unexpected-error arms (TD-102)."""
+    store.record_boot_attempt(run_id, attempt=attempt_record, boot_result=failed)
+    return ToolResponse.failure(
+        category=category,
+        message=failed.summary,
+        run_id=run_id,
+        details=_redacted_boot_data(failed.details),
+        artifacts=failed.artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
+def _execute_boot_attempt(
+    *,
+    plan: Any,
+    retrying_after_failure: bool,
+    replace_succeeded: bool,
+    attempt: int,
+    manifest: RunManifest,
+    provider: LibvirtQemuProvider,
+    store: ArtifactStore,
+    run_id: str,
+    resolved_target_profile: TargetProfile,
+    resolved_rootfs_profile: RootfsProfile,
+    kernel_image: ArtifactRef,
+    force_reboot: bool,
+    admission: AdmissionService | None,
+) -> ToolResponse:
+    """Run one boot attempt: write the RUNNING step, execute the provider, capture provenance on
+    success, record the BootAttempt + terminal step, publish the READY snapshot, and map the
+    outcome to a ToolResponse. Extracted from target_boot_handler (TD-102)."""
+
+    def _failed_attempt_record() -> BootAttempt:
+        return BootAttempt(
+            attempt=attempt,
+            resolved_target_profile=resolved_target_profile,
+            resolved_rootfs_profile=resolved_rootfs_profile,
+            status=StepStatus.FAILED,
+        )
+
+    plan_gdbstub_endpoint = getattr(plan, "gdbstub_endpoint", None)
+    if plan_gdbstub_endpoint is not None and hasattr(plan_gdbstub_endpoint, "as_dict"):
+        plan_gdbstub_endpoint = plan_gdbstub_endpoint.as_dict()
+    running = StepResult(
+        step_name="boot",
+        status=StepStatus.RUNNING,
+        summary="target boot running",
+        details={
+            "provider": provider.name,
+            "domain": plan.domain_name,
+            "target_profile": resolved_target_profile.name,
+            "rootfs_profile": resolved_rootfs_profile.name,
+            "kernel_image_path": str(kernel_image.path),
+            "boot_log_path": str(plan.boot_log_path),
+            "boot_plan_path": str(plan.boot_plan_path),
+            "debug_boot": getattr(plan, "debug_gdbstub", False),
+            "gdbstub_endpoint": plan_gdbstub_endpoint,
+            "nokaslr_source": getattr(plan, "nokaslr_source", "not_applicable"),
+        },
+        artifacts=[ArtifactRef(path=str(plan.boot_log_path), kind="boot-log")],
+    )
+    store.record_step_result(run_id, running, replace_succeeded=replace_succeeded)
+    try:
+        execution = provider.execute_boot(
+            plan,
+            force_reboot=force_reboot,
+            retrying_after_failure=retrying_after_failure,
+        )
+    except ProviderBootError as exc:
+        failed = StepResult(
+            step_name="boot", status=StepStatus.FAILED, summary=str(exc), artifacts=exc.artifacts, details=exc.details
+        )
+        return _record_boot_attempt_failure(
+            store=store, run_id=run_id, attempt_record=_failed_attempt_record(), failed=failed, category=exc.category
+        )
+    except Exception as exc:
+        failed = StepResult(
+            step_name="boot",
+            status=StepStatus.FAILED,
+            summary="unexpected boot provider failure",
+            artifacts=[ArtifactRef(path=str(plan.boot_log_path), kind="boot-log")],
+            details={
+                "provider": provider.name,
+                "domain": plan.domain_name,
+                "exception_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        return _record_boot_attempt_failure(
+            store=store,
+            run_id=run_id,
+            attempt_record=_failed_attempt_record(),
+            failed=failed,
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
+    return _finalize_boot_execution(
+        execution,
+        store=store,
+        run_id=run_id,
+        attempt=attempt,
+        manifest=manifest,
+        kernel_image=kernel_image,
+        resolved_target_profile=resolved_target_profile,
+        resolved_rootfs_profile=resolved_rootfs_profile,
+        admission=admission,
+        plan_gdbstub_endpoint=plan_gdbstub_endpoint,
+    )
+
+
+def _assert_profile_matches_manifest(
+    *, kind: str, requested: str | None, manifest_value: str | None, run_id: str
+) -> ToolResponse | None:
+    """The {target,rootfs}_profile passed to a step must equal the immutable manifest request
+    (manifest invariant / TD-102). Returns a CONFIGURATION_ERROR on mismatch, else None."""
+    if requested == manifest_value:
+        return None
+    return _configuration_failure(
+        run_id=run_id,
+        message=f"{kind}_profile must match the immutable run manifest request",
+        details={"requested_profile": requested, "manifest_profile": manifest_value},
+    )
+
+
+def _apply_boot_overrides(
+    *,
+    resolved_target_profile: TargetProfile,
+    resolved_rootfs_profile: RootfsProfile,
+    overrides: BootOverrides,
+    manifest: RunManifest,
+    sensitive_paths: list[Path] | None,
+    run_id: str,
+) -> tuple[TargetProfile, RootfsProfile] | ToolResponse:
+    """Merge a BootOverrides into the resolved target/rootfs profiles (TD-102): kernel_args are
+    merged, wait_for_debugger is replaced, and the rootfs source/fields are validated and copied in.
+    Returns the updated ``(target, rootfs)`` pair, or a CONFIGURATION_ERROR ToolResponse if a rootfs
+    source fails path-safety validation."""
+    try:
+        if overrides.kernel_args:
+            resolved_target_profile = resolved_target_profile.model_copy(
+                update={"kernel_args": merge_kernel_args(resolved_target_profile.kernel_args, overrides.kernel_args)}
+            )
+        if overrides.wait_for_debugger is not None:
+            resolved_target_profile = resolved_target_profile.model_copy(
+                update={"wait_for_debugger": overrides.wait_for_debugger}
+            )
+        rootfs_update: dict[str, object] = {}
+        if overrides.rootfs_source is not None:
+            validated = validate_rootfs_source(
+                Path(overrides.rootfs_source),
+                source_paths=[Path(manifest.request.source_path)],
+                # Operator-configured sensitive paths threaded in by create_app (empty when no
+                # ServerConfig is loaded); the built-in guards always apply.
+                sensitive_paths=sensitive_paths or [],
+            )
+            rootfs_update["source"] = str(validated)
+        if overrides.rootfs is not None:
+            # Each override field was validated at BootOverrides construction; RootfsProfile has no
+            # cross-field validators, so model_copy yields a valid profile.
+            rootfs_update.update(overrides.rootfs.as_profile_update())
+        if rootfs_update:
+            resolved_rootfs_profile = resolved_rootfs_profile.model_copy(update=rootfs_update)
+    except (PathSafetyError, ValueError) as exc:
+        return _configuration_failure(run_id=run_id, message=str(exc))
+    return resolved_target_profile, resolved_rootfs_profile
+
+
+@dataclass(frozen=True)
+class _ResolvedBootInputs:
+    """The profile/kernel inputs target_boot_handler resolves before taking the boot locks."""
+
+    resolved_target_profile: TargetProfile
+    resolved_rootfs_profile: RootfsProfile
+    target_ref: str
+    kernel_image: ArtifactRef
+
+
+def _resolve_boot_inputs(
+    *,
+    manifest: RunManifest,
+    run_id: str,
+    target_profile: str | None,
+    rootfs_profile: str | None,
+    target_profiles: dict[str, TargetProfile] | None,
+    rootfs_profiles: dict[str, RootfsProfile] | None,
+    default_libvirt_uri: str | None,
+    boot_overrides: BootOverrides | None,
+    sensitive_paths: list[Path] | None,
+) -> _ResolvedBootInputs | ToolResponse:
+    """Resolve and validate the boot inputs (TD-102): the requested profiles must match the
+    immutable manifest request; named profiles resolve from the registry (inline ones come frozen
+    off the manifest); boot_overrides are merged into the resolved profiles; and the build must
+    have succeeded with a kernel-image artifact of the matching architecture. Returns the resolved
+    inputs, or a CONFIGURATION_ERROR ToolResponse on the first failed check."""
     requested_target_profile = target_profile or manifest.request.target_profile
     requested_rootfs_profile = rootfs_profile or manifest.request.rootfs_profile
-    if requested_target_profile != manifest.request.target_profile:
-        return _configuration_failure(
-            run_id=run_id,
-            message="target_profile must match the immutable run manifest request",
-            details={
-                "requested_profile": requested_target_profile,
-                "manifest_profile": manifest.request.target_profile,
-            },
+    for kind, requested, manifest_value in (
+        ("target", requested_target_profile, manifest.request.target_profile),
+        ("rootfs", requested_rootfs_profile, manifest.request.rootfs_profile),
+    ):
+        mismatch = _assert_profile_matches_manifest(
+            kind=kind, requested=requested, manifest_value=manifest_value, run_id=run_id
         )
-    if requested_rootfs_profile != manifest.request.rootfs_profile:
-        return _configuration_failure(
-            run_id=run_id,
-            message="rootfs_profile must match the immutable run manifest request",
-            details={
-                "requested_profile": requested_rootfs_profile,
-                "manifest_profile": manifest.request.rootfs_profile,
-            },
-        )
+        if mismatch is not None:
+            return mismatch
 
     target_profiles = target_profiles if target_profiles is not None else DEFAULT_TARGET_PROFILES
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
@@ -1828,37 +2071,17 @@ def target_boot_handler(
     if effective_boot_overrides is None and not manifest.boot_attempts:
         effective_boot_overrides = manifest.request.boot_overrides
     if effective_boot_overrides is not None:
-        try:
-            if effective_boot_overrides.kernel_args:
-                resolved_target_profile = resolved_target_profile.model_copy(
-                    update={
-                        "kernel_args": merge_kernel_args(
-                            resolved_target_profile.kernel_args, effective_boot_overrides.kernel_args
-                        )
-                    }
-                )
-            if effective_boot_overrides.wait_for_debugger is not None:
-                resolved_target_profile = resolved_target_profile.model_copy(
-                    update={"wait_for_debugger": effective_boot_overrides.wait_for_debugger}
-                )
-            rootfs_update: dict[str, object] = {}
-            if effective_boot_overrides.rootfs_source is not None:
-                validated = validate_rootfs_source(
-                    Path(effective_boot_overrides.rootfs_source),
-                    source_paths=[Path(manifest.request.source_path)],
-                    # Operator-configured sensitive paths threaded in by create_app (empty when
-                    # no ServerConfig is loaded); the built-in guards always apply.
-                    sensitive_paths=sensitive_paths or [],
-                )
-                rootfs_update["source"] = str(validated)
-            if effective_boot_overrides.rootfs is not None:
-                # Each override field was validated at BootOverrides construction; RootfsProfile
-                # has no cross-field validators, so model_copy yields a valid profile.
-                rootfs_update.update(effective_boot_overrides.rootfs.as_profile_update())
-            if rootfs_update:
-                resolved_rootfs_profile = resolved_rootfs_profile.model_copy(update=rootfs_update)
-        except (PathSafetyError, ValueError) as exc:
-            return _configuration_failure(run_id=run_id, message=str(exc))
+        merged = _apply_boot_overrides(
+            resolved_target_profile=resolved_target_profile,
+            resolved_rootfs_profile=resolved_rootfs_profile,
+            overrides=effective_boot_overrides,
+            manifest=manifest,
+            sensitive_paths=sensitive_paths,
+            run_id=run_id,
+        )
+        if isinstance(merged, ToolResponse):
+            return merged
+        resolved_target_profile, resolved_rootfs_profile = merged
 
     build_result = manifest.step_results.get("build")
     if build_result is None or build_result.status != StepStatus.SUCCEEDED:
@@ -1877,161 +2100,94 @@ def target_boot_handler(
             },
         )
 
-    has_new_boot_overrides = boot_overrides is not None and (
-        bool(boot_overrides.kernel_args)
-        or boot_overrides.rootfs_source is not None
-        or boot_overrides.has_rootfs_field_overrides()
-        or boot_overrides.wait_for_debugger is not None
+    return _ResolvedBootInputs(
+        resolved_target_profile=resolved_target_profile,
+        resolved_rootfs_profile=resolved_rootfs_profile,
+        target_ref=target_ref,
+        kernel_image=kernel_image,
     )
 
-    existing = manifest.step_results.get("boot")
-    if existing and existing.status == StepStatus.SUCCEEDED and not force_reboot and not has_new_boot_overrides:
-        return _short_circuit_boot_success(
+
+def _plan_boot_or_failure(
+    *,
+    provider: LibvirtQemuProvider,
+    store: ArtifactStore,
+    run_id: str,
+    kernel_image: ArtifactRef,
+    resolved_target_profile: TargetProfile,
+    resolved_rootfs_profile: RootfsProfile,
+    next_attempt: int,
+    replace_succeeded: bool,
+    force_reboot: bool,
+) -> Any:
+    """Resolve the rootfs source and plan the boot under the target lock (TD-102), recording a
+    FAILED step + returning a ToolResponse on a rootfs/provider/manifest error. Returns the boot
+    plan on success (the caller runs the attempt)."""
+    try:
+        resolve_rootfs_source(resolved_rootfs_profile)
+        plan = provider.plan_boot(
             run_id=run_id,
-            result=existing,
-            admission=admission,
-            manifest=manifest,
+            run_dir=store.run_dir(run_id),
+            kernel_image_path=Path(kernel_image.path),
+            target_profile=resolved_target_profile,
             rootfs_profile=resolved_rootfs_profile,
+            attempt=next_attempt,
         )
-
-    provider = provider or LibvirtQemuProvider()
-
-    def execute_boot(
-        *, plan: Any, retrying_after_failure: bool, replace_succeeded: bool, attempt: int, manifest: RunManifest
-    ) -> ToolResponse:
-        def _failed_attempt_record() -> BootAttempt:
-            return BootAttempt(
-                attempt=attempt,
-                resolved_target_profile=resolved_target_profile,
-                resolved_rootfs_profile=resolved_rootfs_profile,
-                status=StepStatus.FAILED,
-            )
-
-        plan_gdbstub_endpoint = getattr(plan, "gdbstub_endpoint", None)
-        if plan_gdbstub_endpoint is not None and hasattr(plan_gdbstub_endpoint, "as_dict"):
-            plan_gdbstub_endpoint = plan_gdbstub_endpoint.as_dict()
-        running = StepResult(
+    except RootfsSourceError as exc:
+        fix_details = {"suggested_fix": exc.suggested_fix} if exc.suggested_fix else {}
+        failed = StepResult(
             step_name="boot",
-            status=StepStatus.RUNNING,
-            summary="target boot running",
-            details={
-                "provider": provider.name,
-                "domain": plan.domain_name,
-                "target_profile": resolved_target_profile.name,
-                "rootfs_profile": resolved_rootfs_profile.name,
-                "kernel_image_path": str(kernel_image.path),
-                "boot_log_path": str(plan.boot_log_path),
-                "boot_plan_path": str(plan.boot_plan_path),
-                "debug_boot": getattr(plan, "debug_gdbstub", False),
-                "gdbstub_endpoint": plan_gdbstub_endpoint,
-                "nokaslr_source": getattr(plan, "nokaslr_source", "not_applicable"),
-            },
-            artifacts=[ArtifactRef(path=str(plan.boot_log_path), kind="boot-log")],
+            status=StepStatus.FAILED,
+            summary=str(exc),
+            details=fix_details,
         )
-        store.record_step_result(run_id, running, replace_succeeded=replace_succeeded)
-        try:
-            execution = provider.execute_boot(
-                plan,
-                force_reboot=force_reboot,
-                retrying_after_failure=retrying_after_failure,
-            )
-        except ProviderBootError as exc:
-            failed = StepResult(
-                step_name="boot",
-                status=StepStatus.FAILED,
-                summary=str(exc),
-                artifacts=exc.artifacts,
-                details=exc.details,
-            )
-            store.record_boot_attempt(run_id, attempt=_failed_attempt_record(), boot_result=failed)
-            return ToolResponse.failure(
-                category=exc.category,
-                message=str(exc),
-                run_id=run_id,
-                details=_redacted_boot_data(exc.details),
-                artifacts=exc.artifacts,
-                suggested_next_actions=["artifacts.get_manifest"],
-            )
-        except Exception as exc:
-            failed = StepResult(
-                step_name="boot",
-                status=StepStatus.FAILED,
-                summary="unexpected boot provider failure",
-                artifacts=[ArtifactRef(path=str(plan.boot_log_path), kind="boot-log")],
-                details={
-                    "provider": provider.name,
-                    "domain": plan.domain_name,
-                    "exception_type": type(exc).__name__,
-                    "error": str(exc),
-                },
-            )
-            store.record_boot_attempt(run_id, attempt=_failed_attempt_record(), boot_result=failed)
-            return ToolResponse.failure(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                message=failed.summary,
-                run_id=run_id,
-                details=_redacted_boot_data(failed.details),
-                artifacts=failed.artifacts,
-                suggested_next_actions=["artifacts.get_manifest"],
-            )
-        terminal_details: dict[str, Any] = {**execution.details, "kernel_image_path": str(kernel_image.path)}
-        if execution.status == StepStatus.SUCCEEDED:
-            try:
-                terminal_details.update(
-                    _capture_kernel_provenance(
-                        build_step=manifest.step_results.get("build"),
-                        boot_details=execution.details,
-                        run_dir=store.run_dir(run_id),
-                    )
-                )
-            except Exception as capture_exc:  # provenance capture must never fail an otherwise-good boot
-                # Broad catch is deliberate (a good boot must not be lost to a
-                # capture defect) but must NOT be silent: log with traceback so a
-                # masked programming bug is observable, then record a typed error.
-                logger.warning("kernel provenance capture failed: %s", capture_exc, exc_info=True)
-                terminal_details["kernel_provenance_capture_error"] = {
-                    "code": "capture_unexpected_error",
-                    "message": f"{type(capture_exc).__name__}: {capture_exc}",
-                }
-        terminal = StepResult(
-            step_name="boot",
-            status=execution.status,
-            summary=execution.summary,
-            artifacts=execution.artifacts,
-            details=terminal_details,
-        )
-        attempt_record = BootAttempt(
-            attempt=attempt,
-            resolved_target_profile=resolved_target_profile,
-            resolved_rootfs_profile=resolved_rootfs_profile,
-            status=execution.status,
-        )
-        store.record_boot_attempt(run_id, attempt=attempt_record, boot_result=terminal)
-        if execution.status == StepStatus.SUCCEEDED and admission is not None:
-            _publish_boot_ready_snapshot(
-                admission,
-                run_id=run_id,
-                generation=attempt,
-                gdbstub_endpoint=plan_gdbstub_endpoint,
-                rootfs_profile=resolved_rootfs_profile,
-            )
-        if execution.status == StepStatus.SUCCEEDED:
-            return ToolResponse.success(
-                summary=execution.summary,
-                run_id=run_id,
-                data=_redacted_boot_data(terminal.details),
-                artifacts=execution.artifacts,
-                suggested_next_actions=_boot_success_next_actions(terminal.details),
-            )
+        store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded or force_reboot)
         return ToolResponse.failure(
-            category=execution.error_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
-            message=execution.summary,
+            category=exc.category,
+            message=str(exc),
             run_id=run_id,
-            details=_redacted_boot_data({**execution.details, "diagnostic": execution.diagnostic}),
-            artifacts=execution.artifacts,
+            details=fix_details,
             suggested_next_actions=["artifacts.get_manifest"],
         )
+    except ProviderBootError as exc:
+        failed = StepResult(
+            step_name="boot",
+            status=StepStatus.FAILED,
+            summary=str(exc),
+            artifacts=exc.artifacts,
+            details=exc.details,
+        )
+        store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded or force_reboot)
+        return ToolResponse.failure(
+            category=exc.category,
+            message=str(exc),
+            run_id=run_id,
+            details=_redacted_boot_data(exc.details),
+            artifacts=exc.artifacts,
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+    except (ManifestStateError, OSError, ValueError) as exc:
+        return _configuration_failure(run_id=run_id, message=str(exc))
+    return plan
 
+
+def _boot_under_locks(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    target_ref: str,
+    resolved_target_profile: TargetProfile,
+    resolved_rootfs_profile: RootfsProfile,
+    kernel_image: ArtifactRef,
+    force_reboot: bool,
+    has_new_boot_overrides: bool,
+    existing: StepResult | None,
+    provider: LibvirtQemuProvider,
+    admission: AdmissionService | None,
+) -> ToolResponse:
+    """Take boot_lock then target_lock, re-check the SUCCEEDED short-circuit under the lock,
+    recover a stale RUNNING step, plan the boot, and run the attempt (TD-102). A concurrent
+    holder surfaces as a RUNNING response via the boot-locked ManifestStateError arm."""
     try:
         with store.boot_lock(run_id):
             locked_manifest = store.load_manifest(run_id)
@@ -2065,57 +2221,33 @@ def target_boot_handler(
                     )
                     store.record_step_result(run_id, stale_failed)
                     retrying_after_failure = True
-                try:
-                    resolve_rootfs_source(resolved_rootfs_profile)
-                    plan = provider.plan_boot(
-                        run_id=run_id,
-                        run_dir=store.run_dir(run_id),
-                        kernel_image_path=Path(kernel_image.path),
-                        target_profile=resolved_target_profile,
-                        rootfs_profile=resolved_rootfs_profile,
-                        attempt=next_attempt,
-                    )
-                except RootfsSourceError as exc:
-                    fix_details = {"suggested_fix": exc.suggested_fix} if exc.suggested_fix else {}
-                    failed = StepResult(
-                        step_name="boot",
-                        status=StepStatus.FAILED,
-                        summary=str(exc),
-                        details=fix_details,
-                    )
-                    store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded or force_reboot)
-                    return ToolResponse.failure(
-                        category=exc.category,
-                        message=str(exc),
-                        run_id=run_id,
-                        details=fix_details,
-                        suggested_next_actions=["artifacts.get_manifest"],
-                    )
-                except ProviderBootError as exc:
-                    failed = StepResult(
-                        step_name="boot",
-                        status=StepStatus.FAILED,
-                        summary=str(exc),
-                        artifacts=exc.artifacts,
-                        details=exc.details,
-                    )
-                    store.record_step_result(run_id, failed, replace_succeeded=replace_succeeded or force_reboot)
-                    return ToolResponse.failure(
-                        category=exc.category,
-                        message=str(exc),
-                        run_id=run_id,
-                        details=_redacted_boot_data(exc.details),
-                        artifacts=exc.artifacts,
-                        suggested_next_actions=["artifacts.get_manifest"],
-                    )
-                except (ManifestStateError, OSError, ValueError) as exc:
-                    return _configuration_failure(run_id=run_id, message=str(exc))
-                return execute_boot(
+                plan = _plan_boot_or_failure(
+                    provider=provider,
+                    store=store,
+                    run_id=run_id,
+                    kernel_image=kernel_image,
+                    resolved_target_profile=resolved_target_profile,
+                    resolved_rootfs_profile=resolved_rootfs_profile,
+                    next_attempt=next_attempt,
+                    replace_succeeded=replace_succeeded,
+                    force_reboot=force_reboot,
+                )
+                if isinstance(plan, ToolResponse):
+                    return plan
+                return _execute_boot_attempt(
                     plan=plan,
                     retrying_after_failure=retrying_after_failure,
                     replace_succeeded=replace_succeeded or force_reboot,
                     attempt=next_attempt,
                     manifest=locked_manifest,
+                    provider=provider,
+                    store=store,
+                    run_id=run_id,
+                    resolved_target_profile=resolved_target_profile,
+                    resolved_rootfs_profile=resolved_rootfs_profile,
+                    kernel_image=kernel_image,
+                    force_reboot=force_reboot,
+                    admission=admission,
                 )
     except ManifestStateError as exc:
         if "boot is locked" in str(exc):
@@ -2128,6 +2260,82 @@ def target_boot_handler(
             if existing and existing.status == StepStatus.RUNNING:
                 return _running_boot_response(run_id=run_id, result=existing)
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+
+def target_boot_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    target_profile: str | None = None,
+    rootfs_profile: str | None = None,
+    force_reboot: bool = False,
+    provider: LibvirtQemuProvider | None = None,
+    target_profiles: dict[str, TargetProfile] | None = None,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    default_libvirt_uri: str | None = None,
+    boot_overrides: BootOverrides | None = None,
+    sensitive_paths: list[Path] | None = None,
+    admission: AdmissionService | None = None,
+) -> ToolResponse:
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        manifest_path = store.run_dir(run_id) / "manifest.json"
+        if not manifest_path.is_file():
+            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    resolved_inputs = _resolve_boot_inputs(
+        manifest=manifest,
+        run_id=run_id,
+        target_profile=target_profile,
+        rootfs_profile=rootfs_profile,
+        target_profiles=target_profiles,
+        rootfs_profiles=rootfs_profiles,
+        default_libvirt_uri=default_libvirt_uri,
+        boot_overrides=boot_overrides,
+        sensitive_paths=sensitive_paths,
+    )
+    if isinstance(resolved_inputs, ToolResponse):
+        return resolved_inputs
+    resolved_target_profile = resolved_inputs.resolved_target_profile
+    resolved_rootfs_profile = resolved_inputs.resolved_rootfs_profile
+    target_ref = resolved_inputs.target_ref
+    kernel_image = resolved_inputs.kernel_image
+
+    has_new_boot_overrides = boot_overrides is not None and (
+        bool(boot_overrides.kernel_args)
+        or boot_overrides.rootfs_source is not None
+        or boot_overrides.has_rootfs_field_overrides()
+        or boot_overrides.wait_for_debugger is not None
+    )
+
+    existing = manifest.step_results.get("boot")
+    if existing and existing.status == StepStatus.SUCCEEDED and not force_reboot and not has_new_boot_overrides:
+        return _short_circuit_boot_success(
+            run_id=run_id,
+            result=existing,
+            admission=admission,
+            manifest=manifest,
+            rootfs_profile=resolved_rootfs_profile,
+        )
+
+    provider = provider or LibvirtQemuProvider()
+
+    return _boot_under_locks(
+        store=store,
+        run_id=run_id,
+        target_ref=target_ref,
+        resolved_target_profile=resolved_target_profile,
+        resolved_rootfs_profile=resolved_rootfs_profile,
+        kernel_image=kernel_image,
+        force_reboot=force_reboot,
+        has_new_boot_overrides=has_new_boot_overrides,
+        existing=existing,
+        provider=provider,
+        admission=admission,
+    )
 
 
 def _ssh_host_is_unset_or_loopback(host: str | None) -> bool:
