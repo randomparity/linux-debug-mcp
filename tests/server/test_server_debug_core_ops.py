@@ -249,6 +249,14 @@ def test_debug_operation_handlers_route_directly_to_core_response() -> None:
     assert not hasattr(server_module, "_debug_stateful_response")
 
 
+def test_debug_start_session_handler_lives_in_debug_layer() -> None:
+    assert debug_start_session_handler.__module__ == "kdive.debug.session_handlers"
+    assert not hasattr(server_module, "_debug_start_session_handler")
+
+    session_handler_source = Path(debug_start_session_handler.__code__.co_filename).read_text(encoding="utf-8")
+    assert "from kdive.server import" not in session_handler_source
+
+
 def test_debug_operation_handlers_use_typed_operation_requests() -> None:
     """Handlers should construct typed operation requests instead of string names and kwargs bags."""
     assert not hasattr(debug_handlers, "DEBUG_HANDLER_OPERATION_SPECS")

@@ -251,14 +251,14 @@ def test_start_session_persist_failure_reaps_and_resumes(tmp_path: Path, monkeyp
     file (or recording the manifest step) raises AFTER the live attachment is registered and the
     kernel is HALTED, the handler must reap the attachment, un-halt, and tear the transport down —
     never strand the kernel HALTED with the guard held."""
-    import kdive.server as server
+    import kdive.debug.session_handlers as session_handlers
 
     fx = _Fixture(tmp_path)
 
     def _boom(**_kwargs):
         raise OSError("disk full while persisting the debug session")
 
-    monkeypatch.setattr(server, "_persist_mi_debug_session", _boom)
+    monkeypatch.setattr(session_handlers, "_persist_mi_debug_session", _boom)
     response = fx.start()
 
     assert response.ok is False
