@@ -4,7 +4,7 @@ import base64
 import json
 from string import Template
 
-from kdive.providers.local.introspect.drgn_wrapper_common import (
+from kdive.introspect.wrappers.common import (
     _CALL_ID_RE,
     _WRAPPER_BODY,
     WrapperRenderError,

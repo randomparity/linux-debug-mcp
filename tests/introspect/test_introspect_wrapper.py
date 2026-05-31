@@ -555,7 +555,7 @@ def test_render_wrapper_injects_args_into_namespace(monkeypatch: pytest.MonkeyPa
 
 
 def test_render_wrapper_default_caps_match_runner_defaults() -> None:
-    from kdive.providers.local.introspect.drgn_wrapper_common import RUNNER_DEFAULT_CAPS
+    from kdive.introspect.wrappers.common import RUNNER_DEFAULT_CAPS
 
     rendered = render_wrapper(user_script="pass", expected_build_id=EXPECTED_BUILD_ID, call_id=CALL_ID)
     assert f'"per_emit_bytes": {RUNNER_DEFAULT_CAPS["per_emit_bytes"]}' in rendered
