@@ -113,6 +113,27 @@ def configure_workflow_dependencies(dependencies: WorkflowHandlerDependencies) -
     _WORKFLOW_DEPENDENCIES = dependencies
 
 
+def configure_workflow_handlers(
+    *,
+    create_run_handler: CreateRunHandler,
+    kernel_build_handler: KernelBuildHandler,
+    target_boot_handler: TargetBootHandler,
+    target_run_tests_handler: TargetRunTestsHandler,
+    debug_start_session_handler: DebugStartSessionHandler,
+    artifacts_collect_handler: ArtifactsCollectHandler,
+) -> None:
+    configure_workflow_dependencies(
+        WorkflowHandlerDependencies(
+            create_run_handler=create_run_handler,
+            kernel_build_handler=kernel_build_handler,
+            target_boot_handler=target_boot_handler,
+            target_run_tests_handler=target_run_tests_handler,
+            debug_start_session_handler=debug_start_session_handler,
+            artifacts_collect_handler=artifacts_collect_handler,
+        )
+    )
+
+
 def _workflow_dependencies() -> WorkflowHandlerDependencies:
     if _WORKFLOW_DEPENDENCIES is None:
         raise RuntimeError("workflow handler dependencies have not been configured")

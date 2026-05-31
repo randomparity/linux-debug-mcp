@@ -264,8 +264,7 @@ from kdive.transport.proxy import AgentProxyBackend
 from kdive.transport.qemu_gdbstub import QemuGdbstubTransport
 from kdive.transport.tools import TransportToolContext, TransportToolHandlers, register_transport_tools
 from kdive.workflow.handlers import (
-    WorkflowHandlerDependencies,
-    configure_workflow_dependencies,
+    configure_workflow_handlers,
     workflow_build_boot_debug_handler,
     workflow_build_boot_test_handler,
 )
@@ -4074,15 +4073,13 @@ def debug_end_session_handler(
 configure_debug_operation_core(_debug_operation_response)
 
 
-configure_workflow_dependencies(
-    WorkflowHandlerDependencies(
-        create_run_handler=create_run_handler,
-        kernel_build_handler=kernel_build_handler,
-        target_boot_handler=target_boot_handler,
-        target_run_tests_handler=target_run_tests_handler,
-        debug_start_session_handler=debug_start_session_handler,
-        artifacts_collect_handler=artifacts_collect_handler,
-    )
+configure_workflow_handlers(
+    create_run_handler=create_run_handler,
+    kernel_build_handler=kernel_build_handler,
+    target_boot_handler=target_boot_handler,
+    target_run_tests_handler=target_run_tests_handler,
+    debug_start_session_handler=debug_start_session_handler,
+    artifacts_collect_handler=artifacts_collect_handler,
 )
 
 
