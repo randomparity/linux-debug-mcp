@@ -325,6 +325,14 @@ def _elf_build_id(path):
                 e_phoff = struct.unpack_from(end + "I", head, 28)[0]
                 e_phentsize = struct.unpack_from(end + "H", head, 42)[0]
                 e_phnum = struct.unpack_from(end + "H", head, 44)[0]
+            # Bound the program-header table before iterating: an out-of-file e_phoff or a table
+            # that runs past EOF would otherwise drive up to 65535 seeks on a malformed file (TD-34).
+            min_phentsize = 56 if is64 else 32
+            if e_phnum == 0 or e_phentsize < min_phentsize:
+                return None
+            file_size = fh.seek(0, 2)
+            if e_phoff < 0 or e_phoff + e_phnum * e_phentsize > file_size:
+                return None
             for i in range(e_phnum):
                 fh.seek(e_phoff + i * e_phentsize)
                 ph = fh.read(e_phentsize)
