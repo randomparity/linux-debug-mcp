@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
 import pytest
@@ -96,10 +95,18 @@ def test_fakecontroller_with_read_satisfies_protocol() -> None:
     assert isinstance(controller, MiController)
 
 
-def test_engine_uses_execution_control_collaborator() -> None:
-    engine = _engine(FakeController([]))
-    assert type(engine._execution).__name__ == "_ExecutionControl"
-    assert "return self._execution.resume" in inspect.getsource(GdbMiEngine.resume)
+def test_resume_issues_requested_exec_verb_and_returns_stop_record(tmp_path: Path) -> None:
+    engine, controller, attachment = _attached(
+        tmp_path,
+        writes=[_RUNNING],
+        reads=[_stopped("end-stepping-range")],
+    )
+
+    stop = engine.resume(attachment, "-exec-next", timeout_sec=5)
+
+    assert "-exec-next" in controller.commands
+    assert isinstance(stop, StopRecord)
+    assert stop.reason == "end-stepping-range"
 
 
 # --- Task 3: typed records ------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 import hashlib
-import inspect
 from datetime import UTC, datetime, timedelta, timezone
+from modulefinder import ModuleFinder
 
 import pytest
 from pydantic import ValidationError
@@ -29,9 +29,11 @@ def test_target_key_is_frozen_and_hashable():
 def test_target_seam_does_not_import_coordination_or_transport_layers():
     import kdive.seams.target as target_module
 
-    source = inspect.getsource(target_module)
-    assert "kdive.coordination" not in source
-    assert "kdive.transport" not in source
+    finder = ModuleFinder()
+    finder.run_script(target_module.__file__)
+    imported_modules = set(finder.modules)
+    assert not any(name == "kdive.coordination" or name.startswith("kdive.coordination.") for name in imported_modules)
+    assert not any(name == "kdive.transport" or name.startswith("kdive.transport.") for name in imported_modules)
     assert not hasattr(target_module, "publish_ready_snapshot")
 
 
