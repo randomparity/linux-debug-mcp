@@ -424,6 +424,13 @@ def test_target_run_tests_tool_and_handler_are_target_owned() -> None:
     assert server.target_run_tests_handler is target_handlers.target_run_tests_handler
 
 
+def test_target_boot_handler_is_target_owned() -> None:
+    from kdive.target import handlers as target_handlers
+
+    assert target_handlers.target_boot_handler.__module__ == "kdive.target.handlers"
+    assert server.target_boot_handler is target_handlers.target_boot_handler
+
+
 def test_target_run_tests_handler_response_serializes(tmp_path: Path) -> None:
     source, artifact_root = create_test_run(tmp_path)
     store = ArtifactStore(artifact_root, source_paths=[source])
