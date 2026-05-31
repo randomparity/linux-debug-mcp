@@ -1,3 +1,4 @@
+import inspect
 import subprocess
 import threading
 from pathlib import Path
@@ -6,6 +7,7 @@ from unittest.mock import patch
 from conftest import NoopBuildRunner as NoopRunner
 from conftest import add_merge_config_script, make_source_tree
 
+from kdive.kernel import handlers as kernel_handlers
 from kdive.providers.local.build.local_kernel_build import (
     LocalKernelBuildProvider,
 )
@@ -20,6 +22,24 @@ from kdive.server import create_run_handler, kernel_build_handler
 # an autouse fixture that stubs `_extract_build_id` to a constant. Tests
 # that need the real body re-patch via _REAL_EXTRACT_BUILD_ID (captured at
 # module-load time, before the autouse fixture runs).
+
+
+def test_kernel_build_handler_is_split_into_named_phases() -> None:
+    handler_source = inspect.getsource(kernel_handlers.kernel_build_handler)
+    module_source = inspect.getsource(kernel_handlers)
+
+    for phase_name in (
+        "_resolve_kernel_build_request",
+        "_execute_kernel_build_under_lock",
+        "_build_execution_response",
+    ):
+        assert f"def {phase_name}" in module_source
+
+    assert "_resolve_kernel_build_request(" in handler_source
+    assert "_execute_kernel_build_under_lock(" in handler_source
+    assert "_build_execution_response(" in handler_source
+    assert "ReadelfUnavailable" not in handler_source
+    assert "BuildIdMissing" not in handler_source
 
 
 class BlockingRunner(NoopRunner):
