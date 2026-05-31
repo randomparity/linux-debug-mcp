@@ -127,6 +127,7 @@ from kdive.introspect.handlers import (
 )
 from kdive.introspect.tools import register_introspect_tools
 from kdive.kernel import tools as kernel_tools
+from kdive.kernel.handlers import _build_profile_from_manifest as _build_profile_from_manifest
 from kdive.kernel.handlers import kernel_build_handler
 from kdive.postmortem.crash_handler import (
     debug_postmortem_crash_handler,
