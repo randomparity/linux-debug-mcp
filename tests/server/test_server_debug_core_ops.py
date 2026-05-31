@@ -247,6 +247,7 @@ def test_debug_operation_handlers_route_directly_to_core_response() -> None:
     """Public debug.* handlers should be the adapter layer; avoid a second pass-through wrapper tier."""
     assert not hasattr(server_module, "_debug_read_response")
     assert not hasattr(server_module, "_debug_stateful_response")
+    assert not hasattr(debug_handlers, "debug_runtime_from_handler_args")
 
 
 def test_debug_start_session_handler_lives_in_debug_layer() -> None:

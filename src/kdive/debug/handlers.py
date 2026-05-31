@@ -164,27 +164,6 @@ class DebugRuntime:
     gdb_mi_sessions: GdbMiSessionRegistry | None = None
 
 
-def debug_runtime_from_handler_args(
-    *,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> DebugRuntime:
-    return DebugRuntime(
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
 class DebugOperationCore(Protocol):
     def __call__(
         self,
