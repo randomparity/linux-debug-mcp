@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
@@ -13,204 +14,25 @@ from kdive.domain import Model, ToolResponse
 from kdive.providers.debug import GdbMiEngine, GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard
 
-
-class DebugStartSessionHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        debug_profile: str | None,
-        new_session: bool,
-        transaction: TransportTransaction,
-        admission: AdmissionService,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
-    ) -> ToolResponse: ...
-
-
-class DebugReadRegistersHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        registers: list[str],
-        debug_session_id: str | None,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
-    ) -> ToolResponse: ...
-
-
-class DebugReadSymbolHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        symbol: str,
-        debug_session_id: str | None,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
-    ) -> ToolResponse: ...
-
-
-class DebugReadMemoryHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        address: int,
-        byte_count: int,
-        debug_session_id: str | None,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
-    ) -> ToolResponse: ...
-
-
-class DebugEvaluateHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        inspector: str,
-        arguments: dict[str, object] | None,
-        debug_session_id: str | None,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
-    ) -> ToolResponse: ...
-
-
-class DebugLoadModuleSymbolsHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        module: str,
-        sections: dict[str, str] | None,
-        ko_path: str | None,
-        debug_session_id: str | None,
-        admission: AdmissionService,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
-    ) -> ToolResponse: ...
-
-
-class DebugSymbolControlHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        symbol: str,
-        debug_session_id: str | None,
-        admission: AdmissionService,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
-    ) -> ToolResponse: ...
-
-
-class DebugBreakpointIdControlHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        breakpoint_id: str,
-        debug_session_id: str | None,
-        admission: AdmissionService,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
-    ) -> ToolResponse: ...
-
-
-class DebugSessionQueryHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        debug_session_id: str | None,
-        admission: AdmissionService,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
-    ) -> ToolResponse: ...
-
-
-class DebugExecutionControlHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        debug_session_id: str | None,
-        timeout_seconds: int | None,
-        admission: AdmissionService,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
-    ) -> ToolResponse: ...
-
-
-class DebugEndSessionHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        debug_session_id: str | None,
-        admission: AdmissionService,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
-    ) -> ToolResponse: ...
+DebugToolHandler = Callable[..., ToolResponse]
+DebugUngatedHandler = DebugToolHandler
+DebugStatefulHandler = DebugToolHandler
+DebugSessionQueryHandler = DebugToolHandler
+DebugExecutionControlHandler = DebugToolHandler
 
 
 @dataclass(frozen=True)
 class DebugToolHandlers:
-    start_session: DebugStartSessionHandler
-    read_registers: DebugReadRegistersHandler
-    read_symbol: DebugReadSymbolHandler
-    read_memory: DebugReadMemoryHandler
-    evaluate: DebugEvaluateHandler
-    load_module_symbols: DebugLoadModuleSymbolsHandler
-    set_breakpoint: DebugSymbolControlHandler
-    set_watchpoint: DebugSymbolControlHandler
-    clear_breakpoint: DebugBreakpointIdControlHandler
-    clear_watchpoint: DebugBreakpointIdControlHandler
+    start_session: DebugStatefulHandler
+    read_registers: DebugUngatedHandler
+    read_symbol: DebugUngatedHandler
+    read_memory: DebugUngatedHandler
+    evaluate: DebugUngatedHandler
+    load_module_symbols: DebugStatefulHandler
+    set_breakpoint: DebugStatefulHandler
+    set_watchpoint: DebugStatefulHandler
+    clear_breakpoint: DebugStatefulHandler
+    clear_watchpoint: DebugStatefulHandler
     list_breakpoints: DebugSessionQueryHandler
     backtrace: DebugSessionQueryHandler
     list_variables: DebugSessionQueryHandler
@@ -219,7 +41,7 @@ class DebugToolHandlers:
     next: DebugExecutionControlHandler
     finish: DebugExecutionControlHandler
     interrupt: DebugExecutionControlHandler
-    end_session: DebugEndSessionHandler
+    end_session: DebugStatefulHandler
 
 
 @dataclass(frozen=True)

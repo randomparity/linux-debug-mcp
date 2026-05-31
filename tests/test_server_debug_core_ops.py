@@ -260,7 +260,7 @@ def test_debug_operation_handlers_use_typed_operation_requests() -> None:
     assert request.persist_manifest is False
 
 
-def test_debug_tool_registration_uses_typed_context_and_handler_protocols() -> None:
+def test_debug_tool_registration_uses_typed_context_and_grouped_handler_aliases() -> None:
     context_hints = get_type_hints(DebugToolContext)
     assert context_hints["transaction"] is TransportTransaction
     assert context_hints["admission"] is AdmissionService
@@ -270,10 +270,12 @@ def test_debug_tool_registration_uses_typed_context_and_handler_protocols() -> N
     assert not hasattr(DebugToolContext, "gated_kwargs")
 
     handler_hints = get_type_hints(DebugToolHandlers)
-    assert handler_hints["start_session"].__name__ == "DebugStartSessionHandler"
-    assert handler_hints["read_registers"].__name__ == "DebugReadRegistersHandler"
-    assert handler_hints["continue_execution"].__name__ == "DebugExecutionControlHandler"
-    assert handler_hints["end_session"].__name__ == "DebugEndSessionHandler"
+    assert handler_hints["start_session"] == debug_tools.DebugStatefulHandler
+    assert handler_hints["read_registers"] == debug_tools.DebugUngatedHandler
+    assert handler_hints["continue_execution"] == debug_tools.DebugExecutionControlHandler
+    assert handler_hints["end_session"] == debug_tools.DebugStatefulHandler
+    assert not hasattr(debug_tools, "DebugStartSessionHandler")
+    assert not hasattr(debug_tools, "DebugReadRegistersHandler")
 
 
 def test_debug_tool_registration_groups_same_shaped_operations() -> None:
