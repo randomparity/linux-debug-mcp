@@ -31,7 +31,7 @@ from kdive.config import (
 from kdive.coordination.admission import AdmissionError, AdmissionHandle, AdmissionService, TargetSnapshot
 from kdive.coordination.exec_probe import probe_execution_state
 from kdive.coordination.registry import SessionRegistry
-from kdive.default_profiles import DEFAULT_DEBUG_PROFILES, DEFAULT_ROOTFS_PROFILES, DEFAULT_TARGET_PROFILES
+from kdive.default_profiles import DEFAULT_DEBUG_PROFILES, DEFAULT_ROOTFS_PROFILES
 from kdive.domain import ArtifactRef, DebugIntrospectRunRequest, ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.introspect.wrappers import (
     SCRIPT_BYTE_CAP,
@@ -255,6 +255,18 @@ def _read_capped(path: Path, cap: int) -> str | None:
 
 
 IntrospectPostValidator = Callable[[dict[str, Any]], "PostValidatorVerdict | None"]
+
+
+@dataclass(frozen=True)
+class LiveIntrospectRuntime:
+    artifact_root: Path
+    target_profiles: dict[str, TargetProfile] | None = None
+    rootfs_profiles: dict[str, RootfsProfile] | None = None
+    debug_profiles: dict[str, DebugProfile] | None = None
+    ssh_runner: SshRunner | None = None
+    admission: AdmissionService | None = None
+    session_registry: SessionRegistry | None = None
+    clock: Callable[[], datetime] | None = None
 
 
 @dataclass
@@ -1105,14 +1117,7 @@ def _execute_admitted_introspect_ssh(
 def _execute_introspect_call(
     request: DebugIntrospectRunRequest,
     *,
-    artifact_root: Path,
-    target_profiles: dict[str, TargetProfile] | None = None,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    ssh_runner: SshRunner | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
-    clock: Callable[[], datetime] | None = None,
+    runtime: LiveIntrospectRuntime,
     operation_name: str = "debug.introspect.run",
     caps: dict[str, int] | None = None,
     post_validator: IntrospectPostValidator | None = None,
@@ -1122,15 +1127,14 @@ def _execute_introspect_call(
     target VM and return structured JSON.
     """
     run_id = request.run_id
-    now = clock or _utcnow
+    now = runtime.clock or _utcnow
 
-    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
-    target_profiles = target_profiles if target_profiles is not None else DEFAULT_TARGET_PROFILES
-    debug_profiles = debug_profiles if debug_profiles is not None else DEFAULT_DEBUG_PROFILES
+    rootfs_profiles = runtime.rootfs_profiles if runtime.rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    debug_profiles = runtime.debug_profiles if runtime.debug_profiles is not None else DEFAULT_DEBUG_PROFILES
 
     pre_admission, pre_admission_failure = _resolve_pre_admission_introspect_context(
         request=request,
-        artifact_root=artifact_root,
+        artifact_root=runtime.artifact_root,
         rootfs_profiles=rootfs_profiles,
         debug_profiles=debug_profiles,
         operation_name=operation_name,
@@ -1139,7 +1143,7 @@ def _execute_introspect_call(
         return pre_admission_failure
     pre_admission = _require_value(pre_admission, "pre-admission context missing after successful resolution")
 
-    runner: SshRunner = ssh_runner or SubprocessSshRunner()
+    runner: SshRunner = runtime.ssh_runner or SubprocessSshRunner()
 
     # Spec §5.2 step 5: sudo preflight (only when sudo is needed).
     if pre_admission.use_sudo:
@@ -1155,13 +1159,13 @@ def _execute_introspect_call(
 
     # Spec §5.2 step 6: admission gate.
     introspect_admission, admission_failure = _admit_introspect_call(
-        admission=admission,
-        session_registry=session_registry,
+        admission=runtime.admission,
+        session_registry=runtime.session_registry,
         run_id=run_id,
     )
     if admission_failure is not None:
         return admission_failure
-    admission = _require_value(admission, "admission service missing after successful admission")
+    admission = _require_value(runtime.admission, "admission service missing after successful admission")
     introspect_admission = _require_value(introspect_admission, "admission handle missing after successful admission")
 
     return _execute_admitted_introspect_ssh(

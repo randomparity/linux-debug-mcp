@@ -15,6 +15,7 @@ from kdive.domain import (
     DebugIntrospectRunRequest,
     ToolResponse,
 )
+from kdive.introspect.execution import LiveIntrospectRuntime
 from kdive.model import Model
 from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, optional_model_arg
 
@@ -68,9 +69,7 @@ class IntrospectRunHandler(Protocol):
         self,
         request: DebugIntrospectRunRequest,
         *,
-        artifact_root: Path,
-        admission: AdmissionService,
-        session_registry: SessionRegistry,
+        runtime: LiveIntrospectRuntime,
     ) -> ToolResponse: ...
 
 
@@ -79,9 +78,7 @@ class IntrospectHelperHandler(Protocol):
         self,
         request: DebugIntrospectHelperRequest,
         *,
-        artifact_root: Path,
-        admission: AdmissionService,
-        session_registry: SessionRegistry,
+        runtime: LiveIntrospectRuntime,
     ) -> ToolResponse: ...
 
 
@@ -131,6 +128,13 @@ def register_introspect_tools(
     def artifact_root_path(value: str | None) -> Path:
         return Path(value or default_artifact_root_text)
 
+    def live_runtime(value: str | None) -> LiveIntrospectRuntime:
+        return LiveIntrospectRuntime(
+            artifact_root=artifact_root_path(value),
+            admission=admission,
+            session_registry=session_registry,
+        )
+
     @app.tool(name="debug.introspect.run")
     def debug_introspect_run(
         target: IntrospectTargetContext | dict[str, Any],
@@ -156,9 +160,7 @@ def register_introspect_tools(
             return adapter_validation_failure(exc)
         return run_handler(
             request,
-            artifact_root=artifact_root_path(target_model.artifact_root),
-            admission=admission,
-            session_registry=session_registry,
+            runtime=live_runtime(target_model.artifact_root),
         ).model_dump(mode="json")
 
     @app.tool(name="debug.introspect.helper")
@@ -184,9 +186,7 @@ def register_introspect_tools(
             return adapter_validation_failure(exc)
         return helper_handler(
             request,
-            artifact_root=artifact_root_path(target_model.artifact_root),
-            admission=admission,
-            session_registry=session_registry,
+            runtime=live_runtime(target_model.artifact_root),
         ).model_dump(mode="json")
 
     @app.tool(name="debug.introspect.check_prerequisites")

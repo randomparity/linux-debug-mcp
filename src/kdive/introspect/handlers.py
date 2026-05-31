@@ -16,7 +16,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
-from kdive.config import MAX_INTROSPECT_CALLS_PER_RUN, DebugProfile, RootfsProfile, TargetProfile
+from kdive.config import MAX_INTROSPECT_CALLS_PER_RUN, RootfsProfile
 from kdive.coordination.admission import AdmissionError, AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES
@@ -37,6 +37,7 @@ from kdive.introspect.execution import (
     RUN_STDOUT_CAP,
     SSH_TIMEOUT_GRACE_SECONDS,
     IntrospectPostValidator,
+    LiveIntrospectRuntime,
     _chmod_best_effort,
     _configuration_failure,
     _count_introspect_calls,
@@ -195,25 +196,11 @@ class VmcoreIntrospectRun:
 def debug_introspect_run_handler(
     request: DebugIntrospectRunRequest,
     *,
-    artifact_root: Path,
-    target_profiles: dict[str, TargetProfile] | None = None,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    ssh_runner: SshRunner | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
-    clock: Callable[[], datetime] | None = None,
+    runtime: LiveIntrospectRuntime,
 ) -> ToolResponse:
     return _execute_introspect_call(
         request,
-        artifact_root=artifact_root,
-        target_profiles=target_profiles,
-        rootfs_profiles=rootfs_profiles,
-        debug_profiles=debug_profiles,
-        ssh_runner=ssh_runner,
-        admission=admission,
-        session_registry=session_registry,
-        clock=clock,
+        runtime=runtime,
         operation_name="debug.introspect.run",
         caps=None,
         post_validator=None,
@@ -223,14 +210,7 @@ def debug_introspect_run_handler(
 def debug_introspect_helper_handler(
     request: DebugIntrospectHelperRequest,
     *,
-    artifact_root: Path,
-    target_profiles: dict[str, TargetProfile] | None = None,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    ssh_runner: SshRunner | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
-    clock: Callable[[], datetime] | None = None,
+    runtime: LiveIntrospectRuntime,
 ) -> ToolResponse:
     helper_registry = get_helper_registry()
     spec = helper_registry.get(request.name)
@@ -265,14 +245,7 @@ def debug_introspect_helper_handler(
     )
     return _execute_introspect_call(
         run_request,
-        artifact_root=artifact_root,
-        target_profiles=target_profiles,
-        rootfs_profiles=rootfs_profiles,
-        debug_profiles=debug_profiles,
-        ssh_runner=ssh_runner,
-        admission=admission,
-        session_registry=session_registry,
-        clock=clock,
+        runtime=runtime,
         operation_name="debug.introspect.helper",
         caps=HELPER_CAP_PROFILE,
         post_validator=_make_helper_post_validator(spec),

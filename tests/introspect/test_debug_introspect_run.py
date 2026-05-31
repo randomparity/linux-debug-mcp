@@ -22,6 +22,7 @@ from kdive.coordination.admission import (
     TargetSnapshot,
 )
 from kdive.domain import (
+    DebugIntrospectHelperRequest,
     DebugIntrospectRunRequest,
     ErrorCategory,
     RunRequest,
@@ -30,12 +31,92 @@ from kdive.domain import (
     ToolResponse,
 )
 from kdive.introspect import execution as introspect_execution
+from kdive.introspect.execution import LiveIntrospectRuntime
 from kdive.introspect.tools import IntrospectRunOptions, IntrospectTargetContext
 from kdive.providers.local.local_ssh_tests import SshCommandResult
 from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetState
-from kdive.server import RUN_STDOUT_CAP, debug_introspect_run_handler
+from kdive.server import RUN_STDOUT_CAP
+from kdive.server import debug_introspect_helper_handler as _debug_introspect_helper_handler
+from kdive.server import debug_introspect_run_handler as _debug_introspect_run_handler
 
 VALID_BUILD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
+
+
+def _live_runtime(
+    *,
+    artifact_root: Path,
+    target_profiles: dict[str, TargetProfile] | None = None,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    ssh_runner: Any | None = None,
+    admission: Any | None = None,
+    session_registry: Any | None = None,
+    clock: Any | None = None,
+) -> LiveIntrospectRuntime:
+    return LiveIntrospectRuntime(
+        artifact_root=artifact_root,
+        target_profiles=target_profiles,
+        rootfs_profiles=rootfs_profiles,
+        debug_profiles=debug_profiles,
+        ssh_runner=ssh_runner,
+        admission=admission,
+        session_registry=session_registry,
+        clock=clock,
+    )
+
+
+def debug_introspect_run_handler(
+    request: DebugIntrospectRunRequest,
+    *,
+    artifact_root: Path,
+    target_profiles: dict[str, TargetProfile] | None = None,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    ssh_runner: Any | None = None,
+    admission: Any | None = None,
+    session_registry: Any | None = None,
+    clock: Any | None = None,
+) -> ToolResponse:
+    return _debug_introspect_run_handler(
+        request,
+        runtime=_live_runtime(
+            artifact_root=artifact_root,
+            target_profiles=target_profiles,
+            rootfs_profiles=rootfs_profiles,
+            debug_profiles=debug_profiles,
+            ssh_runner=ssh_runner,
+            admission=admission,
+            session_registry=session_registry,
+            clock=clock,
+        ),
+    )
+
+
+def debug_introspect_helper_handler(
+    request: DebugIntrospectHelperRequest,
+    *,
+    artifact_root: Path,
+    target_profiles: dict[str, TargetProfile] | None = None,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    ssh_runner: Any | None = None,
+    admission: Any | None = None,
+    session_registry: Any | None = None,
+    clock: Any | None = None,
+) -> ToolResponse:
+    return _debug_introspect_helper_handler(
+        request,
+        runtime=_live_runtime(
+            artifact_root=artifact_root,
+            target_profiles=target_profiles,
+            rootfs_profiles=rootfs_profiles,
+            debug_profiles=debug_profiles,
+            ssh_runner=ssh_runner,
+            admission=admission,
+            session_registry=session_registry,
+            clock=clock,
+        ),
+    )
 
 
 def _make_run(tmp_path: Path) -> Path:
@@ -290,6 +371,17 @@ def test_run_tool_exposes_acknowledged_permissions() -> None:
     params = inspect.signature(tool.fn).parameters
     assert "IntrospectRunOptions" in params["options"].annotation
     assert "acknowledged_permissions" in IntrospectRunOptions.model_fields
+
+
+def test_live_introspect_handlers_accept_named_runtime_boundary() -> None:
+    import inspect
+
+    from kdive.introspect import handlers
+
+    for handler in (handlers.debug_introspect_run_handler, handlers.debug_introspect_helper_handler):
+        params = inspect.signature(handler).parameters
+        assert set(params) == {"request", "runtime"}
+        assert "LiveIntrospectRuntime" in str(params["runtime"].annotation)
 
 
 def test_run_tool_forwards_args_to_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1608,7 +1700,6 @@ def _helper_script_error_ssh_result() -> SshCommandResult:
 
 def test_helper_success_returns_typed_result(tmp_path: Path) -> None:
     from kdive.domain import DebugIntrospectHelperRequest
-    from kdive.server import debug_introspect_helper_handler
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1641,7 +1732,6 @@ def test_helper_success_returns_typed_result(tmp_path: Path) -> None:
 
 def test_helper_malformed_emit_records_failed_step(tmp_path: Path) -> None:
     from kdive.domain import DebugIntrospectHelperRequest
-    from kdive.server import debug_introspect_helper_handler
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1663,7 +1753,6 @@ def test_helper_malformed_emit_records_failed_step(tmp_path: Path) -> None:
 
 def test_helper_script_error_records_failed_step(tmp_path: Path) -> None:
     from kdive.domain import DebugIntrospectHelperRequest
-    from kdive.server import debug_introspect_helper_handler
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1686,7 +1775,6 @@ def test_helper_script_error_records_failed_step(tmp_path: Path) -> None:
 def test_helper_gating_enforced(tmp_path: Path) -> None:
     from kdive.config import DebugProfile
     from kdive.domain import DebugIntrospectHelperRequest
-    from kdive.server import debug_introspect_helper_handler
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, _ = _profiles()
@@ -1706,7 +1794,6 @@ def test_helper_gating_enforced(tmp_path: Path) -> None:
 
 def test_helper_unknown_name(tmp_path: Path) -> None:
     from kdive.domain import DebugIntrospectHelperRequest
-    from kdive.server import debug_introspect_helper_handler
 
     resp = debug_introspect_helper_handler(
         DebugIntrospectHelperRequest(run_id="missing", manifest_target_profile="t", name="nope"),
@@ -1718,7 +1805,6 @@ def test_helper_unknown_name(tmp_path: Path) -> None:
 
 def test_helper_args_invalid(tmp_path: Path) -> None:
     from kdive.domain import DebugIntrospectHelperRequest
-    from kdive.server import debug_introspect_helper_handler
 
     resp = debug_introspect_helper_handler(
         DebugIntrospectHelperRequest(
@@ -1735,7 +1821,6 @@ def test_helper_args_invalid(tmp_path: Path) -> None:
 
 def test_helper_passes_cap_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from kdive.domain import DebugIntrospectHelperRequest
-    from kdive.server import debug_introspect_helper_handler
 
     captured: dict = {}
     orig = introspect_execution.render_wrapper
@@ -1774,7 +1859,6 @@ def test_helper_passes_cap_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 def test_helper_redacts_secret_in_emit(tmp_path: Path) -> None:
     from kdive.domain import DebugIntrospectHelperRequest
     from kdive.safety.redaction import REDACTION
-    from kdive.server import debug_introspect_helper_handler
 
     _, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, _rootfs, debug = _profiles()

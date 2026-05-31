@@ -6,6 +6,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from kdive.domain import DebugIntrospectRunRequest, ToolResponse
+from kdive.introspect.execution import LiveIntrospectRuntime
 from kdive.introspect.tools import IntrospectRunOptions, IntrospectTargetContext, register_introspect_tools
 from kdive.postmortem.models import DebugPostmortemFetchRequest
 from kdive.postmortem.tools import (
@@ -170,11 +171,12 @@ def test_introspect_adapter_builds_run_request_and_forwards_gate_collaborators(t
         acknowledged_permissions=["read/write target memory"],
         args={"limit": 1},
     )
-    assert kwargs == {
-        "artifact_root": tmp_path / "runs",
-        "admission": admission,
-        "session_registry": registry,
-    }
+    assert set(kwargs) == {"runtime"}
+    assert kwargs["runtime"] == LiveIntrospectRuntime(
+        artifact_root=tmp_path / "runs",
+        admission=admission,
+        session_registry=registry,
+    )
 
 
 def test_introspect_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_path: Path) -> None:
