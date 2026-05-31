@@ -128,6 +128,9 @@ from kdive.introspect.execution import (
     _redact_and_truncate,
     _target_python_remote_argv,
 )
+from kdive.introspect.execution import (
+    _rollback_introspect_admission as _rollback_introspect_admission,
+)
 from kdive.introspect.handlers import (
     debug_introspect_from_vmcore_handler,
     debug_introspect_from_vmcore_helper_handler,
@@ -513,18 +516,6 @@ _POSTMORTEM_CRASH_STEP_RE = re.compile(r"^postmortem\.crash:[0-9a-f]{32}$")
 def _count_introspect_calls(manifest: RunManifest) -> int:
     """Spec §5.2 step 4a / R3-F5. Named so tests can monkey-patch it."""
     return sum(1 for name in manifest.step_results if _INTROSPECT_STEP_NAME_RE.match(name))
-
-
-def _rollback_introspect_admission(
-    admission: AdmissionService, handle: AdmissionHandle, *, call_id: str, run_id: str
-) -> None:
-    """Roll back a promoted admission handle on an introspect-call failure, logging (never
-    swallowing) a rollback failure — a corrupt admission state for this target_key must be visible
-    to the operator."""
-    try:
-        admission.rollback(handle)
-    except Exception:  # noqa: BLE001 - surface, don't swallow: operator must see admission corruption
-        logger.exception("admission rollback failed for introspect call_id=%s run_id=%s", call_id, run_id)
 
 
 def _head_tail(s: str, *, head: int, tail: int) -> str:
