@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from kdive import __version__
+from kdive import __version__, domain
 from kdive.config import BootOverrides, BuildOverrides
 from kdive.domain import (
     ArtifactRef,
@@ -19,6 +19,17 @@ from kdive.domain import (
 
 def test_package_exports_version() -> None:
     assert __version__ == "0.1.0"
+
+
+def test_postmortem_models_live_in_postmortem_package() -> None:
+    assert not hasattr(domain, "DebugPostmortemCrashRequest")
+
+
+def test_debug_request_accepts_deprecated_target_ref_alias() -> None:
+    req = DebugIntrospectRunRequest(run_id="r1", target_ref="local-qemu", script="print(1)")
+
+    assert req.manifest_target_profile == "local-qemu"
+    assert not hasattr(req, "target_ref")
 
 
 def test_success_response_serializes_with_shared_envelope() -> None:

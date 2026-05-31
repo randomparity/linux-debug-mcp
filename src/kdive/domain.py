@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 
 from kdive.config import BootOverrides, BuildOverrides
+from kdive.model import Model
 
 
 class StepStatus(StrEnum):
@@ -49,10 +50,6 @@ class PrerequisiteStatus(StrEnum):
     FAILED = "failed"
     WARNING = "warning"
     SKIPPED = "skipped"
-
-
-class Model(BaseModel):
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
 
 class KernelSource(Model):
@@ -106,7 +103,7 @@ class DebugIntrospectRunRequest(Model):
     """
 
     run_id: str
-    target_ref: str
+    manifest_target_profile: str = Field(validation_alias=AliasChoices("manifest_target_profile", "target_ref"))
     script: str
     timeout_seconds: int = 30
     allow_write: bool = False
@@ -126,24 +123,7 @@ class DebugIntrospectCheckPrerequisitesRequest(Model):
     """
 
     run_id: str
-    target_ref: str
-    timeout_seconds: int = 20
-    debug_profile: str | None = None
-    target_profile: str | None = None
-    rootfs_profile: str | None = None
-
-
-class DebugPostmortemCheckPrereqsRequest(Model):
-    """Request payload for ``debug.postmortem.check_prereqs``. #94 / ADR 0028.
-
-    Run-scoped, live-target kdump-readiness probe. Field-identical to
-    ``DebugIntrospectCheckPrerequisitesRequest`` (a distinct tool gets a distinct
-    model). ``timeout_seconds`` defaults to 20 and is handler-bounded to [5, 60] so
-    an out-of-range value surfaces as ``ToolResponse.failure(CONFIGURATION_ERROR)``.
-    """
-
-    run_id: str
-    target_ref: str
+    manifest_target_profile: str = Field(validation_alias=AliasChoices("manifest_target_profile", "target_ref"))
     timeout_seconds: int = 20
     debug_profile: str | None = None
     target_profile: str | None = None
@@ -160,7 +140,7 @@ class DebugIntrospectHelperRequest(Model):
     """
 
     run_id: str
-    target_ref: str
+    manifest_target_profile: str = Field(validation_alias=AliasChoices("manifest_target_profile", "target_ref"))
     name: str
     args: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = 30
@@ -192,8 +172,8 @@ class DebugIntrospectFromVmcoreRequest(Model):
 class DebugIntrospectFromVmcoreHelperRequest(Model):
     """Request payload for ``debug.introspect.from_vmcore_helper``. Spec §3.1.
 
-    Runs a curated ``HELPER_REGISTRY`` helper against the vmcore. ``args`` is
-    validated against the resolved helper's ``args_model`` by the handler.
+    Runs a curated helper from ``get_helper_registry()`` against the vmcore.
+    ``args`` is validated against the resolved helper's ``args_model`` by the handler.
     """
 
     run_id: str
@@ -203,154 +183,6 @@ class DebugIntrospectFromVmcoreHelperRequest(Model):
     name: str
     args: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = 30
-
-
-class DebugPostmortemCrashRequest(Model):
-    """Request payload for ``debug.postmortem.crash``. Spec §3.1.
-
-    No ``target_ref``/``*_profile``: the offline crash path names no live target.
-    ``vmcore_ref``/``vmlinux_ref``/``modules_ref`` are run-relative and confined
-    to the run dir. ``commands`` is validated (sanitise + allowlist) and the
-    ``[5, 300]`` timeout / command-count / script-size bounds are enforced by the
-    handler so they surface as ``ToolResponse.failure(...)`` with the spec's exact
-    codes.
-    """
-
-    run_id: str
-    vmcore_ref: str
-    vmlinux_ref: str
-    modules_ref: str | None = None
-    commands: list[str]
-    timeout_seconds: int = 60
-
-
-class DebugPostmortemTriageRequest(Model):
-    """Request payload for ``debug.postmortem.triage``. Spec §3.1.
-
-    Composes the crash (#92) and drgn (#54/#55) offline tiers into one report.
-    No ``commands``/``helpers`` (fixed helper set) and no ``target_ref``/``*_profile``
-    (offline, never gated). ``timeout_seconds`` is handler-bounded to ``[5, 300]`` and
-    applied to EACH sub-call; ``modules_ref`` is validated up front and threaded to the
-    crash sub-call only.
-    """
-
-    run_id: str
-    vmcore_ref: str
-    vmlinux_ref: str
-    modules_ref: str | None = None
-    timeout_seconds: int = 60
-
-
-class DebugPostmortemListDumpsRequest(Model):
-    """Request payload for ``debug.postmortem.list_dumps``. #95 / ADR 0029.
-
-    Live-target SSH enumeration of captured vmcores. ``timeout_seconds`` is
-    handler-bounded to ``[5, 60]`` (default 20); ``dump_dir`` overrides the
-    ``/var/crash`` default and must be an absolute path (handler-validated).
-    """
-
-    run_id: str
-    target_ref: str
-    dump_dir: str | None = None
-    timeout_seconds: int = 20
-    debug_profile: str | None = None
-    target_profile: str | None = None
-    rootfs_profile: str | None = None
-
-
-class DebugPostmortemFetchRequest(Model):
-    """Request payload for ``debug.postmortem.fetch``. #95 / ADR 0029.
-
-    Stages a dump enumerated by ``list_dumps`` into the run dir. ``dump_ref`` is a
-    ``path`` from ``list_dumps`` re-validated against a fresh enumeration.
-    ``timeout_seconds`` is handler-bounded to ``[5, 3600]`` (default 300) and bounds
-    each scp subprocess. ``max_bytes`` overrides the default size ceiling; ``force``
-    re-transfers and overrides the incomplete-dump refusal.
-    """
-
-    run_id: str
-    target_ref: str
-    dump_ref: str
-    force: bool = False
-    dump_dir: str | None = None
-    max_bytes: int | None = None
-    timeout_seconds: int = 300
-    debug_profile: str | None = None
-    target_profile: str | None = None
-    rootfs_profile: str | None = None
-
-
-class DumpEntry(Model):
-    """One captured vmcore enumerated by ``debug.postmortem.list_dumps``. #95.
-
-    ``path`` is the remote dump directory (the ``dump_ref`` fetch accepts).
-    ``file_sizes`` maps each present file name to its remote ``st_size`` and drives
-    the per-file truncation guard in fetch.
-    """
-
-    path: str
-    kernel: str | None
-    capture_time: str | None
-    size_bytes: int
-    incomplete: bool = False
-    available_files: list[str] = Field(default_factory=list)
-    file_sizes: dict[str, int] = Field(default_factory=dict)
-
-
-class FetchedFile(Model):
-    """One file staged into the run dir by ``debug.postmortem.fetch``. #95."""
-
-    name: str
-    ref: str
-    sha256: str
-    size_bytes: int
-
-
-class _TriageSectionBase(Model):
-    """Shared per-section status. Spec §3.3 / ADR 0027 decision 3."""
-
-    status: Literal["ok", "failed"]
-    reason: str | None = None  # the sub-call's stable error code, set iff status == "failed"
-
-
-class PanicReasonSection(_TriageSectionBase):
-    source: Literal["crash"] = "crash"
-    text: str | None = None  # selected panic line; None when none matched (status may still be "ok")
-
-
-class FaultingTaskSection(_TriageSectionBase):
-    source: Literal["crash"] = "crash"
-    pid: int | None = None
-    command: str | None = None
-
-
-class BacktraceSection(_TriageSectionBase):
-    source: Literal["crash"] = "crash"
-    frames: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class RecentDmesgSection(_TriageSectionBase):
-    source: Literal["drgn"] = "drgn"
-    entries: list[dict[str, Any]] = Field(default_factory=list)
-    truncated: bool = False
-
-
-class ModulesSection(_TriageSectionBase):
-    source: Literal["drgn"] = "drgn"
-    modules: list[dict[str, Any]] = Field(default_factory=list)
-    decode_errors: int = 0
-
-
-class DebugPostmortemTriageReport(Model):
-    """Composite triage report. Spec §3.3. All section payloads are pass-through of the
-    already-typed-and-redacted upstream shapes (ADR 0027 decision 8)."""
-
-    vmcore_build_id: str
-    panic_reason: PanicReasonSection
-    faulting_task: FaultingTaskSection
-    backtrace: BacktraceSection
-    recent_dmesg: RecentDmesgSection
-    modules: ModulesSection
 
 
 class RunStep(Model):

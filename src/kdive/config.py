@@ -123,10 +123,9 @@ ALLOWED_DEBUG_OPERATIONS = [
     # add-symbol-file) so a breakpoint in the module resolves.
     "debug.load_module_symbols",
     "debug.end_session",
-    # Finding F14: transport.inject_break is destructive (halts the kernel) — gate it through the
-    # same DebugProfile.enabled_operations contract as every other halting/mutating debug op so a
-    # read-only profile can refuse it. Kept in this list (not a transport-only list) because the
-    # gate is per-DebugProfile and the existing `_ensure_debug_operation_enabled` consumes it.
+    # transport.inject_break is destructive (halts the kernel) — gate it through the same
+    # DebugProfile.enabled_operations contract as every other halting/mutating debug op so a
+    # read-only profile can refuse it. Kept in this list because the gate is per-DebugProfile.
     "transport.inject_break",
     "debug.introspect.run",
     "debug.introspect.helper",
@@ -230,6 +229,15 @@ TRANSPORT_DESTRUCTIVE_PERMISSIONS = {
 # writable target; the vmcore path rejects allow_write upstream and so has no entry here.
 INTROSPECT_DESTRUCTIVE_PERMISSIONS = {
     "debug.introspect.run": ["mutate live kernel state via drgn write APIs"],
+}
+TARGET_DESTRUCTIVE_PERMISSIONS = {
+    "target.boot": [
+        "define MCP-owned libvirt domains",
+        "update MCP-owned libvirt domains",
+        "start MCP-owned libvirt domains",
+        "stop MCP-owned libvirt domains",
+        "destroy MCP-owned libvirt domains",
+    ],
 }
 
 

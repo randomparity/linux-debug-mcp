@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
 
-from kdive.server import prerequisites_handler
+from kdive.domain import PrerequisiteCheck, PrerequisiteStatus
+from kdive.handlers.prerequisites import prerequisites_handler
 
 USAGE = "Usage: python -m kdive.dev_setup check-host"
 
 
-def format_prerequisite_checks(checks: list[dict[str, Any]]) -> list[str]:
-    return [f"{check['status']:7} {check['check_id']}: {check['message']}" for check in checks]
+def _parse_prerequisite_checks(raw_checks: list[object]) -> list[PrerequisiteCheck]:
+    return [PrerequisiteCheck.model_validate(check) for check in raw_checks]
+
+
+def format_prerequisite_checks(checks: list[PrerequisiteCheck]) -> list[str]:
+    return [f"{check.status.value:7} {check.check_id}: {check.message}" for check in checks]
 
 
 def check_host() -> int:
@@ -19,8 +23,8 @@ def check_host() -> int:
         source_path=None,
         enable_libvirt_check=False,
     )
-    checks = response.data["checks"]
-    failed = [check for check in checks if check["status"] == "failed"]
+    checks = _parse_prerequisite_checks(response.data["checks"])
+    failed = [check for check in checks if check.status is PrerequisiteStatus.FAILED]
     for line in format_prerequisite_checks(checks):
         print(line)
     if failed:

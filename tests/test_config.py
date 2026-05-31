@@ -8,6 +8,7 @@ from kdive.config import (
     INTROSPECT_DESTRUCTIVE_PERMISSIONS,
     MAX_INTROSPECT_CALLS_PER_RUN,
     PRELUDE_WARNING_FRACTION_PCT,
+    TARGET_DESTRUCTIVE_PERMISSIONS,
     ArtifactPolicy,
     BootOverrides,
     BuildOverrides,
@@ -375,6 +376,16 @@ def test_introspect_destructive_permissions_has_run_entry() -> None:
     ]
 
 
+def test_target_destructive_permissions_has_boot_entry() -> None:
+    assert TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"] == [
+        "define MCP-owned libvirt domains",
+        "update MCP-owned libvirt domains",
+        "start MCP-owned libvirt domains",
+        "stop MCP-owned libvirt domains",
+        "destroy MCP-owned libvirt domains",
+    ]
+
+
 def test_missing_destructive_permissions_introspect_registry() -> None:
     required = INTROSPECT_DESTRUCTIVE_PERMISSIONS["debug.introspect.run"]
     assert (
@@ -391,6 +402,12 @@ def test_missing_destructive_permissions_introspect_registry() -> None:
         )
         == []
     )
+
+
+def test_missing_destructive_permissions_target_registry() -> None:
+    required = TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"]
+    assert missing_destructive_permissions("target.boot", [], registry=TARGET_DESTRUCTIVE_PERMISSIONS) == required
+    assert missing_destructive_permissions("target.boot", required, registry=TARGET_DESTRUCTIVE_PERMISSIONS) == []
 
 
 def test_missing_destructive_permissions_defaults_to_transport_registry() -> None:

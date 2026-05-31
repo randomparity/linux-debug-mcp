@@ -135,16 +135,31 @@ def test_setup_dependency_check_accepts_clang_as_c_compiler(tmp_path: Path) -> N
 
 def test_dev_setup_formats_prerequisite_checks() -> None:
     from kdive.dev_setup import format_prerequisite_checks
+    from kdive.domain import PrerequisiteCheck, PrerequisiteStatus
 
     assert format_prerequisite_checks(
         [
-            {"status": "passed", "check_id": "python.version", "message": "Python 3.13"},
-            {"status": "failed", "check_id": "tool.gdb", "message": "gdb was not found"},
+            PrerequisiteCheck(status=PrerequisiteStatus.PASSED, check_id="python.version", message="Python 3.13"),
+            PrerequisiteCheck(status=PrerequisiteStatus.FAILED, check_id="tool.gdb", message="gdb was not found"),
         ]
     ) == [
         "passed  python.version: Python 3.13",
         "failed  tool.gdb: gdb was not found",
     ]
+
+
+def test_dev_setup_imports_prerequisites_from_handler_package() -> None:
+    import ast
+
+    from kdive import dev_setup
+
+    tree = ast.parse(Path(dev_setup.__file__).read_text(encoding="utf-8"))
+    imports = [
+        (node.module, alias.name) for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) for alias in node.names
+    ]
+    assert ("kdive.server", "prerequisites_handler") not in imports
+    assert ("kdive.handlers.prerequisites", "prerequisites_handler") in imports
+    assert dev_setup.prerequisites_handler.__module__ == "kdive.handlers.prerequisites"
 
 
 def test_dev_setup_check_host_returns_nonzero_for_failed_checks(monkeypatch, capsys) -> None:
