@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import json
+import math
 import re
 import shutil
 import threading
@@ -495,7 +496,10 @@ class GdbMiEngine:
         """Issue an interactive exec verb (-exec-continue/-step/-next/-finish), wait for the stop, and
         return a redacted StopRecord. On timeout, -exec-interrupt back to a known stop and mark
         timed_out=True. Always returns HALTED (or raises session_exited)."""
-        bounded = max(1, min(int(timeout_sec) if timeout_sec else MAX_INTERACTIVE_WAIT_SEC, MAX_INTERACTIVE_WAIT_SEC))
+        # Round fractional requests up: a sub-second request should still wait at least its full
+        # span (and the floor of 1s below), never truncate toward zero (5.7 -> 6, not 5).
+        requested = math.ceil(timeout_sec) if timeout_sec else MAX_INTERACTIVE_WAIT_SEC
+        bounded = max(1, min(requested, MAX_INTERACTIVE_WAIT_SEC))
         self._run(attachment, verb)  # ^running under mi-async on
         stop = self.wait_for_stop(attachment, timeout_sec=bounded)
         if stop is not None:

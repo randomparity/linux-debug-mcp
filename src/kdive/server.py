@@ -360,6 +360,11 @@ PROBE_STDOUT_CAP = 256 * 1024
 # still bounding a hostile target that ignores the wrapper.
 RUN_STDOUT_CAP = 2 * 1024 * 1024
 
+# Seconds added to a caller's command timeout when bounding the outer SSH transport. The remote
+# command is killed at its own deadline; this grace lets the transport observe that exit and return
+# a clean result before the SSH layer itself times out.
+SSH_TIMEOUT_GRACE_SECONDS = 10
+
 
 def _target_python_remote_argv(*, timeout_seconds: int, use_sudo: bool) -> list[str]:
     """Build the remote argv shared by the probe and the introspect runner.
@@ -2530,7 +2535,7 @@ def debug_introspect_check_prerequisites_handler(
             rootfs_profile=ctx.rootfs,
             known_hosts_path=ctx.store.run_dir(run_id) / "sensitive" / "known_hosts",
             command=remote_argv,
-            command_timeout=request.timeout_seconds + 10,
+            command_timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
         )
     except ValueError as exc:
         return _configuration_failure(
@@ -2544,7 +2549,7 @@ def debug_introspect_check_prerequisites_handler(
     try:
         ssh_result = runner.run(
             ssh_argv,
-            timeout=request.timeout_seconds + 10,
+            timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
             stdin=PROBE_SCRIPT,
@@ -2791,7 +2796,7 @@ def debug_postmortem_check_prereqs_handler(
             rootfs_profile=ctx.rootfs,
             known_hosts_path=ctx.store.run_dir(run_id) / "sensitive" / "known_hosts",
             command=remote_argv,
-            command_timeout=request.timeout_seconds + 10,
+            command_timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
         )
     except ValueError as exc:
         return _configuration_failure(
@@ -2805,7 +2810,7 @@ def debug_postmortem_check_prereqs_handler(
     try:
         ssh_result = runner.run(
             ssh_argv,
-            timeout=request.timeout_seconds + 10,
+            timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
             stdin=script,
@@ -3003,7 +3008,7 @@ def _run_dump_enumeration(
             rootfs_profile=ctx.rootfs,
             known_hosts_path=ctx.store.run_dir(run_id) / "sensitive" / "known_hosts",
             command=remote_argv,
-            command_timeout=timeout_seconds + 10,
+            command_timeout=timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
         )
     except ValueError as exc:
         return None, _configuration_failure(
@@ -3016,7 +3021,7 @@ def _run_dump_enumeration(
     try:
         ssh_result = runner.run(
             ssh_argv,
-            timeout=timeout_seconds + 10,
+            timeout=timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
             stdin=script,
@@ -3884,7 +3889,7 @@ def _execute_introspect_call(
                 rootfs_profile=resolved_rootfs,
                 known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
                 command=remote_argv,
-                command_timeout=user_timeout + 10,
+                command_timeout=user_timeout + SSH_TIMEOUT_GRACE_SECONDS,
             )
         except ValueError as exc:
             # build_ssh_argv raises when RootfsProfile.ssh_options['ConnectTimeout']
@@ -3930,7 +3935,7 @@ def _execute_introspect_call(
         try:
             ssh_result = runner.run(
                 ssh_argv,
-                timeout=user_timeout + 10,
+                timeout=user_timeout + SSH_TIMEOUT_GRACE_SECONDS,
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
                 cancel=cancel_event,
@@ -4803,7 +4808,7 @@ def _execute_vmcore_introspect_call(
     started_monotonic = time.monotonic()
     ssh_result = active_runner.run(
         argv,
-        timeout=request.timeout_seconds + 10,
+        timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
         cancel=threading.Event(),
@@ -5081,7 +5086,7 @@ def debug_postmortem_crash_handler(
     started_monotonic = time.monotonic()
     ssh_result = active_runner.run(
         argv,
-        timeout=request.timeout_seconds + 10,
+        timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
         cancel=threading.Event(),
@@ -6779,11 +6784,14 @@ def _read_module_sections(
     )
     remote = ["sh", "-c", script, "kdive-sections", module_name]
     argv = build_ssh_argv(
-        rootfs_profile=rootfs_profile, known_hosts_path=known_hosts_path, command=remote, command_timeout=timeout + 10
+        rootfs_profile=rootfs_profile,
+        known_hosts_path=known_hosts_path,
+        command=remote,
+        command_timeout=timeout + SSH_TIMEOUT_GRACE_SECONDS,
     )
     result = ssh_runner.run(
         argv,
-        timeout=timeout + 10,
+        timeout=timeout + SSH_TIMEOUT_GRACE_SECONDS,
         stdout_path=work_dir / "module-sections.out",
         stderr_path=work_dir / "module-sections.err",
     )

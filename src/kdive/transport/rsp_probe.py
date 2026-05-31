@@ -4,6 +4,11 @@ import threading
 
 from kdive.transport.bounded import BoundedIOTimeout, Deadline, connect_tcp
 
+# Cap on bytes buffered while waiting for a complete RSP frame from an unauthenticated peer. A
+# valid `$...#xx` halt-reason reply is a few dozen bytes; the bound stops a hostile or broken peer
+# that streams data without ever sending `#` from pinning CPU/memory in the accumulation loop.
+RSP_MAX_ACCUMULATE_BYTES = 4096
+
 
 def rsp_frame(payload: str) -> bytes:
     """Wrap an RSP payload as `$<payload>#<checksum>` (mod-256 sum, 2 hex digits)."""
@@ -53,7 +58,7 @@ def rsp_reachable(host: str, port: int, *, deadline: Deadline, cancel: threading
             buffer += chunk
             if valid_rsp_frame(buffer):
                 return True
-            if len(buffer) > 4096:  # bounded: do not accumulate unboundedly
+            if len(buffer) > RSP_MAX_ACCUMULATE_BYTES:
                 break
     except OSError:
         return False
