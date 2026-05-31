@@ -5,8 +5,9 @@ import unicodedata
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 
+from kdive.model import Model
 from kdive.safety.secrets import SecretReference
 
 _SAFE_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
@@ -296,8 +297,8 @@ def validate_ssh_options_map(value: dict[str, str]) -> dict[str, str]:
     return value
 
 
-class ConfigModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+class ConfigModel(Model):
+    pass
 
 
 class BuildProfile(ConfigModel):

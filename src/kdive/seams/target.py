@@ -4,9 +4,9 @@ import hashlib
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field, field_validator
 
-from kdive.domain import Model
+from kdive.model import Model
 
 
 class Arch(StrEnum):
@@ -40,11 +40,11 @@ class BreakHint(StrEnum):
     GDBSTUB_NATIVE = "gdbstub_native"
 
 
-class TargetKey(BaseModel):
+class TargetKey(Model):
     """Contract-wide identity tuple: (provisioner, target_id). Frozen so it is
     hashable and usable as a dict/lease/guard key (contract §3.1)."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid", validate_assignment=True, frozen=True)
 
     provisioner: str
     target_id: str

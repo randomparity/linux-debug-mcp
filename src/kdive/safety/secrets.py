@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict
+from kdive.model import Model
 
 
 class SecretReferenceKind(StrEnum):
@@ -12,9 +12,7 @@ class SecretReferenceKind(StrEnum):
     KEYRING = "keyring"
 
 
-class SecretReference(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class SecretReference(Model):
     kind: SecretReferenceKind
     label: str
     reference: str
