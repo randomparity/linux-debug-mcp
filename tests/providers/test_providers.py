@@ -14,6 +14,7 @@ from kdive.domain import (
 from kdive.model import Model
 from kdive.providers import debug as debug_contracts
 from kdive.providers.local.debug.qemu_gdbstub import DebugSession, DebugSessionState
+from kdive.providers.local.introspect import local_drgn_introspect
 from kdive.providers.plugins import ProviderPluginSpec, local_provider_plugin_specs
 from kdive.providers.registry import ProviderRegistry
 
@@ -31,6 +32,25 @@ def test_provider_package_has_no_local_introspect_facade() -> None:
     provider_root = Path(__file__).parents[2] / "src" / "kdive" / "providers"
 
     assert not (provider_root / "introspect.py").exists()
+
+
+def test_local_drgn_provider_does_not_reexport_wrapper_internals() -> None:
+    wrapper_surface = {
+        "SCRIPT_BYTE_CAP",
+        "TARGET_PYTHON_ARGV",
+        "WrapperRenderError",
+        "render_vmcore_wrapper",
+        "render_vmcore_wrapper_skeleton",
+        "render_wrapper",
+        "render_wrapper_skeleton",
+        "user_script_sha256",
+        "WRAPPER_TEMPLATE",
+        "VMCORE_WRAPPER_TEMPLATE",
+        "_WRAPPER_BODY",
+        "RUNNER_DEFAULT_CAPS",
+    }
+
+    assert not (wrapper_surface & set(vars(local_drgn_introspect)))
 
 
 def _annotation_contains_any(annotation: object) -> bool:

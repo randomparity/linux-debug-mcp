@@ -13,13 +13,13 @@ from typing import Any
 
 import pytest
 
-from kdive.providers.local.introspect.local_drgn_introspect import (
-    VMCORE_WRAPPER_TEMPLATE,
-    WRAPPER_TEMPLATE,
+from kdive.introspect.wrappers import (
     WrapperRenderError,
     render_vmcore_wrapper,
     render_vmcore_wrapper_skeleton,
 )
+from kdive.providers.local.introspect.drgn_live_wrapper import WRAPPER_TEMPLATE
+from kdive.providers.local.introspect.drgn_vmcore_wrapper import VMCORE_WRAPPER_TEMPLATE
 
 GOLDEN = Path(__file__).parents[1] / "golden" / "live_wrapper_template.txt"
 EXPECTED_BUILD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
@@ -32,7 +32,7 @@ def test_live_wrapper_template_byte_identical_after_split() -> None:
 
 
 def test_vmcore_wrapper_shares_body_with_live() -> None:
-    from kdive.providers.local.introspect.local_drgn_introspect import _WRAPPER_BODY
+    from kdive.providers.local.introspect.drgn_wrapper_common import _WRAPPER_BODY
 
     assert _WRAPPER_BODY in VMCORE_WRAPPER_TEMPLATE.template
     assert _WRAPPER_BODY in WRAPPER_TEMPLATE.template

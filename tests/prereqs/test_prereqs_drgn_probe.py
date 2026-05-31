@@ -6,6 +6,7 @@ import sys
 from typing import Any
 
 from kdive.domain import PrerequisiteCheck, PrerequisiteStatus
+from kdive.introspect.wrappers import TARGET_PYTHON_ARGV
 from kdive.prereqs.drgn_probe import (
     PROBE_SCRIPT,
     UNKNOWN,
@@ -16,7 +17,7 @@ from kdive.prereqs.drgn_probe import (
     normalize_build_id,
     python_missing_checks,
 )
-from kdive.providers.local.introspect.local_drgn_introspect import TARGET_PYTHON_ARGV, local_drgn_introspect_capability
+from kdive.providers.local.introspect.local_drgn_introspect import local_drgn_introspect_capability
 
 
 def test_target_python_argv_is_shared_constant() -> None:

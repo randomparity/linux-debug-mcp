@@ -1165,7 +1165,7 @@ def test_wrapper_render_error_rolls_back_admission(tmp_path: Path, monkeypatch: 
     # admission handle, (b) clean up the orphan agent_dir + sensitive_dir,
     # and (c) leave a forensic FAILED StepResult under introspect:<call_id>
     # so the operator can trace via `artifacts.get_manifest`.
-    from kdive.providers.local.introspect.local_drgn_introspect import WrapperRenderError
+    from kdive.introspect.wrappers import WrapperRenderError
 
     def _boom(**_kwargs):
         raise WrapperRenderError("test forced render failure")
