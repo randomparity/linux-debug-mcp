@@ -458,24 +458,35 @@ def _build_profile_from_manifest(manifest: RunManifest) -> BuildProfile:
         raise ValueError(f"unknown build profile: {profile_name}") from exc
 
 
-def _record_terminal_build_result(
+def _record_step_with_retry(
     store: ArtifactStore,
     run_id: str,
     result: StepResult,
     *,
+    append: bool = False,
+    replace_succeeded: bool = False,
     attempts: int = 5,
     initial_delay_seconds: float = 0.01,
 ) -> None:
+    """Single manifest-lock retry-with-backoff for recording a terminal step (TD-99). The build,
+    introspect (``append=True`` — every ``introspect:<call_id>`` is a fresh entry, never a replace),
+    and fetch (``replace_succeeded`` — a ``force`` re-fetch overwrites the SUCCEEDED step) paths all
+    funnel through this one loop instead of cloning it. Only a transient "manifest is locked"
+    ManifestStateError is retried; any other error (or the final attempt) propagates."""
     delay_seconds = initial_delay_seconds
     for attempt in range(attempts):
         try:
-            store.record_step_result(run_id, result)
+            store.record_step_result(run_id, result, append=append, replace_succeeded=replace_succeeded)
             return
         except ManifestStateError as exc:
             if "manifest is locked" not in str(exc) or attempt == attempts - 1:
                 raise
             time.sleep(delay_seconds)
             delay_seconds *= 2
+
+
+def _record_terminal_build_result(store: ArtifactStore, run_id: str, result: StepResult) -> None:
+    _record_step_with_retry(store, run_id, result)
 
 
 _INTROSPECT_STEP_NAME_RE = re.compile(r"^introspect:")
@@ -510,28 +521,9 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _record_terminal_introspect_result(
-    store: ArtifactStore,
-    run_id: str,
-    result: StepResult,
-    *,
-    attempts: int = 5,
-    initial_delay_seconds: float = 0.01,
-) -> None:
-    """Clone of ``_record_terminal_build_result`` that appends rather than
-    replaces. Spec §5.2 step 13: every ``introspect:<call_id>`` is a fresh
-    entry — collisions are an internal bug (UUIDv4).
-    """
-    delay_seconds = initial_delay_seconds
-    for attempt in range(attempts):
-        try:
-            store.record_step_result(run_id, result, append=True)
-            return
-        except ManifestStateError as exc:
-            if "manifest is locked" not in str(exc) or attempt == attempts - 1:
-                raise
-            time.sleep(delay_seconds)
-            delay_seconds *= 2
+def _record_terminal_introspect_result(store: ArtifactStore, run_id: str, result: StepResult) -> None:
+    # Spec §5.2 step 13: every introspect:<call_id> is a fresh entry (UUIDv4) — append, never replace.
+    _record_step_with_retry(store, run_id, result, append=True)
 
 
 def _record_introspect_failure(
@@ -3125,31 +3117,10 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _record_fetch_result(
-    store: ArtifactStore,
-    run_id: str,
-    result: StepResult,
-    *,
-    replace_succeeded: bool,
-    attempts: int = 5,
-    initial_delay_seconds: float = 0.01,
-) -> None:
-    """Record a postmortem.fetch step under the manifest-lock retry-with-backoff.
-
-    Clone of ``_record_terminal_build_result`` that threads ``replace_succeeded`` so a
-    ``force`` re-fetch replaces the SUCCEEDED step rather than no-op-ing (ADR 0029
-    decision 6 / review finding 2).
-    """
-    delay = initial_delay_seconds
-    for attempt in range(attempts):
-        try:
-            store.record_step_result(run_id, result, replace_succeeded=replace_succeeded)
-            return
-        except ManifestStateError as exc:
-            if "manifest is locked" not in str(exc) or attempt == attempts - 1:
-                raise
-            time.sleep(delay)
-            delay *= 2
+def _record_fetch_result(store: ArtifactStore, run_id: str, result: StepResult, *, replace_succeeded: bool) -> None:
+    # A postmortem.fetch step: a `force` re-fetch replaces the SUCCEEDED step rather than no-op-ing
+    # (ADR 0029 decision 6 / review finding 2).
+    _record_step_with_retry(store, run_id, result, replace_succeeded=replace_succeeded)
 
 
 def _stage_one_file(
@@ -6281,7 +6252,13 @@ def _fence_legacy_debug_session(
 
 # Stateful debug.* ops whose effect changes the persisted breakpoint ledger; after each, the ledger
 # is rebuilt from gdb's authoritative -break-list so the manifest matches the engine.
-_BREAKPOINT_MUTATORS = frozenset({"set_breakpoint", "set_watchpoint", "clear_breakpoint", "clear_watchpoint"})
+# Derived from DEBUG_METHOD_OPERATIONS so a new breakpoint/watchpoint op cannot drift out of sync
+# (TD-13): every set_/clear_ of a break/watchpoint mutates the breakpoint ledger.
+_BREAKPOINT_MUTATORS = frozenset(
+    name
+    for name in DEBUG_METHOD_OPERATIONS
+    if name.startswith(("set_", "clear_")) and name.endswith(("breakpoint", "watchpoint"))
+)
 # Interactive resume verbs (continue/step/next/finish): engine method + how the timeout maps.
 _EXEC_VERBS = {
     "continue_execution": lambda engine, att, timeout: engine.continue_(att, timeout_sec=timeout),
@@ -6289,6 +6266,15 @@ _EXEC_VERBS = {
     "next": lambda engine, att, timeout: engine.next(att, timeout_sec=timeout),
     "finish": lambda engine, att, timeout: engine.finish(att, timeout_sec=timeout),
 }
+
+
+def _required_kwarg(kwargs: dict[str, object], key: str) -> object:
+    """Fetch a required debug-op parameter, raising a structured CONFIGURATION_ERROR rather than a
+    raw KeyError when the handler layer did not supply it (TD-12). Optional params keep using
+    ``kwargs.get(...)`` directly; required ones go through here so access is uniform."""
+    if key not in kwargs:
+        raise GdbMiError(f"missing required debug parameter {key!r}", category=ErrorCategory.CONFIGURATION_ERROR)
+    return kwargs[key]
 
 
 def _engine_op_data(
@@ -6299,14 +6285,14 @@ def _engine_op_data(
     dedicated reap path. An unknown method is a CONFIGURATION_ERROR (defence in depth; the handler
     layer already gated the op name)."""
     if method_name == "read_registers":
-        registers = kwargs["registers"]
+        registers = _required_kwarg(kwargs, "registers")
         names = [str(name) for name in registers] if isinstance(registers, list) else []
         return engine.read_registers(attachment, names)
     if method_name == "read_symbol":
-        return engine.read_symbol(attachment, str(kwargs["symbol"]))
+        return engine.read_symbol(attachment, str(_required_kwarg(kwargs, "symbol")))
     if method_name == "read_memory":
-        address = kwargs["address"]
-        byte_count = kwargs["byte_count"]
+        address = _required_kwarg(kwargs, "address")
+        byte_count = _required_kwarg(kwargs, "byte_count")
         if not isinstance(address, int) or not isinstance(byte_count, int):
             raise GdbMiError("address and byte_count must be integers", category=ErrorCategory.CONFIGURATION_ERROR)
         if address < 0:
@@ -6322,16 +6308,26 @@ def _engine_op_data(
         evaluate_args: dict[str, object] = (
             {str(key): value for key, value in arguments.items()} if isinstance(arguments, dict) else {}
         )
-        return engine.evaluate_inspector(attachment, inspector=str(kwargs["inspector"]), arguments=evaluate_args)
+        return engine.evaluate_inspector(
+            attachment, inspector=str(_required_kwarg(kwargs, "inspector")), arguments=evaluate_args
+        )
     if method_name == "set_breakpoint":
-        return {"breakpoint": engine.set_breakpoint(attachment, str(kwargs["symbol"])).model_dump(mode="json")}
+        return {
+            "breakpoint": engine.set_breakpoint(attachment, str(_required_kwarg(kwargs, "symbol"))).model_dump(
+                mode="json"
+            )
+        }
     if method_name == "set_watchpoint":
-        return {"breakpoint": engine.set_watchpoint(attachment, str(kwargs["symbol"])).model_dump(mode="json")}
+        return {
+            "breakpoint": engine.set_watchpoint(attachment, str(_required_kwarg(kwargs, "symbol"))).model_dump(
+                mode="json"
+            )
+        }
     if method_name == "clear_breakpoint":
-        engine.clear_breakpoint(attachment, str(kwargs["breakpoint_id"]))
+        engine.clear_breakpoint(attachment, str(_required_kwarg(kwargs, "breakpoint_id")))
         return {}
     if method_name == "clear_watchpoint":
-        engine.clear_watchpoint(attachment, str(kwargs["breakpoint_id"]))
+        engine.clear_watchpoint(attachment, str(_required_kwarg(kwargs, "breakpoint_id")))
         return {}
     if method_name == "list_breakpoints":
         return {"breakpoints": [ref.model_dump(mode="json") for ref in engine.list_breakpoints(attachment)]}
