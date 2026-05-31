@@ -134,9 +134,13 @@ virt-make-fs --type=ext4 --format=qcow2 --size="${IMAGE_SIZE}" "${rootfs_tar}" "
 # partitions/subvols of its GPT layout (separate /boot, btrfs subvol=root, swap/EFI) that the
 # whole-disk ext4 artifact does not have. Left intact they make local-fs.target fail and block
 # multi-user.target — so the kdive-ready marker never fires. A single root entry is sufficient
-# (the kernel already mounts root via root=/dev/vda).
+# (the kernel already mounts root via root=/dev/vda). The same session disables guest-internal
+# SELinux so the host-written authorized_keys is read without a relabel and the first boot does
+# not relabel+reboot (a false BOOT_TIMEOUT risk); this is independent of the host-side
+# virt_image_t/0644 labeling of the image file (§2).
 guestfish --rw -a "${KDIVE_ROOTFS}" -i <<'EOF'
 write /etc/fstab "/dev/vda / ext4 defaults 0 1\n"
+write /etc/selinux/config "SELINUX=disabled\nSELINUXTYPE=targeted\n"
 rm-f /etc/crypttab
 EOF
 
@@ -179,19 +183,17 @@ or empty) — no inherited `/boot`/swap/EFI/`subvol=` entries — and `/etc/cryp
 stalls before the marker (see Stage 2). The qcow2 container also still satisfies the `copy_on_write`
 overlay's qcow2-base precondition (ADR 0031 §3).
 
-**SELinux contexts on the repacked image.** The old `--selinux-relabel` (and the even-older `.autorelabel`
-touch) is **wrong for a repack**: relabeling the scratch image is discarded when `virt-make-fs` builds a
-fresh filesystem, so contexts must land on the **final** ext4. Two candidate mechanisms, the ADR choosing:
-(b) **first-boot `.autorelabel`** — write `.autorelabel` into the final image and let the guest relabel on
-first boot (the **safe default**: mirrors the old recipe; requires `selinux-policy` present, which a
-virt-builder Fedora image has; cost is a one-time relabel + reboot before the `kdive-ready` marker appears);
-(a) **xattr-preserving repack** — carry `security.selinux` xattrs through `virt-tar-out` → `virt-make-fs`
-so the final filesystem is already correctly labeled (no boot-time cost). **Verify at implementation:** (a)
-is preferable *only if* `virt-tar-out` actually preserves `security.selinux` xattrs end-to-end — it exposes
-no xattr flag, and many libguestfs/tar paths drop `security.*` unless explicitly carried
-(`--xattrs --xattrs-include=security.*`-style handling), so an unlabeled root on an enforcing guest is the
-silent failure mode. Build on (b) by default; adopt (a) only after confirming the xattrs survive the
-roundtrip.
+**SELinux in the repacked image — disabled.** This local QEMU debug rootfs ships with **guest-internal
+SELinux disabled**: the Stage-2 `guestfish` normalization uploads a canonical `/etc/selinux/config` with
+`SELINUX=disabled` alongside the `/etc/fstab` rewrite. This is chosen over trying to label the repacked
+filesystem because (a) it **sidesteps the "contexts must land on the final ext4" problem entirely** —
+relabeling the scratch image is discarded when `virt-make-fs` builds a fresh filesystem, and `virt-tar-out`
+exposes no xattr flag (many tar paths drop `security.*`), so a labeled repack is not reliable; (b) it
+**removes the first-boot relabel + reboot** an `.autorelabel` would force, which risks a false
+`BOOT_TIMEOUT` before the `kdive-ready` marker fires (worse under TCG, where readiness is a single
+`deadline = timeout`, `libvirt_qemu.py:239`); and (c) it is **acceptable because this is a disposable local
+QEMU debug rootfs, not a security boundary**. This is **guest-internal** SELinux only and does **not**
+change the host-side `virt_image_t` + 0644 requirement on the base image *file* (§2 is unaffected).
 
 **Missing template — fail loud.** If `virt-builder` reports `fedora-${RELEASEVER}` is not in the index
 (an older libguestfs install), the script exits non-zero with a message naming `virt-builder --list` and
@@ -386,9 +388,10 @@ existing integration tests do it.
    `virt-tar-out` + `virt-make-fs --type=ext4` repacks the root tree into a no-partition-table whole-disk
    ext4 qcow2, the only layout the provider boots (`root=/dev/vda`, no initramfs). The repack also
    **normalizes the inherited `/etc/fstab`** (to a lone `/ ext4` entry) and drops `/etc/crypttab`, else the
-   scratch image's GPT-layout mount entries stall boot before the marker. SELinux contexts must land on the
-   **final** ext4: `.autorelabel` first-boot is the safe default; xattr-preserving repack only if
-   `virt-tar-out` is confirmed to carry `security.selinux`.
+   scratch image's GPT-layout mount entries stall boot before the marker. Guest-internal SELinux is
+   **disabled** in the repacked image (a canonical `/etc/selinux/config`), which avoids both the unreliable
+   labeled-repack and the first-boot relabel+reboot (false-`BOOT_TIMEOUT` risk); the host-side
+   `virt_image_t`/0644 labeling of the image *file* is unaffected (§2).
    - Rejected: *keep `dnf --installroot` under rootless podman / `unshare --map-root-user` + fakeroot* —
      fragile (dnf-in-userns device-node and ownership quirks), and still conceptually "fake root".
    - Rejected: *mkosi* — idiomatic for kernel dev but a new, heavier dependency with its own config model;

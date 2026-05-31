@@ -61,14 +61,15 @@ virtio-blk are in the default kernel (defconfig; `x86_64-debug` pins `CONFIG_VIR
 `/boot`/swap/EFI/`subvol=` entries; no `/etc/crypttab`). Partitioned/btrfs/LVM layouts are out — they would
 need an initramfs the provider does not supply.
 
-**SELinux sub-decision:** contexts must land on the **final** ext4 (relabeling the scratch image is
-discarded when `virt-make-fs` builds a fresh filesystem, so `--selinux-relabel`/`.autorelabel` on the
-scratch image is wrong). Mechanism: **first-boot `.autorelabel`** written into the final image is the
-**safe default** (requires `selinux-policy` present, which a virt-builder Fedora image has; one-time
-relabel + reboot before the marker); **xattr-preserving repack** (carry `security.selinux` through
-`virt-tar-out` → `virt-make-fs`, no boot-time cost) is adopted **only if** `virt-tar-out` is confirmed to
-preserve `security.selinux` xattrs — it exposes no xattr flag and many tar paths drop `security.*`, so an
-unlabeled enforcing root is the silent failure mode.
+**SELinux sub-decision:** guest-internal SELinux is **disabled** in the repacked image — the Stage-2
+`guestfish` normalization uploads a canonical `/etc/selinux/config` (`SELINUX=disabled`) alongside the
+`/etc/fstab` rewrite. This sidesteps the "contexts must land on the **final** ext4" problem (relabeling the
+scratch image is discarded when `virt-make-fs` builds a fresh filesystem, and `virt-tar-out` exposes no
+xattr flag, so a labeled repack is unreliable) **and** removes the first-boot relabel + reboot an
+`.autorelabel` would force, which risks a false `BOOT_TIMEOUT` before the marker (worse under TCG, where
+readiness is a single `deadline = timeout`, `libvirt_qemu.py:239`). Acceptable because this is a disposable
+local QEMU debug rootfs, not a security boundary. This is **guest-internal** SELinux only; it does **not**
+change the host-side `virt_image_t` + 0644 requirement on the base image *file* (decision 6).
 
 libguestfs uses `/dev/kvm` when available and TCG otherwise; both are unprivileged. A template not in the
 libguestfs index fails non-zero with a message naming `virt-builder --list` and `KDIVE_ROOTFS_RELEASEVER`
@@ -220,7 +221,13 @@ confirmation on a capable host, not a CI gate.
     `local-fs.target` fails and `multi-user.target` (and the `kdive-ready` marker) is never reached — a
     boot-block invisible to the no-boot Tier 1 unless the fstab is normalized. Stage 2 rewrites it to a lone
     `/ ext4` entry and drops `/etc/crypttab`; Tier 1 asserts the result. (decision 1)
-16. **Adopt the xattr-preserving repack as the default SELinux mechanism.** Rejected as the *default*:
-    `virt-tar-out` exposes no xattr flag and tar paths commonly drop `security.*`, so it would silently
-    ship an unlabeled enforcing root. `.autorelabel` first-boot is the safe default; the xattr path is
-    adopted only after the roundtrip is confirmed to preserve `security.selinux`. (decision 1)
+16. **Label the repacked image instead of disabling guest-internal SELinux.** Rejected in three forms.
+    (a) *Keep SELinux enforcing + first-boot `.autorelabel`* — forces a one-time relabel + reboot before
+    the `kdive-ready` marker, which risks a false `BOOT_TIMEOUT` (worse under TCG, where readiness is a
+    single `deadline = timeout`, `libvirt_qemu.py:239`). (b) *xattr-preserving repack* (carry
+    `security.selinux` through `virt-tar-out` → `virt-make-fs`) — `virt-tar-out` exposes no xattr flag and
+    tar paths commonly drop `security.*`, so it would silently ship an unlabeled enforcing root. (c)
+    *offline `virt-customize --selinux-relabel`* — a no-op on the host's current libguestfs, so not
+    reliable. Guest-internal SELinux is **disabled** instead (a canonical `/etc/selinux/config`); this is a
+    disposable local debug rootfs, not a security boundary, and the host-side `virt_image_t`/0644 labeling
+    of the image *file* is unaffected (decision 6). (decision 1)
