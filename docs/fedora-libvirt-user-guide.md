@@ -215,18 +215,35 @@ export KDIVE_ROOTFS=/var/lib/kdive/rootfs/minimal.qcow2
 
 ### One command: `just rootfs`
 
-The fastest path is the bundled builder, which produces the marker + sshd +
-authorized-key image at the default path:
+`just rootfs` runs `scripts/build-rootfs.sh` as a regular user — no `sudo`. It builds the image
+in two unprivileged libguestfs stages: `virt-builder` customizes a Fedora image (installs
+`openssh-server`, injects your SSH public key, enables sshd and the `kdive-ready` serial unit),
+then `virt-tar-out` + `virt-make-fs --type=ext4` repack the root tree into a **single whole-disk
+ext4 qcow2 with no partition table**. That layout is required: the boot provider boots
+`root=/dev/vda` with no initramfs, so a partitioned image would panic. The build normalizes
+`/etc/fstab` to a lone `/` entry so the guest reaches `multi-user.target`. It also disables
+guest-internal SELinux in the image, so the host-written SSH key is read without a relabel and the
+first boot does not relabel+reboot. That is separate from the host-side `virt_image_t` label on the
+image *file*, which is still required (see below).
 
 ```bash
-sudo mkdir -p /var/lib/kdive/rootfs
-sudo chown "$USER":"$USER" /var/lib/kdive/rootfs
 just rootfs
 ```
 
-Override defaults via environment: `KDIVE_ROOTFS` (output path),
-`KDIVE_ROOTFS_RELEASEVER`, `KDIVE_ROOTFS_SIZE`,
-`KDIVE_ROOTFS_SSH_USER`, `KDIVE_ROOTFS_AUTHORIZED_KEY`.
+Configure it with environment variables (defaults in parentheses):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KDIVE_ROOTFS` | `/var/lib/kdive/rootfs/minimal.qcow2` | output image path |
+| `KDIVE_ROOTFS_RELEASEVER` | `43` | Fedora release (must be in `virt-builder --list`) |
+| `KDIVE_ROOTFS_SIZE` | `2G` | image size (raise if `virt-make-fs` reports "too small") |
+| `KDIVE_ROOTFS_SSH_USER` | `root` | guest user that receives the key |
+| `KDIVE_ROOTFS_AUTHORIZED_KEY` | your `~/.ssh/id_ed25519.pub` or `id_rsa.pub` | public key to install |
+
+Prerequisite: `libguestfs-tools` (provides `virt-builder`, `virt-tar-out`, `virt-make-fs`,
+`guestfish`, `qemu-img`). Building also needs network access to download and GPG-verify the
+template. `host.check_prerequisites` reports the `rootfs.builder`, `kvm.access`, and
+`libvirt.connect` capabilities.
 
 The default `minimal` rootfs profile is `source_kind="builder"` and
 `mutability="copy_on_write"`: a missing image makes `target.boot` fail with a
@@ -234,66 +251,11 @@ The default `minimal` rootfs profile is `source_kind="builder"` and
 from a throwaway qcow2 overlay so the base image stays pristine. `copy_on_write`
 requires `qemu-img` on the host and a qcow2 base image.
 
-Under `qemu:///system`, the libvirt qemu user must be able to read the kernel image,
-the rootfs base image, and the per-run overlay (under the artifact root). This is the
-same access the kernel image already requires; place the artifact root and source tree
-on a libvirt-readable, correctly-labeled path, or use `qemu:///session`. SSH login
-additionally requires that the guest not mislabel `authorized_keys` — the builder image
-has no SELinux policy and carries `.autorelabel`, so this holds without action.
-
-The manual recipe below remains valid as an explanation of what the script does.
-
 If you already have a compatible rootfs image, copy it to that path and make
 sure it writes this exact marker to `ttyS0`:
 
 ```text
 kdive-ready
-```
-
-To create a representative Fedora rootfs for the pilot, build a minimal
-installroot and pack it into a qcow2 image. This uses a whole-disk ext4
-filesystem so the provider's `root=/dev/vda` kernel argument can mount it
-directly:
-
-```bash
-ROOTFS_WORK="$(mktemp -d)"
-sudo dnf --installroot="${ROOTFS_WORK}" \
-  --releasever=43 \
-  --setopt=install_weak_deps=False \
-  --setopt=tsflags=nodocs \
-  install -y systemd fedora-release passwd
-
-sudo tee "${ROOTFS_WORK}/etc/fstab" >/dev/null <<'EOF'
-/dev/vda / ext4 defaults 0 1
-EOF
-
-sudo tee "${ROOTFS_WORK}/etc/systemd/system/kdive-ready.service" >/dev/null <<'EOF'
-[Unit]
-Description=Signal kdive serial readiness
-After=dev-ttyS0.device
-Wants=dev-ttyS0.device
-
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -c 'echo kdive-ready > /dev/ttyS0'
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo mkdir -p "${ROOTFS_WORK}/etc/systemd/system/multi-user.target.wants"
-sudo ln -sf ../kdive-ready.service \
-  "${ROOTFS_WORK}/etc/systemd/system/multi-user.target.wants/kdive-ready.service"
-
-sudo virt-make-fs \
-  --format=qcow2 \
-  --type=ext4 \
-  --size=2G \
-  "${ROOTFS_WORK}" \
-  "${KDIVE_ROOTFS}"
-sudo chown "$USER":"$USER" "${KDIVE_ROOTFS}"
-sudo rm -rf "${ROOTFS_WORK}"
 ```
 
 Verify the image exists before running the integration test:
@@ -316,6 +278,15 @@ If `semanage` reports that the rule already exists, update it instead:
 sudo semanage fcontext -m -t virt_image_t '/var/lib/kdive/rootfs(/.*)?'
 sudo restorecon -Rv /var/lib/kdive/rootfs
 ```
+
+**Why the image must be 0644 + `virt_image_t`.** Under the default `qemu:///system`, a separate
+`qemu` user reads the image. With the per-boot copy-on-write overlay the built image is the
+read-only *backing file* in the disk chain, and libvirt's security driver relabels only the
+writable overlay, not the backing file. So the base image must be **independently readable**:
+mode `0644` (the builder sets this with an unprivileged `chmod` — you own the file) **and**
+labeled `virt_image_t` (inherited from the pre-prepared directory's fcontext above). If you put
+the image under `$HOME` instead, use `qemu:///session` (a per-user qemu that runs as you and can
+read it) — a `0700` home and `user_home_t` labels block the system `qemu` user.
 
 This rootfs recipe is a development smoke image, not a production guest. The
 MCP server still does not create rootfs images automatically; the commands above
