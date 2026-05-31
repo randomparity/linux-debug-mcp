@@ -79,3 +79,30 @@ def test_note_absent_raises(tmp_path: Path) -> None:
 def test_missing_file_raises(tmp_path: Path) -> None:
     with pytest.raises(BuildIdReadError):
         read_elf_build_id(tmp_path / "nope")
+
+
+def _elf64_header(e: str, *, e_phoff: int, e_phentsize: int, e_phnum: int) -> bytes:
+    ident = bytes([0x7F]) + b"ELF" + bytes([2, 1, 1]) + bytes(9)
+    eh = struct.pack(f"{e}HHIQQQIHHHHHH", 2, 0x3E, 1, 0, e_phoff, 0, 0, 64, e_phentsize, e_phnum, 0, 0, 0)
+    return ident + eh
+
+
+def test_undersized_phentsize_raises_build_id_error(tmp_path: Path) -> None:
+    # TD-02: an e_phentsize smaller than a real program-header entry would make the parser
+    # read fields past the entry; reject it as a clean BuildIdReadError, not a raw struct.error.
+    p = tmp_path / "x"
+    # An 8-byte "entry" whose p_type is PT_NOTE: the parser would unpack p_offset past the
+    # entry (raw struct.error) without the e_phentsize guard.
+    undersized_entry = struct.pack("<I", 4) + bytes(4)
+    p.write_bytes(_elf64_header("<", e_phoff=64, e_phentsize=8, e_phnum=1) + undersized_entry)
+    with pytest.raises(BuildIdReadError):
+        read_elf_build_id(p)
+
+
+def test_phdr_table_larger_than_file_raises_without_giant_read(tmp_path: Path) -> None:
+    # TD-02: a header claiming a ~4 GB program-header table must be rejected by the file-size
+    # containment check before any read attempts to allocate it.
+    p = tmp_path / "x"
+    p.write_bytes(_elf64_header("<", e_phoff=64, e_phentsize=0xFFFF, e_phnum=0xFFFF))
+    with pytest.raises(BuildIdReadError):
+        read_elf_build_id(p)
