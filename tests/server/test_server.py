@@ -517,6 +517,12 @@ def test_kernel_build_tool_and_handler_are_kernel_owned() -> None:
     assert server.kernel_build_handler is kernel_handlers.kernel_build_handler
 
 
+def test_host_prerequisites_tool_is_prereqs_owned() -> None:
+    tool = create_app()._tool_manager._tools["host.check_prerequisites"]
+
+    assert tool.fn.__module__ == "kdive.prereqs.tools"
+
+
 def test_create_run_freezes_merged_profiles(tmp_path):
     source = make_source_tree(tmp_path)
     response = server.create_run_handler(

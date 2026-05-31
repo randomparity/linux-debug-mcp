@@ -128,7 +128,6 @@ from kdive.introspect.handlers import (
 from kdive.introspect.tools import register_introspect_tools
 from kdive.kernel import tools as kernel_tools
 from kdive.kernel.handlers import kernel_build_handler
-from kdive.model import Model
 from kdive.postmortem.crash_handler import (
     debug_postmortem_crash_handler,
 )
@@ -151,6 +150,7 @@ from kdive.prereqs.drgn_probe import (
 )
 from kdive.prereqs.handlers import prerequisites_handler
 from kdive.prereqs.kdump_probe import build_kdump_checks
+from kdive.prereqs.tools import register_prereq_tools
 from kdive.providers.debug import (
     DebugSession,
     DebugSessionState,
@@ -280,21 +280,6 @@ def _require_dict(value: object, message: str) -> dict[str, Any]:
 
 
 DEFAULT_ARTIFACT_ROOT = Path(".kdive/runs")
-
-
-class HostPrerequisitesContext(Model):
-    artifact_root: str | None = None
-
-
-class HostPrerequisitesProfiles(Model):
-    build_profile: str | None = None
-    target_profile: str | None = None
-    rootfs_profile: str | None = None
-
-
-class HostPrerequisitesOptions(Model):
-    source_path: str | None = None
-    enable_libvirt_check: bool = False
 
 
 SERVER_CONFIG_ENV_VAR = "KDIVE_CONFIG"
@@ -2768,23 +2753,11 @@ def create_app(
     # do not flag a missing attribute on a third-party class we cannot extend.
     setattr(app, "_transport_machinery", machinery)  # noqa: B010
 
-    @app.tool(name="host.check_prerequisites")
-    def host_check_prerequisites(
-        context: HostPrerequisitesContext | None = None,
-        profiles: HostPrerequisitesProfiles | None = None,
-        options: HostPrerequisitesOptions | None = None,
-    ) -> dict[str, Any]:
-        context = context or HostPrerequisitesContext()
-        profiles = profiles or HostPrerequisitesProfiles()
-        options = options or HostPrerequisitesOptions()
-        return prerequisites_handler(
-            artifact_root=Path(context.artifact_root or str(DEFAULT_ARTIFACT_ROOT)),
-            source_path=options.source_path,
-            enable_libvirt_check=options.enable_libvirt_check,
-            build_profile=profiles.build_profile,
-            target_profile=profiles.target_profile,
-            rootfs_profile=profiles.rootfs_profile,
-        ).model_dump(mode="json")
+    register_prereq_tools(
+        app,
+        default_artifact_root=DEFAULT_ARTIFACT_ROOT,
+        prerequisites_handler=prerequisites_handler,
+    )
 
     kernel_tools.register_kernel_tools(
         app,
