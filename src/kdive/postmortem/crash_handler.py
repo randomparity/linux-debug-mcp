@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,23 @@ from kdive.symbols.vmcore_build_id import (
 
 SSH_TIMEOUT_GRACE_SECONDS = 10
 _POSTMORTEM_CRASH_STEP_RE = re.compile(r"^postmortem\.crash:[0-9a-f]{32}$")
+
+
+@dataclass(frozen=True)
+class PostmortemVmcoreContext:
+    store: ArtifactStore
+    manifest: Any
+    run_dir: Path
+    vmcore_path: Path
+    vmlinux_path: Path
+    modules_path: str | None
+    vmcore_build_id: str
+
+
+def _require_postmortem_context(ctx: PostmortemVmcoreContext | None) -> PostmortemVmcoreContext:
+    if ctx is None:
+        raise RuntimeError("postmortem vmcore context missing after successful resolution")
+    return ctx
 
 
 def _utcnow() -> datetime:
@@ -139,6 +157,71 @@ def _crash_build_id_fail_loud(
     return observed, None
 
 
+def resolve_postmortem_vmcore_context(
+    request: Any,
+    *,
+    artifact_root: Path,
+    vmcore_build_id_reader: Callable[[Path], str],
+    vmlinux_build_id_reader: Callable[[Path], str],
+) -> tuple[PostmortemVmcoreContext | None, ToolResponse | None]:
+    run_id = request.run_id
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        if not (store.run_dir(run_id) / "manifest.json").is_file():
+            return None, _crash_config_failure(run_id, "run_not_found", f"run not found: {run_id}")
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return None, ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    if not (5 <= request.timeout_seconds <= 300):
+        return None, _crash_config_failure(
+            run_id, "invalid_timeout", f"timeout_seconds must be in [5, 300]; got {request.timeout_seconds}"
+        )
+
+    run_dir = store.run_dir(run_id)
+    provenance_shell = KernelProvenance(
+        build_id="",
+        release="",
+        vmlinux_ref=request.vmlinux_ref,
+        modules_ref=request.modules_ref,
+        cmdline="",
+        config_ref=None,
+    )
+    try:
+        resolved = resolve_symbols(provenance_shell, run_dir=run_dir)
+    except SymbolResolutionError as exc:
+        return None, _crash_config_failure(run_id, "symbol_resolution_failed", str(exc))
+    try:
+        vmcore_path = confine_run_relative(request.vmcore_ref, run_dir=run_dir)
+    except PathSafetyError as exc:
+        return None, _crash_config_failure(run_id, "vmcore_not_found", str(exc))
+    if not vmcore_path.is_file():
+        return None, _crash_config_failure(run_id, "vmcore_not_found", f"vmcore not found at {request.vmcore_ref!r}")
+
+    modules_path = str(resolved.modules_path) if resolved.modules_path is not None else None
+    if modules_path is not None and not validate_modules_path(modules_path):
+        return None, _crash_config_failure(run_id, "modules_path_unsafe", "resolved modules path has unsafe characters")
+
+    vmcore_build_id, failure = _crash_build_id_fail_loud(
+        run_id, vmcore_path, resolved.vmlinux_path, vmcore_build_id_reader, vmlinux_build_id_reader
+    )
+    if failure is not None:
+        return None, failure
+
+    return (
+        PostmortemVmcoreContext(
+            store=store,
+            manifest=manifest,
+            run_dir=run_dir,
+            vmcore_path=vmcore_path,
+            vmlinux_path=resolved.vmlinux_path,
+            modules_path=modules_path,
+            vmcore_build_id=vmcore_build_id,
+        ),
+        None,
+    )
+
+
 def debug_postmortem_crash_handler(
     request: DebugPostmortemCrashRequest,
     *,
@@ -151,28 +234,26 @@ def debug_postmortem_crash_handler(
     """Spec §6 / ADR 0026. Host-side crash batch runner; no admission gate."""
     run_id = request.run_id
     now = clock or _utcnow
-    try:
-        store = ArtifactStore(artifact_root, create_root=False)
-        if not (store.run_dir(run_id) / "manifest.json").is_file():
-            return _crash_config_failure(run_id, "run_not_found", f"run not found: {run_id}")
-        manifest = store.load_manifest(run_id)
-    except ManifestStateError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-
-    if not (5 <= request.timeout_seconds <= 300):
-        return _crash_config_failure(
-            run_id, "invalid_timeout", f"timeout_seconds must be in [5, 300]; got {request.timeout_seconds}"
-        )
+    ctx, failure = resolve_postmortem_vmcore_context(
+        request,
+        artifact_root=artifact_root,
+        vmcore_build_id_reader=vmcore_build_id_reader,
+        vmlinux_build_id_reader=vmlinux_build_id_reader,
+    )
+    if failure is not None:
+        return failure
+    ctx = _require_postmortem_context(ctx)
     bad_commands = _validate_crash_commands(run_id, request.commands)
     if bad_commands is not None:
         return bad_commands
-    crash_steps = sum(1 for n in manifest.step_results if _POSTMORTEM_CRASH_STEP_RE.match(n))
+    crash_steps = sum(1 for n in ctx.manifest.step_results if _POSTMORTEM_CRASH_STEP_RE.match(n))
     if crash_steps >= MAX_POSTMORTEM_CRASH_CALLS_PER_RUN:
         return _crash_config_failure(
             run_id, "manifest_call_budget_exhausted", "crash call budget exhausted; start a new run"
         )
 
-    run_dir = store.run_dir(run_id)
+    store = ctx.store
+    run_dir = ctx.run_dir
     sensitive_dir = run_dir / "sensitive"
     try:
         mode = sensitive_dir.stat().st_mode & 0o777
@@ -180,35 +261,6 @@ def debug_postmortem_crash_handler(
         return _crash_config_failure(run_id, "sensitive_dir_missing", f"{sensitive_dir} is missing")
     if mode & 0o077:
         return _crash_config_failure(run_id, "sensitive_dir_too_permissive", f"{sensitive_dir} mode is {oct(mode)}")
-
-    provenance_shell = KernelProvenance(
-        build_id="",
-        release="",
-        vmlinux_ref=request.vmlinux_ref,
-        modules_ref=request.modules_ref,
-        cmdline="",
-        config_ref=None,
-    )
-    try:
-        resolved = resolve_symbols(provenance_shell, run_dir=run_dir)
-    except SymbolResolutionError as exc:
-        return _crash_config_failure(run_id, "symbol_resolution_failed", str(exc))
-    try:
-        vmcore_path = confine_run_relative(request.vmcore_ref, run_dir=run_dir)
-    except PathSafetyError as exc:
-        return _crash_config_failure(run_id, "vmcore_not_found", str(exc))
-    if not vmcore_path.is_file():
-        return _crash_config_failure(run_id, "vmcore_not_found", f"vmcore not found at {request.vmcore_ref!r}")
-
-    modules_path = str(resolved.modules_path) if resolved.modules_path is not None else None
-    if modules_path is not None and not validate_modules_path(modules_path):
-        return _crash_config_failure(run_id, "modules_path_unsafe", "resolved modules path has unsafe characters")
-
-    vmcore_build_id, failure = _crash_build_id_fail_loud(
-        run_id, vmcore_path, resolved.vmlinux_path, vmcore_build_id_reader, vmlinux_build_id_reader
-    )
-    if failure is not None:
-        return failure
 
     call_id = uuid.uuid4().hex
     agent_dir = run_dir / "debug" / "postmortem" / "crash" / call_id
@@ -223,7 +275,7 @@ def debug_postmortem_crash_handler(
     sensitive_call_dir.parent.parent.chmod(0o700)
 
     stripped_commands = [c.strip() for c in request.commands]
-    cmd_script = build_command_script(stripped_commands, sensitive_call_dir, modules_path)
+    cmd_script = build_command_script(stripped_commands, sensitive_call_dir, ctx.modules_path)
     redactor = Redactor(secret_values=[])
     (agent_dir / "request.json").write_text(
         json.dumps(redactor.redact_value(request.model_dump(mode="json"))), encoding="utf-8"
@@ -240,8 +292,8 @@ def debug_postmortem_crash_handler(
         f"{request.timeout_seconds}s",
         "crash",
         "-s",
-        str(resolved.vmlinux_path),
-        str(vmcore_path),
+        str(ctx.vmlinux_path),
+        str(ctx.vmcore_path),
     ]
     started_at = now()
     started_monotonic = time.monotonic()
@@ -298,8 +350,8 @@ def debug_postmortem_crash_handler(
         agent_dir=agent_dir,
         redactor=redactor,
         commands=stripped_commands,
-        modules_requested=modules_path is not None,
-        vmcore_build_id=vmcore_build_id,
+        modules_requested=ctx.modules_path is not None,
+        vmcore_build_id=ctx.vmcore_build_id,
         started_at=started_at,
         finished_at=now(),
         duration_ms=duration_ms,

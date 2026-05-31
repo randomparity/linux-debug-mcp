@@ -17,6 +17,15 @@ from kdive.server import debug_postmortem_crash_handler
 GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
 
+def test_postmortem_vmcore_context_resolver_is_shared() -> None:
+    import kdive.postmortem.crash_handler as crash_handler
+    import kdive.postmortem.handlers as postmortem_handlers
+
+    assert hasattr(crash_handler, "PostmortemVmcoreContext")
+    assert hasattr(crash_handler, "resolve_postmortem_vmcore_context")
+    assert postmortem_handlers.resolve_postmortem_vmcore_context is crash_handler.resolve_postmortem_vmcore_context
+
+
 def _run(tmp_path: Path) -> ArtifactStore:
     store = ArtifactStore(artifact_root=tmp_path)
     store.create_run(

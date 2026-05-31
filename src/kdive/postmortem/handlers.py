@@ -48,11 +48,9 @@ from kdive.handlers.shared import (
 )
 from kdive.introspect.execution import _record_terminal_introspect_result, _utcnow
 from kdive.introspect.handlers import debug_introspect_from_vmcore_helper_handler
-from kdive.postmortem.crash_commands import validate_modules_path
 from kdive.postmortem.crash_handler import (
-    _crash_build_id_fail_loud,
-    _crash_config_failure,
     debug_postmortem_crash_handler,
+    resolve_postmortem_vmcore_context,
 )
 from kdive.postmortem.dumps import (
     FetchSpec,
@@ -74,11 +72,8 @@ from kdive.postmortem.models import (
 from kdive.postmortem.triage import CrashOutcome, DrgnOutcome, any_section_ok, assemble_report
 from kdive.prereqs.kdump_probe import render_kdump_probe_script
 from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner, build_ssh_argv
-from kdive.safety.paths import PathSafetyError, confine_run_relative
 from kdive.safety.redaction import Redactor
-from kdive.seams.target import KernelProvenance
 from kdive.symbols.build_id import read_elf_build_id
-from kdive.symbols.resolve import SymbolResolutionError, resolve_symbols
 from kdive.symbols.vmcore_build_id import read_vmcore_build_id
 
 SSH_TIMEOUT_GRACE_SECONDS = 10
@@ -671,46 +666,19 @@ def debug_postmortem_triage_handler(
     """Spec §4 / ADR 0027. Compose the crash + drgn offline tiers into one report; no admission gate."""
     run_id = request.run_id
     now = clock or _utcnow
-    try:
-        store = ArtifactStore(artifact_root, create_root=False)
-        if not (store.run_dir(run_id) / "manifest.json").is_file():
-            return _crash_config_failure(run_id, "run_not_found", f"run not found: {run_id}")
-        store.load_manifest(run_id)
-    except ManifestStateError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-
-    if not (5 <= request.timeout_seconds <= 300):
-        return _crash_config_failure(
-            run_id, "invalid_timeout", f"timeout_seconds must be in [5, 300]; got {request.timeout_seconds}"
-        )
-
-    run_dir = store.run_dir(run_id)
-    provenance_shell = KernelProvenance(
-        build_id="",
-        release="",
-        vmlinux_ref=request.vmlinux_ref,
-        modules_ref=request.modules_ref,
-        cmdline="",
-        config_ref=None,
-    )
-    try:
-        resolved = resolve_symbols(provenance_shell, run_dir=run_dir)
-    except SymbolResolutionError as exc:
-        return _crash_config_failure(run_id, "symbol_resolution_failed", str(exc))
-    try:
-        vmcore_path = confine_run_relative(request.vmcore_ref, run_dir=run_dir)
-    except PathSafetyError as exc:
-        return _crash_config_failure(run_id, "vmcore_not_found", str(exc))
-    if not vmcore_path.is_file():
-        return _crash_config_failure(run_id, "vmcore_not_found", f"vmcore not found at {request.vmcore_ref!r}")
-    if resolved.modules_path is not None and not validate_modules_path(str(resolved.modules_path)):
-        return _crash_config_failure(run_id, "modules_path_unsafe", "resolved modules path has unsafe characters")
-
-    vmcore_build_id, failure = _crash_build_id_fail_loud(
-        run_id, vmcore_path, resolved.vmlinux_path, vmcore_build_id_reader, vmlinux_build_id_reader
+    ctx, failure = resolve_postmortem_vmcore_context(
+        request,
+        artifact_root=artifact_root,
+        vmcore_build_id_reader=vmcore_build_id_reader,
+        vmlinux_build_id_reader=vmlinux_build_id_reader,
     )
     if failure is not None:
         return failure
+    if ctx is None:
+        raise RuntimeError("postmortem vmcore context missing after successful resolution")
+    store = ctx.store
+    run_dir = ctx.run_dir
+    vmcore_build_id = ctx.vmcore_build_id
 
     started_at = now()
     started_monotonic = time.monotonic()
