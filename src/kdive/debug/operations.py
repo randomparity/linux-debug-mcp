@@ -12,9 +12,29 @@ from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import RecoveryTombstone, SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
-from kdive.debug.handlers import DEBUG_METHOD_OPERATIONS, DebugRuntime
+from kdive.debug.handlers import (
+    DebugBacktraceRequest,
+    DebugClearBreakpointRequest,
+    DebugClearWatchpointRequest,
+    DebugContinueRequest,
+    DebugEvaluateRequest,
+    DebugFinishRequest,
+    DebugInterruptRequest,
+    DebugListBreakpointsRequest,
+    DebugListVariablesRequest,
+    DebugNextRequest,
+    DebugOperationRequest,
+    DebugReadMemoryRequest,
+    DebugReadRegistersRequest,
+    DebugReadSymbolRequest,
+    DebugRuntime,
+    DebugSetBreakpointRequest,
+    DebugSetWatchpointRequest,
+    DebugStepRequest,
+)
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.providers.local.gdb_mi import (
+    MAX_INTERACTIVE_WAIT_SEC,
     MAX_MEMORY_READ_BYTES,
     GdbMiAttachment,
     GdbMiEngine,
@@ -379,97 +399,76 @@ def _enforce_debug_ownership_fence(
         _assert_layer4_ownership(run_id=run_id, session_registry=session_registry)
 
 
-# Stateful debug.* ops whose effect changes the persisted breakpoint ledger; after each, the ledger
-# is rebuilt from gdb's authoritative -break-list so the manifest matches the engine.
-# Derived from DEBUG_METHOD_OPERATIONS so a new breakpoint/watchpoint op cannot drift out of sync
-# (TD-13): every set_/clear_ of a break/watchpoint mutates the breakpoint ledger.
-_BREAKPOINT_MUTATORS = frozenset(
-    name
-    for name in DEBUG_METHOD_OPERATIONS
-    if name.startswith(("set_", "clear_")) and name.endswith(("breakpoint", "watchpoint"))
+_BREAKPOINT_MUTATOR_TYPES = (
+    DebugSetBreakpointRequest,
+    DebugSetWatchpointRequest,
+    DebugClearBreakpointRequest,
+    DebugClearWatchpointRequest,
 )
-# Interactive resume verbs (continue/step/next/finish): engine method + how the timeout maps.
-_EXEC_VERBS = {
-    "continue_execution": lambda engine, att, timeout: engine.continue_(att, timeout_sec=timeout),
-    "step": lambda engine, att, timeout: engine.step(att, timeout_sec=timeout),
-    "next": lambda engine, att, timeout: engine.next(att, timeout_sec=timeout),
-    "finish": lambda engine, att, timeout: engine.finish(att, timeout_sec=timeout),
-}
 
 
-def _required_kwarg(kwargs: dict[str, object], key: str) -> object:
-    """Fetch a required debug-op parameter, raising a structured CONFIGURATION_ERROR rather than a
-    raw KeyError when the handler layer did not supply it (TD-12). Optional params keep using
-    ``kwargs.get(...)`` directly; required ones go through here so access is uniform."""
-    if key not in kwargs:
-        raise GdbMiError(f"missing required debug parameter {key!r}", category=ErrorCategory.CONFIGURATION_ERROR)
-    return kwargs[key]
+def _execution_timeout(timeout_seconds: int | None) -> int:
+    return timeout_seconds if timeout_seconds is not None else MAX_INTERACTIVE_WAIT_SEC
 
 
 def _engine_op_data(
-    *, engine: GdbMiEngine, attachment: GdbMiAttachment, method_name: str, kwargs: dict[str, object]
+    *, engine: GdbMiEngine, attachment: GdbMiAttachment, request: DebugOperationRequest
 ) -> dict[str, object]:
-    """Dispatch one debug.* operation onto the live gdb/MI attachment and return its typed JSON as a
-    dict (the engine has already redacted every value). ``end_session`` is NOT routed here — it has a
-    dedicated reap path. An unknown method is a CONFIGURATION_ERROR (defence in depth; the handler
-    layer already gated the op name)."""
-    if method_name == "read_registers":
-        registers = _required_kwarg(kwargs, "registers")
-        names = [str(name) for name in registers] if isinstance(registers, list) else []
-        return engine.read_registers(attachment, names)
-    if method_name == "read_symbol":
-        return engine.read_symbol(attachment, str(_required_kwarg(kwargs, "symbol")))
-    if method_name == "read_memory":
-        address = _required_kwarg(kwargs, "address")
-        byte_count = _required_kwarg(kwargs, "byte_count")
-        if not isinstance(address, int) or not isinstance(byte_count, int):
-            raise GdbMiError("address and byte_count must be integers", category=ErrorCategory.CONFIGURATION_ERROR)
-        if address < 0:
-            raise GdbMiError(f"address must be non-negative, got {address}", category=ErrorCategory.CONFIGURATION_ERROR)
-        if not 0 < byte_count <= MAX_MEMORY_READ_BYTES:
+    """Dispatch one typed debug.* request onto the live gdb/MI attachment and return redacted JSON data.
+
+    ``end_session`` has a dedicated reap path and is not routed through this function.
+    """
+    if isinstance(request, DebugReadRegistersRequest):
+        return engine.read_registers(attachment, [str(name) for name in request.registers])
+    if isinstance(request, DebugReadSymbolRequest):
+        return engine.read_symbol(attachment, request.symbol)
+    if isinstance(request, DebugReadMemoryRequest):
+        if request.address < 0:
             raise GdbMiError(
-                f"byte_count must be in 1..{MAX_MEMORY_READ_BYTES}, got {byte_count}",
+                f"address must be non-negative, got {request.address}",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
-        return engine.read_memory(attachment, address=address, byte_count=byte_count)
-    if method_name == "evaluate":
-        arguments = kwargs.get("arguments")
-        evaluate_args: dict[str, object] = (
-            {str(key): value for key, value in arguments.items()} if isinstance(arguments, dict) else {}
-        )
-        return engine.evaluate_inspector(
-            attachment, inspector=str(_required_kwarg(kwargs, "inspector")), arguments=evaluate_args
-        )
-    if method_name == "set_breakpoint":
-        return {
-            "breakpoint": engine.set_breakpoint(attachment, str(_required_kwarg(kwargs, "symbol"))).model_dump(
-                mode="json"
+        if not 0 < request.byte_count <= MAX_MEMORY_READ_BYTES:
+            raise GdbMiError(
+                f"byte_count must be in 1..{MAX_MEMORY_READ_BYTES}, got {request.byte_count}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
             )
-        }
-    if method_name == "set_watchpoint":
-        return {
-            "breakpoint": engine.set_watchpoint(attachment, str(_required_kwarg(kwargs, "symbol"))).model_dump(
-                mode="json"
-            )
-        }
-    if method_name == "clear_breakpoint":
-        engine.clear_breakpoint(attachment, str(_required_kwarg(kwargs, "breakpoint_id")))
+        return engine.read_memory(attachment, address=request.address, byte_count=request.byte_count)
+    if isinstance(request, DebugEvaluateRequest):
+        evaluate_args = {str(key): value for key, value in request.arguments.items()}
+        return engine.evaluate_inspector(attachment, inspector=request.inspector, arguments=evaluate_args)
+    if isinstance(request, DebugSetBreakpointRequest):
+        return {"breakpoint": engine.set_breakpoint(attachment, request.symbol).model_dump(mode="json")}
+    if isinstance(request, DebugSetWatchpointRequest):
+        return {"breakpoint": engine.set_watchpoint(attachment, request.symbol).model_dump(mode="json")}
+    if isinstance(request, DebugClearBreakpointRequest):
+        engine.clear_breakpoint(attachment, request.breakpoint_id)
         return {}
-    if method_name == "clear_watchpoint":
-        engine.clear_watchpoint(attachment, str(_required_kwarg(kwargs, "breakpoint_id")))
+    if isinstance(request, DebugClearWatchpointRequest):
+        engine.clear_watchpoint(attachment, request.breakpoint_id)
         return {}
-    if method_name == "list_breakpoints":
+    if isinstance(request, DebugListBreakpointsRequest):
         return {"breakpoints": [ref.model_dump(mode="json") for ref in engine.list_breakpoints(attachment)]}
-    if method_name == "backtrace":
+    if isinstance(request, DebugBacktraceRequest):
         return {"frames": [frame.model_dump(mode="json") for frame in engine.backtrace(attachment)]}
-    if method_name == "list_variables":
+    if isinstance(request, DebugListVariablesRequest):
         return {"variables": [var.model_dump(mode="json") for var in engine.list_variables(attachment)]}
-    if method_name in _EXEC_VERBS:
-        timeout = kwargs.get("timeout_seconds")
-        stop = _EXEC_VERBS[method_name](engine, attachment, timeout)
+    if isinstance(request, DebugContinueRequest):
+        stop = engine.continue_(attachment, timeout_sec=_execution_timeout(request.timeout_seconds))
+        return {"stop": stop.model_dump(mode="json"), "current_execution_state": DebugSessionState.STOPPED.value}
+    if isinstance(request, DebugStepRequest):
+        stop = engine.step(attachment, timeout_sec=_execution_timeout(request.timeout_seconds))
+        return {"stop": stop.model_dump(mode="json"), "current_execution_state": DebugSessionState.STOPPED.value}
+    if isinstance(request, DebugNextRequest):
+        stop = engine.next(attachment, timeout_sec=_execution_timeout(request.timeout_seconds))
+        return {"stop": stop.model_dump(mode="json"), "current_execution_state": DebugSessionState.STOPPED.value}
+    if isinstance(request, DebugFinishRequest):
+        stop = engine.finish(attachment, timeout_sec=_execution_timeout(request.timeout_seconds))
         return {"stop": stop.model_dump(mode="json"), "current_execution_state": DebugSessionState.STOPPED.value}
     raise GdbMiError(
-        "unsupported debug operation", category=ErrorCategory.CONFIGURATION_ERROR, details={"operation": method_name}
+        "unsupported debug operation",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"operation": request.profile_operation},
     )
 
 
@@ -560,8 +559,7 @@ def _run_debug_engine_op(
     gdb_mi_sessions: GdbMiSessionRegistry,
     attachment: GdbMiAttachment,
     session: DebugSession,
-    method_name: str,
-    kwargs: dict[str, object],
+    request: DebugOperationRequest,
     artifact_root: Path,
     run_id: str,
     transaction: TransportTransaction | None,
@@ -576,7 +574,7 @@ def _run_debug_engine_op(
     re-raised for the caller's outer handler; failures that require local teardown are returned as
     ``_DebugOpFailure`` and translated at the response boundary."""
     try:
-        if method_name == "interrupt":
+        if isinstance(request, DebugInterruptRequest):
             data = _interrupt_op_data(
                 engine=engine,
                 attachment=attachment,
@@ -589,9 +587,9 @@ def _run_debug_engine_op(
                 transaction=transaction,
             )
         else:
-            data = _engine_op_data(engine=engine, attachment=attachment, method_name=method_name, kwargs=kwargs)
+            data = _engine_op_data(engine=engine, attachment=attachment, request=request)
         updated_session = session
-        if method_name in _BREAKPOINT_MUTATORS:
+        if isinstance(request, _BREAKPOINT_MUTATOR_TYPES):
             ledger = {ref.number: ref.model_dump(mode="json") for ref in engine.list_breakpoints(attachment)}
             updated_session = session.model_copy(update={"breakpoints": ledger})
         return _DebugOpSuccess(data=data, session=updated_session)
@@ -631,14 +629,14 @@ def _run_debug_engine_op(
                 engine.force_resume(reaped)
         return _DebugOpFailure(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            message=f"the gdb/MI engine faulted during debug.{method_name}: {exc}",
+            message=f"the gdb/MI engine faulted during debug.{request.summary_name}: {exc}",
             details={"code": "debug_engine_faulted"},
             suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
         )
 
 
 def _persist_debug_op_details(
-    *, store: ArtifactStore, run_id: str, method_name: str, session: DebugSession, data: dict[str, object]
+    *, store: ArtifactStore, run_id: str, request: DebugOperationRequest, session: DebugSession, data: dict[str, object]
 ) -> dict[str, object]:
     """Persist the post-op DebugSession + a SUCCEEDED ``debug`` step, returning the merged details
     (manifest details + preserved step details + op data). Extracted from _debug_operation_response
@@ -652,7 +650,7 @@ def _persist_debug_op_details(
     terminal = StepResult(
         step_name="debug",
         status=StepStatus.SUCCEEDED,
-        summary=f"debug.{method_name} succeeded",
+        summary=f"debug.{request.summary_name} succeeded",
         artifacts=_mi_session_artifacts(store=store, run_id=run_id, session=session),
         details=details,
     )
@@ -660,7 +658,9 @@ def _persist_debug_op_details(
     return details
 
 
-def _map_debug_op_exception(exc: Exception, *, run_id: str, method_name: str, redactor: Redactor) -> ToolResponse:
+def _map_debug_op_exception(
+    exc: Exception, *, run_id: str, request: DebugOperationRequest, redactor: Redactor
+) -> ToolResponse:
     """Map the terminal exceptions of _debug_operation_response's op block to a structured failure
     (TD-09), preserving the original per-type handling order."""
     if isinstance(exc, ManifestStateError):
@@ -686,7 +686,7 @@ def _map_debug_op_exception(exc: Exception, *, run_id: str, method_name: str, re
     # faulted. Surface a structured failure WITHOUT reaping — the caller can retry the op.
     return ToolResponse.failure(
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-        message=redactor.redact_text(f"failed to record debug.{method_name}: {exc}"),
+        message=redactor.redact_text(f"failed to record debug.{request.summary_name}: {exc}"),
         run_id=run_id,
         details={"code": "debug_session_op_record_failed"},
         suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
@@ -698,9 +698,7 @@ def _debug_operation_response(
     artifact_root: Path,
     run_id: str,
     debug_session_id: str | None,
-    method_name: str,
-    kwargs: dict[str, object],
-    persist_manifest: bool,
+    request: DebugOperationRequest,
     runtime: DebugRuntime,
     allow_ended: bool = False,
 ) -> ToolResponse:
@@ -738,7 +736,7 @@ def _debug_operation_response(
                 profile_name=session.selected_debug_profile,
                 debug_profiles=runtime.debug_profiles,
             )
-            _ensure_debug_operation_enabled(profile, DEBUG_METHOD_OPERATIONS[method_name])
+            _ensure_debug_operation_enabled(profile, request.profile_operation)
             attachment = runtime.gdb_mi_sessions.require(session.session_id)
             # Every engine interaction for this op — the op itself AND the post-mutator ledger rebuild
             # (-break-list) — shares one guard (inside debug_lock, no concurrent op can require() a
@@ -749,8 +747,7 @@ def _debug_operation_response(
                 gdb_mi_sessions=runtime.gdb_mi_sessions,
                 attachment=attachment,
                 session=session,
-                method_name=method_name,
-                kwargs=kwargs,
+                request=request,
                 artifact_root=artifact_root,
                 run_id=run_id,
                 transaction=runtime.transaction,
@@ -762,18 +759,18 @@ def _debug_operation_response(
                 return op_result.to_tool_response(run_id=run_id, redactor=redactor)
             data = op_result.data
             updated_session = op_result.session
-            if persist_manifest:
+            if request.persist_manifest:
                 details = _persist_debug_op_details(
-                    store=store, run_id=run_id, method_name=method_name, session=updated_session, data=data
+                    store=store, run_id=run_id, request=request, session=updated_session, data=data
                 )
             else:
                 details = data
     except (ManifestStateError, ProviderDebugError, GdbMiError, OSError) as exc:
-        return _map_debug_op_exception(exc, run_id=run_id, method_name=method_name, redactor=redactor)
+        return _map_debug_op_exception(exc, run_id=run_id, request=request, redactor=redactor)
 
     op_artifacts = _mi_session_artifacts(store=store, run_id=run_id, session=updated_session)
     return ToolResponse.success(
-        summary=f"debug.{method_name} succeeded",
+        summary=f"debug.{request.summary_name} succeeded",
         run_id=run_id,
         data=redactor.redact_value(details),
         artifacts=_redacted_artifacts(op_artifacts, redactor),

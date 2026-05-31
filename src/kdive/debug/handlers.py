@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import ClassVar, Protocol
 
 from kdive.config import DebugProfile
 from kdive.coordination.admission import AdmissionService
@@ -12,52 +12,144 @@ from kdive.domain import ToolResponse
 from kdive.providers.local.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard
 
-DEBUG_METHOD_OPERATIONS = {
-    "read_registers": "debug.read_registers",
-    "read_symbol": "debug.read_symbol",
-    "read_memory": "debug.read_memory",
-    "evaluate": "debug.evaluate",
-    "set_breakpoint": "debug.set_breakpoint",
-    "set_watchpoint": "debug.set_watchpoint",
-    "clear_breakpoint": "debug.clear_breakpoint",
-    "clear_watchpoint": "debug.clear_watchpoint",
-    "list_breakpoints": "debug.list_breakpoints",
-    "backtrace": "debug.backtrace",
-    "list_variables": "debug.list_variables",
-    "continue_execution": "debug.continue",
-    "step": "debug.step",
-    "next": "debug.next",
-    "finish": "debug.finish",
-    "interrupt": "debug.interrupt",
-    "end_session": "debug.end_session",
-}
+
+class DebugOperationRequest(Protocol):
+    profile_operation: str
+    summary_name: str
+    persist_manifest: bool
+
+
+class _DebugOperationMetadata:
+    profile_operation: ClassVar[str]
+    summary_name: ClassVar[str]
+    persist_manifest: ClassVar[bool]
 
 
 @dataclass(frozen=True)
-class DebugHandlerOperationSpec:
-    method_name: str
-    persist_manifest: bool
-    argument_names: tuple[str, ...] = ()
+class DebugReadRegistersRequest(_DebugOperationMetadata):
+    registers: list[str]
+    profile_operation: ClassVar[str] = "debug.read_registers"
+    summary_name: ClassVar[str] = "read_registers"
+    persist_manifest: ClassVar[bool] = False
 
 
-DEBUG_HANDLER_OPERATION_SPECS = {
-    "debug.read_registers": DebugHandlerOperationSpec("read_registers", False, ("registers",)),
-    "debug.read_symbol": DebugHandlerOperationSpec("read_symbol", False, ("symbol",)),
-    "debug.read_memory": DebugHandlerOperationSpec("read_memory", False, ("address", "byte_count")),
-    "debug.evaluate": DebugHandlerOperationSpec("evaluate", False, ("inspector", "arguments")),
-    "debug.set_breakpoint": DebugHandlerOperationSpec("set_breakpoint", True, ("symbol",)),
-    "debug.set_watchpoint": DebugHandlerOperationSpec("set_watchpoint", True, ("symbol",)),
-    "debug.clear_breakpoint": DebugHandlerOperationSpec("clear_breakpoint", True, ("breakpoint_id",)),
-    "debug.clear_watchpoint": DebugHandlerOperationSpec("clear_watchpoint", True, ("breakpoint_id",)),
-    "debug.list_breakpoints": DebugHandlerOperationSpec("list_breakpoints", False),
-    "debug.backtrace": DebugHandlerOperationSpec("backtrace", False),
-    "debug.list_variables": DebugHandlerOperationSpec("list_variables", False),
-    "debug.continue": DebugHandlerOperationSpec("continue_execution", True, ("timeout_seconds",)),
-    "debug.step": DebugHandlerOperationSpec("step", True, ("timeout_seconds",)),
-    "debug.next": DebugHandlerOperationSpec("next", True, ("timeout_seconds",)),
-    "debug.finish": DebugHandlerOperationSpec("finish", True, ("timeout_seconds",)),
-    "debug.interrupt": DebugHandlerOperationSpec("interrupt", True, ("timeout_seconds",)),
-}
+@dataclass(frozen=True)
+class DebugReadSymbolRequest(_DebugOperationMetadata):
+    symbol: str
+    profile_operation: ClassVar[str] = "debug.read_symbol"
+    summary_name: ClassVar[str] = "read_symbol"
+    persist_manifest: ClassVar[bool] = False
+
+
+@dataclass(frozen=True)
+class DebugReadMemoryRequest(_DebugOperationMetadata):
+    address: int
+    byte_count: int
+    profile_operation: ClassVar[str] = "debug.read_memory"
+    summary_name: ClassVar[str] = "read_memory"
+    persist_manifest: ClassVar[bool] = False
+
+
+@dataclass(frozen=True)
+class DebugEvaluateRequest(_DebugOperationMetadata):
+    inspector: str
+    arguments: dict[str, object]
+    profile_operation: ClassVar[str] = "debug.evaluate"
+    summary_name: ClassVar[str] = "evaluate"
+    persist_manifest: ClassVar[bool] = False
+
+
+@dataclass(frozen=True)
+class DebugSetBreakpointRequest(_DebugOperationMetadata):
+    symbol: str
+    profile_operation: ClassVar[str] = "debug.set_breakpoint"
+    summary_name: ClassVar[str] = "set_breakpoint"
+    persist_manifest: ClassVar[bool] = True
+
+
+@dataclass(frozen=True)
+class DebugSetWatchpointRequest(_DebugOperationMetadata):
+    symbol: str
+    profile_operation: ClassVar[str] = "debug.set_watchpoint"
+    summary_name: ClassVar[str] = "set_watchpoint"
+    persist_manifest: ClassVar[bool] = True
+
+
+@dataclass(frozen=True)
+class DebugClearBreakpointRequest(_DebugOperationMetadata):
+    breakpoint_id: str
+    profile_operation: ClassVar[str] = "debug.clear_breakpoint"
+    summary_name: ClassVar[str] = "clear_breakpoint"
+    persist_manifest: ClassVar[bool] = True
+
+
+@dataclass(frozen=True)
+class DebugClearWatchpointRequest(_DebugOperationMetadata):
+    breakpoint_id: str
+    profile_operation: ClassVar[str] = "debug.clear_watchpoint"
+    summary_name: ClassVar[str] = "clear_watchpoint"
+    persist_manifest: ClassVar[bool] = True
+
+
+@dataclass(frozen=True)
+class DebugListBreakpointsRequest(_DebugOperationMetadata):
+    profile_operation: ClassVar[str] = "debug.list_breakpoints"
+    summary_name: ClassVar[str] = "list_breakpoints"
+    persist_manifest: ClassVar[bool] = False
+
+
+@dataclass(frozen=True)
+class DebugBacktraceRequest(_DebugOperationMetadata):
+    profile_operation: ClassVar[str] = "debug.backtrace"
+    summary_name: ClassVar[str] = "backtrace"
+    persist_manifest: ClassVar[bool] = False
+
+
+@dataclass(frozen=True)
+class DebugListVariablesRequest(_DebugOperationMetadata):
+    profile_operation: ClassVar[str] = "debug.list_variables"
+    summary_name: ClassVar[str] = "list_variables"
+    persist_manifest: ClassVar[bool] = False
+
+
+@dataclass(frozen=True)
+class DebugContinueRequest(_DebugOperationMetadata):
+    timeout_seconds: int | None
+    profile_operation: ClassVar[str] = "debug.continue"
+    summary_name: ClassVar[str] = "continue_execution"
+    persist_manifest: ClassVar[bool] = True
+
+
+@dataclass(frozen=True)
+class DebugStepRequest(_DebugOperationMetadata):
+    timeout_seconds: int | None
+    profile_operation: ClassVar[str] = "debug.step"
+    summary_name: ClassVar[str] = "step"
+    persist_manifest: ClassVar[bool] = True
+
+
+@dataclass(frozen=True)
+class DebugNextRequest(_DebugOperationMetadata):
+    timeout_seconds: int | None
+    profile_operation: ClassVar[str] = "debug.next"
+    summary_name: ClassVar[str] = "next"
+    persist_manifest: ClassVar[bool] = True
+
+
+@dataclass(frozen=True)
+class DebugFinishRequest(_DebugOperationMetadata):
+    timeout_seconds: int | None
+    profile_operation: ClassVar[str] = "debug.finish"
+    summary_name: ClassVar[str] = "finish"
+    persist_manifest: ClassVar[bool] = True
+
+
+@dataclass(frozen=True)
+class DebugInterruptRequest(_DebugOperationMetadata):
+    timeout_seconds: int | None
+    profile_operation: ClassVar[str] = "debug.interrupt"
+    summary_name: ClassVar[str] = "interrupt"
+    persist_manifest: ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
@@ -99,9 +191,7 @@ class DebugOperationCore(Protocol):
         artifact_root: Path,
         run_id: str,
         debug_session_id: str | None,
-        method_name: str,
-        kwargs: dict[str, object],
-        persist_manifest: bool,
+        request: DebugOperationRequest,
         runtime: DebugRuntime,
     ) -> ToolResponse: ...
 
@@ -114,22 +204,12 @@ def configure_debug_operation_core(operation_core: DebugOperationCore) -> None:
     _DEBUG_OPERATION_CORE = operation_core
 
 
-def debug_handler_operation_spec(operation: str) -> DebugHandlerOperationSpec:
-    return DEBUG_HANDLER_OPERATION_SPECS[operation]
-
-
-def debug_operation_arguments(operation: DebugHandlerOperationSpec, values: dict[str, object]) -> dict[str, object]:
-    return {name: values[name] for name in operation.argument_names}
-
-
 def _default_debug_operation_core(
     *,
     artifact_root: Path,
     run_id: str,
     debug_session_id: str | None,
-    method_name: str,
-    kwargs: dict[str, object],
-    persist_manifest: bool,
+    request: DebugOperationRequest,
     runtime: DebugRuntime,
 ) -> ToolResponse:
     if _DEBUG_OPERATION_CORE is None:
@@ -138,32 +218,78 @@ def _default_debug_operation_core(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        method_name=method_name,
-        kwargs=kwargs,
-        persist_manifest=persist_manifest,
+        request=request,
         runtime=runtime,
     )
 
 
 def debug_tool_operation_response(
     *,
-    operation_name: str,
-    values: dict[str, object],
+    request: DebugOperationRequest,
     artifact_root: Path,
     run_id: str,
     debug_session_id: str | None,
     runtime: DebugRuntime,
     operation_core: DebugOperationCore = _default_debug_operation_core,
 ) -> ToolResponse:
-    operation = debug_handler_operation_spec(operation_name)
     return operation_core(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        method_name=operation.method_name,
-        kwargs=debug_operation_arguments(operation, values),
-        persist_manifest=operation.persist_manifest,
+        request=request,
         runtime=runtime,
+    )
+
+
+def _runtime_from_operation_args(
+    *,
+    debug_profiles: dict[str, DebugProfile] | None,
+    admission: AdmissionService | None,
+    transaction: TransportTransaction | None,
+    session_registry: SessionRegistry | None,
+    session_guard: SessionGuard | None,
+    gdb_mi_engine: GdbMiEngine | None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None,
+) -> DebugRuntime:
+    return debug_runtime_from_handler_args(
+        debug_profiles=debug_profiles,
+        admission=admission,
+        transaction=transaction,
+        session_registry=session_registry,
+        session_guard=session_guard,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
+    )
+
+
+def _debug_operation_handler(
+    *,
+    request: DebugOperationRequest,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None,
+    debug_profiles: dict[str, DebugProfile] | None,
+    admission: AdmissionService | None,
+    transaction: TransportTransaction | None,
+    session_registry: SessionRegistry | None,
+    session_guard: SessionGuard | None,
+    gdb_mi_engine: GdbMiEngine | None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None,
+) -> ToolResponse:
+    return debug_tool_operation_response(
+        request=request,
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        runtime=_runtime_from_operation_args(
+            debug_profiles=debug_profiles,
+            admission=admission,
+            transaction=transaction,
+            session_registry=session_registry,
+            session_guard=session_guard,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+        ),
     )
 
 
@@ -181,8 +307,7 @@ def debug_read_registers_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_operation_handler(
-        operation_name="debug.read_registers",
-        values={"registers": registers},
+        request=DebugReadRegistersRequest(registers=registers),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
@@ -210,8 +335,7 @@ def debug_read_symbol_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_operation_handler(
-        operation_name="debug.read_symbol",
-        values={"symbol": symbol},
+        request=DebugReadSymbolRequest(symbol=symbol),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
@@ -240,8 +364,7 @@ def debug_read_memory_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_operation_handler(
-        operation_name="debug.read_memory",
-        values={"address": address, "byte_count": byte_count},
+        request=DebugReadMemoryRequest(address=address, byte_count=byte_count),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
@@ -270,8 +393,7 @@ def debug_evaluate_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_operation_handler(
-        operation_name="debug.evaluate",
-        values={"inspector": inspector, "arguments": arguments or {}},
+        request=DebugEvaluateRequest(inspector=inspector, arguments=arguments or {}),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
@@ -282,39 +404,6 @@ def debug_evaluate_handler(
         session_guard=session_guard,
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def _debug_operation_handler(
-    *,
-    operation_name: str,
-    values: dict[str, object],
-    artifact_root: Path,
-    run_id: str,
-    debug_session_id: str | None,
-    debug_profiles: dict[str, DebugProfile] | None,
-    admission: AdmissionService | None,
-    transaction: TransportTransaction | None,
-    session_registry: SessionRegistry | None,
-    session_guard: SessionGuard | None,
-    gdb_mi_engine: GdbMiEngine | None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None,
-) -> ToolResponse:
-    return debug_tool_operation_response(
-        operation_name=operation_name,
-        values=values,
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        runtime=debug_runtime_from_handler_args(
-            debug_profiles=debug_profiles,
-            admission=admission,
-            transaction=transaction,
-            session_registry=session_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ),
     )
 
 
@@ -333,8 +422,7 @@ def debug_set_breakpoint_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_operation_handler(
-        operation_name="debug.set_breakpoint",
-        values={"symbol": symbol},
+        request=DebugSetBreakpointRequest(symbol=symbol),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
@@ -363,8 +451,7 @@ def debug_set_watchpoint_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_operation_handler(
-        operation_name="debug.set_watchpoint",
-        values={"symbol": symbol},
+        request=DebugSetWatchpointRequest(symbol=symbol),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
@@ -393,8 +480,7 @@ def debug_clear_breakpoint_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_operation_handler(
-        operation_name="debug.clear_breakpoint",
-        values={"breakpoint_id": breakpoint_id},
+        request=DebugClearBreakpointRequest(breakpoint_id=breakpoint_id),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
@@ -423,8 +509,7 @@ def debug_clear_watchpoint_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_operation_handler(
-        operation_name="debug.clear_watchpoint",
-        values={"breakpoint_id": breakpoint_id},
+        request=DebugClearWatchpointRequest(breakpoint_id=breakpoint_id),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
@@ -452,8 +537,7 @@ def debug_list_breakpoints_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_operation_handler(
-        operation_name="debug.list_breakpoints",
-        values={},
+        request=DebugListBreakpointsRequest(),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
@@ -481,8 +565,7 @@ def debug_backtrace_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_operation_handler(
-        operation_name="debug.backtrace",
-        values={},
+        request=DebugBacktraceRequest(),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
@@ -510,8 +593,7 @@ def debug_list_variables_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_operation_handler(
-        operation_name="debug.list_variables",
-        values={},
+        request=DebugListVariablesRequest(),
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
@@ -527,10 +609,9 @@ def debug_list_variables_handler(
 
 def _debug_execution_control_handler(
     *,
-    operation_name: str,
+    request: DebugOperationRequest,
     artifact_root: Path,
     run_id: str,
-    timeout_seconds: int | None,
     debug_session_id: str | None,
     debug_profiles: dict[str, DebugProfile] | None,
     admission: AdmissionService | None,
@@ -541,8 +622,7 @@ def _debug_execution_control_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None,
 ) -> ToolResponse:
     return _debug_operation_handler(
-        operation_name=operation_name,
-        values={"timeout_seconds": timeout_seconds},
+        request=request,
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
@@ -571,10 +651,9 @@ def debug_continue_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_execution_control_handler(
-        operation_name="debug.continue",
+        request=DebugContinueRequest(timeout_seconds=timeout_seconds),
         artifact_root=artifact_root,
         run_id=run_id,
-        timeout_seconds=timeout_seconds,
         debug_session_id=debug_session_id,
         debug_profiles=debug_profiles,
         admission=admission,
@@ -601,10 +680,9 @@ def debug_step_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_execution_control_handler(
-        operation_name="debug.step",
+        request=DebugStepRequest(timeout_seconds=timeout_seconds),
         artifact_root=artifact_root,
         run_id=run_id,
-        timeout_seconds=timeout_seconds,
         debug_session_id=debug_session_id,
         debug_profiles=debug_profiles,
         admission=admission,
@@ -631,10 +709,9 @@ def debug_next_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_execution_control_handler(
-        operation_name="debug.next",
+        request=DebugNextRequest(timeout_seconds=timeout_seconds),
         artifact_root=artifact_root,
         run_id=run_id,
-        timeout_seconds=timeout_seconds,
         debug_session_id=debug_session_id,
         debug_profiles=debug_profiles,
         admission=admission,
@@ -661,10 +738,9 @@ def debug_finish_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_execution_control_handler(
-        operation_name="debug.finish",
+        request=DebugFinishRequest(timeout_seconds=timeout_seconds),
         artifact_root=artifact_root,
         run_id=run_id,
-        timeout_seconds=timeout_seconds,
         debug_session_id=debug_session_id,
         debug_profiles=debug_profiles,
         admission=admission,
@@ -691,10 +767,9 @@ def debug_interrupt_handler(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     return _debug_execution_control_handler(
-        operation_name="debug.interrupt",
+        request=DebugInterruptRequest(timeout_seconds=timeout_seconds),
         artifact_root=artifact_root,
         run_id=run_id,
-        timeout_seconds=timeout_seconds,
         debug_session_id=debug_session_id,
         debug_profiles=debug_profiles,
         admission=admission,

@@ -14,6 +14,7 @@ import pytest
 
 import kdive.server as server
 from kdive.coordination.registry import RecoveryTombstone, SessionRegistry
+from kdive.debug.handlers import DebugReadMemoryRequest
 from kdive.domain import ErrorCategory
 from kdive.postmortem.dumps import is_within_dump_dir, parse_dump_listing
 from kdive.prereqs.checks import PortProbeResult, _default_port_probe
@@ -57,8 +58,7 @@ def _read_memory(engine: _RecordingEngine, *, address: object, byte_count: objec
     return server._engine_op_data(
         engine=engine,  # type: ignore[arg-type]
         attachment=object(),  # type: ignore[arg-type]
-        method_name="read_memory",
-        kwargs={"address": address, "byte_count": byte_count},
+        request=DebugReadMemoryRequest(address=address, byte_count=byte_count),  # type: ignore[arg-type]
     )
 
 

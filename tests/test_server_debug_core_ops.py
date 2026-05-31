@@ -247,20 +247,16 @@ def test_debug_operation_handlers_route_directly_to_core_response() -> None:
     assert not hasattr(server_module, "_debug_stateful_response")
 
 
-def test_debug_operation_handlers_use_central_operation_specs() -> None:
-    """Operation names and manifest persistence policy should not be duplicated in each handler."""
-    specs = debug_handlers.DEBUG_HANDLER_OPERATION_SPECS
-    assert specs["debug.read_registers"].method_name == "read_registers"
-    assert specs["debug.read_registers"].persist_manifest is False
-    assert specs["debug.read_registers"].argument_names == ("registers",)
-    assert specs["debug.set_breakpoint"].method_name == "set_breakpoint"
-    assert specs["debug.set_breakpoint"].persist_manifest is True
-    assert specs["debug.set_breakpoint"].argument_names == ("symbol",)
-    assert specs["debug.read_memory"].argument_names == ("address", "byte_count")
-    assert specs["debug.evaluate"].argument_names == ("inspector", "arguments")
-    assert specs["debug.list_breakpoints"].persist_manifest is False
-    assert specs["debug.backtrace"].persist_manifest is False
-    assert specs["debug.list_variables"].persist_manifest is False
+def test_debug_operation_handlers_use_typed_operation_requests() -> None:
+    """Handlers should construct typed operation requests instead of string names and kwargs bags."""
+    assert not hasattr(debug_handlers, "DEBUG_HANDLER_OPERATION_SPECS")
+    assert not hasattr(debug_handlers, "DebugHandlerOperationSpec")
+    assert not hasattr(debug_handlers, "debug_operation_arguments")
+
+    request = debug_handlers.DebugReadMemoryRequest(address=0x1000, byte_count=16)
+    assert request.profile_operation == "debug.read_memory"
+    assert request.summary_name == "read_memory"
+    assert request.persist_manifest is False
 
 
 def test_debug_tool_registration_uses_typed_context_and_handler_protocols() -> None:
@@ -318,8 +314,13 @@ def test_debug_operation_response_uses_runtime_bundle() -> None:
     assert server_module._debug_operation_response is debug_operations._debug_operation_response
     assert hasattr(debug_handlers, "DebugRuntime")
     params = inspect.signature(debug_handlers.debug_tool_operation_response).parameters
-    assert get_type_hints(debug_handlers.debug_tool_operation_response)["runtime"] is debug_handlers.DebugRuntime
+    response_hints = get_type_hints(debug_handlers.debug_tool_operation_response)
+    assert response_hints["runtime"] is debug_handlers.DebugRuntime
+    assert response_hints["request"] is debug_handlers.DebugOperationRequest
     assert "runtime" in params
+    assert "request" in params
+    assert "operation_name" not in params
+    assert "values" not in params
     for dependency_name in (
         "debug_profiles",
         "admission",
