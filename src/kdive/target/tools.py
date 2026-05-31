@@ -40,6 +40,7 @@ class TargetRunTestsHandler(Protocol):
         commands: list[list[str]] | None,
         force_rerun: bool,
         attempt: int | None,
+        acknowledged_permissions: list[str] | None,
         admission: AdmissionService | None,
         session_registry: SessionRegistry | None,
     ) -> ToolResponse: ...
@@ -71,6 +72,7 @@ class TargetRunOptions(Model):
     commands: list[list[str]] | None = None
     force_rerun: bool = False
     attempt: int | None = None
+    acknowledged_permissions: list[str] | None = None
 
 
 def register_target_tools(
@@ -129,6 +131,7 @@ def register_target_tools(
             commands=options_model.commands,
             force_rerun=options_model.force_rerun,
             attempt=options_model.attempt,
+            acknowledged_permissions=options_model.acknowledged_permissions,
             admission=admission,
             session_registry=session_registry,
         ).model_dump(mode="json")

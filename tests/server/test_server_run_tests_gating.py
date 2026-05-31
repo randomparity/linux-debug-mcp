@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from conftest import FakeTestProvider, create_booted_run, rootfs
 
 from kdive.artifacts.store import ArtifactStore
+from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS
 from kdive.coordination.admission import AdmissionService, SnapshotStore, publish_ready_snapshot
 from kdive.coordination.registry import SessionRegistry
 from kdive.domain import ErrorCategory, StepResult, StepStatus
@@ -78,6 +79,44 @@ def test_fresh_run_rejected_while_halted(tmp_path):
     assert response.ok is False
     assert response.error.category == ErrorCategory.READINESS_FAILURE
     assert response.error.details["code"] == "target_halted"
+
+
+def test_adhoc_commands_require_destructive_permission_ack(tmp_path):
+    artifact_root = create_booted_run(tmp_path)
+    provider = FakeTestProvider()
+
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        commands=[["uname", "-a"]],
+        provider=provider,
+        rootfs_profiles={"minimal": rootfs(tmp_path)},
+    )
+
+    assert response.ok is False
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert response.error.details == {
+        "code": "permission_required",
+        "required_permissions": TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"],
+    }
+    assert provider.executions == 0
+
+
+def test_adhoc_commands_run_with_destructive_permission_ack(tmp_path):
+    artifact_root = create_booted_run(tmp_path)
+    provider = FakeTestProvider()
+
+    response = target_run_tests_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        commands=[["uname", "-a"]],
+        acknowledged_permissions=TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"],
+        provider=provider,
+        rootfs_profiles={"minimal": rootfs(tmp_path)},
+    )
+
+    assert response.ok is True
+    assert provider.executions == 1
 
 
 def test_cached_succeeded_served_while_halted(tmp_path):

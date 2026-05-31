@@ -64,6 +64,7 @@ class TargetRunTestsHandler(Protocol):
         test_suite: str | None = None,
         commands: list[list[str]] | None = None,
         force_rerun: bool = False,
+        acknowledged_permissions: list[str] | None = None,
         admission: AdmissionService | None = None,
         session_registry: SessionRegistry | None = None,
     ) -> ToolResponse: ...
@@ -413,6 +414,7 @@ def workflow_build_boot_test_handler(
         test_suite=test_suite,
         commands=commands,
         force_rerun=force_rerun_tests,
+        acknowledged_permissions=acknowledged_permissions,
         admission=admission,
         session_registry=session_registry,
     )

@@ -262,6 +262,36 @@ def test_workflow_existing_run_uses_manifest_test_suite_when_omitted(tmp_path: P
     assert captured_tests["test_suite"] == "smoke-basic"
 
 
+def test_workflow_forwards_acknowledged_permissions_to_run_tests(tmp_path: Path) -> None:
+    captured_tests: dict[str, object] = {}
+
+    def fake_run_tests(**kwargs: object) -> ToolResponse:
+        captured_tests.update(kwargs)
+        return success("tested")
+
+    dependencies = _install_workflow_dependencies(
+        create_run=lambda **kwargs: success("created"),
+        kernel_build=lambda **kwargs: success("built"),
+        target_boot=lambda **kwargs: success("booted"),
+        target_run_tests=fake_run_tests,
+        artifacts_collect=lambda **kwargs: success("collected"),
+    )
+
+    response = workflow_build_boot_test_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=str(tmp_path),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        commands=[["uname", "-a"]],
+        acknowledged_permissions=TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"],
+        dependencies=dependencies,
+    )
+
+    assert response.ok is True
+    assert captured_tests["acknowledged_permissions"] == TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"]
+
+
 def test_workflow_creates_missing_supplied_run_id_exactly(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
     calls: list[str] = []

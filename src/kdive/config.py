@@ -239,6 +239,7 @@ TARGET_DESTRUCTIVE_PERMISSIONS = {
         "stop MCP-owned libvirt domains",
         "destroy MCP-owned libvirt domains",
     ],
+    "target.run_tests": ["execute caller-supplied commands over target SSH"],
 }
 
 

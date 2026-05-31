@@ -386,6 +386,10 @@ def test_target_destructive_permissions_has_boot_entry() -> None:
     ]
 
 
+def test_target_destructive_permissions_has_run_tests_entry() -> None:
+    assert TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"] == ["execute caller-supplied commands over target SSH"]
+
+
 def test_missing_destructive_permissions_introspect_registry() -> None:
     required = INTROSPECT_DESTRUCTIVE_PERMISSIONS["debug.introspect.run"]
     assert (
@@ -405,9 +409,9 @@ def test_missing_destructive_permissions_introspect_registry() -> None:
 
 
 def test_missing_destructive_permissions_target_registry() -> None:
-    required = TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"]
-    assert missing_destructive_permissions("target.boot", [], registry=TARGET_DESTRUCTIVE_PERMISSIONS) == required
-    assert missing_destructive_permissions("target.boot", required, registry=TARGET_DESTRUCTIVE_PERMISSIONS) == []
+    for operation, required in TARGET_DESTRUCTIVE_PERMISSIONS.items():
+        assert missing_destructive_permissions(operation, [], registry=TARGET_DESTRUCTIVE_PERMISSIONS) == required
+        assert missing_destructive_permissions(operation, required, registry=TARGET_DESTRUCTIVE_PERMISSIONS) == []
 
 
 def test_missing_destructive_permissions_defaults_to_transport_registry() -> None:

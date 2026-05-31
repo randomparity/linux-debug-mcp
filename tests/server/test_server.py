@@ -2,12 +2,15 @@ from functools import partial
 from pathlib import Path
 
 from conftest import make_source_tree
+from mcp.server.fastmcp import FastMCP
 
 from kdive import server
 from kdive.artifacts.store import ArtifactStore
-from kdive.config import BootOverrides, BuildOverrides, RootfsProfile, TargetProfile
+from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, BootOverrides, BuildOverrides, RootfsProfile, TargetProfile
+from kdive.coordination.admission import AdmissionService, SnapshotStore
+from kdive.coordination.registry import SessionRegistry
 from kdive.debug import operations as debug_operations
-from kdive.domain import ArtifactRef, StepResult, StepStatus
+from kdive.domain import ArtifactRef, StepResult, StepStatus, ToolResponse
 from kdive.kernel import handlers as kernel_handlers
 from kdive.prereqs.checks import PortProbeResult
 from kdive.providers.handlers import list_providers_handler
@@ -19,6 +22,7 @@ from kdive.server import (
     not_implemented_handler,
     prerequisites_handler,
 )
+from kdive.target.tools import register_target_tools
 
 
 def _get_tool_fn(app, name):
@@ -435,6 +439,35 @@ def test_target_run_tests_tool_uses_grouped_context_and_options() -> None:
     assert {"context", "options"}.issubset(properties)
     assert {"force_rerun", "commands", "run_id", "artifact_root"}.isdisjoint(properties)
     assert tool.fn.__name__ == "target_run_tests"
+
+
+def test_target_run_tests_tool_options_forward_acknowledged_permissions(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    app = FastMCP("test")
+    register_target_tools(
+        app,
+        default_artifact_root=tmp_path / "default-runs",
+        sensitive_paths=[],
+        admission=AdmissionService(SnapshotStore()),
+        session_registry=SessionRegistry(directory=tmp_path / "sessions"),
+        target_boot_handler=lambda **kwargs: ToolResponse.success(summary="booted"),
+        target_run_tests_handler=lambda **kwargs: (
+            captured.update(kwargs) or ToolResponse.success(summary="tested", run_id="run-abc123")
+        ),
+    )
+    tool = app._tool_manager._tools["target.run_tests"]
+
+    response = tool.fn(
+        context={"run_id": "run-abc123", "artifact_root": str(tmp_path / "runs")},
+        options={
+            "commands": [["uname", "-a"]],
+            "acknowledged_permissions": TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"],
+        },
+    )
+
+    assert response["status"] == "succeeded"
+    assert captured["commands"] == [["uname", "-a"]]
+    assert captured["acknowledged_permissions"] == TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"]
 
 
 def test_target_run_tests_tool_and_handler_are_target_owned() -> None:

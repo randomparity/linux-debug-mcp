@@ -4,7 +4,7 @@ from conftest import FakeTestProvider, create_booted_run, make_source_tree, root
 
 from kdive.artifacts.manifest import BootAttempt
 from kdive.artifacts.store import ArtifactStore
-from kdive.config import RootfsProfile, TargetProfile, TestCommand, TestSuiteProfile
+from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, RootfsProfile, TargetProfile, TestCommand, TestSuiteProfile
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
 from kdive.providers.local.local_ssh_tests import LocalSshTestProvider, TestExecutionResult
 from kdive.server import create_run_handler, target_run_tests_handler
@@ -167,6 +167,7 @@ def test_run_tests_adhoc_only_does_not_add_default_suite(tmp_path: Path) -> None
         artifact_root=artifact_root,
         run_id="run-abc123",
         commands=[["id"]],
+        acknowledged_permissions=TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"],
         provider=provider,
         rootfs_profiles={"minimal": rootfs(tmp_path)},
         test_suites=suites(),

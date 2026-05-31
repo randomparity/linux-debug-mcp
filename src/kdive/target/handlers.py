@@ -1239,6 +1239,7 @@ def target_run_tests_handler(
     commands: list[list[str]] | None = None,
     force_rerun: bool = False,
     attempt: int | None = None,
+    acknowledged_permissions: list[str] | None = None,
     provider: LocalSshTestProvider | None = None,
     rootfs_profiles: dict[str, RootfsProfile] | None = None,
     test_suites: dict[str, TestSuiteProfile] | None = None,
@@ -1273,6 +1274,19 @@ def target_run_tests_handler(
     if input_failure is not None:
         return input_failure
     inputs = _require_value(inputs, "run tests inputs missing after successful resolution")
+
+    if inputs.adhoc_commands:
+        missing = missing_destructive_permissions(
+            "target.run_tests",
+            acknowledged_permissions or [],
+            registry=TARGET_DESTRUCTIVE_PERMISSIONS,
+        )
+        if missing:
+            return _configuration_failure(
+                run_id=run_id,
+                message="target.run_tests requires acknowledged destructive permissions before ad hoc SSH commands",
+                details={"code": "permission_required", "required_permissions": missing},
+            )
 
     try:
         completed = _locked_run_tests_execution(

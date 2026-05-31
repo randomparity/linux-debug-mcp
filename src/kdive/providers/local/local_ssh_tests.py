@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 
-from kdive.config import RootfsProfile, TestCommand, TestSuiteProfile
+from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, RootfsProfile, TestCommand, TestSuiteProfile
 from kdive.domain import (
     ArtifactRef,
     ErrorCategory,
@@ -375,12 +375,12 @@ def local_ssh_tests_capability() -> ProviderCapability:
         transports=["ssh", "filesystem"],
         operations=["target.run_tests"],
         required_host_tools=["ssh"],
-        destructive_permissions=[],
+        destructive_permissions=TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"],
         access_methods=["ssh", "filesystem"],
         semantics=OperationSemantics(
             idempotent=True,
             retryable=True,
-            destructive=False,
+            destructive=True,
             cancelable=False,
             concurrent_safe=False,
         ),

@@ -207,6 +207,8 @@ def test_default_registry_exposes_sprint_1_providers() -> None:
     assert ssh_tests.operations == ["target.run_tests"]
     assert ssh_tests.required_host_tools == ["ssh"]
     assert ssh_tests.target_kinds == [TargetKind.VIRTUAL]
+    assert ssh_tests.destructive_permissions == TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"]
+    assert ssh_tests.semantics.destructive is True
 
     qemu_gdbstub = providers["local-qemu-gdbstub"]
     assert qemu_gdbstub.destructive_permissions == []
