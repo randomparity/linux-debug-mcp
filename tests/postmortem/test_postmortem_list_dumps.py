@@ -10,9 +10,9 @@ from kdive.domain import (
     StepResult,
     StepStatus,
 )
+from kdive.postmortem.handlers import build_scp_argv, debug_postmortem_list_dumps_handler
 from kdive.postmortem.models import DebugPostmortemListDumpsRequest
 from kdive.providers.local.local_ssh_tests import SshCommandResult
-from kdive.server import build_scp_argv, debug_postmortem_list_dumps_handler
 
 SECRET_KEY_REF = "s3cr3t-key"  # pragma: allowlist secret
 
