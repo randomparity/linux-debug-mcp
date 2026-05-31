@@ -170,6 +170,11 @@ DUMP_LIST_SCRIPT_TEMPLATE = Template(
 DUMP_DIR = $dump_dir
 CORES = ("vmcore", "vmcore.flat", "vmcore-incomplete")
 SYMBOLS = ("vmcore-dmesg.txt", "vmlinux", "vmcoreinfo")
+enumeration_errors = []
+
+
+def _error(code, path, exc):
+    return {"code": code, "path": path, "exception": type(exc).__name__}
 
 
 def _kernel(d):
@@ -195,7 +200,8 @@ def _record(d):
         st = os.stat(os.path.join(d, core))
         file_sizes[core] = st.st_size
         mtime = st.st_mtime
-    except Exception:
+    except Exception as exc:
+        enumeration_errors.append(_error("core_stat_failed", os.path.join(d, core), exc))
         return None
     present = []
     for name in SYMBOLS:
@@ -204,7 +210,8 @@ def _record(d):
             present.append(name)
             try:
                 file_sizes[name] = os.stat(p).st_size
-            except Exception:
+            except Exception as exc:
+                enumeration_errors.append(_error("symbol_stat_failed", p, exc))
                 pass
     return {
         "dir": d,
@@ -223,7 +230,8 @@ exists = os.path.isdir(DUMP_DIR)
 if exists:
     try:
         names = sorted(os.listdir(DUMP_DIR))
-    except Exception:
+    except Exception as exc:
+        enumeration_errors.append(_error("listdir_failed", DUMP_DIR, exc))
         names = []
     for name in names:
         sub = os.path.join(DUMP_DIR, name)
@@ -236,7 +244,12 @@ if exists:
         if rec is not None:
             dumps.append(rec)
 
-sys.stdout.write(json.dumps({"dump_dir": DUMP_DIR, "exists": exists, "dumps": dumps}))
+sys.stdout.write(json.dumps({
+    "dump_dir": DUMP_DIR,
+    "exists": exists,
+    "dumps": dumps,
+    "enumeration_errors": enumeration_errors,
+}))
 """
 )
 

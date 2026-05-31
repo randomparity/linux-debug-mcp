@@ -6,6 +6,7 @@ from pathlib import Path
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import RootfsProfile
 from kdive.domain import (
+    ErrorCategory,
     RunRequest,
     StepResult,
     StepStatus,
@@ -123,6 +124,26 @@ def test_list_dumps_returns_typed_failure_for_malformed_record(tmp_path) -> None
 
     assert resp.ok is False
     assert resp.error.details["code"] == "malformed_dump_listing"
+
+
+def test_list_dumps_reports_target_enumeration_errors(tmp_path) -> None:
+    run_id = _booted_run(tmp_path)
+    stdout = (
+        '{"dump_dir": "/var/crash", "exists": true, "dumps": [],'
+        ' "enumeration_errors": [{"code": "listdir_failed", "path": "/var/crash", "exception": "PermissionError"}]}'
+    )
+
+    resp = debug_postmortem_list_dumps_handler(
+        DebugPostmortemListDumpsRequest(run_id=run_id, target_ref="local-qemu"),
+        artifact_root=tmp_path,
+        rootfs_profiles=_rootfs(),
+        ssh_runner=_list_runner(stdout),
+    )
+
+    assert resp.ok is False
+    assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert resp.error.details["code"] == "dump_enumeration_incomplete"
+    assert resp.error.details["enumeration_errors"][0]["code"] == "listdir_failed"
 
 
 def test_list_dumps_bad_dump_dir(tmp_path) -> None:

@@ -191,6 +191,18 @@ _DUMP_LISTING_SHAPE_ERRORS = (KeyError, TypeError, ValueError, AttributeError, V
 def _parse_dump_listing_at_boundary(
     ctx: Any, parsed: dict[str, object]
 ) -> tuple[list[DumpEntry] | None, ToolResponse | None]:
+    enumeration_errors = parsed.get("enumeration_errors") or []
+    if enumeration_errors:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=ctx.run_id,
+            message="dump enumeration was incomplete on the target",
+            details={
+                "code": "dump_enumeration_incomplete",
+                "enumeration_errors": ctx.redactor.redact_value(enumeration_errors),
+            },
+            suggested_next_actions=["debug.postmortem.check_prereqs"],
+        )
     try:
         return parse_dump_listing(parsed), None
     except _DUMP_LISTING_SHAPE_ERRORS as exc:
