@@ -130,6 +130,18 @@ class SessionRegistry:
         self._dir = directory
         self._lock_fd: int | None = None
         self._on_orphan_reaped = on_orphan_reaped
+        self._lifecycle_started = False
+
+    def bind_orphan_reap_callback(self, callback: Callable[[OrphanReap], None]) -> None:
+        """Bind the reconcile orphan-reap callback before the registry lifecycle starts.
+
+        Startup composition sometimes injects a registry that was constructed before the
+        lifecycle dispatcher exists. This method makes that dependency explicit while refusing
+        late rewires once the instance lock has been acquired or reconciliation has begun.
+        """
+        if self._lifecycle_started:
+            raise RuntimeError("bind_orphan_reap_callback must run before registry lifecycle starts")
+        self._on_orphan_reaped = callback
 
     def acquire_instance_lock(self) -> None:
         path = self._dir / "instance.lock"
@@ -140,6 +152,7 @@ class SessionRegistry:
             os.close(self._lock_fd)
             self._lock_fd = None
             raise InstanceLockError("another kdive server already holds the registry instance lock") from exc
+        self._lifecycle_started = True
 
     def release_instance_lock(self) -> None:
         if self._lock_fd is not None:
@@ -275,6 +288,7 @@ class SessionRegistry:
         (a crash mid-reconcile re-runs it next start). It must not assume the delete will be rolled
         back if it raises; it will not be.
         """
+        self._lifecycle_started = True
         report = OrphanReapReport()
         # 1. re-assert persisted tombstones (durable across restarts). A malformed marker is
         #    logged and skipped (TD-17) rather than aborting reconcile and blocking startup.

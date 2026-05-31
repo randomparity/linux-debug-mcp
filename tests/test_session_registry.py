@@ -83,6 +83,37 @@ def test_second_instance_fails_loud(tmp_path):
     third.release_instance_lock()
 
 
+def test_bind_orphan_reap_callback_before_lifecycle_start(tmp_path):
+    captured = []
+    reg = SessionRegistry(directory=tmp_path)
+    reg.bind_orphan_reap_callback(captured.append)
+    key = _key()
+    record = _session(key, backend_pid=4321, backend_start_time="999", execution_state=ExecutionState.EXECUTING)
+    reg.write_record(record)
+
+    reg.reconcile(proxy=_FakeProxy(), admission=_RecordingAdmission())
+
+    assert [reap.session_id for reap in captured] == [record.session_id]
+
+
+def test_bind_orphan_reap_callback_rejects_after_instance_lock(tmp_path):
+    reg = SessionRegistry(directory=tmp_path)
+    reg.acquire_instance_lock()
+    try:
+        with pytest.raises(RuntimeError, match="before registry lifecycle starts"):
+            reg.bind_orphan_reap_callback(lambda _reap: None)
+    finally:
+        reg.release_instance_lock()
+
+
+def test_bind_orphan_reap_callback_rejects_after_reconcile(tmp_path):
+    reg = SessionRegistry(directory=tmp_path)
+    reg.reconcile(proxy=_FakeProxy(), admission=_RecordingAdmission())
+
+    with pytest.raises(RuntimeError, match="before registry lifecycle starts"):
+        reg.bind_orphan_reap_callback(lambda _reap: None)
+
+
 class _FakeProxy:
     def __init__(self, *, kills_live_backend: bool = False) -> None:
         self.reaped: list[tuple[int, str | None]] = []

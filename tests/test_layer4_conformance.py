@@ -1430,7 +1430,7 @@ def test_crash_recovery_round_trip_admits_after_restart(tmp_path: Path) -> None:
             close_admission=reap.close_admission_required,
         )
 
-    reg._on_orphan_reaped = on_reap
+    reg.bind_orphan_reap_callback(on_reap)
     reg.reconcile(proxy=FakeReapProxy(kills_live_backend=False), admission=admission)
     # The stale record is gone and admission is NOT closed (no live backend was reaped).
     assert reg.read_record(KEY) is None

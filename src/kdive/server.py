@@ -4619,10 +4619,8 @@ def _build_transport_machinery(
         )
     else:
         # An injected registry (test wiring) may not have been constructed with the callback.
-        # The callback hook is a private attribute; setting it here lets test fixtures share the
-        # production behavior without forcing every test that builds a SessionRegistry by hand
-        # to know about the §4.5 reap-source contract.
-        session_registry._on_orphan_reaped = _on_orphan_reaped
+        # Bind explicitly before the instance lock/reconcile lifecycle starts.
+        session_registry.bind_orphan_reap_callback(_on_orphan_reaped)
 
     secrets_backends: dict[SecretReferenceKind, SecretsBackend] = {SecretReferenceKind.ENV: EnvSecretsBackend()}
     # keyring extra not installed -> the kind stays unavailable until configured
