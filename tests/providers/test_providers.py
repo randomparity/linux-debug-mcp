@@ -154,17 +154,16 @@ def test_debug_session_state_is_typed_and_serializes_as_string() -> None:
         "active_controller_identity",
     }.isdisjoint(dumped)
 
-    legacy = DebugSession.model_validate(
-        {
-            **dumped,
-            "controller_mode": "attached",
-            "active_controller_pid": 1234,
-            "controller_last_observed_state": "running",
-            "active_controller_identity": {"pid": 1234},
-        }
-    )
-    assert legacy.controller_mode == "attached"
-    assert legacy.active_controller_pid == 1234
+    with pytest.raises(ValueError, match="controller_mode"):
+        DebugSession.model_validate(
+            {
+                **dumped,
+                "controller_mode": "attached",
+                "active_controller_pid": 1234,
+                "controller_last_observed_state": "running",
+                "active_controller_identity": {"pid": 1234},
+            }
+        )
 
 
 def test_registry_get_unknown_provider_has_contextual_error() -> None:
