@@ -108,6 +108,43 @@ def test_attach_rejects_an_unreachable_stub():
     assert exc.value.category == ErrorCategory.DEBUG_ATTACH_FAILURE
 
 
+@pytest.mark.parametrize("bad_port", ["not-a-number", None, 0, -1, 70000])
+def test_attach_rejects_invalid_port_with_configuration_error(monkeypatch, bad_port):
+    # TD-03: a malformed/out-of-range opts['port'] must surface as CONFIGURATION_ERROR before
+    # any network IO, not as a raw ValueError/TypeError from int().
+    called = []
+    monkeypatch.setattr(
+        "kdive.transport.qemu_gdbstub.rsp_reachable",
+        lambda *a, **k: (called.append(True), True)[1],
+    )
+    request = OpenRequest(
+        target_key=TargetKey(provisioner="local-qemu", target_id="vm1"),
+        generation=0,
+        transport_ref=TransportRef(
+            provider="qemu-gdbstub",
+            channel_id="rsp0",
+            line_role=LineRole.RSP,
+            opts={"host": "127.0.0.1", "port": bad_port},
+        ),
+        platform=PlatformMetadata(
+            console_kind=ConsoleKind.UART,
+            console_count=1,
+            dedicated_debug_line=False,
+            ssh_reachable=True,
+        ),
+        required_caps=["rsp"],
+    )
+    with pytest.raises(QemuGdbstubAttachError) as exc:
+        QemuGdbstubTransport().attach(
+            request,
+            cancel=threading.Event(),
+            deadline=Deadline.after(1.0),
+            on_partial=lambda *_: None,
+        )
+    assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
+    assert called == []  # rejected before any RSP probe
+
+
 def test_attach_rejects_a_non_loopback_host_without_any_network_io(monkeypatch):
     """A loopback_local provider must never connect out to a caller-supplied remote host
     (round-3 review F2): loopback is enforced before rsp_reachable is ever called."""

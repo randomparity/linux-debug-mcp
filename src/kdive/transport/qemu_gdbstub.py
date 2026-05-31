@@ -53,7 +53,18 @@ class QemuGdbstubTransport(Transport):
     ) -> BackendAttachment:
         opts = request.transport_ref.opts
         host = str(opts.get("host", "127.0.0.1"))
-        port = int(opts["port"])
+        try:
+            port = int(opts["port"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise QemuGdbstubAttachError(
+                f"qemu-gdbstub transport_ref.opts['port'] must be an integer, got {opts.get('port')!r}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            ) from exc
+        if not 1 <= port <= 65535:
+            raise QemuGdbstubAttachError(
+                f"qemu-gdbstub port out of range (1-65535), got {port}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
         # F2: enforce loopback BEFORE any network IO. A loopback_local provider must never
         # initiate an outbound RSP connect to a caller-supplied remote host (SSRF-like from
         # target metadata). A non-loopback/hostname value is a CONFIGURATION_ERROR here, not
