@@ -1281,38 +1281,13 @@ def _build_introspect_success_response(
     return response_data
 
 
-def _finalize_introspect_call(
+def _triage_introspect_runner_output(
     *,
-    store: ArtifactStore,
-    run_id: str,
-    call_id: str,
     ssh_result: SshCommandResult,
     stdout_path: Path,
     stderr_path: Path,
-    agent_dir: Path,
-    sensitive_call_dir: Path,
-    redactor: Redactor,
-    expected_build_id: str,
-    request_timeout_seconds: int,
-    started_at: datetime,
-    finished_at: datetime,
-    duration_ms: int,
-    operation_name: str,
-    drgn_open_message: str,
-    exec_principal: str | None,
-    post_validator: IntrospectPostValidator | None,
-    allow_write: bool = False,
-    acknowledged_permissions: list[str] | None = None,
-) -> ToolResponse:
-    """Shared post-runner stage for both the live (`_execute_introspect_call`)
-    and offline (`_execute_vmcore_introspect_call`) paths (spec §7 / ADR 0010).
-
-    Everything from the runner-result triage through outcome discrimination,
-    host-side `verify_build_id`, redaction, the `introspect:<call_id>` manifest
-    step, and the success/post-validator response is identical between the two
-    paths; only `expected_build_id`, `exec_principal` (None for vmcore — no SSH
-    user), `operation_name`, `drgn_open_message`, and `post_validator` differ.
-    """
+    fail: Callable[..., ToolResponse],
+) -> tuple[str, str, dict[str, Any], int, ToolResponse | None]:
     # Spec §5.2 step 11: exit-code + JSON parsing.
     raw_stdout = _read_capped(stdout_path, RUN_STDOUT_CAP)
     raw_stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
@@ -1325,137 +1300,174 @@ def _finalize_introspect_call(
 
     ssh_exit = ssh_result.exit_status
 
-    def _fail(
-        *,
-        category: ErrorCategory,
-        code: str,
-        message: str,
-        outcome_status_for_forensics: str | None,
-        include_stdout_json: bool = False,
-        redacted_payload: dict[str, Any] | None = None,
-    ) -> ToolResponse:
-        return _record_introspect_failure(
-            store=store,
-            run_id=run_id,
-            call_id=call_id,
-            category=category,
-            code=code,
-            message=message,
-            agent_dir=agent_dir,
-            sensitive_dir=sensitive_call_dir,
-            redactor=redactor,
-            raw_stderr=raw_stderr,
-            ssh_exit=ssh_exit,
-            request_timeout_seconds=request_timeout_seconds,
-            duration_ms=duration_ms,
-            ssh_user=exec_principal,
-            outcome_status_for_forensics=outcome_status_for_forensics,
-            include_stdout_json=include_stdout_json,
-            redacted_payload=redacted_payload,
-            allow_write=allow_write,
-            acknowledged_permissions=acknowledged_permissions,
-        )
-
     if ssh_result.oversized_output or raw_stdout is None:
-        return _fail(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            code="oversized_output",
-            message=f"introspect stdout exceeded {RUN_STDOUT_CAP} bytes",
-            outcome_status_for_forensics=None,
+        return (
+            "",
+            raw_stderr,
+            {},
+            ssh_exit,
+            fail(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                code="oversized_output",
+                message=f"introspect stdout exceeded {RUN_STDOUT_CAP} bytes",
+                raw_stderr=raw_stderr,
+                ssh_exit=ssh_exit,
+                outcome_status_for_forensics=None,
+            ),
         )
 
     if ssh_result.cancelled:
-        return _fail(
-            category=ErrorCategory.READINESS_FAILURE,
-            code="introspect_cancelled",
-            message="introspect call cancelled by admission fence",
-            outcome_status_for_forensics=None,
+        return (
+            raw_stdout,
+            raw_stderr,
+            {},
+            ssh_exit,
+            fail(
+                category=ErrorCategory.READINESS_FAILURE,
+                code="introspect_cancelled",
+                message="introspect call cancelled by admission fence",
+                raw_stderr=raw_stderr,
+                ssh_exit=ssh_exit,
+                outcome_status_for_forensics=None,
+            ),
         )
 
     if ssh_result.stdin_failed:
         # Wrapper payload was truncated mid-write (BrokenPipe / OSError). The
         # interpreter saw an incomplete script — any exit code or stdout it
         # produced is meaningless. Classify as transport failure.
-        return _fail(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            code="ssh_stdin_failure",
-            message="wrapper payload was not fully written to the runner stdin",
-            outcome_status_for_forensics=None,
+        return (
+            raw_stdout,
+            raw_stderr,
+            {},
+            ssh_exit,
+            fail(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                code="ssh_stdin_failure",
+                message="wrapper payload was not fully written to the runner stdin",
+                raw_stderr=raw_stderr,
+                ssh_exit=ssh_exit,
+                outcome_status_for_forensics=None,
+            ),
         )
 
     if ssh_result.timed_out:
-        return _fail(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            code="ssh_timeout",
-            message="runner round trip exceeded host-side timeout margin",
-            outcome_status_for_forensics=None,
+        return (
+            raw_stdout,
+            raw_stderr,
+            {},
+            ssh_exit,
+            fail(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                code="ssh_timeout",
+                message="runner round trip exceeded host-side timeout margin",
+                raw_stderr=raw_stderr,
+                ssh_exit=ssh_exit,
+                outcome_status_for_forensics=None,
+            ),
         )
 
     if ssh_exit == 124 and parsed is None:
-        return _fail(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            code="introspect_timeout",
-            message="timeout(1) fired",
-            outcome_status_for_forensics=None,
+        return (
+            raw_stdout,
+            raw_stderr,
+            {},
+            ssh_exit,
+            fail(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                code="introspect_timeout",
+                message="timeout(1) fired",
+                raw_stderr=raw_stderr,
+                ssh_exit=ssh_exit,
+                outcome_status_for_forensics=None,
+            ),
         )
 
     if parsed is None:
         # Stdout was non-empty but not JSON; raw bytes are already under
         # sensitive/stdout.raw with a tightened mode.
-        return _fail(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            code="wrapper_crash",
-            message=f"wrapper exited {ssh_exit} without a parseable JSON document",
-            outcome_status_for_forensics=None,
+        return (
+            raw_stdout,
+            raw_stderr,
+            {},
+            ssh_exit,
+            fail(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                code="wrapper_crash",
+                message=f"wrapper exited {ssh_exit} without a parseable JSON document",
+                raw_stderr=raw_stderr,
+                ssh_exit=ssh_exit,
+                outcome_status_for_forensics=None,
+            ),
         )
 
-    # JSON parsed. Discriminate on outcome.status per §4.3.
-    redacted_payload = redactor.redact_value(parsed)
-    outcome_obj = redacted_payload.get("outcome") if isinstance(redacted_payload, dict) else None
-    outcome_status = outcome_obj.get("status") if isinstance(outcome_obj, dict) else None
+    return raw_stdout, raw_stderr, parsed, ssh_exit, None
+
+
+def _map_introspect_wrapper_failure(
+    *,
+    parsed: dict[str, Any],
+    redacted_payload: Any,
+    outcome_status: Any,
+    expected_build_id: str,
+    drgn_open_message: str,
+    raw_stderr: str,
+    ssh_exit: int,
+    fail: Callable[..., ToolResponse],
+) -> ToolResponse | None:
     rp = redacted_payload if isinstance(redacted_payload, dict) else None
 
     if outcome_status == "drgn_open_failure":
-        return _fail(
+        return fail(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             code="drgn_open_failure",
             message=drgn_open_message,
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
             outcome_status_for_forensics=outcome_status,
             include_stdout_json=True,
             redacted_payload=rp,
         )
     if outcome_status == "drgn_version_skew":
-        return _fail(
+        return fail(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             code="drgn_version_skew",
             message="drgn lacks main_module().build_id (version skew)",
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
             outcome_status_for_forensics=outcome_status,
             include_stdout_json=True,
             redacted_payload=rp,
         )
     if outcome_status == "provenance_unverifiable":
-        return _fail(
+        return fail(
             category=ErrorCategory.CONFIGURATION_ERROR,
             code="provenance_unverifiable",
             message="vmcore carries no embedded build-id; provenance cannot be verified",
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
             outcome_status_for_forensics=outcome_status,
             include_stdout_json=True,
             redacted_payload=rp,
         )
     if outcome_status == "provenance_mismatch":
-        return _fail(
+        return fail(
             category=ErrorCategory.CONFIGURATION_ERROR,
             code="provenance_mismatch",
             message="kernel build_id does not match the expected build_id",
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
             outcome_status_for_forensics=outcome_status,
             include_stdout_json=True,
             redacted_payload=rp,
         )
     if outcome_status == "script_compile_error":
-        return _fail(
+        return fail(
             category=ErrorCategory.CONFIGURATION_ERROR,
             code="script_compile_error",
             message="user script failed to compile",
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
             outcome_status_for_forensics=outcome_status,
             include_stdout_json=True,
             redacted_payload=rp,
@@ -1464,20 +1476,24 @@ def _finalize_introspect_call(
         # ADR 0011 / #56: the wrapper guard refused a drgn write under allow_write=false.
         # Must be an explicit branch — an unmatched outcome status falls through to the
         # success path below (`status="ok"`), which would report a blocked write as success.
-        return _fail(
+        return fail(
             category=ErrorCategory.CONFIGURATION_ERROR,
             code="write_mode_disabled",
             message="script attempted a drgn write API but allow_write is false",
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
             outcome_status_for_forensics=outcome_status,
             include_stdout_json=True,
             redacted_payload=rp,
         )
     if outcome_status == "wrapper_internal_error":
         # R4-F3: forensic-only on disk; agent-facing collapses to wrapper_crash.
-        return _fail(
+        return fail(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             code="wrapper_crash",
             message="wrapper exited 6 with a minimal-recovery JSON document",
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
             outcome_status_for_forensics="wrapper_internal_error",
             include_stdout_json=True,
             redacted_payload=rp,
@@ -1487,12 +1503,14 @@ def _finalize_introspect_call(
     # self-aborted on mismatch (handled above); reaching here on an "ok" outcome
     # with a disagreeing or absent id is a wrapper fault — fail loud, never skip.
     # Verify the RAW parsed id, never the redacted payload.
-    observed_build_id = parsed.get("build_id") if isinstance(parsed, dict) else None
+    observed_build_id = parsed.get("build_id")
     if not isinstance(observed_build_id, str):
-        return _fail(
+        return fail(
             category=ErrorCategory.CONFIGURATION_ERROR,
             code="provenance_mismatch",
             message="wrapper reported success without a build_id; cannot confirm provenance",
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
             outcome_status_for_forensics="provenance_inconsistent",
             include_stdout_json=True,
             redacted_payload=rp,
@@ -1500,15 +1518,41 @@ def _finalize_introspect_call(
     try:
         verify_build_id(expected=expected_build_id, observed=observed_build_id)
     except ProvenanceMismatch:
-        return _fail(
+        return fail(
             category=ErrorCategory.CONFIGURATION_ERROR,
             code="provenance_mismatch",
             message="host build_id verify disagrees with the wrapper-reported id",
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
             outcome_status_for_forensics="provenance_inconsistent",
             include_stdout_json=True,
             redacted_payload=rp,
         )
+    return None
 
+
+def _record_introspect_success(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    call_id: str,
+    ssh_result: SshCommandResult,
+    agent_dir: Path,
+    sensitive_call_dir: Path,
+    redacted_payload: Any,
+    outcome_status: Any,
+    raw_stderr: str,
+    redactor: Redactor,
+    request_timeout_seconds: int,
+    started_at: datetime,
+    finished_at: datetime,
+    duration_ms: int,
+    operation_name: str,
+    exec_principal: str | None,
+    post_validator: IntrospectPostValidator | None,
+    allow_write: bool,
+    acknowledged_permissions: list[str] | None,
+) -> ToolResponse:
     artifacts = _persist_introspect_success_artifacts(
         agent_dir=agent_dir,
         sensitive_call_dir=sensitive_call_dir,
@@ -1606,6 +1650,122 @@ def _finalize_introspect_call(
         artifacts=public_artifacts,
         suggested_next_actions=["artifacts.get_manifest", operation_name],
         data=success_response,
+    )
+
+
+def _finalize_introspect_call(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    call_id: str,
+    ssh_result: SshCommandResult,
+    stdout_path: Path,
+    stderr_path: Path,
+    agent_dir: Path,
+    sensitive_call_dir: Path,
+    redactor: Redactor,
+    expected_build_id: str,
+    request_timeout_seconds: int,
+    started_at: datetime,
+    finished_at: datetime,
+    duration_ms: int,
+    operation_name: str,
+    drgn_open_message: str,
+    exec_principal: str | None,
+    post_validator: IntrospectPostValidator | None,
+    allow_write: bool = False,
+    acknowledged_permissions: list[str] | None = None,
+) -> ToolResponse:
+    """Shared post-runner stage for both the live (`_execute_introspect_call`)
+    and offline (`_execute_vmcore_introspect_call`) paths (spec §7 / ADR 0010).
+
+    Everything from the runner-result triage through outcome discrimination,
+    host-side `verify_build_id`, redaction, the `introspect:<call_id>` manifest
+    step, and the success/post-validator response is identical between the two
+    paths; only `expected_build_id`, `exec_principal` (None for vmcore — no SSH
+    user), `operation_name`, `drgn_open_message`, and `post_validator` differ.
+    """
+
+    def _fail(
+        *,
+        category: ErrorCategory,
+        code: str,
+        message: str,
+        raw_stderr: str,
+        ssh_exit: int,
+        outcome_status_for_forensics: str | None,
+        include_stdout_json: bool = False,
+        redacted_payload: dict[str, Any] | None = None,
+    ) -> ToolResponse:
+        return _record_introspect_failure(
+            store=store,
+            run_id=run_id,
+            call_id=call_id,
+            category=category,
+            code=code,
+            message=message,
+            agent_dir=agent_dir,
+            sensitive_dir=sensitive_call_dir,
+            redactor=redactor,
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
+            request_timeout_seconds=request_timeout_seconds,
+            duration_ms=duration_ms,
+            ssh_user=exec_principal,
+            outcome_status_for_forensics=outcome_status_for_forensics,
+            include_stdout_json=include_stdout_json,
+            redacted_payload=redacted_payload,
+            allow_write=allow_write,
+            acknowledged_permissions=acknowledged_permissions,
+        )
+
+    _, raw_stderr, parsed, ssh_exit, terminal = _triage_introspect_runner_output(
+        ssh_result=ssh_result,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        fail=_fail,
+    )
+    if terminal is not None:
+        return terminal
+
+    # JSON parsed. Discriminate on outcome.status per §4.3.
+    redacted_payload = redactor.redact_value(parsed)
+    outcome_obj = redacted_payload.get("outcome") if isinstance(redacted_payload, dict) else None
+    outcome_status = outcome_obj.get("status") if isinstance(outcome_obj, dict) else None
+
+    terminal = _map_introspect_wrapper_failure(
+        parsed=parsed,
+        redacted_payload=redacted_payload,
+        outcome_status=outcome_status,
+        expected_build_id=expected_build_id,
+        drgn_open_message=drgn_open_message,
+        raw_stderr=raw_stderr,
+        ssh_exit=ssh_exit,
+        fail=_fail,
+    )
+    if terminal is not None:
+        return terminal
+
+    return _record_introspect_success(
+        store=store,
+        run_id=run_id,
+        call_id=call_id,
+        ssh_result=ssh_result,
+        agent_dir=agent_dir,
+        sensitive_call_dir=sensitive_call_dir,
+        redacted_payload=redacted_payload,
+        outcome_status=outcome_status,
+        raw_stderr=raw_stderr,
+        redactor=redactor,
+        request_timeout_seconds=request_timeout_seconds,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_ms=duration_ms,
+        operation_name=operation_name,
+        exec_principal=exec_principal,
+        post_validator=post_validator,
+        allow_write=allow_write,
+        acknowledged_permissions=acknowledged_permissions,
     )
 
 
