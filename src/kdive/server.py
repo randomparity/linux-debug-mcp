@@ -115,6 +115,7 @@ from kdive.introspect.execution import (
 from kdive.introspect.execution import (
     _rollback_introspect_admission as _rollback_introspect_admission,
 )
+from kdive.introspect.execution import _target_python_remote_argv as _INTROSPECT_TARGET_PYTHON_REMOTE_ARGV
 from kdive.introspect.handlers import (
     debug_introspect_check_prerequisites_handler,
     debug_introspect_from_vmcore_handler,
@@ -253,6 +254,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_BUILD_PROFILES = _DEFAULT_BUILD_PROFILES
 DEFAULT_DEBUG_PROFILES = _DEFAULT_DEBUG_PROFILES
 DEFAULT_TEST_SUITES = _DEFAULT_TEST_SUITES
+_target_python_remote_argv = _INTROSPECT_TARGET_PYTHON_REMOTE_ARGV
 CreateRunContext = kernel_tools.CreateRunContext
 CreateRunOptions = kernel_tools.CreateRunOptions
 CreateRunProfiles = kernel_tools.CreateRunProfiles

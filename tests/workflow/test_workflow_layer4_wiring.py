@@ -160,14 +160,14 @@ def test_workflow_run_tests_rejects_when_target_halted(tmp_path: Path, monkeypat
     # Provide a default rootfs profile via the run_tests handler's monkey-patched DEFAULT registry so
     # the real handler can resolve the manifest's "minimal" profile to something testable.
     monkeypatch.setattr(
-        "kdive.server.DEFAULT_ROOTFS_PROFILES",
+        "kdive.target.handlers.DEFAULT_ROOTFS_PROFILES",
         {"minimal": rootfs(tmp_path)},
     )
     # The real test provider would actually attempt SSH; replace its plan_tests/execute_tests with a
     # passing FakeTestProvider so the gate is the only thing that can reject. The handler instantiates
     # LocalSshTestProvider() when provider is None, so swap the constructor.
     monkeypatch.setattr(
-        "kdive.server.LocalSshTestProvider",
+        "kdive.target.handlers.LocalSshTestProvider",
         lambda: FakeTestProvider(),
     )
 
