@@ -26,6 +26,7 @@ from kdive.providers.contracts.models import (
 from kdive.providers.handlers import (
     STUB_PROVIDER_OPERATIONS,
     list_providers_handler,
+    stub_provider_operation_handler,
     stub_request_validation_failure_response,
 )
 
@@ -218,7 +219,7 @@ def _register_stub_provider_tool(
                 request = request_factory(*args, **kwargs)
             except ValidationError as exc:
                 return stub_request_validation_failure_response(exc)
-            return provider_operation.handler(request=request).model_dump(mode="json")
+            return stub_provider_operation_handler(request=request, spec=provider_operation).model_dump(mode="json")
 
         tool_wrapper.__name__ = request_factory.__name__
         tool_wrapper.__doc__ = request_factory.__doc__

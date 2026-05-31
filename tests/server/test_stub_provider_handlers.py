@@ -4,12 +4,12 @@ import inspect
 import socket
 import subprocess
 from pathlib import Path
-from typing import get_type_hints
 
 import pytest
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.domain import ToolResponse
+from kdive.providers import handlers as provider_handlers
 from kdive.providers.contracts.models import (
     ConsoleReadRequest,
     ConsoleSessionRequest,
@@ -24,20 +24,7 @@ from kdive.providers.contracts.models import (
     ReservationRequest,
     ReserveProvisionBootRequest,
 )
-from kdive.providers.handlers import (
-    STUB_PROVIDER_OPERATIONS,
-    console_open_session_handler,
-    console_read_handler,
-    console_write_handler,
-    hardware_boot_kernel_handler,
-    hardware_power_control_handler,
-    provision_prepare_target_handler,
-    remote_build_kernel_handler,
-    remote_sync_artifacts_handler,
-    reservation_release_host_handler,
-    reservation_request_host_handler,
-    workflow_reserve_provision_boot_handler,
-)
+from kdive.providers.handlers import STUB_PROVIDER_OPERATIONS
 from kdive.providers.local.build.local_kernel_build import LocalKernelBuildProvider
 from kdive.providers.local.local_ssh_tests import LocalSshTestProvider
 from kdive.providers.local.target.libvirt_qemu import LibvirtQemuProvider
@@ -48,104 +35,104 @@ from kdive.tools import providers as provider_tools
 
 VALID_CALLS = [
     (
-        remote_build_kernel_handler,
+        "remote.build_kernel",
         {
             "architecture": "ppc64le",
             "source_ref": "linux-src",
             "build_profile": "defconfig",
         },
         "remote-build-stub",
-        "remote.build_kernel",
+        RemoteBuildRequest,
     ),
     (
-        remote_sync_artifacts_handler,
+        "remote.sync_artifacts",
         {
             "architecture": "ppc64le",
             "external_artifact_ref": "kernel-image",
         },
         "remote-artifact-sync-stub",
-        "remote.sync_artifacts",
+        RemoteArtifactSyncRequest,
     ),
     (
-        reservation_request_host_handler,
+        "reservation.request_host",
         {
             "architecture": "ppc64le",
             "reservation_pool": "lab-a",
         },
         "reservation-stub",
-        "reservation.request_host",
+        ReservationRequest,
     ),
     (
-        reservation_release_host_handler,
+        "reservation.release_host",
         {
             "architecture": "ppc64le",
             "reservation_id": "reservation-1",
         },
         "reservation-stub",
-        "reservation.release_host",
+        ReservationReleaseRequest,
     ),
     (
-        provision_prepare_target_handler,
+        "provision.prepare_target",
         {
             "architecture": "ppc64le",
             "target_name": "host-01",
             "provisioning_profile": "fedora",
         },
         "provisioning-stub",
-        "provision.prepare_target",
+        ProvisioningRequest,
     ),
     (
-        hardware_power_control_handler,
+        "hardware.power_control",
         {
             "architecture": "ppc64le",
             "target_name": "host-01",
             "action": "cycle",
         },
         "hardware-control-stub",
-        "hardware.power_control",
+        HardwareControlRequest,
     ),
     (
-        hardware_boot_kernel_handler,
+        "hardware.boot_kernel",
         {
             "architecture": "ppc64le",
             "target_name": "host-01",
             "kernel_artifact_ref": "kernel-image",
         },
         "real-boot-stub",
-        "hardware.boot_kernel",
+        RealBootRequest,
     ),
     (
-        console_open_session_handler,
+        "console.open_session",
         {
             "architecture": "ppc64le",
             "target_name": "host-01",
             "access_method": "serial",
         },
         "console-access-stub",
-        "console.open_session",
+        ConsoleSessionRequest,
     ),
     (
-        console_read_handler,
+        "console.read",
         {
             "architecture": "ppc64le",
             "console_session_id": "console-1",
             "max_bytes": 128,
         },
         "console-access-stub",
-        "console.read",
+        ConsoleReadRequest,
     ),
     (
-        console_write_handler,
+        "console.write",
         {
             "architecture": "ppc64le",
             "console_session_id": "console-1",
             "data": "help\n",
         },
         "console-access-stub",
-        "console.write",
+        ConsoleWriteRequest,
     ),
     (
-        workflow_reserve_provision_boot_handler,
+        "workflow.reserve_provision_boot",
         {
             "architecture": "ppc64le",
             "reservation_pool": "lab-a",
@@ -154,27 +141,21 @@ VALID_CALLS = [
             "kernel_artifact_ref": "kernel-image",
         },
         "real-boot-stub",
-        "workflow.reserve_provision_boot",
+        ReserveProvisionBootRequest,
     ),
 ]
 
-REQUEST_BY_HANDLER = {
-    remote_build_kernel_handler: RemoteBuildRequest,
-    remote_sync_artifacts_handler: RemoteArtifactSyncRequest,
-    reservation_request_host_handler: ReservationRequest,
-    reservation_release_host_handler: ReservationReleaseRequest,
-    provision_prepare_target_handler: ProvisioningRequest,
-    hardware_power_control_handler: HardwareControlRequest,
-    hardware_boot_kernel_handler: RealBootRequest,
-    console_open_session_handler: ConsoleSessionRequest,
-    console_read_handler: ConsoleReadRequest,
-    console_write_handler: ConsoleWriteRequest,
-    workflow_reserve_provision_boot_handler: ReserveProvisionBootRequest,
-}
+
+def _request_for(operation: str, payload):
+    return STUB_PROVIDER_OPERATIONS[operation].request_type(**payload)
 
 
-def _request_for(handler, payload):
-    return REQUEST_BY_HANDLER[handler](**payload)
+def _handler_response(operation: str, payload, *, registry=None) -> ToolResponse:
+    return provider_handlers.stub_provider_operation_handler(
+        request=_request_for(operation, payload),
+        spec=STUB_PROVIDER_OPERATIONS[operation],
+        registry=registry,
+    )
 
 
 def _tool_response(tool_name: str, **payload) -> ToolResponse:
@@ -182,11 +163,33 @@ def _tool_response(tool_name: str, **payload) -> ToolResponse:
     return ToolResponse.model_validate(raw)
 
 
-def test_stub_provider_handlers_take_typed_request_models() -> None:
-    signature = inspect.signature(remote_build_kernel_handler)
-    assert "kwargs" not in signature.parameters
-    assert get_type_hints(remote_build_kernel_handler)["request"] is RemoteBuildRequest
-    assert remote_build_kernel_handler.__module__ == "kdive.providers.handlers"
+def test_stub_provider_operation_specs_do_not_carry_repeated_handlers() -> None:
+    from kdive.providers import handlers
+
+    assert hasattr(provider_handlers, "stub_provider_operation_handler")
+    generic_handler = provider_handlers.stub_provider_operation_handler
+    assert inspect.signature(generic_handler).parameters["spec"].annotation != inspect.Signature.empty
+    assert not hasattr(handlers, "StubProviderHandler")
+    for operation, _, _, request_type in VALID_CALLS:
+        spec = STUB_PROVIDER_OPERATIONS[operation]
+        assert spec.operation == operation
+        assert spec.request_type is request_type
+        assert not hasattr(spec, "handler")
+
+    repeated_handler_names = {
+        "remote_build_kernel_handler",
+        "remote_sync_artifacts_handler",
+        "reservation_request_host_handler",
+        "reservation_release_host_handler",
+        "provision_prepare_target_handler",
+        "hardware_power_control_handler",
+        "hardware_boot_kernel_handler",
+        "console_open_session_handler",
+        "console_read_handler",
+        "console_write_handler",
+        "workflow_reserve_provision_boot_handler",
+    }
+    assert repeated_handler_names.isdisjoint(vars(handlers))
 
 
 def test_stub_provider_handlers_are_real_static_functions() -> None:
@@ -209,7 +212,10 @@ def test_stub_provider_runtime_vocabulary_does_not_use_future_terms() -> None:
 
 
 def test_stub_provider_handler_validates_direct_call_request_type() -> None:
-    response = remote_build_kernel_handler(request=ProviderRequest(architecture="ppc64le"))
+    response = provider_handlers.stub_provider_operation_handler(
+        request=ProviderRequest(architecture="ppc64le"),
+        spec=STUB_PROVIDER_OPERATIONS["remote.build_kernel"],
+    )
 
     assert response.ok is False
     assert response.error is not None
@@ -223,29 +229,21 @@ def test_stub_provider_handler_validates_direct_call_request_type() -> None:
     }
 
 
-def test_stub_provider_handlers_are_generated_from_operation_table() -> None:
-    for handler, _, _, operation in VALID_CALLS:
-        spec = STUB_PROVIDER_OPERATIONS[operation]
-        assert spec.handler is handler
-        assert spec.request_type is REQUEST_BY_HANDLER[handler]
-
-
 def test_create_app_registers_stub_provider_tools_through_shared_helper() -> None:
     app = create_app()
 
     assert not hasattr(provider_tools, "_StubProviderPayloadAdapter")
     assert not hasattr(provider_tools, "_provider_payload")
 
-    for _, _, _, operation in VALID_CALLS:
+    for operation, _, _, _ in VALID_CALLS:
         tool = app._tool_manager._tools[operation]
         assert tool.fn.__module__ == "kdive.tools.providers"
 
 
 def test_provider_tools_registration_uses_stub_operation_table() -> None:
-    for handler, _, _, operation in VALID_CALLS:
+    for operation, _, _, request_type in VALID_CALLS:
         spec = STUB_PROVIDER_OPERATIONS[operation]
-        assert spec.handler is handler
-        assert spec.request_type is REQUEST_BY_HANDLER[handler]
+        assert spec.request_type is request_type
 
 
 def test_stub_provider_tool_schema_groups_repeated_provider_metadata() -> None:
@@ -263,7 +261,7 @@ def test_stub_provider_tool_schema_groups_repeated_provider_metadata() -> None:
 def test_stub_provider_tool_request_variation_is_table_driven() -> None:
     specs = provider_tools.STUB_PROVIDER_TOOL_REQUEST_SPECS
 
-    assert set(specs) == {operation for _, _, _, operation in VALID_CALLS}
+    assert set(specs) == {operation for operation, _, _, _ in VALID_CALLS}
     assert specs["remote.build_kernel"].request_type is RemoteBuildRequest
     assert specs["remote.build_kernel"].operation_fields == ("source_ref", "build_profile")
     assert specs["remote.build_kernel"].options_model is provider_tools.RemoteBuildArtifactOptions
@@ -291,9 +289,11 @@ def test_stub_provider_tool_grouped_metadata_reaches_request_validation() -> Non
     assert response.error.category == "configuration_error"
 
 
-@pytest.mark.parametrize(("handler", "payload", "provider_name", "operation"), VALID_CALLS)
-def test_stub_provider_handlers_return_not_implemented(handler, payload, provider_name: str, operation: str) -> None:
-    response = handler(request=_request_for(handler, payload))
+@pytest.mark.parametrize(("operation", "payload", "provider_name", "_request_type"), VALID_CALLS)
+def test_stub_provider_handlers_return_not_implemented(
+    operation: str, payload, provider_name: str, _request_type
+) -> None:
+    response = _handler_response(operation, payload)
 
     assert response.ok is False
     assert response.error is not None
@@ -321,13 +321,14 @@ def test_stub_provider_handler_maps_malformed_requests_to_configuration_error() 
 
 
 def test_explicit_provider_selection_never_falls_back() -> None:
-    response = remote_build_kernel_handler(
+    response = provider_handlers.stub_provider_operation_handler(
         request=RemoteBuildRequest(
             architecture="ppc64le",
             source_ref="linux-src",
             build_profile="defconfig",
             provider_name="reservation-stub",
-        )
+        ),
+        spec=STUB_PROVIDER_OPERATIONS["remote.build_kernel"],
     )
 
     assert response.ok is False
@@ -337,13 +338,14 @@ def test_explicit_provider_selection_never_falls_back() -> None:
 
 
 def test_unknown_explicit_provider_returns_configuration_error() -> None:
-    response = remote_build_kernel_handler(
+    response = provider_handlers.stub_provider_operation_handler(
         request=RemoteBuildRequest(
             architecture="ppc64le",
             source_ref="linux-src",
             build_profile="defconfig",
             provider_name="missing-provider",
-        )
+        ),
+        spec=STUB_PROVIDER_OPERATIONS["remote.build_kernel"],
     )
 
     assert response.ok is False
@@ -383,12 +385,13 @@ def test_ambiguous_implicit_provider_selection_includes_candidate_names() -> Non
     registry.register(first)
     registry.register(first.model_copy(update={"provider_name": "remote-build-stub-2"}))
 
-    response = remote_build_kernel_handler(
+    response = provider_handlers.stub_provider_operation_handler(
         request=RemoteBuildRequest(
             architecture="ppc64le",
             source_ref="linux-src",
             build_profile="defconfig",
         ),
+        spec=STUB_PROVIDER_OPERATIONS["remote.build_kernel"],
         registry=registry,
     )
 
@@ -417,12 +420,12 @@ def test_console_write_validation_does_not_accept_credential_ref_or_echo_payload
     assert "x" * 100 not in dumped
 
 
-@pytest.mark.parametrize(("handler", "payload", "provider_name", "operation"), VALID_CALLS)
+@pytest.mark.parametrize(("operation", "payload", "provider_name", "_request_type"), VALID_CALLS)
 def test_stub_provider_handlers_do_not_create_run_workspace_or_touch_forbidden_dependencies(
-    handler,
+    operation: str,
     payload,
     provider_name: str,
-    operation: str,
+    _request_type,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -442,7 +445,7 @@ def test_stub_provider_handlers_do_not_create_run_workspace_or_touch_forbidden_d
     monkeypatch.setattr(LocalSshTestProvider, "plan_tests", fail_forbidden_dependency)
     monkeypatch.setattr(LibvirtQemuProvider, "plan_boot", fail_forbidden_dependency)
 
-    response = handler(request=_request_for(handler, payload))
+    response = _handler_response(operation, payload)
 
     assert response.error is not None
     assert response.error.category == "not_implemented"
@@ -469,12 +472,13 @@ def test_console_open_ipmi_cipher_zero_is_configuration_error() -> None:
 
 
 def test_console_open_ipmi_default_cipher_reaches_not_implemented() -> None:
-    response = console_open_session_handler(
+    response = provider_handlers.stub_provider_operation_handler(
         request=ConsoleSessionRequest(
             architecture="x86_64",
             target_name="host-01",
             access_method="ipmi-sol",
-        )
+        ),
+        spec=STUB_PROVIDER_OPERATIONS["console.open_session"],
     )
 
     assert response.ok is False
