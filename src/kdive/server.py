@@ -53,15 +53,6 @@ from kdive.debug.bound_handlers import (
     debug_step_handler,
 )
 from kdive.debug.module_symbols import debug_load_module_symbols_handler
-from kdive.debug.operations import (
-    _break_entry_method as _break_entry_method,
-)
-from kdive.debug.operations import (
-    _engine_op_data as _engine_op_data,
-)
-from kdive.debug.operations import (
-    _interrupt_op_data as _interrupt_op_data,
-)
 from kdive.debug.session_end import debug_end_session_handler
 from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.debug.tools import DebugToolContext, DebugToolHandlers, register_debug_tools
@@ -76,13 +67,6 @@ from kdive.domain import (
     StepResult,
     ToolResponse,
 )
-from kdive.introspect.execution import (
-    _record_introspect_failure as _record_introspect_failure,
-)
-from kdive.introspect.execution import (
-    _rollback_introspect_admission as _rollback_introspect_admission,
-)
-from kdive.introspect.execution import _target_python_remote_argv as _INTROSPECT_TARGET_PYTHON_REMOTE_ARGV
 from kdive.introspect.handlers import (
     debug_introspect_check_prerequisites_handler,
     debug_introspect_from_vmcore_handler,
@@ -92,7 +76,6 @@ from kdive.introspect.handlers import (
 )
 from kdive.introspect.tools import register_introspect_tools
 from kdive.kernel import tools as kernel_tools
-from kdive.kernel.handlers import _build_profile_from_manifest as _build_profile_from_manifest
 from kdive.kernel.handlers import kernel_build_handler
 from kdive.postmortem.crash_handler import (
     debug_postmortem_crash_handler,
@@ -139,16 +122,6 @@ from kdive.seams.secrets import (
 )
 from kdive.target import tools as target_tools
 from kdive.target.handlers import DEFAULT_TEST_SUITES as _DEFAULT_TEST_SUITES
-from kdive.target.handlers import _admit_run_tests_ssh_tier as _admit_run_tests_ssh_tier
-from kdive.target.handlers import _artifact_run_relative_ref as _artifact_run_relative_ref
-from kdive.target.handlers import _boot_under_locks as _boot_under_locks
-from kdive.target.handlers import _capture_kernel_provenance as _capture_kernel_provenance
-from kdive.target.handlers import _find_artifact as _find_artifact
-from kdive.target.handlers import _find_kernel_image as _find_kernel_image
-from kdive.target.handlers import _publish_boot_ready_snapshot as _publish_boot_ready_snapshot
-from kdive.target.handlers import _resolve_boot_inputs as _resolve_boot_inputs
-from kdive.target.handlers import _ssh_host_is_unset_or_loopback as _ssh_host_is_unset_or_loopback
-from kdive.target.handlers import _validated_guest_ip as _validated_guest_ip
 from kdive.target.handlers import target_boot_handler, target_run_tests_handler
 from kdive.tools.artifacts import register_artifact_tools
 from kdive.tools.providers import register_provider_tools
@@ -157,9 +130,6 @@ from kdive.transport.base import (
     Transport,
     TransportLocality,
     TransportRegistry,
-)
-from kdive.transport.handlers import (
-    _halt_debug_transport as _halt_debug_transport,
 )
 from kdive.transport.handlers import (
     transport_close_handler,
@@ -182,7 +152,6 @@ DEFAULT_DEBUG_PROFILES = _DEFAULT_DEBUG_PROFILES
 DEFAULT_ROOTFS_PROFILES = _DEFAULT_ROOTFS_PROFILES
 DEFAULT_TARGET_PROFILES = _DEFAULT_TARGET_PROFILES
 DEFAULT_TEST_SUITES = _DEFAULT_TEST_SUITES
-_target_python_remote_argv = _INTROSPECT_TARGET_PYTHON_REMOTE_ARGV
 CreateRunContext = kernel_tools.CreateRunContext
 CreateRunOptions = kernel_tools.CreateRunOptions
 CreateRunProfiles = kernel_tools.CreateRunProfiles

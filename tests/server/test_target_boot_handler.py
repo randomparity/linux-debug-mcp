@@ -12,7 +12,6 @@ from conftest import (
     target_profile,
 )
 
-from kdive import server
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, BootOverrides, RootfsOverrides, RootfsProfile, TargetProfile
 from kdive.coordination.admission import AdmissionService, SnapshotStore
@@ -20,6 +19,7 @@ from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, Too
 from kdive.providers.local.target.libvirt_qemu import BootExecutionResult, ProviderBootError
 from kdive.seams.target import TargetKey
 from kdive.server import target_boot_handler
+from kdive.target import handlers as target_handlers
 
 
 def boot(
@@ -85,7 +85,7 @@ def test_resolve_boot_inputs_returns_internal_failure_not_tool_response(tmp_path
     artifact_root = create_run(tmp_path)
     manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
 
-    result = server._resolve_boot_inputs(
+    result = target_handlers._resolve_boot_inputs(
         manifest=manifest,
         run_id="run-abc123",
         target_profile=None,

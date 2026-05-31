@@ -444,8 +444,8 @@ def test_server_no_longer_reexports_private_debug_operation_helpers() -> None:
         assert not hasattr(server_module, name)
 
     for name in ("_target_python_remote_argv", "_record_introspect_failure"):
-        assert getattr(server_module, name) is getattr(introspect_execution, name)
-        assert getattr(server_module, name).__module__ == "kdive.introspect.execution"
+        assert hasattr(introspect_execution, name)
+        assert not hasattr(server_module, name)
 
     assert not hasattr(server_module, "_redact_and_truncate")
 

@@ -12,8 +12,8 @@ import struct
 
 import pytest
 
-import kdive.server as server
 from kdive.coordination.registry import RecoveryTombstone, SessionRegistry
+from kdive.debug import operations as debug_operations
 from kdive.debug.handlers import DebugReadMemoryRequest
 from kdive.domain import ErrorCategory
 from kdive.postmortem.dumps import is_within_dump_dir, parse_dump_listing
@@ -55,7 +55,7 @@ class _RecordingEngine:
 
 
 def _read_memory(engine: _RecordingEngine, *, address: object, byte_count: object) -> dict[str, object]:
-    return server._engine_op_data(
+    return debug_operations._engine_op_data(
         engine=engine,  # type: ignore[arg-type]
         attachment=object(),  # type: ignore[arg-type]
         request=DebugReadMemoryRequest(address=address, byte_count=byte_count),  # type: ignore[arg-type]

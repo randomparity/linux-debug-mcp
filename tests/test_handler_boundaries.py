@@ -60,3 +60,32 @@ def test_target_probe_helpers_live_in_domain_named_module() -> None:
     assert "def _parse_probe_stdout(" not in shared_source
     assert "from kdive.target.probes import" in introspect_source
     assert "from kdive.target.probes import" in postmortem_source
+
+
+def test_server_does_not_reexport_private_feature_helpers() -> None:
+    import kdive.server as server
+
+    private_feature_helpers = {
+        "_admit_run_tests_ssh_tier",
+        "_artifact_run_relative_ref",
+        "_boot_under_locks",
+        "_break_entry_method",
+        "_build_profile_from_manifest",
+        "_capture_kernel_provenance",
+        "_engine_op_data",
+        "_find_artifact",
+        "_find_kernel_image",
+        "_halt_debug_transport",
+        "_interrupt_op_data",
+        "_publish_boot_ready_snapshot",
+        "_record_introspect_failure",
+        "_resolve_boot_inputs",
+        "_rollback_introspect_admission",
+        "_ssh_host_is_unset_or_loopback",
+        "_target_python_remote_argv",
+        "_validated_guest_ip",
+    }
+
+    leaked = sorted(name for name in private_feature_helpers if hasattr(server, name))
+
+    assert leaked == []

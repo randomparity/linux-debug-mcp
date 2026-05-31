@@ -9,9 +9,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from kdive.coordination.transaction import TransportTransaction
+from kdive.debug.operations import _break_entry_method, _interrupt_op_data
 from kdive.providers.local.debug.gdb_mi import StopRecord
 from kdive.seams.target import TargetKey
-from kdive.server import _break_entry_method, _interrupt_op_data
 from kdive.transport.base import BreakMethod, BreakPlan, TransportSession
 from kdive.transport.break_inject import InjectBreakError
 

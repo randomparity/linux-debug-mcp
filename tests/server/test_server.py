@@ -8,6 +8,7 @@ from kdive.artifacts.store import ArtifactStore
 from kdive.config import BootOverrides, BuildOverrides, RootfsProfile, TargetProfile
 from kdive.debug import operations as debug_operations
 from kdive.domain import ArtifactRef, StepResult, StepStatus
+from kdive.kernel import handlers as kernel_handlers
 from kdive.prereqs.checks import PortProbeResult
 from kdive.providers.handlers import list_providers_handler
 from kdive.server import (
@@ -18,7 +19,6 @@ from kdive.server import (
     not_implemented_handler,
     prerequisites_handler,
 )
-from kdive.transport import handlers as transport_handlers
 
 
 def _get_tool_fn(app, name):
@@ -44,8 +44,11 @@ def tool_names() -> set[str]:
     return set(create_app()._tool_manager._tools)
 
 
-def test_server_reuses_transport_halt_helper() -> None:
-    assert server._halt_debug_transport is transport_handlers._halt_debug_transport
+def test_transport_halt_helper_is_not_reexported_by_server() -> None:
+    from kdive.transport import handlers as transport_handlers
+
+    assert hasattr(transport_handlers, "_halt_debug_transport")
+    assert not hasattr(server, "_halt_debug_transport")
 
 
 def test_create_run_handler_creates_manifest(tmp_path: Path) -> None:
@@ -659,7 +662,7 @@ def test_build_reads_resolved_profile_not_global(tmp_path):
     run_id = created.run_id
     store = server.ArtifactStore(tmp_path / "runs", create_root=False)
     manifest = store.load_manifest(run_id)
-    resolved = server._build_profile_from_manifest(manifest)
+    resolved = kernel_handlers._build_profile_from_manifest(manifest)
     assert resolved.make_variables == {"CC": "clang"}
 
 
@@ -676,7 +679,7 @@ def test_build_profile_from_manifest_v1_fallback():
             rootfs_profile="minimal",
         ),
     )  # resolved_build_profile is None
-    resolved = server._build_profile_from_manifest(manifest)
+    resolved = kernel_handlers._build_profile_from_manifest(manifest)
     assert resolved.name == "x86_64-default"
 
 

@@ -52,7 +52,6 @@ from kdive.seams.target import (
     TargetKey,
 )
 from kdive.server import (
-    _halt_debug_transport,
     create_app,
     debug_start_session_handler,
     target_run_tests_handler,
@@ -65,6 +64,7 @@ from kdive.transport.base import (
     TransportSession,
     new_session_id,
 )
+from kdive.transport.handlers import _halt_debug_transport
 
 RUN_ID = "run-1"
 GDBSTUB_ENDPOINT = {"host": "127.0.0.1", "port": 1234}

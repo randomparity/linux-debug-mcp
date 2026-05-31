@@ -24,10 +24,10 @@ from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard, SessionGuardContext
 from kdive.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleEvent, LifecycleKind
 from kdive.server import (
-    _admit_run_tests_ssh_tier,
     debug_end_session_handler,
     debug_start_session_handler,
 )
+from kdive.target.handlers import _admit_run_tests_ssh_tier
 from kdive.transport.base import LineRole, TransportRef
 
 from kdive.artifacts.store import ArtifactStore  # isort: skip

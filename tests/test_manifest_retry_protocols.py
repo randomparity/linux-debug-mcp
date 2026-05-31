@@ -22,7 +22,8 @@ def test_manifest_step_retry_helper_is_store_owned() -> None:
 
 
 def test_server_reuses_extracted_introspect_rollback_helper() -> None:
-    assert server._rollback_introspect_admission is introspect_execution._rollback_introspect_admission
+    assert not hasattr(server, "_rollback_introspect_admission")
+    assert hasattr(introspect_execution, "_rollback_introspect_admission")
 
 
 def test_postmortem_dump_handlers_are_owned_by_postmortem_module() -> None:

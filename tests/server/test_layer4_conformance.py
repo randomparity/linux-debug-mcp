@@ -82,7 +82,6 @@ from kdive.seams.target import (
     TargetState,
 )
 from kdive.server import (
-    _halt_debug_transport,
     debug_continue_handler,
     debug_read_registers_handler,
     target_boot_handler,
@@ -100,6 +99,7 @@ from kdive.transport.base import (
     TransportSession,
     new_session_id,
 )
+from kdive.transport.handlers import _halt_debug_transport
 
 RUN_ID_FRESH = "run-abc123"  # matches conftest.create_booted_run default
 FRESH_KEY = TargetKey(provisioner="local-qemu", target_id=RUN_ID_FRESH)
