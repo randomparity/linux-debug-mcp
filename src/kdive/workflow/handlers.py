@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
+from kdive.artifacts.manifest import RunManifest
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
@@ -105,6 +106,12 @@ class WorkflowHandlerDependencies:
     artifacts_collect_handler: ArtifactsCollectHandler
 
 
+@dataclass(frozen=True)
+class _ExistingWorkflowRunValidation:
+    manifest: RunManifest
+    resolved_optional: str | None
+
+
 _WORKFLOW_DEPENDENCIES: WorkflowHandlerDependencies | None = None
 
 
@@ -138,6 +145,69 @@ def _workflow_dependencies() -> WorkflowHandlerDependencies:
     if _WORKFLOW_DEPENDENCIES is None:
         raise RuntimeError("workflow handler dependencies have not been configured")
     return _WORKFLOW_DEPENDENCIES
+
+
+def _validate_existing_workflow_run_request(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    source_path: str,
+    build_profile: str,
+    target_profile: str,
+    rootfs_profile: str,
+    optional_field: Literal["test_suite", "debug_profile"],
+    requested_optional: str | None,
+    optional_policy: Literal["always", "when_manifest_set"],
+) -> tuple[_ExistingWorkflowRunValidation | None, ToolResponse | None]:
+    try:
+        store = ArtifactStore(artifact_root, create_root=False)
+        manifest_path = store.run_dir(run_id) / "manifest.json"
+        if not manifest_path.is_file():
+            return None, None
+        manifest = store.load_manifest(run_id)
+    except ManifestStateError as exc:
+        return None, ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+
+    manifest_optional = getattr(manifest.request, optional_field)
+    resolved_optional = requested_optional if requested_optional is not None else manifest_optional
+    try:
+        resolved_source_path = str(validate_source_path(Path(source_path)))
+    except PathSafetyError as exc:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            message=str(exc),
+            run_id=run_id,
+            details={"source_path": source_path},
+        )
+
+    expected = {
+        "source_path": resolved_source_path,
+        "build_profile": build_profile,
+        "target_profile": target_profile,
+        "rootfs_profile": rootfs_profile,
+    }
+    actual = {
+        "source_path": manifest.request.source_path,
+        "build_profile": manifest.request.build_profile,
+        "target_profile": manifest.request.target_profile,
+        "rootfs_profile": manifest.request.rootfs_profile,
+    }
+    include_optional = optional_policy == "always" or manifest_optional is not None
+    if include_optional:
+        expected[optional_field] = resolved_optional
+        actual[optional_field] = manifest_optional
+
+    mismatches = {
+        key: {"requested": expected[key], "manifest": actual[key]} for key in expected if expected[key] != actual[key]
+    }
+    if mismatches:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            message="immutable run manifest request mismatch",
+            run_id=run_id,
+            details={"mismatches": mismatches},
+        )
+    return _ExistingWorkflowRunValidation(manifest=manifest, resolved_optional=resolved_optional), None
 
 
 def _workflow_failure_response(
@@ -189,50 +259,21 @@ def workflow_build_boot_test_handler(
 ) -> ToolResponse:
     dependencies = dependencies or _workflow_dependencies()
     if run_id is not None:
-        try:
-            store = ArtifactStore(artifact_root, create_root=False)
-            manifest_path = store.run_dir(run_id) / "manifest.json"
-            if manifest_path.is_file():
-                manifest = store.load_manifest(run_id)
-                resolved_test_suite = test_suite if test_suite is not None else manifest.request.test_suite
-                try:
-                    resolved_source_path = str(validate_source_path(Path(source_path)))
-                except PathSafetyError as exc:
-                    return ToolResponse.failure(
-                        category=ErrorCategory.CONFIGURATION_ERROR,
-                        message=str(exc),
-                        run_id=run_id,
-                        details={"source_path": source_path},
-                    )
-                expected = {
-                    "source_path": resolved_source_path,
-                    "build_profile": build_profile,
-                    "target_profile": target_profile,
-                    "rootfs_profile": rootfs_profile,
-                    "test_suite": resolved_test_suite,
-                }
-                actual = {
-                    "source_path": manifest.request.source_path,
-                    "build_profile": manifest.request.build_profile,
-                    "target_profile": manifest.request.target_profile,
-                    "rootfs_profile": manifest.request.rootfs_profile,
-                    "test_suite": manifest.request.test_suite,
-                }
-                mismatches = {
-                    key: {"requested": expected[key], "manifest": actual[key]}
-                    for key in expected
-                    if expected[key] != actual[key]
-                }
-                if mismatches:
-                    return ToolResponse.failure(
-                        category=ErrorCategory.CONFIGURATION_ERROR,
-                        message="immutable run manifest request mismatch",
-                        run_id=run_id,
-                        details={"mismatches": mismatches},
-                    )
-                test_suite = resolved_test_suite
-        except ManifestStateError as exc:
-            return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+        validation, validation_failure = _validate_existing_workflow_run_request(
+            artifact_root=artifact_root,
+            run_id=run_id,
+            source_path=source_path,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            optional_field="test_suite",
+            requested_optional=test_suite,
+            optional_policy="always",
+        )
+        if validation_failure is not None:
+            return validation_failure
+        if validation is not None:
+            test_suite = validation.resolved_optional
 
     if run_id is None or not (artifact_root / run_id / "manifest.json").is_file():
         create_response = dependencies.create_run_handler(
@@ -374,55 +415,21 @@ def workflow_build_boot_debug_handler(
 ) -> ToolResponse:
     dependencies = dependencies or _workflow_dependencies()
     if run_id is not None:
-        try:
-            store = ArtifactStore(artifact_root, create_root=False)
-            manifest_path = store.run_dir(run_id) / "manifest.json"
-            if manifest_path.is_file():
-                manifest = store.load_manifest(run_id)
-                resolved_debug_profile = debug_profile if debug_profile is not None else manifest.request.debug_profile
-                try:
-                    resolved_source_path = str(validate_source_path(Path(source_path)))
-                except PathSafetyError as exc:
-                    return ToolResponse.failure(
-                        category=ErrorCategory.CONFIGURATION_ERROR,
-                        message=str(exc),
-                        run_id=run_id,
-                        details={"source_path": source_path},
-                    )
-                expected = {
-                    "source_path": resolved_source_path,
-                    "build_profile": build_profile,
-                    "target_profile": target_profile,
-                    "rootfs_profile": rootfs_profile,
-                    **({"debug_profile": resolved_debug_profile} if manifest.request.debug_profile is not None else {}),
-                }
-                actual = {
-                    "source_path": manifest.request.source_path,
-                    "build_profile": manifest.request.build_profile,
-                    "target_profile": manifest.request.target_profile,
-                    "rootfs_profile": manifest.request.rootfs_profile,
-                    **(
-                        {"debug_profile": manifest.request.debug_profile}
-                        if manifest.request.debug_profile is not None
-                        else {}
-                    ),
-                }
-                mismatches = {
-                    key: {"requested": expected[key], "manifest": actual[key]}
-                    for key in expected
-                    if expected[key] != actual[key]
-                }
-                if mismatches:
-                    return ToolResponse.failure(
-                        category=ErrorCategory.CONFIGURATION_ERROR,
-                        message="immutable run manifest request mismatch",
-                        run_id=run_id,
-                        details={"mismatches": mismatches},
-                    )
-                if manifest.request.debug_profile is not None or debug_profile is None:
-                    debug_profile = resolved_debug_profile
-        except ManifestStateError as exc:
-            return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+        validation, validation_failure = _validate_existing_workflow_run_request(
+            artifact_root=artifact_root,
+            run_id=run_id,
+            source_path=source_path,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            optional_field="debug_profile",
+            requested_optional=debug_profile,
+            optional_policy="when_manifest_set",
+        )
+        if validation_failure is not None:
+            return validation_failure
+        if validation is not None and (validation.manifest.request.debug_profile is not None or debug_profile is None):
+            debug_profile = validation.resolved_optional
 
     if run_id is None or not (artifact_root / run_id / "manifest.json").is_file():
         create_response = dependencies.create_run_handler(
