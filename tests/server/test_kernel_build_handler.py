@@ -358,6 +358,7 @@ def test_kernel_build_existing_running_state_fails_without_rerun(tmp_path: Path)
     )
 
     assert response.ok is False
+    assert response.status == StepStatus.RUNNING
     assert response.error is not None
     assert response.error.category == "infrastructure_failure"
     assert "previous build is still recorded as running" in response.error.message
@@ -379,6 +380,7 @@ def test_kernel_build_existing_running_state_takes_precedence_over_missing_sourc
     response = kernel_build_handler(artifact_root=artifact_root, run_id="run-abc123")
 
     assert response.ok is False
+    assert response.status == StepStatus.RUNNING
     assert response.error is not None
     assert response.error.category == "infrastructure_failure"
     assert "previous build is still recorded as running" in response.error.message

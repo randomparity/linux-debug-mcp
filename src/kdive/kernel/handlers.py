@@ -38,6 +38,7 @@ def _running_build_response(*, run_id: str, result: StepResult) -> ToolResponse:
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         message=RUNNING_BUILD_MESSAGE,
         run_id=run_id,
+        status=StepStatus.RUNNING,
         details=Redactor().redact_value(result.details),
         suggested_next_actions=["artifacts.get_manifest"],
     )

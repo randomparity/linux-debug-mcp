@@ -219,6 +219,27 @@ def test_run_tests_returns_recorded_success_without_force_rerun(tmp_path: Path) 
     assert provider.executions == 1
 
 
+def test_run_tests_existing_running_state_reports_running_status(tmp_path: Path) -> None:
+    artifact_root = create_booted_run(tmp_path)
+    store = ArtifactStore(artifact_root, create_root=False)
+    running = StepResult(step_name="run_tests", status=StepStatus.RUNNING, summary="tests running")
+    store.record_step_result("run-abc123", running)
+
+    with store.tests_lock("run-abc123"):
+        response = target_run_tests_handler(
+            artifact_root=artifact_root,
+            run_id="run-abc123",
+            provider=FakeTestProvider(),
+            rootfs_profiles={"minimal": rootfs(tmp_path)},
+            test_suites=suites(),
+        )
+
+    assert response.ok is False
+    assert response.status == StepStatus.RUNNING
+    assert response.error is not None
+    assert "previous test run is still recorded as running" in response.error.message
+
+
 def test_run_tests_force_rerun_replaces_success(tmp_path: Path) -> None:
     artifact_root = create_booted_run(tmp_path)
     provider = FakeTestProvider()

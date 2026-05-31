@@ -412,6 +412,7 @@ def test_target_boot_concurrent_calls_use_boot_lock(tmp_path: Path) -> None:
     assert len(provider.executions) == 1
     assert len(provider.plans) == 1
     assert {response.ok for response in [*responses, second]} == {True, False}
+    assert second.status == StepStatus.RUNNING
     assert second.error is not None
     assert "previous boot is still recorded as running" in second.error.message
 
