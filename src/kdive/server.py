@@ -181,6 +181,7 @@ from kdive.providers.local.local_ssh_tests import (
 )
 from kdive.providers.local.qemu_gdbstub import (
     DebugSession,
+    DebugSessionState,
     ProviderDebugError,
 )
 from kdive.rootfs.sources import RootfsSourceError, resolve_rootfs_source
@@ -3619,7 +3620,7 @@ def _build_mi_debug_session(
         attach_status="attached",
         started_at=started_at,
         ended_at=None,
-        current_execution_state="stopped",
+        current_execution_state=DebugSessionState.STOPPED,
         breakpoints={},
         controller_mode="attached",
         active_controller_pid=None,
@@ -4349,7 +4350,7 @@ def _end_mi_debug_session(
             profile = _resolve_debug_profile(profile_name=session.selected_debug_profile, debug_profiles=debug_profiles)
             _ensure_debug_operation_enabled(profile, "debug.end_session")
             ended = session.model_copy(
-                update={"current_execution_state": "ended", "ended_at": datetime.now(UTC).isoformat()}
+                update={"current_execution_state": DebugSessionState.ENDED, "ended_at": datetime.now(UTC).isoformat()}
             )
             # Durably record ENDED BEFORE the irreversible reap+force_resume. A disk/manifest fault
             # here must leave the live attachment intact and the durable record legitimately HALTED

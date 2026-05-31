@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import Field
@@ -21,6 +22,13 @@ QEMU_GDBSTUB_OPERATIONS = [
     "workflow.build_boot_debug",
     *[op for op in ALLOWED_DEBUG_OPERATIONS if op != "debug.introspect.run"],
 ]
+
+
+class DebugSessionState(StrEnum):
+    UNKNOWN = "unknown"
+    RUNNING = "running"
+    STOPPED = "stopped"
+    ENDED = "ended"
 
 
 def local_qemu_gdbstub_capability() -> ProviderCapability:
@@ -60,7 +68,7 @@ class DebugSession(Model):
     attach_status: str
     started_at: str
     ended_at: str | None = None
-    current_execution_state: Literal["unknown", "running", "stopped", "ended"] = "unknown"
+    current_execution_state: DebugSessionState = DebugSessionState.UNKNOWN
     breakpoints: dict[str, dict[str, object]] = Field(default_factory=dict)
     # Phase D (#82): module name -> {".text": "0x...", ...} loaded at runtime addresses via
     # add-symbol-file. Keyed by module name; the .text address is the idempotency key.

@@ -11,7 +11,7 @@ from kdive.domain import (
 )
 from kdive.model import Model
 from kdive.providers.compat import LEGACY_PROVIDER_MODULES
-from kdive.providers.local.qemu_gdbstub import DebugSession
+from kdive.providers.local.qemu_gdbstub import DebugSession, DebugSessionState
 from kdive.providers.plugins import ProviderPluginSpec, local_provider_plugin_specs
 from kdive.providers.registry import ProviderRegistry
 
@@ -55,6 +55,28 @@ def test_registry_rejects_duplicate_names() -> None:
 def test_debug_session_uses_shared_model_base() -> None:
     assert issubclass(DebugSession, Model)
     assert DebugSession.__bases__ == (Model,)
+
+
+def test_debug_session_state_is_typed_and_serializes_as_string() -> None:
+    session = DebugSession(
+        session_id="debug-1",
+        run_id="run-1",
+        provider_name="local-qemu-gdbstub",
+        gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
+        vmlinux_path="/tmp/vmlinux",
+        selected_debug_profile="qemu-gdbstub-default",
+        attach_status="attached",
+        started_at="2026-01-01T00:00:00+00:00",
+        current_execution_state="stopped",
+        transcript_path="/tmp/transcript.log",
+        command_metadata_path="/tmp/commands.jsonl",
+        latest_summary_path="/tmp/debug-summary.json",
+    )
+
+    assert session.current_execution_state is DebugSessionState.STOPPED
+    reloaded = DebugSession.model_validate_json(session.model_dump_json())
+    assert reloaded.current_execution_state is DebugSessionState.STOPPED
+    assert session.model_dump(mode="json")["current_execution_state"] == "stopped"
 
 
 def test_registry_get_unknown_provider_has_contextual_error() -> None:

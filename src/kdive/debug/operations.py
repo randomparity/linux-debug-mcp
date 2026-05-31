@@ -21,7 +21,7 @@ from kdive.providers.local.gdb_mi import (
     GdbMiError,
     GdbMiSessionRegistry,
 )
-from kdive.providers.local.qemu_gdbstub import DebugSession, ProviderDebugError
+from kdive.providers.local.qemu_gdbstub import DebugSession, DebugSessionState, ProviderDebugError
 from kdive.safety.redaction import Redactor
 from kdive.seams.guard import SessionGuard, SessionGuardContext
 from kdive.seams.target import TargetKey
@@ -74,7 +74,7 @@ def _debug_session_manifest_details(*, store: ArtifactStore, run_id: str, sessio
     details: dict[str, Any] = {
         "debug_session_id": session.session_id,
         "session_path": str(store.run_dir(run_id) / "debug" / "sessions" / f"{session.session_id}.json"),
-        "current_execution_state": session.current_execution_state,
+        "current_execution_state": session.current_execution_state.value,
         "gdbstub_endpoint": session.gdbstub_endpoint,
         "transcript_path": session.transcript_path,
         "command_metadata_path": session.command_metadata_path,
@@ -260,7 +260,8 @@ def _load_active_debug_session(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"session_path": str(session_path), "session_id": session.session_id},
         )
-    if (not allow_ended and session.current_execution_state == "ended") or session.attach_status != "attached":
+    ended_state_refused = not allow_ended and session.current_execution_state is DebugSessionState.ENDED
+    if ended_state_refused or session.attach_status != "attached":
         raise ProviderDebugError(
             "active debug session required",
             category=ErrorCategory.CONFIGURATION_ERROR,
@@ -466,7 +467,7 @@ def _engine_op_data(
     if method_name in _EXEC_VERBS:
         timeout = kwargs.get("timeout_seconds")
         stop = _EXEC_VERBS[method_name](engine, attachment, timeout)
-        return {"stop": stop.model_dump(mode="json"), "current_execution_state": "stopped"}
+        return {"stop": stop.model_dump(mode="json"), "current_execution_state": DebugSessionState.STOPPED.value}
     raise GdbMiError(
         "unsupported debug operation", category=ErrorCategory.CONFIGURATION_ERROR, details={"operation": method_name}
     )
@@ -526,8 +527,8 @@ def _interrupt_op_data(
     # claiming HALTED would mislead the agent (matching the fail-closed posture of the dedicated
     # transport.inject_break tool, which post-probes and reports UNKNOWN when unconfirmed).
     if stop is None:
-        return {"stop": None, "current_execution_state": "unknown"}
-    return {"stop": stop.model_dump(mode="json"), "current_execution_state": "stopped"}
+        return {"stop": None, "current_execution_state": DebugSessionState.UNKNOWN.value}
+    return {"stop": stop.model_dump(mode="json"), "current_execution_state": DebugSessionState.STOPPED.value}
 
 
 def _mi_session_artifacts(*, store: ArtifactStore, run_id: str, session: DebugSession) -> list[ArtifactRef]:
