@@ -258,6 +258,19 @@ def test_debug_start_session_handler_lives_in_debug_layer() -> None:
     assert "from kdive.server import" not in session_handler_source
 
 
+def test_debug_start_session_handler_is_split_into_named_phases() -> None:
+    session_handler_source = Path(debug_start_session_handler.__code__.co_filename).read_text(encoding="utf-8")
+
+    for phase_name in (
+        "_debug_start_session_preflight",
+        "_debug_start_session_locked_attach",
+        "_debug_start_session_persist_success",
+        "_cleanup_debug_start_session_attach",
+        "_debug_start_session_success_response",
+    ):
+        assert f"def {phase_name}" in session_handler_source
+
+
 def test_debug_operation_handlers_use_typed_operation_requests() -> None:
     """Handlers should construct typed operation requests instead of string names and kwargs bags."""
     assert not hasattr(debug_handlers, "DEBUG_HANDLER_OPERATION_SPECS")
