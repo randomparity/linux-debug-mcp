@@ -1,5 +1,4 @@
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -284,29 +283,47 @@ def test_run_is_killed_on_cancel(tmp_path: Path) -> None:
     runner = SubprocessSshRunner()
     cancel = threading.Event()
     out, err = tmp_path / "o", tmp_path / "e"
-    t = threading.Timer(0.2, cancel.set)
-    t.start()
-    start = time.monotonic()
-    result = runner.run(["sleep", "30"], timeout=30, stdout_path=out, stderr_path=err, cancel=cancel)
-    t.cancel()
-    assert time.monotonic() - start < 5  # killed, not waited 30s
+    ready_path = tmp_path / "ready"
+    program = (
+        "from pathlib import Path\n"
+        "import signal\n"
+        f"Path({str(ready_path)!r}).write_text('ready', encoding='utf-8')\n"
+        "signal.pause()\n"
+    )
+    result_holder: list[SshCommandResult] = []
+    run_done = threading.Event()
+
+    def run_command() -> None:
+        result_holder.append(
+            runner.run(["python3", "-c", program], timeout=30, stdout_path=out, stderr_path=err, cancel=cancel)
+        )
+        run_done.set()
+
+    thread = threading.Thread(target=run_command)
+    thread.start()
+    assert _wait_for_file(ready_path)
+    cancel.set()
+    assert run_done.wait(timeout=5)
+    thread.join()
+    result = result_holder[0]
+
     assert result.cancelled is True
 
 
 def test_run_is_killed_when_stdout_exceeds_cap(tmp_path: Path) -> None:
     runner = SubprocessSshRunner()
     out, err = tmp_path / "o", tmp_path / "e"
+    ready_path = tmp_path / "ready"
     cap = 4096
-    # Stream stdout in bounded chunks with a small pause so the 0.1s poll loop
-    # observes the cap breach and kills the process group before disk balloons.
     program = (
-        "import sys, time\n"
-        "while True:\n"
-        "    sys.stdout.write('x' * 1000)\n"
-        "    sys.stdout.flush()\n"
-        "    time.sleep(0.02)\n"
+        "from pathlib import Path\n"
+        "import signal\n"
+        "import sys\n"
+        f"Path({str(ready_path)!r}).write_text('ready', encoding='utf-8')\n"
+        f"sys.stdout.write('x' * {cap + 1})\n"
+        "sys.stdout.flush()\n"
+        "signal.pause()\n"
     )
-    start = time.monotonic()
     result = runner.run(
         ["python3", "-c", program],
         timeout=30,
@@ -314,8 +331,16 @@ def test_run_is_killed_when_stdout_exceeds_cap(tmp_path: Path) -> None:
         stderr_path=err,
         max_stdout_bytes=cap,
     )
-    assert time.monotonic() - start < 5  # killed by the cap, not the 30s timeout
+    assert ready_path.read_text(encoding="utf-8") == "ready"
     assert result.oversized_output is True
     assert result.timed_out is False
     assert result.exit_status == -1
     assert out.stat().st_size > cap
+
+
+def _wait_for_file(path: Path, *, attempts: int = 500) -> bool:
+    for _ in range(attempts):
+        if path.exists():
+            return True
+        threading.Event().wait(0.01)
+    return path.exists()
