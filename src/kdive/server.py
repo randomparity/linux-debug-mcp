@@ -238,13 +238,6 @@ DEFAULT_ARTIFACT_ROOT = Path(".kdive/runs")
 SERVER_CONFIG_ENV_VAR = "KDIVE_CONFIG"
 RUNNING_BOOT_MESSAGE = "previous boot is still recorded as running"
 RUNNING_TESTS_MESSAGE = "previous test run is still recorded as running"
-# Spec §6/§7: bound the probe's local footprint at three layers. The streaming
-# cap passed to the SSH runner (max_stdout_bytes) kills the probe the moment its
-# transcript on disk exceeds the cap, so a noisy/hostile target cannot fill local
-# disk within the timeout window; `_read_capped` is the post-run backstop that
-# guards json.loads memory (and covers direct-write test fakes that bypass the
-# streaming path); wall-clock is bounded by the remote `timeout` prefix.
-PROBE_STDOUT_CAP = 256 * 1024
 # debug.introspect.run stdout cap. Sized above the wrapper's 1 MiB total_json
 # payload (local_drgn_introspect.py) so a legitimate run is never killed, while
 # still bounding a hostile target that ignores the wrapper.

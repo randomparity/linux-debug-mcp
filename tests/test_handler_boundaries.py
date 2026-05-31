@@ -25,6 +25,8 @@ def test_extracted_handler_modules_do_not_import_server_module() -> None:
 def test_server_does_not_own_shared_probe_helpers() -> None:
     server_source = SERVER_SOURCE.read_text(encoding="utf-8")
 
+    assert "PROBE_STDOUT_CAP =" not in server_source
+
     duplicated_helpers = [
         "_resolve_probe_context",
         "_reject_if_target_halted",
