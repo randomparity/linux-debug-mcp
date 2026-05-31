@@ -59,6 +59,7 @@ class FakeQemuTransport(Transport):
         self._backend_pid = backend_pid
         self._backend_start_time = backend_start_time
         self.closed: list[str] = []
+        self._proxy = None  # a test may assign a reap proxy; reap_backend() delegates to it (TD-07)
 
     @property
     def capability(self) -> TransportCapability:
@@ -90,6 +91,12 @@ class FakeQemuTransport(Transport):
 
     def health(self, session) -> str:
         return "ready"
+
+    def reap_backend(self, pid, start_time) -> None:
+        # Real transports override the TD-07 hook to reach their proxy; the fake delegates to a
+        # test-assigned `_proxy` (e.g. FakeBlockingReapProxy) so reap behavior stays observable.
+        if self._proxy is not None:
+            self._proxy.stop_by_identity(pid, start_time)
 
 
 class FakeBrokeredTransport(FakeQemuTransport):

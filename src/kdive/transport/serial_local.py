@@ -539,6 +539,12 @@ class SerialLocalTransport(Transport):
         if isinstance(console, UnixSocketEndpoint):
             self._close_console_only(console.path)
 
+    def reap_backend(self, pid: int, start_time: str | None) -> None:
+        # Start-time-fenced kill of the agent-proxy backend (ADR 0004); the single TD-07 reap hook
+        # Layer-4 teardown/rollback call instead of reaching transport._proxy directly. May raise;
+        # the caller suppresses.
+        self._proxy.stop_by_identity(pid, start_time)
+
     def _close_demux(self, session: TransportSession) -> None:
         pid = session.backend_pid
         if pid is None:  # callers (close/health) only reach here for a demuxed session
