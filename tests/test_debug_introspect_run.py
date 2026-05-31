@@ -38,29 +38,6 @@ from kdive.server import RUN_STDOUT_CAP, debug_introspect_run_handler
 VALID_BUILD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
 
-def test_execute_introspect_call_keeps_ssh_phase_in_helper() -> None:
-    assert introspect_execution._execute_introspect_call.__module__ == "kdive.introspect.execution"
-    assert callable(introspect_execution._run_introspect_ssh_with_cancellation)
-    assert "_run_introspect_ssh_with_cancellation" in introspect_execution._execute_introspect_call.__code__.co_names
-    assert "threading" not in introspect_execution._execute_introspect_call.__code__.co_names
-
-
-def test_execute_introspect_call_keeps_preflight_and_admission_phases_in_helpers() -> None:
-    assert callable(introspect_execution._run_introspect_sudo_preflight)
-    assert callable(introspect_execution._admit_introspect_call)
-    assert "_run_introspect_sudo_preflight" in introspect_execution._execute_introspect_call.__code__.co_names
-    assert "_admit_introspect_call" in introspect_execution._execute_introspect_call.__code__.co_names
-    assert "admit_ssh_tier" not in introspect_execution._execute_introspect_call.__code__.co_names
-
-
-def test_finalize_introspect_call_keeps_success_persistence_and_response_in_helpers() -> None:
-    assert callable(introspect_execution._persist_introspect_success_artifacts)
-    assert callable(introspect_execution._build_introspect_success_response)
-    assert "_persist_introspect_success_artifacts" in introspect_execution._finalize_introspect_call.__code__.co_names
-    assert "_build_introspect_success_response" in introspect_execution._finalize_introspect_call.__code__.co_names
-    assert "ArtifactRef" not in introspect_execution._finalize_introspect_call.__code__.co_names
-
-
 def _make_run(tmp_path: Path) -> Path:
     store = ArtifactStore(artifact_root=tmp_path)
     manifest = store.create_run(

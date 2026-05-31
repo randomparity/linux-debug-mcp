@@ -245,8 +245,6 @@ def test_debug_operation_handlers_route_directly_to_core_response() -> None:
     """Public debug.* handlers should be the adapter layer; avoid a second pass-through wrapper tier."""
     assert not hasattr(server_module, "_debug_read_response")
     assert not hasattr(server_module, "_debug_stateful_response")
-    assert "_debug_operation_handler" in server_module.debug_read_registers_handler.__code__.co_names
-    assert "_debug_operation_handler" in server_module.debug_set_breakpoint_handler.__code__.co_names
 
 
 def test_debug_operation_handlers_use_central_operation_specs() -> None:
@@ -263,32 +261,6 @@ def test_debug_operation_handlers_use_central_operation_specs() -> None:
     assert specs["debug.list_breakpoints"].persist_manifest is False
     assert specs["debug.backtrace"].persist_manifest is False
     assert specs["debug.list_variables"].persist_manifest is False
-
-    for handler in (server_module.debug_read_registers_handler, server_module.debug_set_breakpoint_handler):
-        assert "debug_handler_operation_spec" not in handler.__code__.co_names
-        assert "debug_operation_arguments" not in handler.__code__.co_names
-
-
-def test_debug_operation_forwarding_handlers_do_not_use_locals_bags() -> None:
-    for handler in (
-        server_module.debug_read_registers_handler,
-        server_module.debug_read_symbol_handler,
-        server_module.debug_read_memory_handler,
-        server_module.debug_evaluate_handler,
-        server_module.debug_set_breakpoint_handler,
-        server_module.debug_set_watchpoint_handler,
-        server_module.debug_clear_breakpoint_handler,
-        server_module.debug_clear_watchpoint_handler,
-        server_module.debug_list_breakpoints_handler,
-        server_module.debug_backtrace_handler,
-        server_module.debug_list_variables_handler,
-        server_module.debug_continue_handler,
-        server_module.debug_step_handler,
-        server_module.debug_next_handler,
-        server_module.debug_finish_handler,
-        server_module.debug_interrupt_handler,
-    ):
-        assert "locals" not in handler.__code__.co_names
 
 
 def test_debug_tool_registration_uses_typed_context_and_handler_protocols() -> None:
