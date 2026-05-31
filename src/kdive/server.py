@@ -91,6 +91,9 @@ from kdive.default_profiles import DEFAULT_DEBUG_PROFILES as _DEFAULT_DEBUG_PROF
 from kdive.default_profiles import (
     DEFAULT_ROOTFS_PROFILES,
 )
+from kdive.default_profiles import (
+    DEFAULT_TARGET_PROFILES as _DEFAULT_TARGET_PROFILES,
+)
 from kdive.domain import (
     ArtifactRef,
     ErrorCategory,
@@ -248,6 +251,7 @@ from kdive.workflow.tools import register_workflow_tools
 logger = logging.getLogger(__name__)
 DEFAULT_BUILD_PROFILES = _DEFAULT_BUILD_PROFILES
 DEFAULT_DEBUG_PROFILES = _DEFAULT_DEBUG_PROFILES
+DEFAULT_TARGET_PROFILES = _DEFAULT_TARGET_PROFILES
 DEFAULT_TEST_SUITES = _DEFAULT_TEST_SUITES
 _target_python_remote_argv = _INTROSPECT_TARGET_PYTHON_REMOTE_ARGV
 CreateRunContext = kernel_tools.CreateRunContext
