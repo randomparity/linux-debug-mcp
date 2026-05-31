@@ -1276,6 +1276,8 @@ def test_inject_break_probe_timeout_falls_to_unknown(tmp_path: Path) -> None:
     )
     assert result.ok is False
     assert result.error.details["code"] == "break_unconfirmed"
+    assert result.error.details["probe_code"] == "probe_failed"
+    assert result.error.details["exception_type"] == "TimeoutError"
     assert reg.read_record(KEY).execution_state is ExecutionState.UNKNOWN
 
 

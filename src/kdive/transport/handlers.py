@@ -354,21 +354,30 @@ def transport_inject_break_handler(
             ),
             suggested_next_actions=["providers.list"],
         )
+    probe_failure_details: dict[str, object] = {}
     try:
         halted_observed = probe_halted(record)
-    except Exception:
+    except Exception as exc:
         halted_observed = False
+        probe_failure_details = {
+            "probe_code": "probe_failed",
+            "exception_type": type(exc).__name__,
+            "exception_message": redactor.redact_text(str(exc)),
+        }
     if not halted_observed:
         session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
         return ToolResponse.failure(
             category=ErrorCategory.DEBUG_ATTACH_FAILURE,
             message="inject_break: post-probe did not confirm HALTED",
             run_id=run_id,
-            details={
-                "code": "break_unconfirmed",
-                "execution_state": ExecutionState.UNKNOWN.value,
-                "probe_observed": ExecutionState.UNKNOWN.value,
-            },
+            details=redactor.redact_value(
+                {
+                    "code": "break_unconfirmed",
+                    "execution_state": ExecutionState.UNKNOWN.value,
+                    "probe_observed": ExecutionState.UNKNOWN.value,
+                    **probe_failure_details,
+                }
+            ),
             suggested_next_actions=["providers.list"],
         )
     return ToolResponse.success(
