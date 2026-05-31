@@ -330,13 +330,15 @@ def test_create_app_registers_sprint_4_tools_as_real_handlers() -> None:
     assert {"profiles", "context", "options"}.issubset(workflow_debug_properties)
     assert {"debug_profile", "new_session", "force_rebuild", "force_reboot"}.isdisjoint(workflow_debug_properties)
     assert tools["debug.start_session"].fn.__name__ == "debug_start_session"
-    assert "debug_profile" in tools["debug.start_session"].parameters["properties"]
-    assert "new_session" in tools["debug.start_session"].parameters["properties"]
+    start_properties = tools["debug.start_session"].parameters["properties"]
+    assert {"context", "options"}.issubset(start_properties)
+    assert {"artifact_root", "debug_profile", "new_session"}.isdisjoint(start_properties)
     assert tools["debug.read_memory"].fn.__name__ == "debug_read_memory"
-    assert "address" in tools["debug.read_memory"].parameters["properties"]
-    assert "byte_count" in tools["debug.read_memory"].parameters["properties"]
+    read_memory_properties = tools["debug.read_memory"].parameters["properties"]
+    assert {"address", "byte_count", "context"}.issubset(read_memory_properties)
+    assert {"artifact_root", "debug_session_id"}.isdisjoint(read_memory_properties)
     assert tools["debug.end_session"].fn.__name__ == "debug_end_session"
-    assert "debug_session_id" in tools["debug.end_session"].parameters["properties"]
+    assert "context" in tools["debug.end_session"].parameters["properties"]
 
 
 def test_create_app_registers_future_provider_tools() -> None:

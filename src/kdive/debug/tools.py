@@ -9,7 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
-from kdive.domain import ToolResponse
+from kdive.domain import Model, ToolResponse
 from kdive.providers.local.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard
 
@@ -233,6 +233,29 @@ class DebugToolContext:
     gdb_mi_sessions: GdbMiSessionRegistry
 
 
+class DebugSessionContext(Model):
+    artifact_root: str | None = None
+    debug_session_id: str | None = None
+
+
+class DebugStartSessionOptions(Model):
+    debug_profile: str | None = None
+    new_session: bool = False
+
+
+class DebugEvaluateOptions(Model):
+    arguments: dict[str, object] | None = None
+
+
+class DebugLoadModuleSymbolsOptions(Model):
+    sections: dict[str, str] | None = None
+    ko_path: str | None = None
+
+
+class DebugExecutionOptions(Model):
+    timeout_seconds: int | None = None
+
+
 UNGATED_QUERY_TOOL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("debug.read_registers", "read_registers", "registers"),
     ("debug.read_symbol", "read_symbol", "symbol"),
@@ -275,6 +298,23 @@ def _dump(response: ToolResponse) -> dict[str, Any]:
     return response.model_dump(mode="json")
 
 
+def _model(value: Model | dict[str, Any] | None, model_type: type[Model]) -> Model:
+    if value is None:
+        return model_type()
+    return value if isinstance(value, model_type) else model_type.model_validate(value)
+
+
+def _session_context(
+    value: DebugSessionContext | dict[str, Any] | None,
+    *,
+    default_artifact_root: str,
+) -> tuple[Path, str | None]:
+    context = _model(value, DebugSessionContext)
+    assert isinstance(context, DebugSessionContext)
+    artifact_root = default_artifact_root if context.artifact_root is None else context.artifact_root
+    return _path(artifact_root), context.debug_session_id
+
+
 def _debug_runtime_kwargs(context: DebugToolContext) -> dict[str, Any]:
     return {
         "transaction": context.transaction,
@@ -294,23 +334,26 @@ def _tool_function_name(tool_name: str) -> str:
 
 
 def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: DebugToolHandlers) -> None:
+    tool_context = context
     default_artifact_root = str(context.default_artifact_root)
 
     @app.tool(name="debug.start_session")
     def debug_start_session(
         run_id: str,
-        artifact_root: str = default_artifact_root,
-        debug_profile: str | None = None,
-        new_session: bool = False,
+        context: DebugSessionContext | None = None,
+        options: DebugStartSessionOptions | None = None,
     ) -> dict[str, Any]:
+        artifact_root, _debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+        start_options = _model(options, DebugStartSessionOptions)
+        assert isinstance(start_options, DebugStartSessionOptions)
         return _dump(
             handlers.start_session(
-                artifact_root=_path(artifact_root),
+                artifact_root=artifact_root,
                 run_id=run_id,
-                debug_profile=debug_profile,
-                new_session=new_session,
-                admission=context.admission,
-                **_debug_runtime_kwargs(context),
+                debug_profile=start_options.debug_profile,
+                new_session=start_options.new_session,
+                admission=tool_context.admission,
+                **_debug_runtime_kwargs(tool_context),
             )
         )
 
@@ -318,16 +361,16 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         def debug_registers_query(
             run_id: str,
             registers: list[str],
-            artifact_root: str = default_artifact_root,
-            debug_session_id: str | None = None,
+            context: DebugSessionContext | None = None,
         ) -> dict[str, Any]:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
             return _dump(
                 getattr(handlers, handler_name)(
-                    artifact_root=_path(artifact_root),
+                    artifact_root=artifact_root,
                     run_id=run_id,
                     registers=registers,
                     debug_session_id=debug_session_id,
-                    **_debug_runtime_kwargs(context),
+                    **_debug_runtime_kwargs(tool_context),
                 )
             )
 
@@ -338,16 +381,16 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         def debug_symbol_query(
             run_id: str,
             symbol: str,
-            artifact_root: str = default_artifact_root,
-            debug_session_id: str | None = None,
+            context: DebugSessionContext | None = None,
         ) -> dict[str, Any]:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
             return _dump(
                 getattr(handlers, handler_name)(
-                    artifact_root=_path(artifact_root),
+                    artifact_root=artifact_root,
                     run_id=run_id,
                     symbol=symbol,
                     debug_session_id=debug_session_id,
-                    **_debug_runtime_kwargs(context),
+                    **_debug_runtime_kwargs(tool_context),
                 )
             )
 
@@ -367,17 +410,17 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         run_id: str,
         address: int,
         byte_count: int,
-        artifact_root: str = default_artifact_root,
-        debug_session_id: str | None = None,
+        context: DebugSessionContext | None = None,
     ) -> dict[str, Any]:
+        artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
         return _dump(
             handlers.read_memory(
-                artifact_root=_path(artifact_root),
+                artifact_root=artifact_root,
                 run_id=run_id,
                 address=address,
                 byte_count=byte_count,
                 debug_session_id=debug_session_id,
-                **_debug_runtime_kwargs(context),
+                **_debug_runtime_kwargs(tool_context),
             )
         )
 
@@ -385,18 +428,20 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
     def debug_evaluate(
         run_id: str,
         inspector: str,
-        arguments: dict[str, object] | None = None,
-        artifact_root: str = default_artifact_root,
-        debug_session_id: str | None = None,
+        context: DebugSessionContext | None = None,
+        options: DebugEvaluateOptions | None = None,
     ) -> dict[str, Any]:
+        artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+        evaluate_options = _model(options, DebugEvaluateOptions)
+        assert isinstance(evaluate_options, DebugEvaluateOptions)
         return _dump(
             handlers.evaluate(
-                artifact_root=_path(artifact_root),
+                artifact_root=artifact_root,
                 run_id=run_id,
                 inspector=inspector,
-                arguments=arguments,
+                arguments=evaluate_options.arguments,
                 debug_session_id=debug_session_id,
-                **_debug_runtime_kwargs(context),
+                **_debug_runtime_kwargs(tool_context),
             )
         )
 
@@ -404,20 +449,21 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
     def debug_load_module_symbols(
         run_id: str,
         module: str,
-        sections: dict[str, str] | None = None,
-        ko_path: str | None = None,
-        artifact_root: str = default_artifact_root,
-        debug_session_id: str | None = None,
+        context: DebugSessionContext | None = None,
+        options: DebugLoadModuleSymbolsOptions | None = None,
     ) -> dict[str, Any]:
+        artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+        load_options = _model(options, DebugLoadModuleSymbolsOptions)
+        assert isinstance(load_options, DebugLoadModuleSymbolsOptions)
         return _dump(
             handlers.load_module_symbols(
-                artifact_root=_path(artifact_root),
+                artifact_root=artifact_root,
                 run_id=run_id,
                 module=module,
-                sections=sections,
-                ko_path=ko_path,
+                sections=load_options.sections,
+                ko_path=load_options.ko_path,
                 debug_session_id=debug_session_id,
-                **_gated_debug_runtime_kwargs(context),
+                **_gated_debug_runtime_kwargs(tool_context),
             )
         )
 
@@ -425,16 +471,16 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         def debug_symbol_control(
             run_id: str,
             symbol: str,
-            artifact_root: str = default_artifact_root,
-            debug_session_id: str | None = None,
+            context: DebugSessionContext | None = None,
         ) -> dict[str, Any]:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
             return _dump(
                 getattr(handlers, handler_name)(
-                    artifact_root=_path(artifact_root),
+                    artifact_root=artifact_root,
                     run_id=run_id,
                     symbol=symbol,
                     debug_session_id=debug_session_id,
-                    **_gated_debug_runtime_kwargs(context),
+                    **_gated_debug_runtime_kwargs(tool_context),
                 )
             )
 
@@ -445,16 +491,16 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         def debug_breakpoint_id_control(
             run_id: str,
             breakpoint_id: str,
-            artifact_root: str = default_artifact_root,
-            debug_session_id: str | None = None,
+            context: DebugSessionContext | None = None,
         ) -> dict[str, Any]:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
             return _dump(
                 getattr(handlers, handler_name)(
-                    artifact_root=_path(artifact_root),
+                    artifact_root=artifact_root,
                     run_id=run_id,
                     breakpoint_id=breakpoint_id,
                     debug_session_id=debug_session_id,
-                    **_gated_debug_runtime_kwargs(context),
+                    **_gated_debug_runtime_kwargs(tool_context),
                 )
             )
 
@@ -464,15 +510,15 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
     def _register_gated_query(tool_name: str, handler_name: str) -> None:
         def debug_session_query(
             run_id: str,
-            artifact_root: str = default_artifact_root,
-            debug_session_id: str | None = None,
+            context: DebugSessionContext | None = None,
         ) -> dict[str, Any]:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
             return _dump(
                 getattr(handlers, handler_name)(
-                    artifact_root=_path(artifact_root),
+                    artifact_root=artifact_root,
                     run_id=run_id,
                     debug_session_id=debug_session_id,
-                    **_gated_debug_runtime_kwargs(context),
+                    **_gated_debug_runtime_kwargs(tool_context),
                 )
             )
 
@@ -482,17 +528,19 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
     def _register_execution_control(tool_name: str, handler_name: str) -> None:
         def debug_execution_control(
             run_id: str,
-            artifact_root: str = default_artifact_root,
-            debug_session_id: str | None = None,
-            timeout_seconds: int | None = None,
+            context: DebugSessionContext | None = None,
+            options: DebugExecutionOptions | None = None,
         ) -> dict[str, Any]:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            execution_options = _model(options, DebugExecutionOptions)
+            assert isinstance(execution_options, DebugExecutionOptions)
             return _dump(
                 getattr(handlers, handler_name)(
-                    artifact_root=_path(artifact_root),
+                    artifact_root=artifact_root,
                     run_id=run_id,
                     debug_session_id=debug_session_id,
-                    timeout_seconds=timeout_seconds,
-                    **_gated_debug_runtime_kwargs(context),
+                    timeout_seconds=execution_options.timeout_seconds,
+                    **_gated_debug_runtime_kwargs(tool_context),
                 )
             )
 
@@ -514,14 +562,14 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
     @app.tool(name="debug.end_session")
     def debug_end_session(
         run_id: str,
-        artifact_root: str = default_artifact_root,
-        debug_session_id: str | None = None,
+        context: DebugSessionContext | None = None,
     ) -> dict[str, Any]:
+        artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
         return _dump(
             handlers.end_session(
-                artifact_root=_path(artifact_root),
+                artifact_root=artifact_root,
                 run_id=run_id,
                 debug_session_id=debug_session_id,
-                **_gated_debug_runtime_kwargs(context),
+                **_gated_debug_runtime_kwargs(tool_context),
             )
         )
