@@ -4,6 +4,7 @@ from pathlib import Path
 from conftest import NoopBuildRunner as _NoopBuildRunner
 from conftest import make_source_tree
 
+import kdive.server as server_module
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import (
     TARGET_DESTRUCTIVE_PERMISSIONS,
@@ -29,6 +30,8 @@ from kdive.server import (
     target_run_tests_handler,
     workflow_build_boot_test_handler,
 )
+from kdive.workflow import handlers as workflow_handlers
+from kdive.workflow.handlers import WorkflowHandlerDependencies
 
 
 def success(summary: str, *, run_id: str = "run-abc123") -> ToolResponse:
@@ -39,25 +42,39 @@ def failure(category: ErrorCategory, message: str, *, run_id: str = "run-abc123"
     return ToolResponse.failure(category=category, message=message, run_id=run_id)
 
 
+def _install_workflow_dependencies(
+    monkeypatch,
+    *,
+    create_run=create_run_handler,
+    kernel_build=server_module.kernel_build_handler,
+    target_boot=server_module.target_boot_handler,
+    target_run_tests=server_module.target_run_tests_handler,
+    artifacts_collect=server_module.artifacts_collect_handler,
+) -> None:
+    monkeypatch.setattr(
+        workflow_handlers,
+        "_WORKFLOW_DEPENDENCIES",
+        WorkflowHandlerDependencies(
+            create_run_handler=create_run,
+            kernel_build_handler=kernel_build,
+            target_boot_handler=target_boot,
+            target_run_tests_handler=target_run_tests,
+            debug_start_session_handler=server_module.debug_start_session_handler,
+            artifacts_collect_handler=artifacts_collect,
+        ),
+    )
+
+
 def test_workflow_runs_build_boot_tests_and_collects(tmp_path: Path, monkeypatch) -> None:
     calls: list[str] = []
 
-    monkeypatch.setattr("kdive.server.create_run_handler", lambda **kwargs: success("created"))
-    monkeypatch.setattr(
-        "kdive.server.kernel_build_handler",
-        lambda **kwargs: calls.append("build") or success("built"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.target_boot_handler",
-        lambda **kwargs: calls.append("boot") or success("booted"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.target_run_tests_handler",
-        lambda **kwargs: calls.append("tests") or success("tested"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.artifacts_collect_handler",
-        lambda **kwargs: calls.append("collect") or success("collected"),
+    _install_workflow_dependencies(
+        monkeypatch,
+        create_run=lambda **kwargs: success("created"),
+        kernel_build=lambda **kwargs: calls.append("build") or success("built"),
+        target_boot=lambda **kwargs: calls.append("boot") or success("booted"),
+        target_run_tests=lambda **kwargs: calls.append("tests") or success("tested"),
+        artifacts_collect=lambda **kwargs: calls.append("collect") or success("collected"),
     )
 
     response = workflow_build_boot_test_handler(
@@ -76,14 +93,11 @@ def test_workflow_runs_build_boot_tests_and_collects(tmp_path: Path, monkeypatch
 def test_workflow_collects_and_returns_build_failure(tmp_path: Path, monkeypatch) -> None:
     calls: list[str] = []
 
-    monkeypatch.setattr("kdive.server.create_run_handler", lambda **kwargs: success("created"))
-    monkeypatch.setattr(
-        "kdive.server.kernel_build_handler",
-        lambda **kwargs: calls.append("build") or failure(ErrorCategory.BUILD_FAILURE, "build failed"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.artifacts_collect_handler",
-        lambda **kwargs: calls.append("collect") or success("collected"),
+    _install_workflow_dependencies(
+        monkeypatch,
+        create_run=lambda **kwargs: success("created"),
+        kernel_build=lambda **kwargs: calls.append("build") or failure(ErrorCategory.BUILD_FAILURE, "build failed"),
+        artifacts_collect=lambda **kwargs: calls.append("collect") or success("collected"),
     )
 
     response = workflow_build_boot_test_handler(
@@ -104,22 +118,13 @@ def test_workflow_collects_and_returns_build_failure(tmp_path: Path, monkeypatch
 def test_workflow_collects_after_test_failure(tmp_path: Path, monkeypatch) -> None:
     calls: list[str] = []
 
-    monkeypatch.setattr("kdive.server.create_run_handler", lambda **kwargs: success("created"))
-    monkeypatch.setattr(
-        "kdive.server.kernel_build_handler",
-        lambda **kwargs: calls.append("build") or success("built"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.target_boot_handler",
-        lambda **kwargs: calls.append("boot") or success("booted"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.target_run_tests_handler",
-        lambda **kwargs: calls.append("tests") or failure(ErrorCategory.TEST_FAILURE, "tests failed"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.artifacts_collect_handler",
-        lambda **kwargs: calls.append("collect") or success("collected"),
+    _install_workflow_dependencies(
+        monkeypatch,
+        create_run=lambda **kwargs: success("created"),
+        kernel_build=lambda **kwargs: calls.append("build") or success("built"),
+        target_boot=lambda **kwargs: calls.append("boot") or success("booted"),
+        target_run_tests=lambda **kwargs: calls.append("tests") or failure(ErrorCategory.TEST_FAILURE, "tests failed"),
+        artifacts_collect=lambda **kwargs: calls.append("collect") or success("collected"),
     )
 
     response = workflow_build_boot_test_handler(
@@ -187,15 +192,18 @@ def test_workflow_existing_run_uses_manifest_test_suite_when_omitted(tmp_path: P
     assert created.ok is True
 
     captured_tests: dict[str, object] = {}
-    monkeypatch.setattr("kdive.server.kernel_build_handler", lambda **kwargs: success("built"))
-    monkeypatch.setattr("kdive.server.target_boot_handler", lambda **kwargs: success("booted"))
 
     def fake_run_tests(**kwargs: object) -> ToolResponse:
         captured_tests.update(kwargs)
         return success("tested")
 
-    monkeypatch.setattr("kdive.server.target_run_tests_handler", fake_run_tests)
-    monkeypatch.setattr("kdive.server.artifacts_collect_handler", lambda **kwargs: success("collected"))
+    _install_workflow_dependencies(
+        monkeypatch,
+        kernel_build=lambda **kwargs: success("built"),
+        target_boot=lambda **kwargs: success("booted"),
+        target_run_tests=fake_run_tests,
+        artifacts_collect=lambda **kwargs: success("collected"),
+    )
 
     response = workflow_build_boot_test_handler(
         artifact_root=artifact_root,
@@ -218,22 +226,13 @@ def test_workflow_creates_missing_supplied_run_id_exactly(tmp_path: Path, monkey
         captured.update(kwargs)
         return success("created", run_id=str(kwargs["run_id"]))
 
-    monkeypatch.setattr("kdive.server.create_run_handler", fake_create_run)
-    monkeypatch.setattr(
-        "kdive.server.kernel_build_handler",
-        lambda **kwargs: calls.append("build") or success("built", run_id="run-explicit"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.target_boot_handler",
-        lambda **kwargs: calls.append("boot") or success("booted", run_id="run-explicit"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.target_run_tests_handler",
-        lambda **kwargs: calls.append("tests") or success("tested", run_id="run-explicit"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.artifacts_collect_handler",
-        lambda **kwargs: calls.append("collect") or success("collected", run_id="run-explicit"),
+    _install_workflow_dependencies(
+        monkeypatch,
+        create_run=fake_create_run,
+        kernel_build=lambda **kwargs: calls.append("build") or success("built", run_id="run-explicit"),
+        target_boot=lambda **kwargs: calls.append("boot") or success("booted", run_id="run-explicit"),
+        target_run_tests=lambda **kwargs: calls.append("tests") or success("tested", run_id="run-explicit"),
+        artifacts_collect=lambda **kwargs: calls.append("collect") or success("collected", run_id="run-explicit"),
     )
 
     response = workflow_build_boot_test_handler(

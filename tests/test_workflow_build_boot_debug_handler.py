@@ -1,11 +1,14 @@
 from pathlib import Path
 
+import kdive.server as server_module
 from kdive.domain import ErrorCategory, ToolResponse
 from kdive.server import (
     DEFAULT_TARGET_PROFILES,
     create_run_handler,
     workflow_build_boot_debug_handler,
 )
+from kdive.workflow import handlers as workflow_handlers
+from kdive.workflow.handlers import WorkflowHandlerDependencies
 
 
 def success(summary: str, *, run_id: str = "run-abc123") -> ToolResponse:
@@ -16,25 +19,42 @@ def failure(category: ErrorCategory, message: str, *, run_id: str = "run-abc123"
     return ToolResponse.failure(category=category, message=message, run_id=run_id)
 
 
+def _install_workflow_dependencies(
+    monkeypatch,
+    *,
+    create_run=create_run_handler,
+    kernel_build=server_module.kernel_build_handler,
+    target_boot=server_module.target_boot_handler,
+    debug_start=server_module.debug_start_session_handler,
+) -> None:
+    monkeypatch.setattr(
+        workflow_handlers,
+        "_WORKFLOW_DEPENDENCIES",
+        WorkflowHandlerDependencies(
+            create_run_handler=create_run,
+            kernel_build_handler=kernel_build,
+            target_boot_handler=target_boot,
+            target_run_tests_handler=server_module.target_run_tests_handler,
+            debug_start_session_handler=debug_start,
+            artifacts_collect_handler=server_module.artifacts_collect_handler,
+        ),
+    )
+
+
 def test_workflow_build_boot_debug_success(tmp_path: Path, monkeypatch) -> None:
     calls: list[str] = []
     captured: dict[str, dict[str, object]] = {}
 
-    monkeypatch.setattr(
-        "kdive.server.create_run_handler",
-        lambda **kwargs: captured.setdefault("create", kwargs) and calls.append("create") or success("created"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.kernel_build_handler",
-        lambda **kwargs: captured.setdefault("build", kwargs) and calls.append("build") or success("built"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.target_boot_handler",
-        lambda **kwargs: captured.setdefault("boot", kwargs) and calls.append("boot") or success("booted"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.debug_start_session_handler",
-        lambda **kwargs: (
+    _install_workflow_dependencies(
+        monkeypatch,
+        create_run=lambda **kwargs: (
+            captured.setdefault("create", kwargs) and calls.append("create") or success("created")
+        ),
+        kernel_build=lambda **kwargs: (
+            captured.setdefault("build", kwargs) and calls.append("build") or success("built")
+        ),
+        target_boot=lambda **kwargs: captured.setdefault("boot", kwargs) and calls.append("boot") or success("booted"),
+        debug_start=lambda **kwargs: (
             captured.setdefault("debug", kwargs) and calls.append("debug") or success("debug session started")
         ),
     )
@@ -69,21 +89,12 @@ def test_workflow_build_boot_debug_stops_before_debug_when_boot_fails(
 ) -> None:
     calls: list[str] = []
 
-    monkeypatch.setattr(
-        "kdive.server.create_run_handler",
-        lambda **kwargs: calls.append("create") or success("created"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.kernel_build_handler",
-        lambda **kwargs: calls.append("build") or success("built"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.target_boot_handler",
-        lambda **kwargs: calls.append("boot") or failure(ErrorCategory.BOOT_TIMEOUT, "boot timed out"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.debug_start_session_handler",
-        lambda **kwargs: calls.append("debug") or success("debug session started"),
+    _install_workflow_dependencies(
+        monkeypatch,
+        create_run=lambda **kwargs: calls.append("create") or success("created"),
+        kernel_build=lambda **kwargs: calls.append("build") or success("built"),
+        target_boot=lambda **kwargs: calls.append("boot") or failure(ErrorCategory.BOOT_TIMEOUT, "boot timed out"),
+        debug_start=lambda **kwargs: calls.append("debug") or success("debug session started"),
     )
 
     response = workflow_build_boot_debug_handler(
@@ -105,21 +116,14 @@ def test_workflow_build_boot_debug_stops_before_debug_when_boot_fails(
 def test_workflow_build_boot_debug_stops_when_debug_start_fails(tmp_path: Path, monkeypatch) -> None:
     calls: list[str] = []
 
-    monkeypatch.setattr(
-        "kdive.server.create_run_handler",
-        lambda **kwargs: calls.append("create") or success("created"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.kernel_build_handler",
-        lambda **kwargs: calls.append("build") or success("built"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.target_boot_handler",
-        lambda **kwargs: calls.append("boot") or success("booted"),
-    )
-    monkeypatch.setattr(
-        "kdive.server.debug_start_session_handler",
-        lambda **kwargs: calls.append("debug") or failure(ErrorCategory.DEBUG_ATTACH_FAILURE, "debug attach failed"),
+    _install_workflow_dependencies(
+        monkeypatch,
+        create_run=lambda **kwargs: calls.append("create") or success("created"),
+        kernel_build=lambda **kwargs: calls.append("build") or success("built"),
+        target_boot=lambda **kwargs: calls.append("boot") or success("booted"),
+        debug_start=lambda **kwargs: (
+            calls.append("debug") or failure(ErrorCategory.DEBUG_ATTACH_FAILURE, "debug attach failed")
+        ),
     )
 
     response = workflow_build_boot_debug_handler(
@@ -157,14 +161,17 @@ def test_workflow_build_boot_debug_allows_explicit_profile_when_manifest_did_not
     )
     assert created.ok is True
     captured_debug: dict[str, object] = {}
-    monkeypatch.setattr("kdive.server.kernel_build_handler", lambda **kwargs: success("built", run_id="run-debug"))
-    monkeypatch.setattr("kdive.server.target_boot_handler", lambda **kwargs: success("booted", run_id="run-debug"))
 
     def fake_debug(**kwargs: object) -> ToolResponse:
         captured_debug.update(kwargs)
         return success("debug session started", run_id="run-debug")
 
-    monkeypatch.setattr("kdive.server.debug_start_session_handler", fake_debug)
+    _install_workflow_dependencies(
+        monkeypatch,
+        kernel_build=lambda **kwargs: success("built", run_id="run-debug"),
+        target_boot=lambda **kwargs: success("booted", run_id="run-debug"),
+        debug_start=fake_debug,
+    )
 
     response = workflow_build_boot_debug_handler(
         artifact_root=artifact_root,
@@ -200,14 +207,17 @@ def test_workflow_build_boot_debug_uses_manifest_debug_profile_when_omitted(
     )
     assert created.ok is True
     captured_debug: dict[str, object] = {}
-    monkeypatch.setattr("kdive.server.kernel_build_handler", lambda **kwargs: success("built", run_id="run-debug"))
-    monkeypatch.setattr("kdive.server.target_boot_handler", lambda **kwargs: success("booted", run_id="run-debug"))
 
     def fake_debug(**kwargs: object) -> ToolResponse:
         captured_debug.update(kwargs)
         return success("debug session started", run_id="run-debug")
 
-    monkeypatch.setattr("kdive.server.debug_start_session_handler", fake_debug)
+    _install_workflow_dependencies(
+        monkeypatch,
+        kernel_build=lambda **kwargs: success("built", run_id="run-debug"),
+        target_boot=lambda **kwargs: success("booted", run_id="run-debug"),
+        debug_start=fake_debug,
+    )
 
     response = workflow_build_boot_debug_handler(
         artifact_root=artifact_root,

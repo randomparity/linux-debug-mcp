@@ -4478,38 +4478,14 @@ def debug_end_session_handler(
 configure_debug_operation_core(_debug_operation_response)
 
 
-def _workflow_create_run_handler(**kwargs: Any) -> ToolResponse:
-    return create_run_handler(**kwargs)
-
-
-def _workflow_kernel_build_handler(**kwargs: Any) -> ToolResponse:
-    return kernel_build_handler(**kwargs)
-
-
-def _workflow_target_boot_handler(**kwargs: Any) -> ToolResponse:
-    return target_boot_handler(**kwargs)
-
-
-def _workflow_target_run_tests_handler(**kwargs: Any) -> ToolResponse:
-    return target_run_tests_handler(**kwargs)
-
-
-def _workflow_debug_start_session_handler(**kwargs: Any) -> ToolResponse:
-    return debug_start_session_handler(**kwargs)
-
-
-def _workflow_artifacts_collect_handler(**kwargs: Any) -> ToolResponse:
-    return artifacts_collect_handler(**kwargs)
-
-
 configure_workflow_dependencies(
     WorkflowHandlerDependencies(
-        create_run_handler=_workflow_create_run_handler,
-        kernel_build_handler=_workflow_kernel_build_handler,
-        target_boot_handler=_workflow_target_boot_handler,
-        target_run_tests_handler=_workflow_target_run_tests_handler,
-        debug_start_session_handler=_workflow_debug_start_session_handler,
-        artifacts_collect_handler=_workflow_artifacts_collect_handler,
+        create_run_handler=create_run_handler,
+        kernel_build_handler=kernel_build_handler,
+        target_boot_handler=target_boot_handler,
+        target_run_tests_handler=target_run_tests_handler,
+        debug_start_session_handler=debug_start_session_handler,
+        artifacts_collect_handler=artifacts_collect_handler,
     )
 )
 
