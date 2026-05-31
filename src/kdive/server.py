@@ -22,7 +22,11 @@ from typing import Any, Protocol, TypeVar, cast
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
-from kdive.artifacts.handlers import artifacts_collect_handler
+from kdive.artifacts.handlers import (
+    ArtifactHandlerDependencies,
+    artifacts_collect_handler,
+    configure_artifact_handler_dependencies,
+)
 from kdive.artifacts.manifest import BootAttempt, RunManifest
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import (
@@ -66,6 +70,7 @@ from kdive.coordination.transaction import TransportTransaction
 from kdive.debug.handlers import (
     DEBUG_METHOD_OPERATIONS,
     DebugRuntime,
+    configure_debug_operation_core,
     debug_backtrace_handler,
     debug_clear_breakpoint_handler,
     debug_clear_watchpoint_handler,
@@ -104,7 +109,12 @@ from kdive.domain import (
     StepStatus,
     ToolResponse,
 )
-from kdive.introspect.handlers import debug_introspect_helper_handler, debug_introspect_run_handler
+from kdive.introspect.handlers import (
+    IntrospectHandlerDependencies,
+    configure_introspect_handler_dependencies,
+    debug_introspect_helper_handler,
+    debug_introspect_run_handler,
+)
 from kdive.introspect.tools import register_introspect_tools
 from kdive.introspect_helpers import HelperSpec, get_helper_registry
 from kdive.logging import SECRET_REGISTRY, configure_logging
@@ -6932,6 +6942,26 @@ def _collection_covers_manifest(*, manifest: RunManifest, collect_result: StepRe
         for artifact in result.artifacts
     }
     return current.issubset(collected)
+
+
+configure_artifact_handler_dependencies(
+    ArtifactHandlerDependencies(
+        bundle_for_manifest=_bundle_for_manifest,
+        collection_covers_manifest=_collection_covers_manifest,
+        configuration_failure=_configuration_failure,
+        recorded_collect_success_response=_recorded_collect_success_response,
+        redacted_artifacts=_redacted_artifacts,
+    )
+)
+configure_debug_operation_core(_debug_operation_response)
+configure_introspect_handler_dependencies(
+    IntrospectHandlerDependencies(
+        execute_introspect_call=_execute_introspect_call,
+        redact_and_truncate=_redact_and_truncate,
+        helper_cap_profile=HELPER_CAP_PROFILE,
+        make_helper_post_validator=_make_helper_post_validator,
+    )
+)
 
 
 def _workflow_create_run_handler(**kwargs: Any) -> ToolResponse:

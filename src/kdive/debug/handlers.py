@@ -106,6 +106,14 @@ class DebugOperationCore(Protocol):
     ) -> ToolResponse: ...
 
 
+_DEBUG_OPERATION_CORE: DebugOperationCore | None = None
+
+
+def configure_debug_operation_core(operation_core: DebugOperationCore) -> None:
+    global _DEBUG_OPERATION_CORE
+    _DEBUG_OPERATION_CORE = operation_core
+
+
 def debug_handler_operation_spec(operation: str) -> DebugHandlerOperationSpec:
     return DEBUG_HANDLER_OPERATION_SPECS[operation]
 
@@ -124,9 +132,9 @@ def _default_debug_operation_core(
     persist_manifest: bool,
     runtime: DebugRuntime,
 ) -> ToolResponse:
-    from kdive.server import _debug_operation_response
-
-    return _debug_operation_response(
+    if _DEBUG_OPERATION_CORE is None:
+        raise RuntimeError("debug operation core has not been configured")
+    return _DEBUG_OPERATION_CORE(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,

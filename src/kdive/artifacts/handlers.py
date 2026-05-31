@@ -1,11 +1,63 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Protocol
 
+from kdive.artifacts.manifest import RunManifest
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
-from kdive.domain import ErrorCategory, StepResult, StepStatus, ToolResponse
+from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.safety.redaction import Redactor
+
+
+class ConfigurationFailure(Protocol):
+    def __call__(self, *, run_id: str, message: str, details: dict[str, Any] | None = None) -> ToolResponse: ...
+
+
+class BundleForManifest(Protocol):
+    def __call__(
+        self,
+        *,
+        manifest: RunManifest,
+        run_dir: Path,
+        bundle_path: Path,
+    ) -> tuple[dict[str, Any], list[ArtifactRef], list[dict[str, Any]], list[dict[str, Any]]]: ...
+
+
+class CollectionCoversManifest(Protocol):
+    def __call__(self, *, manifest: RunManifest, collect_result: StepResult) -> bool: ...
+
+
+class RecordedCollectSuccessResponse(Protocol):
+    def __call__(self, *, run_id: str, result: StepResult) -> ToolResponse: ...
+
+
+class RedactedArtifacts(Protocol):
+    def __call__(self, artifacts: list[ArtifactRef], redactor: Redactor) -> list[ArtifactRef]: ...
+
+
+@dataclass(frozen=True)
+class ArtifactHandlerDependencies:
+    bundle_for_manifest: BundleForManifest
+    collection_covers_manifest: CollectionCoversManifest
+    configuration_failure: ConfigurationFailure
+    recorded_collect_success_response: RecordedCollectSuccessResponse
+    redacted_artifacts: RedactedArtifacts
+
+
+_DEPENDENCIES: ArtifactHandlerDependencies | None = None
+
+
+def configure_artifact_handler_dependencies(dependencies: ArtifactHandlerDependencies) -> None:
+    global _DEPENDENCIES
+    _DEPENDENCIES = dependencies
+
+
+def _dependencies() -> ArtifactHandlerDependencies:
+    if _DEPENDENCIES is None:
+        raise RuntimeError("artifact handler dependencies have not been configured")
+    return _DEPENDENCIES
 
 
 def artifacts_collect_handler(
@@ -14,19 +66,12 @@ def artifacts_collect_handler(
     run_id: str,
     force_recollect: bool = False,
 ) -> ToolResponse:
-    from kdive.server import (
-        _bundle_for_manifest,
-        _collection_covers_manifest,
-        _configuration_failure,
-        _recorded_collect_success_response,
-        _redacted_artifacts,
-    )
-
+    dependencies = _dependencies()
     try:
         store = ArtifactStore(artifact_root, create_root=False)
         manifest_path = store.run_dir(run_id) / "manifest.json"
         if not manifest_path.is_file():
-            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+            return dependencies.configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
         manifest = store.load_manifest(run_id)
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
@@ -35,9 +80,9 @@ def artifacts_collect_handler(
         existing
         and existing.status == StepStatus.SUCCEEDED
         and not force_recollect
-        and _collection_covers_manifest(manifest=manifest, collect_result=existing)
+        and dependencies.collection_covers_manifest(manifest=manifest, collect_result=existing)
     ):
-        return _recorded_collect_success_response(run_id=run_id, result=existing)
+        return dependencies.recorded_collect_success_response(run_id=run_id, result=existing)
     try:
         with store.collect_lock(run_id):
             locked_manifest = store.load_manifest(run_id)
@@ -47,11 +92,11 @@ def artifacts_collect_handler(
                 existing
                 and existing.status == StepStatus.SUCCEEDED
                 and not force_recollect
-                and _collection_covers_manifest(manifest=locked_manifest, collect_result=existing)
+                and dependencies.collection_covers_manifest(manifest=locked_manifest, collect_result=existing)
             ):
-                return _recorded_collect_success_response(run_id=run_id, result=existing)
+                return dependencies.recorded_collect_success_response(run_id=run_id, result=existing)
             bundle_path = store.run_dir(run_id) / "summaries" / "artifact-bundle.json"
-            bundle, artifacts, missing_required, missing_optional = _bundle_for_manifest(
+            bundle, artifacts, missing_required, missing_optional = dependencies.bundle_for_manifest(
                 manifest=locked_manifest,
                 run_dir=store.run_dir(run_id),
                 bundle_path=bundle_path,
@@ -78,7 +123,7 @@ def artifacts_collect_handler(
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
     redactor = Redactor()
     safe_bundle = redactor.redact_value(bundle)
-    safe_artifacts = _redacted_artifacts(artifacts, redactor)
+    safe_artifacts = dependencies.redacted_artifacts(artifacts, redactor)
     if missing_required:
         return ToolResponse.failure(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,

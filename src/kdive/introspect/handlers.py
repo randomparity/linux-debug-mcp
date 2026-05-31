@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
@@ -11,9 +12,58 @@ from kdive.config import DebugProfile, RootfsProfile, TargetProfile
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.domain import DebugIntrospectHelperRequest, DebugIntrospectRunRequest, ErrorCategory, ToolResponse
-from kdive.introspect_helpers import get_helper_registry
+from kdive.introspect_helpers import HelperSpec, get_helper_registry
 from kdive.providers.local.local_ssh_tests import SshRunner
 from kdive.safety.redaction import Redactor
+
+
+class IntrospectCallCore(Protocol):
+    def __call__(
+        self,
+        request: DebugIntrospectRunRequest,
+        *,
+        artifact_root: Path,
+        target_profiles: dict[str, TargetProfile] | None,
+        rootfs_profiles: dict[str, RootfsProfile] | None,
+        debug_profiles: dict[str, DebugProfile] | None,
+        ssh_runner: SshRunner | None,
+        admission: AdmissionService | None,
+        session_registry: SessionRegistry | None,
+        clock: Callable[[], datetime] | None,
+        operation_name: str,
+        caps: dict[str, int] | None,
+        post_validator: Any | None,
+    ) -> ToolResponse: ...
+
+
+class HelperPostValidatorFactory(Protocol):
+    def __call__(self, spec: HelperSpec) -> Any: ...
+
+
+class RedactAndTruncate(Protocol):
+    def __call__(self, redactor: Redactor, text: str, cap: int = 256) -> str: ...
+
+
+@dataclass(frozen=True)
+class IntrospectHandlerDependencies:
+    execute_introspect_call: IntrospectCallCore
+    redact_and_truncate: RedactAndTruncate
+    helper_cap_profile: dict[str, int]
+    make_helper_post_validator: HelperPostValidatorFactory
+
+
+_DEPENDENCIES: IntrospectHandlerDependencies | None = None
+
+
+def configure_introspect_handler_dependencies(dependencies: IntrospectHandlerDependencies) -> None:
+    global _DEPENDENCIES
+    _DEPENDENCIES = dependencies
+
+
+def _dependencies() -> IntrospectHandlerDependencies:
+    if _DEPENDENCIES is None:
+        raise RuntimeError("introspect handler dependencies have not been configured")
+    return _DEPENDENCIES
 
 
 def _execute_live_introspect_call(
@@ -31,9 +81,8 @@ def _execute_live_introspect_call(
     caps: dict[str, int] | None,
     post_validator: object | None,
 ) -> ToolResponse:
-    from kdive.server import _execute_introspect_call
-
-    return _execute_introspect_call(
+    dependencies = _dependencies()
+    return dependencies.execute_introspect_call(
         request,
         artifact_root=artifact_root,
         target_profiles=target_profiles,
@@ -102,12 +151,11 @@ def debug_introspect_helper_handler(
     try:
         validated_args = spec.args_model.model_validate(request.args)
     except ValidationError as exc:
-        from kdive.server import _redact_and_truncate
-
+        dependencies = _dependencies()
         return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
             run_id=request.run_id,
-            message=_redact_and_truncate(Redactor(), str(exc), cap=512),
+            message=dependencies.redact_and_truncate(Redactor(), str(exc), cap=512),
             details={"code": "helper_args_invalid"},
             suggested_next_actions=["debug.introspect.helper"],
         )
@@ -122,8 +170,7 @@ def debug_introspect_helper_handler(
         rootfs_profile=request.rootfs_profile,
         args=validated_args.model_dump(mode="json"),
     )
-    from kdive.server import HELPER_CAP_PROFILE, _make_helper_post_validator
-
+    dependencies = _dependencies()
     return _execute_live_introspect_call(
         run_request,
         artifact_root=artifact_root,
@@ -135,6 +182,6 @@ def debug_introspect_helper_handler(
         session_registry=session_registry,
         clock=clock,
         operation_name="debug.introspect.helper",
-        caps=HELPER_CAP_PROFILE,
-        post_validator=_make_helper_post_validator(spec),
+        caps=dependencies.helper_cap_profile,
+        post_validator=dependencies.make_helper_post_validator(spec),
     )
