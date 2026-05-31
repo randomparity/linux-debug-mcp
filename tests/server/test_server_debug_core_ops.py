@@ -261,7 +261,7 @@ def test_debug_operation_handlers_use_typed_operation_requests() -> None:
     assert request.persist_manifest is False
 
 
-def test_debug_tool_registration_uses_typed_context_and_grouped_handler_aliases() -> None:
+def test_debug_tool_registration_uses_typed_context_and_handler_protocols() -> None:
     context_hints = get_type_hints(DebugToolContext)
     assert context_hints["transaction"] is TransportTransaction
     assert context_hints["admission"] is AdmissionService
@@ -271,44 +271,19 @@ def test_debug_tool_registration_uses_typed_context_and_grouped_handler_aliases(
     assert not hasattr(DebugToolContext, "gated_kwargs")
 
     handler_hints = get_type_hints(DebugToolHandlers)
-    assert handler_hints["start_session"] == debug_tools.DebugStatefulHandler
-    assert handler_hints["read_registers"] == debug_tools.DebugUngatedHandler
+    assert handler_hints["start_session"] == debug_tools.DebugStartSessionHandler
+    assert handler_hints["read_registers"] == debug_tools.DebugReadRegistersHandler
+    assert handler_hints["read_symbol"] == debug_tools.DebugReadSymbolHandler
+    assert handler_hints["set_breakpoint"] == debug_tools.DebugSymbolControlHandler
     assert handler_hints["continue_execution"] == debug_tools.DebugExecutionControlHandler
-    assert handler_hints["end_session"] == debug_tools.DebugStatefulHandler
-    assert not hasattr(debug_tools, "DebugStartSessionHandler")
-    assert not hasattr(debug_tools, "DebugReadRegistersHandler")
+    assert handler_hints["end_session"] == debug_tools.DebugEndSessionHandler
+    assert not hasattr(debug_tools, "DebugToolHandler")
+    assert not hasattr(debug_tools, "DebugUngatedHandler")
 
 
-def test_debug_tool_registration_groups_same_shaped_operations() -> None:
-    groups = debug_tools.DEBUG_TOOL_REGISTRATION_GROUPS
-
-    assert groups["ungated_query"] == (
-        ("debug.read_registers", "read_registers", "registers"),
-        ("debug.read_symbol", "read_symbol", "symbol"),
-    )
-    assert groups["gated_query"] == (
-        ("debug.list_breakpoints", "list_breakpoints"),
-        ("debug.backtrace", "backtrace"),
-        ("debug.list_variables", "list_variables"),
-    )
-    assert groups["symbol_control"] == (
-        ("debug.set_breakpoint", "set_breakpoint"),
-        ("debug.set_watchpoint", "set_watchpoint"),
-    )
-    assert groups["breakpoint_id_control"] == (
-        ("debug.clear_breakpoint", "clear_breakpoint"),
-        ("debug.clear_watchpoint", "clear_watchpoint"),
-    )
-    assert groups["execution_control"] == (
-        ("debug.continue", "continue_execution"),
-        ("debug.step", "step"),
-        ("debug.next", "next"),
-        ("debug.finish", "finish"),
-        ("debug.interrupt", "interrupt"),
-    )
-    assert {"debug.evaluate", "debug.read_memory", "debug.end_session"}.isdisjoint(
-        {operation for group in groups.values() for operation, *_ in group}
-    )
+def test_debug_tool_registration_uses_bound_handlers_instead_of_name_dispatch() -> None:
+    assert not hasattr(debug_tools, "DEBUG_TOOL_REGISTRATION_GROUPS")
+    assert not hasattr(debug_tools, "UNGATED_QUERY_TOOL_SPECS")
 
 
 def test_debug_operation_handler_builds_runtime_without_pass_through_layers() -> None:

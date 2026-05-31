@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 
@@ -14,25 +13,204 @@ from kdive.domain import Model, ToolResponse
 from kdive.providers.debug import GdbMiEngine, GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard
 
-DebugToolHandler = Callable[..., ToolResponse]
-DebugUngatedHandler = DebugToolHandler
-DebugStatefulHandler = DebugToolHandler
-DebugSessionQueryHandler = DebugToolHandler
-DebugExecutionControlHandler = DebugToolHandler
+
+class DebugStartSessionHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        run_id: str,
+        debug_profile: str | None,
+        new_session: bool,
+        admission: AdmissionService,
+        transaction: TransportTransaction,
+        session_registry: SessionRegistry,
+        session_guard: SessionGuard,
+        gdb_mi_engine: GdbMiEngine,
+        gdb_mi_sessions: GdbMiSessionRegistry,
+    ) -> ToolResponse: ...
+
+
+class DebugReadRegistersHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        run_id: str,
+        registers: list[str],
+        debug_session_id: str | None,
+        transaction: TransportTransaction,
+        session_registry: SessionRegistry,
+        session_guard: SessionGuard,
+        gdb_mi_engine: GdbMiEngine,
+        gdb_mi_sessions: GdbMiSessionRegistry,
+    ) -> ToolResponse: ...
+
+
+class DebugReadSymbolHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        run_id: str,
+        symbol: str,
+        debug_session_id: str | None,
+        transaction: TransportTransaction,
+        session_registry: SessionRegistry,
+        session_guard: SessionGuard,
+        gdb_mi_engine: GdbMiEngine,
+        gdb_mi_sessions: GdbMiSessionRegistry,
+    ) -> ToolResponse: ...
+
+
+class DebugReadMemoryHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        run_id: str,
+        address: int,
+        byte_count: int,
+        debug_session_id: str | None,
+        transaction: TransportTransaction,
+        session_registry: SessionRegistry,
+        session_guard: SessionGuard,
+        gdb_mi_engine: GdbMiEngine,
+        gdb_mi_sessions: GdbMiSessionRegistry,
+    ) -> ToolResponse: ...
+
+
+class DebugEvaluateHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        run_id: str,
+        inspector: str,
+        arguments: dict[str, object] | None,
+        debug_session_id: str | None,
+        transaction: TransportTransaction,
+        session_registry: SessionRegistry,
+        session_guard: SessionGuard,
+        gdb_mi_engine: GdbMiEngine,
+        gdb_mi_sessions: GdbMiSessionRegistry,
+    ) -> ToolResponse: ...
+
+
+class DebugLoadModuleSymbolsHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        run_id: str,
+        module: str,
+        sections: dict[str, str] | None,
+        ko_path: str | None,
+        debug_session_id: str | None,
+        admission: AdmissionService,
+        transaction: TransportTransaction,
+        session_registry: SessionRegistry,
+        session_guard: SessionGuard,
+        gdb_mi_engine: GdbMiEngine,
+        gdb_mi_sessions: GdbMiSessionRegistry,
+    ) -> ToolResponse: ...
+
+
+class DebugSymbolControlHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        run_id: str,
+        symbol: str,
+        debug_session_id: str | None,
+        admission: AdmissionService,
+        transaction: TransportTransaction,
+        session_registry: SessionRegistry,
+        session_guard: SessionGuard,
+        gdb_mi_engine: GdbMiEngine,
+        gdb_mi_sessions: GdbMiSessionRegistry,
+    ) -> ToolResponse: ...
+
+
+class DebugBreakpointIdControlHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        run_id: str,
+        breakpoint_id: str,
+        debug_session_id: str | None,
+        admission: AdmissionService,
+        transaction: TransportTransaction,
+        session_registry: SessionRegistry,
+        session_guard: SessionGuard,
+        gdb_mi_engine: GdbMiEngine,
+        gdb_mi_sessions: GdbMiSessionRegistry,
+    ) -> ToolResponse: ...
+
+
+class DebugSessionQueryHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        run_id: str,
+        debug_session_id: str | None,
+        admission: AdmissionService,
+        transaction: TransportTransaction,
+        session_registry: SessionRegistry,
+        session_guard: SessionGuard,
+        gdb_mi_engine: GdbMiEngine,
+        gdb_mi_sessions: GdbMiSessionRegistry,
+    ) -> ToolResponse: ...
+
+
+class DebugExecutionControlHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        run_id: str,
+        debug_session_id: str | None,
+        timeout_seconds: int | None,
+        admission: AdmissionService,
+        transaction: TransportTransaction,
+        session_registry: SessionRegistry,
+        session_guard: SessionGuard,
+        gdb_mi_engine: GdbMiEngine,
+        gdb_mi_sessions: GdbMiSessionRegistry,
+    ) -> ToolResponse: ...
+
+
+class DebugEndSessionHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        run_id: str,
+        debug_session_id: str | None,
+        admission: AdmissionService,
+        transaction: TransportTransaction,
+        session_registry: SessionRegistry,
+        session_guard: SessionGuard,
+        gdb_mi_engine: GdbMiEngine,
+        gdb_mi_sessions: GdbMiSessionRegistry,
+    ) -> ToolResponse: ...
 
 
 @dataclass(frozen=True)
 class DebugToolHandlers:
-    start_session: DebugStatefulHandler
-    read_registers: DebugUngatedHandler
-    read_symbol: DebugUngatedHandler
-    read_memory: DebugUngatedHandler
-    evaluate: DebugUngatedHandler
-    load_module_symbols: DebugStatefulHandler
-    set_breakpoint: DebugStatefulHandler
-    set_watchpoint: DebugStatefulHandler
-    clear_breakpoint: DebugStatefulHandler
-    clear_watchpoint: DebugStatefulHandler
+    start_session: DebugStartSessionHandler
+    read_registers: DebugReadRegistersHandler
+    read_symbol: DebugReadSymbolHandler
+    read_memory: DebugReadMemoryHandler
+    evaluate: DebugEvaluateHandler
+    load_module_symbols: DebugLoadModuleSymbolsHandler
+    set_breakpoint: DebugSymbolControlHandler
+    set_watchpoint: DebugSymbolControlHandler
+    clear_breakpoint: DebugBreakpointIdControlHandler
+    clear_watchpoint: DebugBreakpointIdControlHandler
     list_breakpoints: DebugSessionQueryHandler
     backtrace: DebugSessionQueryHandler
     list_variables: DebugSessionQueryHandler
@@ -41,7 +219,7 @@ class DebugToolHandlers:
     next: DebugExecutionControlHandler
     finish: DebugExecutionControlHandler
     interrupt: DebugExecutionControlHandler
-    end_session: DebugStatefulHandler
+    end_session: DebugEndSessionHandler
 
 
 @dataclass(frozen=True)
@@ -76,40 +254,6 @@ class DebugLoadModuleSymbolsOptions(Model):
 
 class DebugExecutionOptions(Model):
     timeout_seconds: int | None = None
-
-
-UNGATED_QUERY_TOOL_SPECS: tuple[tuple[str, str, str], ...] = (
-    ("debug.read_registers", "read_registers", "registers"),
-    ("debug.read_symbol", "read_symbol", "symbol"),
-)
-GATED_QUERY_TOOL_SPECS: tuple[tuple[str, str], ...] = (
-    ("debug.list_breakpoints", "list_breakpoints"),
-    ("debug.backtrace", "backtrace"),
-    ("debug.list_variables", "list_variables"),
-)
-SYMBOL_CONTROL_TOOL_SPECS: tuple[tuple[str, str], ...] = (
-    ("debug.set_breakpoint", "set_breakpoint"),
-    ("debug.set_watchpoint", "set_watchpoint"),
-)
-BREAKPOINT_ID_CONTROL_TOOL_SPECS: tuple[tuple[str, str], ...] = (
-    ("debug.clear_breakpoint", "clear_breakpoint"),
-    ("debug.clear_watchpoint", "clear_watchpoint"),
-)
-EXECUTION_CONTROL_TOOL_SPECS: tuple[tuple[str, str], ...] = (
-    ("debug.continue", "continue_execution"),
-    ("debug.step", "step"),
-    ("debug.next", "next"),
-    ("debug.finish", "finish"),
-    ("debug.interrupt", "interrupt"),
-)
-
-DEBUG_TOOL_REGISTRATION_GROUPS: dict[str, tuple[tuple[str, ...], ...]] = {
-    "ungated_query": UNGATED_QUERY_TOOL_SPECS,
-    "gated_query": GATED_QUERY_TOOL_SPECS,
-    "symbol_control": SYMBOL_CONTROL_TOOL_SPECS,
-    "breakpoint_id_control": BREAKPOINT_ID_CONTROL_TOOL_SPECS,
-    "execution_control": EXECUTION_CONTROL_TOOL_SPECS,
-}
 
 
 def _path(value: str) -> Path:
@@ -179,7 +323,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
             )
         )
 
-    def _register_registers_query(tool_name: str, handler_name: str) -> None:
+    def _register_registers_query(tool_name: str, handler: DebugReadRegistersHandler) -> None:
         def debug_registers_query(
             run_id: str,
             registers: list[str],
@@ -187,7 +331,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         ) -> dict[str, Any]:
             artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
             return _dump(
-                getattr(handlers, handler_name)(
+                handler(
                     artifact_root=artifact_root,
                     run_id=run_id,
                     registers=registers,
@@ -199,7 +343,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         debug_registers_query.__name__ = _tool_function_name(tool_name)
         app.tool(name=tool_name)(debug_registers_query)
 
-    def _register_symbol_query(tool_name: str, handler_name: str) -> None:
+    def _register_symbol_query(tool_name: str, handler: DebugReadSymbolHandler) -> None:
         def debug_symbol_query(
             run_id: str,
             symbol: str,
@@ -207,7 +351,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         ) -> dict[str, Any]:
             artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
             return _dump(
-                getattr(handlers, handler_name)(
+                handler(
                     artifact_root=artifact_root,
                     run_id=run_id,
                     symbol=symbol,
@@ -219,13 +363,8 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         debug_symbol_query.__name__ = _tool_function_name(tool_name)
         app.tool(name=tool_name)(debug_symbol_query)
 
-    for tool_name, handler_name, value_name in UNGATED_QUERY_TOOL_SPECS:
-        if value_name == "registers":
-            _register_registers_query(tool_name, handler_name)
-        elif value_name == "symbol":
-            _register_symbol_query(tool_name, handler_name)
-        else:
-            raise ValueError(f"unknown ungated debug query shape: {value_name}")
+    _register_registers_query("debug.read_registers", handlers.read_registers)
+    _register_symbol_query("debug.read_symbol", handlers.read_symbol)
 
     @app.tool(name="debug.read_memory")
     def debug_read_memory(
@@ -289,7 +428,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
             )
         )
 
-    def _register_symbol_control(tool_name: str, handler_name: str) -> None:
+    def _register_symbol_control(tool_name: str, handler: DebugSymbolControlHandler) -> None:
         def debug_symbol_control(
             run_id: str,
             symbol: str,
@@ -297,7 +436,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         ) -> dict[str, Any]:
             artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
             return _dump(
-                getattr(handlers, handler_name)(
+                handler(
                     artifact_root=artifact_root,
                     run_id=run_id,
                     symbol=symbol,
@@ -309,7 +448,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         debug_symbol_control.__name__ = _tool_function_name(tool_name)
         app.tool(name=tool_name)(debug_symbol_control)
 
-    def _register_breakpoint_id_control(tool_name: str, handler_name: str) -> None:
+    def _register_breakpoint_id_control(tool_name: str, handler: DebugBreakpointIdControlHandler) -> None:
         def debug_breakpoint_id_control(
             run_id: str,
             breakpoint_id: str,
@@ -317,7 +456,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         ) -> dict[str, Any]:
             artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
             return _dump(
-                getattr(handlers, handler_name)(
+                handler(
                     artifact_root=artifact_root,
                     run_id=run_id,
                     breakpoint_id=breakpoint_id,
@@ -329,14 +468,14 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         debug_breakpoint_id_control.__name__ = _tool_function_name(tool_name)
         app.tool(name=tool_name)(debug_breakpoint_id_control)
 
-    def _register_gated_query(tool_name: str, handler_name: str) -> None:
+    def _register_gated_query(tool_name: str, handler: DebugSessionQueryHandler) -> None:
         def debug_session_query(
             run_id: str,
             context: DebugSessionContext | None = None,
         ) -> dict[str, Any]:
             artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
             return _dump(
-                getattr(handlers, handler_name)(
+                handler(
                     artifact_root=artifact_root,
                     run_id=run_id,
                     debug_session_id=debug_session_id,
@@ -347,7 +486,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         debug_session_query.__name__ = _tool_function_name(tool_name)
         app.tool(name=tool_name)(debug_session_query)
 
-    def _register_execution_control(tool_name: str, handler_name: str) -> None:
+    def _register_execution_control(tool_name: str, handler: DebugExecutionControlHandler) -> None:
         def debug_execution_control(
             run_id: str,
             context: DebugSessionContext | None = None,
@@ -357,7 +496,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
             execution_options = _model(options, DebugExecutionOptions)
             assert isinstance(execution_options, DebugExecutionOptions)
             return _dump(
-                getattr(handlers, handler_name)(
+                handler(
                     artifact_root=artifact_root,
                     run_id=run_id,
                     debug_session_id=debug_session_id,
@@ -369,17 +508,33 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         debug_execution_control.__name__ = _tool_function_name(tool_name)
         app.tool(name=tool_name)(debug_execution_control)
 
-    for tool_name, handler_name in SYMBOL_CONTROL_TOOL_SPECS:
-        _register_symbol_control(tool_name, handler_name)
+    for tool_name, handler in (
+        ("debug.set_breakpoint", handlers.set_breakpoint),
+        ("debug.set_watchpoint", handlers.set_watchpoint),
+    ):
+        _register_symbol_control(tool_name, handler)
 
-    for tool_name, handler_name in BREAKPOINT_ID_CONTROL_TOOL_SPECS:
-        _register_breakpoint_id_control(tool_name, handler_name)
+    for tool_name, handler in (
+        ("debug.clear_breakpoint", handlers.clear_breakpoint),
+        ("debug.clear_watchpoint", handlers.clear_watchpoint),
+    ):
+        _register_breakpoint_id_control(tool_name, handler)
 
-    for tool_name, handler_name in GATED_QUERY_TOOL_SPECS:
-        _register_gated_query(tool_name, handler_name)
+    for tool_name, handler in (
+        ("debug.list_breakpoints", handlers.list_breakpoints),
+        ("debug.backtrace", handlers.backtrace),
+        ("debug.list_variables", handlers.list_variables),
+    ):
+        _register_gated_query(tool_name, handler)
 
-    for tool_name, handler_name in EXECUTION_CONTROL_TOOL_SPECS:
-        _register_execution_control(tool_name, handler_name)
+    for tool_name, handler in (
+        ("debug.continue", handlers.continue_execution),
+        ("debug.step", handlers.step),
+        ("debug.next", handlers.next),
+        ("debug.finish", handlers.finish),
+        ("debug.interrupt", handlers.interrupt),
+    ):
+        _register_execution_control(tool_name, handler)
 
     @app.tool(name="debug.end_session")
     def debug_end_session(
