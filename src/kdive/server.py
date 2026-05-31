@@ -498,6 +498,18 @@ def _count_introspect_calls(manifest: RunManifest) -> int:
     return sum(1 for name in manifest.step_results if _INTROSPECT_STEP_NAME_RE.match(name))
 
 
+def _rollback_introspect_admission(
+    admission: AdmissionService, handle: AdmissionHandle, *, call_id: str, run_id: str
+) -> None:
+    """Roll back a promoted admission handle on an introspect-call failure, logging (never
+    swallowing) a rollback failure — a corrupt admission state for this target_key must be visible
+    to the operator (Iter-2 finding 3 / TD-08)."""
+    try:
+        admission.rollback(handle)
+    except Exception:  # noqa: BLE001 - surface, don't swallow: operator must see admission corruption
+        logger.exception("admission rollback failed for introspect call_id=%s run_id=%s", call_id, run_id)
+
+
 def _redact_and_truncate(redactor: Redactor, text: str, cap: int = 256) -> str:
     """Spec §5.2 step 5, step 9, §6.3 — redact BEFORE truncate (R2-F3).
 
@@ -519,6 +531,15 @@ def _head_tail(s: str, *, head: int, tail: int) -> str:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _chmod_best_effort(path: Path, mode: int) -> None:
+    """chmod that tolerates concurrent deletion (TD-15). A path removed between its enumeration
+    (e.g. a ``glob``) and this call raises FileNotFoundError — the expected benign race on the
+    sensitive/ tree — which is suppressed; any other OSError still propagates. Centralizing the
+    TOCTOU handling here keeps the several sensitive-file tightening sites from each re-deriving it."""
+    with contextlib.suppress(FileNotFoundError):
+        path.chmod(mode)
 
 
 def _record_terminal_introspect_result(store: ArtifactStore, run_id: str, result: StepResult) -> None:
@@ -2557,8 +2578,7 @@ def debug_introspect_check_prerequisites_handler(
             details={"code": "ssh_failure"},
         )
     for _path in (stdout_path, stderr_path):
-        with contextlib.suppress(FileNotFoundError):
-            _path.chmod(0o600)
+        _chmod_best_effort(_path, 0o600)
 
     return _assemble_probe_response(
         ctx,
@@ -2601,8 +2621,7 @@ def _prepare_probe_dirs(
     sensitive_root = run_dir / "sensitive"
     current = sensitive_dir
     while current != sensitive_root and current != run_dir:
-        with contextlib.suppress(FileNotFoundError):
-            current.chmod(0o700)
+        _chmod_best_effort(current, 0o700)
         current = current.parent
     return agent_dir, sensitive_dir
 
@@ -2818,8 +2837,7 @@ def debug_postmortem_check_prereqs_handler(
             details={"code": "ssh_failure"},
         )
     for _path in (stdout_path, stderr_path):
-        with contextlib.suppress(FileNotFoundError):
-            _path.chmod(0o600)
+        _chmod_best_effort(_path, 0o600)
 
     return _assemble_kdump_response(
         ctx,
@@ -2829,6 +2847,57 @@ def debug_postmortem_check_prereqs_handler(
         agent_dir=agent_dir,
         probe_id=probe_id,
     )
+
+
+def _parse_probe_stdout(
+    ctx: _ProbeContext,
+    *,
+    ssh_result: SshCommandResult,
+    stdout_path: Path,
+    noun: str,
+    no_python_message: str,
+) -> tuple[dict[str, Any] | None, ToolResponse | None]:
+    """Shared SSH-probe stdout gate (TD-100): the oversized → cap → cancelled/timeout → exit-255 →
+    exit-127 → unparseable-JSON ladder the kdump-readiness and dump-enumeration probes both ran
+    byte-for-byte (modulo the ``noun`` in each message and the no-python text). Returns
+    ``(parsed_object, None)`` when the target produced a JSON object, else ``(None, failure)``.
+
+    (`_assemble_probe_response` deliberately does NOT use this: its introspect prereq check is
+    advisory, so a no-JSON / no-python target gets a degraded report via ``_no_json_response``, not
+    the hard INFRASTRUCTURE_FAILURE this gate returns.)"""
+    run_id = ctx.run_id
+
+    def fail(message: str, code: str, **extra: object) -> ToolResponse:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=message,
+            details={"code": code, **extra},
+        )
+
+    oversized = f"{noun} stdout exceeded {PROBE_STDOUT_CAP} bytes"
+    if ssh_result.oversized_output:
+        return None, fail(oversized, "oversized_output")
+    raw_stdout = _read_capped(stdout_path, PROBE_STDOUT_CAP)
+    if raw_stdout is None:
+        return None, fail(oversized, "oversized_output")
+    if ssh_result.cancelled or ssh_result.timed_out or ssh_result.stdin_failed:
+        return None, fail(f"{noun} ssh round trip failed", "ssh_failure")
+    if ssh_result.exit_status == 255:
+        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
+        return None, fail(f"{noun} ssh transport failed before the target ran", "ssh_connect_failure", stderr=snippet)
+    if ssh_result.exit_status == 127:
+        return None, fail(no_python_message, "probe_no_python")
+    try:
+        parsed = json.loads(raw_stdout) if raw_stdout else None
+    except json.JSONDecodeError:
+        parsed = None
+    if not isinstance(parsed, dict):
+        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
+        return None, fail(
+            f"{noun} did not return parseable JSON (exit {ssh_result.exit_status})", "probe_unparseable", stderr=snippet
+        )
+    return parsed, None
 
 
 def _assemble_kdump_response(
@@ -2841,55 +2910,16 @@ def _assemble_kdump_response(
     probe_id: str,
 ) -> ToolResponse:
     run_id = ctx.run_id
-    if ssh_result.oversized_output:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"probe stdout exceeded {PROBE_STDOUT_CAP} bytes",
-            details={"code": "oversized_output"},
-        )
-    raw_stdout = _read_capped(stdout_path, PROBE_STDOUT_CAP)
-    if raw_stdout is None:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"probe stdout exceeded {PROBE_STDOUT_CAP} bytes",
-            details={"code": "oversized_output"},
-        )
-    if ssh_result.cancelled or ssh_result.timed_out or ssh_result.stdin_failed:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="probe ssh round trip failed",
-            details={"code": "ssh_failure"},
-        )
-    if ssh_result.exit_status == 255:
-        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="probe ssh transport failed before the target ran",
-            details={"code": "ssh_connect_failure", "stderr": snippet},
-        )
-    if ssh_result.exit_status == 127:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="python3 is not available on the target; cannot probe kdump readiness",
-            details={"code": "probe_no_python"},
-        )
-    try:
-        parsed = json.loads(raw_stdout) if raw_stdout else None
-    except json.JSONDecodeError:
-        parsed = None
-    if not isinstance(parsed, dict):
-        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"probe did not return parseable JSON (exit {ssh_result.exit_status})",
-            details={"code": "probe_unparseable", "stderr": snippet},
-        )
+    parsed, failure = _parse_probe_stdout(
+        ctx,
+        ssh_result=ssh_result,
+        stdout_path=stdout_path,
+        noun="probe",
+        no_python_message="python3 is not available on the target; cannot probe kdump readiness",
+    )
+    if failure is not None:
+        return failure
+    assert parsed is not None
 
     checks, mechanism = build_kdump_checks(parsed)
     kdump_ready = not any(c.status == PrerequisiteStatus.FAILED for c in checks)
@@ -2929,57 +2959,13 @@ def _validated_dump_dir(request: _SupportsDumpRequest, run_id: str) -> tuple[str
 def _parse_enumeration_result(
     ctx: _ProbeContext, *, ssh_result: SshCommandResult, stdout_path: Path
 ) -> tuple[dict[str, Any] | None, ToolResponse | None]:
-    run_id = ctx.run_id
-    if ssh_result.oversized_output:
-        return None, ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"enumeration stdout exceeded {PROBE_STDOUT_CAP} bytes",
-            details={"code": "oversized_output"},
-        )
-    raw = _read_capped(stdout_path, PROBE_STDOUT_CAP)
-    if raw is None:
-        return None, ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"enumeration stdout exceeded {PROBE_STDOUT_CAP} bytes",
-            details={"code": "oversized_output"},
-        )
-    if ssh_result.cancelled or ssh_result.timed_out or ssh_result.stdin_failed:
-        return None, ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="enumeration ssh round trip failed",
-            details={"code": "ssh_failure"},
-        )
-    if ssh_result.exit_status == 255:
-        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
-        return None, ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="enumeration ssh transport failed before the target ran",
-            details={"code": "ssh_connect_failure", "stderr": snippet},
-        )
-    if ssh_result.exit_status == 127:
-        return None, ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="python3 is not available on the target; cannot enumerate dumps",
-            details={"code": "probe_no_python"},
-        )
-    try:
-        parsed = json.loads(raw) if raw else None
-    except json.JSONDecodeError:
-        parsed = None
-    if not isinstance(parsed, dict):
-        snippet = _redact_and_truncate(ctx.redactor, ssh_result.stderr_snippet or "", cap=256)
-        return None, ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"enumeration did not return parseable JSON (exit {ssh_result.exit_status})",
-            details={"code": "probe_unparseable", "stderr": snippet},
-        )
-    return parsed, None
+    return _parse_probe_stdout(
+        ctx,
+        ssh_result=ssh_result,
+        stdout_path=stdout_path,
+        noun="enumeration",
+        no_python_message="python3 is not available on the target; cannot enumerate dumps",
+    )
 
 
 def _run_dump_enumeration(
@@ -3029,8 +3015,7 @@ def _run_dump_enumeration(
             details={"code": "ssh_failure"},
         )
     for _path in (stdout_path, stderr_path):
-        with contextlib.suppress(FileNotFoundError):
-            _path.chmod(0o600)
+        _chmod_best_effort(_path, 0o600)
     parsed, failure = _parse_enumeration_result(ctx, ssh_result=ssh_result, stdout_path=stdout_path)
     if failure is not None:
         return None, failure
@@ -3701,8 +3686,7 @@ def _execute_introspect_call(
         # tooling sees a stable artifact path even when the raw file is sealed
         # under sensitive/.
         if sensitive_preflight_stderr.exists():
-            with contextlib.suppress(FileNotFoundError):
-                sensitive_preflight_stderr.chmod(0o600)
+            _chmod_best_effort(sensitive_preflight_stderr, 0o600)
             raw_preflight_stderr = sensitive_preflight_stderr.read_text(encoding="utf-8", errors="replace")
             preflight_stderr.write_text(redactor.redact_text(raw_preflight_stderr), encoding="utf-8")
         if sudo_result.exit_status != 0:
@@ -3807,13 +3791,7 @@ def _execute_introspect_call(
             # handle, clean up the orphan directories, and write a forensic
             # FAILED StepResult directly (no SSH means no stderr/stdout to
             # redact via _record_introspect_failure).
-            try:
-                admission.rollback(handle)
-            except Exception:
-                # Iter-2 finding 3: surface rollback failures rather than
-                # swallowing them; the operator needs to know if the
-                # admission state for this target_key is now corrupt.
-                logger.exception("admission rollback failed for introspect call_id=%s run_id=%s", call_id, run_id)
+            _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=run_id)
             shutil.rmtree(agent_dir, ignore_errors=True)
             shutil.rmtree(sensitive_call_dir, ignore_errors=True)
             failed = StepResult(
@@ -3881,10 +3859,7 @@ def _execute_introspect_call(
             # build_ssh_argv raises when RootfsProfile.ssh_options['ConnectTimeout']
             # exceeds the command timeout — surface as CONFIGURATION_ERROR rather
             # than letting it fall into the outer broad-except.
-            try:
-                admission.rollback(handle)
-            except Exception:
-                logger.exception("admission rollback failed for introspect call_id=%s run_id=%s", call_id, run_id)
+            _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=run_id)
             admission_disposed = True
             shutil.rmtree(agent_dir, ignore_errors=True)
             shutil.rmtree(sensitive_call_dir, ignore_errors=True)
@@ -3942,8 +3917,7 @@ def _execute_introspect_call(
         # between exists() and chmod() would turn a benign race into a
         # handler crash that drops the call's manifest record.
         for _raw_path in (stdout_path, stderr_path):
-            with contextlib.suppress(FileNotFoundError):
-                _raw_path.chmod(0o600)
+            _chmod_best_effort(_raw_path, 0o600)
 
         # admission_disposed flips True as soon as either complete() succeeds
         # or rollback() runs — the outer `except` then skips a redundant
@@ -3958,13 +3932,7 @@ def _execute_introspect_call(
             # artifacts orphaned with no manifest trace. Roll back the
             # admission binding and append a FAILED introspect:<call_id>
             # record so the manifest reflects the on-disk state.
-            try:
-                admission.rollback(handle)
-            except Exception:
-                # Iter-2 finding 3: silent suppression hides real
-                # admission-state corruption from operators. Log the
-                # exception with enough context to find the offending call.
-                logger.exception("admission rollback failed for introspect call_id=%s run_id=%s", call_id, run_id)
+            _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=run_id)
             admission_disposed = True
             raw_stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
             duration_ms = int((time.monotonic() - started_monotonic) * 1000)
@@ -4802,8 +4770,7 @@ def _execute_vmcore_introspect_call(
         max_stdout_bytes=RUN_STDOUT_CAP,
     )
     for raw_path in (stdout_path, stderr_path):
-        with contextlib.suppress(FileNotFoundError):
-            raw_path.chmod(0o600)
+        _chmod_best_effort(raw_path, 0o600)
 
     finished_at = now()
     duration_ms = int((time.monotonic() - started_monotonic) * 1000)
@@ -5087,8 +5054,7 @@ def debug_postmortem_crash_handler(
     if mod_load_path.exists():
         raw_files.append(mod_load_path)
     for raw_path in raw_files:
-        with contextlib.suppress(FileNotFoundError):
-            raw_path.chmod(0o600)
+        _chmod_best_effort(raw_path, 0o600)
     duration_ms = int((time.monotonic() - started_monotonic) * 1000)
     return _finalize_crash_call(
         store=store,
@@ -6209,6 +6175,27 @@ def _assert_layer4_ownership(
         "it cannot be silently resumed.",
         category=ErrorCategory.DEBUG_ATTACH_FAILURE,
         details={"code": "legacy_session_no_ownership", "debug_session_id": None},
+    )
+
+
+def _is_legacy_debug_session(
+    *,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+    transport_session_id: str | None,
+    run_id: str,
+) -> bool:
+    """A DebugSession that predates the transport-ownership model: on a WIRED server (admission +
+    registry both present) it has no bound ``transport_session_id`` and no durable SessionRegistry
+    record for ``TargetKey("local-qemu", run_id)``. The canonical predicate `debug_end_session_handler`
+    uses to route its post-detach tombstone (TD-11), replacing an inline boolean. (The mutating-op
+    pre-detach fence `_fence_legacy_debug_session` runs a related check in its own raise-path scope,
+    which does not carry ``transport_session_id``.)"""
+    return (
+        admission is not None
+        and session_registry is not None
+        and transport_session_id is None
+        and session_registry.read_record(TargetKey(provisioner="local-qemu", target_id=run_id)) is None
     )
 
 
@@ -7599,11 +7586,11 @@ def debug_end_session_handler(
     # has no SessionRegistry ownership record; detect it BEFORE the detach so the post-detach tombstone
     # path below runs even though end_session rewrites the manifest's debug step. A Layer-4-owned
     # session has a record AND a `transport_session_id` — the transaction.close() branch governs it.
-    is_legacy_session = (
-        admission is not None
-        and session_registry is not None
-        and transport_session_id is None
-        and session_registry.read_record(TargetKey(provisioner="local-qemu", target_id=run_id)) is None
+    is_legacy_session = _is_legacy_debug_session(
+        admission=admission,
+        session_registry=session_registry,
+        transport_session_id=transport_session_id,
+        run_id=run_id,
     )
     response = _end_mi_debug_session(
         artifact_root=artifact_root,
