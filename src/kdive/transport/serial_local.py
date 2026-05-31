@@ -29,6 +29,7 @@ from kdive.transport.base import (
     Transport,
     TransportCapability,
     TransportLocality,
+    TransportSession,
     UnixSocketEndpoint,
 )
 from kdive.transport.bounded import Deadline, await_accept, check_not_cancelled, open_device
@@ -515,21 +516,24 @@ class SerialLocalTransport(Transport):
             backend_start_time=None,
         )
 
-    def close(self, session) -> None:
-        if getattr(session, "backend_pid", None):
+    def close(self, session: TransportSession) -> None:
+        if session.backend_pid:
             self._close_demux(session)
             return
-        console = getattr(session, "console_endpoint", None)
+        console = session.console_endpoint
         if isinstance(console, UnixSocketEndpoint):
             self._close_console_only(console.path)
 
-    def _close_demux(self, session) -> None:
-        key = (session.backend_pid, getattr(session, "backend_start_time", None))
+    def _close_demux(self, session: TransportSession) -> None:
+        pid = session.backend_pid
+        if pid is None:  # callers (close/health) only reach here for a demuxed session
+            return
+        key = (pid, session.backend_start_time)
         handle = self._proxy_handles.pop(key, None)
         if handle is not None:
             self._proxy.stop(handle)
         else:
-            self._proxy.stop_by_identity(session.backend_pid, getattr(session, "backend_start_time", None))
+            self._proxy.stop_by_identity(pid, session.backend_start_time)
         self._close_fd(self._proxy_lock_fds.pop(key, None))
 
     def _close_console_only(self, socket_path: str) -> None:
@@ -538,27 +542,27 @@ class SerialLocalTransport(Transport):
             bridge.stop()
         self._close_fd(self._bridge_lock_fds.pop(socket_path, None))
 
-    def health(self, session) -> str:
-        if getattr(session, "backend_pid", None):
-            key = (session.backend_pid, getattr(session, "backend_start_time", None))
+    def health(self, session: TransportSession) -> str:
+        if session.backend_pid:
+            key = (session.backend_pid, session.backend_start_time)
             handle = self._proxy_handles.get(key)
             return "degraded" if handle is None else self._proxy.health(handle)
-        console = getattr(session, "console_endpoint", None)
+        console = session.console_endpoint
         if isinstance(console, UnixSocketEndpoint):
             bridge = self._bridges.get(console.path)
             if bridge is not None and bridge.is_alive():
                 return "ready"
         return "degraded"
 
-    def break_resources(self, session) -> BreakResources | None:
+    def break_resources(self, session: TransportSession) -> BreakResources | None:
         """Resolve the live agent-proxy + handle for this demuxed session so the break mechanism can
         send an agent-proxy/UART break over the console (#82 / ADR 0024). A console-only session, or
         a session whose proxy handle is no longer held, exposes no break handle -> None, which
         ``inject_break_for_session`` maps to ``break_inject_unavailable`` (never a silent no-op)."""
-        pid = getattr(session, "backend_pid", None)
+        pid = session.backend_pid
         if pid is None:
             return None
-        handle = self._proxy_handles.get((pid, getattr(session, "backend_start_time", None)))
+        handle = self._proxy_handles.get((pid, session.backend_start_time))
         if handle is None:
             return None
         return BreakResources(proxy=self._proxy, proxy_handle=handle)

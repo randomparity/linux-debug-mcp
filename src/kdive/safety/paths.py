@@ -11,6 +11,13 @@ class PathSafetyError(ValueError):
 
 
 _RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+# Defense-in-depth only. The PRIMARY defense against shell injection is that every subprocess in
+# kdive is invoked with a list argv and shell=False — no validated value is ever interpolated into
+# a shell string (the TD-39 audit confirmed no shell=True sink exists). This set therefore stays
+# deliberately narrow: it rejects the unambiguously-dangerous shell-control characters while NOT
+# rejecting glob/brace/tilde chars (`! ( ) [ ] { } * ? ~`) that can occur in legitimate filesystem
+# paths. If a shell-string sink is ever introduced, switch that sink to list-argv rather than
+# widening this set to "sanitize" for a shell.
 _SHELL_METACHARS = set(";|&`$<>\\")
 
 

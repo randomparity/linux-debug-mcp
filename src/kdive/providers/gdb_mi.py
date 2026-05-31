@@ -803,6 +803,16 @@ class GdbMiEngine:
         return text.replace("\\", "\\\\").replace(" ", "\\ ")
 
     def _append_transcript(self, transcript_path: Path, command: str, records: list[MiRecord]) -> None:
+        """Append one redacted JSON-lines record per MI command to the session transcript.
+
+        Lifecycle (TD-20): the transcript is a per-session file under ``<run>/debug/`` referenced by
+        an ``ArtifactRef``; it grows by one line per MI command for the life of one debug session
+        (bounded by the session, not the server) and is retained as a run artifact, cleaned up with
+        the run directory. It is intentionally not rotated — a single interactive session's command
+        count is small, and a rotated/truncated transcript would lose the forensic record the
+        artifact exists to preserve. Revisit with size-based rotation only if a real session is
+        observed to produce a pathologically large transcript.
+        """
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
             "observed_at": datetime.now(UTC).isoformat(),
