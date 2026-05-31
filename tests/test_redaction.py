@@ -1,4 +1,4 @@
-from kdive.safety.redaction import Redactor
+from kdive.safety.redaction import REDACTION, Redactor
 
 
 def test_redacts_registered_secret_values_from_text() -> None:
@@ -25,6 +25,18 @@ def test_redacts_environment_mapping() -> None:
     assert redactor.redact_mapping({"API_TOKEN": "topsecret", "PATH": "/usr/bin"}) == {
         "API_TOKEN": "[REDACTED]",
         "PATH": "/usr/bin",
+    }
+
+
+def test_redacts_non_string_values_under_secret_named_keys() -> None:
+    # TD-01: a secret-named key must be masked regardless of the value's type; an int,
+    # list, or bool under "password"/"api_key"/"token" must not leak verbatim.
+    redactor = Redactor()
+
+    assert redactor.redact_value({"password": 12345, "api_key": ["a", "b"], "nested": {"token": True}}) == {
+        "password": REDACTION,
+        "api_key": REDACTION,
+        "nested": {"token": REDACTION},
     }
 
 
