@@ -233,6 +233,40 @@ class DebugToolContext:
     gdb_mi_sessions: GdbMiSessionRegistry
 
 
+UNGATED_QUERY_TOOL_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("debug.read_registers", "read_registers", "registers"),
+    ("debug.read_symbol", "read_symbol", "symbol"),
+)
+GATED_QUERY_TOOL_SPECS: tuple[tuple[str, str], ...] = (
+    ("debug.list_breakpoints", "list_breakpoints"),
+    ("debug.backtrace", "backtrace"),
+    ("debug.list_variables", "list_variables"),
+)
+SYMBOL_CONTROL_TOOL_SPECS: tuple[tuple[str, str], ...] = (
+    ("debug.set_breakpoint", "set_breakpoint"),
+    ("debug.set_watchpoint", "set_watchpoint"),
+)
+BREAKPOINT_ID_CONTROL_TOOL_SPECS: tuple[tuple[str, str], ...] = (
+    ("debug.clear_breakpoint", "clear_breakpoint"),
+    ("debug.clear_watchpoint", "clear_watchpoint"),
+)
+EXECUTION_CONTROL_TOOL_SPECS: tuple[tuple[str, str], ...] = (
+    ("debug.continue", "continue_execution"),
+    ("debug.step", "step"),
+    ("debug.next", "next"),
+    ("debug.finish", "finish"),
+    ("debug.interrupt", "interrupt"),
+)
+
+DEBUG_TOOL_REGISTRATION_GROUPS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "ungated_query": UNGATED_QUERY_TOOL_SPECS,
+    "gated_query": GATED_QUERY_TOOL_SPECS,
+    "symbol_control": SYMBOL_CONTROL_TOOL_SPECS,
+    "breakpoint_id_control": BREAKPOINT_ID_CONTROL_TOOL_SPECS,
+    "execution_control": EXECUTION_CONTROL_TOOL_SPECS,
+}
+
+
 def _path(value: str) -> Path:
     return Path(value)
 
@@ -255,11 +289,17 @@ def _gated_debug_runtime_kwargs(context: DebugToolContext) -> dict[str, Any]:
     return {"admission": context.admission, **_debug_runtime_kwargs(context)}
 
 
+def _tool_function_name(tool_name: str) -> str:
+    return tool_name.replace(".", "_")
+
+
 def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: DebugToolHandlers) -> None:
+    default_artifact_root = str(context.default_artifact_root)
+
     @app.tool(name="debug.start_session")
     def debug_start_session(
         run_id: str,
-        artifact_root: str = str(context.default_artifact_root),
+        artifact_root: str = default_artifact_root,
         debug_profile: str | None = None,
         new_session: bool = False,
     ) -> dict[str, Any]:
@@ -274,46 +314,60 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
             )
         )
 
-    @app.tool(name="debug.read_registers")
-    def debug_read_registers(
-        run_id: str,
-        registers: list[str],
-        artifact_root: str = str(context.default_artifact_root),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return _dump(
-            handlers.read_registers(
-                artifact_root=_path(artifact_root),
-                run_id=run_id,
-                registers=registers,
-                debug_session_id=debug_session_id,
-                **_debug_runtime_kwargs(context),
+    def _register_registers_query(tool_name: str, handler_name: str) -> None:
+        def debug_registers_query(
+            run_id: str,
+            registers: list[str],
+            artifact_root: str = default_artifact_root,
+            debug_session_id: str | None = None,
+        ) -> dict[str, Any]:
+            return _dump(
+                getattr(handlers, handler_name)(
+                    artifact_root=_path(artifact_root),
+                    run_id=run_id,
+                    registers=registers,
+                    debug_session_id=debug_session_id,
+                    **_debug_runtime_kwargs(context),
+                )
             )
-        )
 
-    @app.tool(name="debug.read_symbol")
-    def debug_read_symbol(
-        run_id: str,
-        symbol: str,
-        artifact_root: str = str(context.default_artifact_root),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return _dump(
-            handlers.read_symbol(
-                artifact_root=_path(artifact_root),
-                run_id=run_id,
-                symbol=symbol,
-                debug_session_id=debug_session_id,
-                **_debug_runtime_kwargs(context),
+        debug_registers_query.__name__ = _tool_function_name(tool_name)
+        app.tool(name=tool_name)(debug_registers_query)
+
+    def _register_symbol_query(tool_name: str, handler_name: str) -> None:
+        def debug_symbol_query(
+            run_id: str,
+            symbol: str,
+            artifact_root: str = default_artifact_root,
+            debug_session_id: str | None = None,
+        ) -> dict[str, Any]:
+            return _dump(
+                getattr(handlers, handler_name)(
+                    artifact_root=_path(artifact_root),
+                    run_id=run_id,
+                    symbol=symbol,
+                    debug_session_id=debug_session_id,
+                    **_debug_runtime_kwargs(context),
+                )
             )
-        )
+
+        debug_symbol_query.__name__ = _tool_function_name(tool_name)
+        app.tool(name=tool_name)(debug_symbol_query)
+
+    for tool_name, handler_name, value_name in UNGATED_QUERY_TOOL_SPECS:
+        if value_name == "registers":
+            _register_registers_query(tool_name, handler_name)
+        elif value_name == "symbol":
+            _register_symbol_query(tool_name, handler_name)
+        else:
+            raise ValueError(f"unknown ungated debug query shape: {value_name}")
 
     @app.tool(name="debug.read_memory")
     def debug_read_memory(
         run_id: str,
         address: int,
         byte_count: int,
-        artifact_root: str = str(context.default_artifact_root),
+        artifact_root: str = default_artifact_root,
         debug_session_id: str | None = None,
     ) -> dict[str, Any]:
         return _dump(
@@ -332,7 +386,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         run_id: str,
         inspector: str,
         arguments: dict[str, object] | None = None,
-        artifact_root: str = str(context.default_artifact_root),
+        artifact_root: str = default_artifact_root,
         debug_session_id: str | None = None,
     ) -> dict[str, Any]:
         return _dump(
@@ -352,7 +406,7 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         module: str,
         sections: dict[str, str] | None = None,
         ko_path: str | None = None,
-        artifact_root: str = str(context.default_artifact_root),
+        artifact_root: str = default_artifact_root,
         debug_session_id: str | None = None,
     ) -> dict[str, Any]:
         return _dump(
@@ -367,208 +421,100 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
             )
         )
 
-    @app.tool(name="debug.set_breakpoint")
-    def debug_set_breakpoint(
-        run_id: str,
-        symbol: str,
-        artifact_root: str = str(context.default_artifact_root),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return _dump(
-            handlers.set_breakpoint(
-                artifact_root=_path(artifact_root),
-                run_id=run_id,
-                symbol=symbol,
-                debug_session_id=debug_session_id,
-                **_gated_debug_runtime_kwargs(context),
+    def _register_symbol_control(tool_name: str, handler_name: str) -> None:
+        def debug_symbol_control(
+            run_id: str,
+            symbol: str,
+            artifact_root: str = default_artifact_root,
+            debug_session_id: str | None = None,
+        ) -> dict[str, Any]:
+            return _dump(
+                getattr(handlers, handler_name)(
+                    artifact_root=_path(artifact_root),
+                    run_id=run_id,
+                    symbol=symbol,
+                    debug_session_id=debug_session_id,
+                    **_gated_debug_runtime_kwargs(context),
+                )
             )
-        )
 
-    @app.tool(name="debug.set_watchpoint")
-    def debug_set_watchpoint(
-        run_id: str,
-        symbol: str,
-        artifact_root: str = str(context.default_artifact_root),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return _dump(
-            handlers.set_watchpoint(
-                artifact_root=_path(artifact_root),
-                run_id=run_id,
-                symbol=symbol,
-                debug_session_id=debug_session_id,
-                **_gated_debug_runtime_kwargs(context),
-            )
-        )
+        debug_symbol_control.__name__ = _tool_function_name(tool_name)
+        app.tool(name=tool_name)(debug_symbol_control)
 
-    @app.tool(name="debug.clear_breakpoint")
-    def debug_clear_breakpoint(
-        run_id: str,
-        breakpoint_id: str,
-        artifact_root: str = str(context.default_artifact_root),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return _dump(
-            handlers.clear_breakpoint(
-                artifact_root=_path(artifact_root),
-                run_id=run_id,
-                breakpoint_id=breakpoint_id,
-                debug_session_id=debug_session_id,
-                **_gated_debug_runtime_kwargs(context),
+    def _register_breakpoint_id_control(tool_name: str, handler_name: str) -> None:
+        def debug_breakpoint_id_control(
+            run_id: str,
+            breakpoint_id: str,
+            artifact_root: str = default_artifact_root,
+            debug_session_id: str | None = None,
+        ) -> dict[str, Any]:
+            return _dump(
+                getattr(handlers, handler_name)(
+                    artifact_root=_path(artifact_root),
+                    run_id=run_id,
+                    breakpoint_id=breakpoint_id,
+                    debug_session_id=debug_session_id,
+                    **_gated_debug_runtime_kwargs(context),
+                )
             )
-        )
 
-    @app.tool(name="debug.clear_watchpoint")
-    def debug_clear_watchpoint(
-        run_id: str,
-        breakpoint_id: str,
-        artifact_root: str = str(context.default_artifact_root),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return _dump(
-            handlers.clear_watchpoint(
-                artifact_root=_path(artifact_root),
-                run_id=run_id,
-                breakpoint_id=breakpoint_id,
-                debug_session_id=debug_session_id,
-                **_gated_debug_runtime_kwargs(context),
-            )
-        )
+        debug_breakpoint_id_control.__name__ = _tool_function_name(tool_name)
+        app.tool(name=tool_name)(debug_breakpoint_id_control)
 
-    @app.tool(name="debug.list_breakpoints")
-    def debug_list_breakpoints(
-        run_id: str,
-        artifact_root: str = str(context.default_artifact_root),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return _dump(
-            handlers.list_breakpoints(
-                artifact_root=_path(artifact_root),
-                run_id=run_id,
-                debug_session_id=debug_session_id,
-                **_gated_debug_runtime_kwargs(context),
+    def _register_gated_query(tool_name: str, handler_name: str) -> None:
+        def debug_session_query(
+            run_id: str,
+            artifact_root: str = default_artifact_root,
+            debug_session_id: str | None = None,
+        ) -> dict[str, Any]:
+            return _dump(
+                getattr(handlers, handler_name)(
+                    artifact_root=_path(artifact_root),
+                    run_id=run_id,
+                    debug_session_id=debug_session_id,
+                    **_gated_debug_runtime_kwargs(context),
+                )
             )
-        )
 
-    @app.tool(name="debug.backtrace")
-    def debug_backtrace(
-        run_id: str,
-        artifact_root: str = str(context.default_artifact_root),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return _dump(
-            handlers.backtrace(
-                artifact_root=_path(artifact_root),
-                run_id=run_id,
-                debug_session_id=debug_session_id,
-                **_gated_debug_runtime_kwargs(context),
-            )
-        )
+        debug_session_query.__name__ = _tool_function_name(tool_name)
+        app.tool(name=tool_name)(debug_session_query)
 
-    @app.tool(name="debug.list_variables")
-    def debug_list_variables(
-        run_id: str,
-        artifact_root: str = str(context.default_artifact_root),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return _dump(
-            handlers.list_variables(
-                artifact_root=_path(artifact_root),
-                run_id=run_id,
-                debug_session_id=debug_session_id,
-                **_gated_debug_runtime_kwargs(context),
+    def _register_execution_control(tool_name: str, handler_name: str) -> None:
+        def debug_execution_control(
+            run_id: str,
+            artifact_root: str = default_artifact_root,
+            debug_session_id: str | None = None,
+            timeout_seconds: int | None = None,
+        ) -> dict[str, Any]:
+            return _dump(
+                getattr(handlers, handler_name)(
+                    artifact_root=_path(artifact_root),
+                    run_id=run_id,
+                    debug_session_id=debug_session_id,
+                    timeout_seconds=timeout_seconds,
+                    **_gated_debug_runtime_kwargs(context),
+                )
             )
-        )
 
-    @app.tool(name="debug.continue")
-    def debug_continue(
-        run_id: str,
-        artifact_root: str = str(context.default_artifact_root),
-        debug_session_id: str | None = None,
-        timeout_seconds: int | None = None,
-    ) -> dict[str, Any]:
-        return _dump(
-            handlers.continue_execution(
-                artifact_root=_path(artifact_root),
-                run_id=run_id,
-                debug_session_id=debug_session_id,
-                timeout_seconds=timeout_seconds,
-                **_gated_debug_runtime_kwargs(context),
-            )
-        )
+        debug_execution_control.__name__ = _tool_function_name(tool_name)
+        app.tool(name=tool_name)(debug_execution_control)
 
-    @app.tool(name="debug.step")
-    def debug_step(
-        run_id: str,
-        artifact_root: str = str(context.default_artifact_root),
-        debug_session_id: str | None = None,
-        timeout_seconds: int | None = None,
-    ) -> dict[str, Any]:
-        return _dump(
-            handlers.step(
-                artifact_root=_path(artifact_root),
-                run_id=run_id,
-                debug_session_id=debug_session_id,
-                timeout_seconds=timeout_seconds,
-                **_gated_debug_runtime_kwargs(context),
-            )
-        )
+    for tool_name, handler_name in SYMBOL_CONTROL_TOOL_SPECS:
+        _register_symbol_control(tool_name, handler_name)
 
-    @app.tool(name="debug.next")
-    def debug_next(
-        run_id: str,
-        artifact_root: str = str(context.default_artifact_root),
-        debug_session_id: str | None = None,
-        timeout_seconds: int | None = None,
-    ) -> dict[str, Any]:
-        return _dump(
-            handlers.next(
-                artifact_root=_path(artifact_root),
-                run_id=run_id,
-                debug_session_id=debug_session_id,
-                timeout_seconds=timeout_seconds,
-                **_gated_debug_runtime_kwargs(context),
-            )
-        )
+    for tool_name, handler_name in BREAKPOINT_ID_CONTROL_TOOL_SPECS:
+        _register_breakpoint_id_control(tool_name, handler_name)
 
-    @app.tool(name="debug.finish")
-    def debug_finish(
-        run_id: str,
-        artifact_root: str = str(context.default_artifact_root),
-        debug_session_id: str | None = None,
-        timeout_seconds: int | None = None,
-    ) -> dict[str, Any]:
-        return _dump(
-            handlers.finish(
-                artifact_root=_path(artifact_root),
-                run_id=run_id,
-                debug_session_id=debug_session_id,
-                timeout_seconds=timeout_seconds,
-                **_gated_debug_runtime_kwargs(context),
-            )
-        )
+    for tool_name, handler_name in GATED_QUERY_TOOL_SPECS:
+        _register_gated_query(tool_name, handler_name)
 
-    @app.tool(name="debug.interrupt")
-    def debug_interrupt(
-        run_id: str,
-        artifact_root: str = str(context.default_artifact_root),
-        debug_session_id: str | None = None,
-        timeout_seconds: int | None = None,
-    ) -> dict[str, Any]:
-        return _dump(
-            handlers.interrupt(
-                artifact_root=_path(artifact_root),
-                run_id=run_id,
-                debug_session_id=debug_session_id,
-                timeout_seconds=timeout_seconds,
-                **_gated_debug_runtime_kwargs(context),
-            )
-        )
+    for tool_name, handler_name in EXECUTION_CONTROL_TOOL_SPECS:
+        _register_execution_control(tool_name, handler_name)
 
     @app.tool(name="debug.end_session")
     def debug_end_session(
         run_id: str,
-        artifact_root: str = str(context.default_artifact_root),
+        artifact_root: str = default_artifact_root,
         debug_session_id: str | None = None,
     ) -> dict[str, Any]:
         return _dump(

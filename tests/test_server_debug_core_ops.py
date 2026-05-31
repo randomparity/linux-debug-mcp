@@ -22,6 +22,7 @@ from kdive.coordination.admission import AdmissionService, publish_ready_snapsho
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.debug import handlers as debug_handlers
+from kdive.debug import tools as debug_tools
 from kdive.debug.tools import DebugToolContext, DebugToolHandlers
 from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus
 from kdive.providers.local.gdb_mi import (
@@ -303,6 +304,38 @@ def test_debug_tool_registration_uses_typed_context_and_handler_protocols() -> N
     assert handler_hints["read_registers"].__name__ == "DebugReadRegistersHandler"
     assert handler_hints["continue_execution"].__name__ == "DebugExecutionControlHandler"
     assert handler_hints["end_session"].__name__ == "DebugEndSessionHandler"
+
+
+def test_debug_tool_registration_groups_same_shaped_operations() -> None:
+    groups = debug_tools.DEBUG_TOOL_REGISTRATION_GROUPS
+
+    assert groups["ungated_query"] == (
+        ("debug.read_registers", "read_registers", "registers"),
+        ("debug.read_symbol", "read_symbol", "symbol"),
+    )
+    assert groups["gated_query"] == (
+        ("debug.list_breakpoints", "list_breakpoints"),
+        ("debug.backtrace", "backtrace"),
+        ("debug.list_variables", "list_variables"),
+    )
+    assert groups["symbol_control"] == (
+        ("debug.set_breakpoint", "set_breakpoint"),
+        ("debug.set_watchpoint", "set_watchpoint"),
+    )
+    assert groups["breakpoint_id_control"] == (
+        ("debug.clear_breakpoint", "clear_breakpoint"),
+        ("debug.clear_watchpoint", "clear_watchpoint"),
+    )
+    assert groups["execution_control"] == (
+        ("debug.continue", "continue_execution"),
+        ("debug.step", "step"),
+        ("debug.next", "next"),
+        ("debug.finish", "finish"),
+        ("debug.interrupt", "interrupt"),
+    )
+    assert {"debug.evaluate", "debug.read_memory", "debug.end_session"}.isdisjoint(
+        {operation for group in groups.values() for operation, *_ in group}
+    )
 
 
 def test_debug_operation_response_uses_runtime_bundle() -> None:
