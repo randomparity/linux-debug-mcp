@@ -38,6 +38,7 @@ from kdive.providers.debug import (
     MAX_MEMORY_READ_BYTES,
     DebugSession,
     DebugSessionState,
+    GdbMiAttachment,
     GdbMiEngine,
     GdbMiError,
     GdbMiSessionRegistry,
@@ -409,7 +410,9 @@ def _execution_timeout(timeout_seconds: int | None) -> int:
     return timeout_seconds if timeout_seconds is not None else MAX_INTERACTIVE_WAIT_SEC
 
 
-def _engine_op_data(*, engine: GdbMiEngine, attachment: Any, request: DebugOperationRequest) -> dict[str, object]:
+def _engine_op_data(
+    *, engine: GdbMiEngine, attachment: GdbMiAttachment, request: DebugOperationRequest
+) -> dict[str, object]:
     """Dispatch one typed debug.* request onto the live gdb/MI attachment and return redacted JSON data.
 
     ``end_session`` has a dedicated reap path and is not routed through this function.
@@ -502,7 +505,7 @@ def _lookup_transport_session(
 def _interrupt_op_data(
     *,
     engine: GdbMiEngine,
-    attachment: Any,
+    attachment: GdbMiAttachment,
     transport_session: TransportSession | None,
     transaction: TransportTransaction | None,
 ) -> dict[str, object]:
@@ -553,7 +556,7 @@ def _run_debug_engine_op(
     *,
     engine: GdbMiEngine,
     gdb_mi_sessions: GdbMiSessionRegistry,
-    attachment: Any,
+    attachment: GdbMiAttachment,
     session: DebugSession,
     request: DebugOperationRequest,
     artifact_root: Path,

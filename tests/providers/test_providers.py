@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any, get_args, get_type_hints
 
 import pytest
 
@@ -11,6 +12,7 @@ from kdive.domain import (
     TargetKind,
 )
 from kdive.model import Model
+from kdive.providers import debug as debug_contracts
 from kdive.providers.local.debug.qemu_gdbstub import DebugSession, DebugSessionState
 from kdive.providers.plugins import ProviderPluginSpec, local_provider_plugin_specs
 from kdive.providers.registry import ProviderRegistry
@@ -29,6 +31,38 @@ def test_provider_package_has_no_local_introspect_facade() -> None:
     provider_root = Path(__file__).parents[2] / "src" / "kdive" / "providers"
 
     assert not (provider_root / "introspect.py").exists()
+
+
+def _annotation_contains_any(annotation: object) -> bool:
+    return annotation is Any or any(_annotation_contains_any(arg) for arg in get_args(annotation))
+
+
+def test_gdb_mi_provider_contract_preserves_result_model_types() -> None:
+    engine_result_methods = (
+        "attach",
+        "probe_read",
+        "resolve_symbol",
+        "load_module_symbols",
+        "set_breakpoint",
+        "set_watchpoint",
+        "list_breakpoints",
+        "backtrace",
+        "list_variables",
+        "continue_",
+        "step",
+        "next",
+        "finish",
+        "interrupt",
+        "wait_for_stop",
+    )
+    registry_result_methods = ("get", "require", "reap")
+
+    for name in engine_result_methods:
+        hints = get_type_hints(getattr(debug_contracts.GdbMiEngine, name))
+        assert not _annotation_contains_any(hints["return"]), name
+    for name in registry_result_methods:
+        hints = get_type_hints(getattr(debug_contracts.GdbMiSessionRegistry, name))
+        assert not _annotation_contains_any(hints["return"]), name
 
 
 def capability(name: str) -> ProviderCapability:
