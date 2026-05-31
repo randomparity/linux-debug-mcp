@@ -107,6 +107,21 @@ class WorkflowHandlerDependencies:
 
 
 @dataclass(frozen=True)
+class BuildBootWorkflowRequest:
+    artifact_root: Path
+    source_path: str
+    build_profile: str
+    target_profile: str
+    rootfs_profile: str
+    run_id: str | None = None
+    force_rebuild: bool = False
+    force_reboot: bool = False
+    force_recollect: bool = False
+    acknowledged_permissions: list[str] | None = None
+    admission: AdmissionService | None = None
+
+
+@dataclass(frozen=True)
 class _ExistingWorkflowRunValidation:
     manifest: RunManifest
     resolved_optional: str | None
@@ -237,31 +252,22 @@ def _require_pipeline(pipeline: _BuildBootWorkflowResult | None) -> _BuildBootWo
 def _run_build_boot_workflow(
     *,
     workflow_name: str,
-    artifact_root: Path,
-    source_path: str,
-    build_profile: str,
-    target_profile: str,
-    rootfs_profile: str,
-    run_id: str | None,
+    request: BuildBootWorkflowRequest,
     optional_field: Literal["test_suite", "debug_profile"],
     requested_optional: str | None,
     optional_policy: Literal["always", "when_manifest_set"],
-    force_rebuild: bool,
-    force_reboot: bool,
-    force_recollect: bool,
     collect_pipeline_failures: bool,
-    acknowledged_permissions: list[str] | None,
-    admission: AdmissionService | None,
     dependencies: WorkflowHandlerDependencies,
 ) -> tuple[_BuildBootWorkflowResult | None, ToolResponse | None]:
+    run_id = request.run_id
     if run_id is not None:
         validation, validation_failure = _validate_existing_workflow_run_request(
-            artifact_root=artifact_root,
+            artifact_root=request.artifact_root,
             run_id=run_id,
-            source_path=source_path,
-            build_profile=build_profile,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
+            source_path=request.source_path,
+            build_profile=request.build_profile,
+            target_profile=request.target_profile,
+            rootfs_profile=request.rootfs_profile,
             optional_field=optional_field,
             requested_optional=requested_optional,
             optional_policy=optional_policy,
@@ -275,14 +281,14 @@ def _run_build_boot_workflow(
         ):
             requested_optional = validation.resolved_optional
 
-    if run_id is None or not (artifact_root / run_id / "manifest.json").is_file():
+    if run_id is None or not (request.artifact_root / run_id / "manifest.json").is_file():
         create_kwargs = {optional_field: requested_optional}
         create_response = dependencies.create_run_handler(
-            artifact_root=artifact_root,
-            source_path=source_path,
-            build_profile=build_profile,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
+            artifact_root=request.artifact_root,
+            source_path=request.source_path,
+            build_profile=request.build_profile,
+            target_profile=request.target_profile,
+            rootfs_profile=request.rootfs_profile,
             run_id=run_id,
             **create_kwargs,
         )
@@ -296,17 +302,17 @@ def _run_build_boot_workflow(
         )
 
     build_response = dependencies.kernel_build_handler(
-        artifact_root=artifact_root,
+        artifact_root=request.artifact_root,
         run_id=run_id,
-        build_profile=build_profile,
-        force_rebuild=force_rebuild,
+        build_profile=request.build_profile,
+        force_rebuild=request.force_rebuild,
     )
     if not build_response.ok:
         collect_response = _pipeline_failure_collect_response(
             dependencies=dependencies,
-            artifact_root=artifact_root,
+            artifact_root=request.artifact_root,
             run_id=run_id,
-            force_recollect=force_recollect,
+            force_recollect=request.force_recollect,
             collect_pipeline_failures=collect_pipeline_failures,
         )
         return None, _workflow_failure_response(
@@ -318,20 +324,20 @@ def _run_build_boot_workflow(
         )
 
     boot_response = dependencies.target_boot_handler(
-        artifact_root=artifact_root,
+        artifact_root=request.artifact_root,
         run_id=run_id,
-        target_profile=target_profile,
-        rootfs_profile=rootfs_profile,
-        force_reboot=force_reboot,
-        acknowledged_permissions=acknowledged_permissions,
-        admission=admission,
+        target_profile=request.target_profile,
+        rootfs_profile=request.rootfs_profile,
+        force_reboot=request.force_reboot,
+        acknowledged_permissions=request.acknowledged_permissions,
+        admission=request.admission,
     )
     if not boot_response.ok:
         collect_response = _pipeline_failure_collect_response(
             dependencies=dependencies,
-            artifact_root=artifact_root,
+            artifact_root=request.artifact_root,
             run_id=run_id,
-            force_recollect=force_recollect,
+            force_recollect=request.force_recollect,
             collect_pipeline_failures=collect_pipeline_failures,
         )
         return None, _workflow_failure_response(
@@ -374,21 +380,23 @@ def workflow_build_boot_test_handler(
 ) -> ToolResponse:
     pipeline, pipeline_failure = _run_build_boot_workflow(
         workflow_name="workflow.build_boot_test",
-        artifact_root=artifact_root,
-        source_path=source_path,
-        build_profile=build_profile,
-        target_profile=target_profile,
-        rootfs_profile=rootfs_profile,
-        run_id=run_id,
+        request=BuildBootWorkflowRequest(
+            artifact_root=artifact_root,
+            source_path=source_path,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            run_id=run_id,
+            force_rebuild=force_rebuild,
+            force_reboot=force_reboot,
+            force_recollect=force_recollect,
+            acknowledged_permissions=acknowledged_permissions,
+            admission=admission,
+        ),
         optional_field="test_suite",
         requested_optional=test_suite,
         optional_policy="always",
-        force_rebuild=force_rebuild,
-        force_reboot=force_reboot,
-        force_recollect=force_recollect,
         collect_pipeline_failures=True,
-        acknowledged_permissions=acknowledged_permissions,
-        admission=admission,
         dependencies=dependencies,
     )
     if pipeline_failure is not None:
@@ -477,21 +485,22 @@ def workflow_build_boot_debug_handler(
 ) -> ToolResponse:
     pipeline, pipeline_failure = _run_build_boot_workflow(
         workflow_name="workflow.build_boot_debug",
-        artifact_root=artifact_root,
-        source_path=source_path,
-        build_profile=build_profile,
-        target_profile=target_profile,
-        rootfs_profile=rootfs_profile,
-        run_id=run_id,
+        request=BuildBootWorkflowRequest(
+            artifact_root=artifact_root,
+            source_path=source_path,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            run_id=run_id,
+            force_rebuild=force_rebuild,
+            force_reboot=force_reboot,
+            acknowledged_permissions=acknowledged_permissions,
+            admission=admission,
+        ),
         optional_field="debug_profile",
         requested_optional=debug_profile,
         optional_policy="when_manifest_set",
-        force_rebuild=force_rebuild,
-        force_reboot=force_reboot,
-        force_recollect=False,
         collect_pipeline_failures=False,
-        acknowledged_permissions=acknowledged_permissions,
-        admission=admission,
         dependencies=dependencies,
     )
     if pipeline_failure is not None:
