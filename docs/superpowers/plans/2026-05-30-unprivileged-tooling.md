@@ -411,6 +411,7 @@ Find the import block at `src/kdive/server.py:113-116`:
 Replace with (keep alphabetical-ish grouping, add the new names and the runner class):
 
 ```python
+    PrerequisiteRunner,
     SubprocessPrerequisiteRunner,
     check_gdbstub_port,
     check_kernel_config,
@@ -421,7 +422,7 @@ Replace with (keep alphabetical-ish grouping, add the new names and the runner c
     check_rootfs_image,
 ```
 
-(If the surrounding `from kdive.prereqs.checks import (` block also lists `PortProbeResult`/`PrerequisiteRunner`, leave those entries intact; only add the new names.)
+(If the surrounding `from kdive.prereqs.checks import (` block also lists `PortProbeResult`, leave that entry intact; only add the new names.)
 
 - [ ] **Step 4: Thread `runner`/`kvm_probe` and append the checks in `prerequisites_handler`**
 
@@ -434,7 +435,7 @@ In `src/kdive/server.py:1263-1296`, add two params to the signature (after `port
 ) -> ToolResponse:
 ```
 
-`PrerequisiteRunner` (the Protocol used in the type hint) comes from `kdive.prereqs.checks` — add it to the import block from Step 3 if it is not already there. `Callable` is already imported in `server.py` (the existing `port_probe` hint uses it). Then resolve `runner` once and pass it through. Replace the `check_prerequisites(...)` call and the three `checks.append(...)` lines:
+`PrerequisiteRunner` (the Protocol used in the type hint) was added to the Step 3 import block. `Callable` is already imported in `server.py` (the existing `port_probe` hint uses it). Then resolve `runner` once and pass it through. Replace the `check_prerequisites(...)` call and the three `checks.append(...)` lines:
 
 ```python
     runner = runner or SubprocessPrerequisiteRunner()
@@ -454,8 +455,6 @@ In `src/kdive/server.py:1263-1296`, add two params to the signature (after `port
     checks.append(check_rootfs_builder(runner=runner))
     checks.append(target_err or check_libvirt_connect(target_obj, runner=runner))
 ```
-
-(`PrerequisiteRunner` is a Protocol in `prereqs/checks.py`; add it to the import block from Step 3.)
 
 - [ ] **Step 5: Run the new test and the full prereqs + server suites**
 
@@ -503,6 +502,12 @@ Overwrite `scripts/build-rootfs.sh` with:
 #      initramfs). /etc/fstab is then normalized to a lone "/" entry and /etc/crypttab removed,
 #      because the scratch image's GPT-layout mount entries would stall local-fs.target and the
 #      kdive-ready marker would never fire.
+#
+# SELinux is disabled in this local debug rootfs (guest-internal /etc/selinux/config) so the
+# host-written authorized_keys is read without a relabel and the first boot does not relabel+reboot
+# (which would risk a false BOOT_TIMEOUT). This is the guest's internal SELinux only and is
+# independent of the host-side virt_image_t/0644 labeling of the image file, which still applies
+# (see docs/fedora-libvirt-user-guide.md §5 / ADR 0037 decision #6).
 #
 # No host-side sudo/pkexec/doas. The output directory is pre-prepared once by an OS admin
 # (see docs/fedora-libvirt-user-guide.md §5); the per-build write and the final chmod are
@@ -565,9 +570,10 @@ fi
 
 unit_file="$(mktemp)"
 fstab_file="$(mktemp)"
+selinux_file="$(mktemp)"
 scratch="$(mktemp --suffix=.qcow2)"
 rootfs_tar="$(mktemp --suffix=.tar)"
-cleanup() { rm -f "${unit_file}" "${fstab_file}" "${scratch}" "${rootfs_tar}"; }
+cleanup() { rm -f "${unit_file}" "${fstab_file}" "${selinux_file}" "${scratch}" "${rootfs_tar}"; }
 trap cleanup EXIT
 
 cat >"${unit_file}" <<EOF
@@ -586,6 +592,7 @@ WantedBy=multi-user.target
 EOF
 
 printf '/dev/vda / ext4 defaults 0 1\n' >"${fstab_file}"
+printf 'SELINUX=disabled\nSELINUXTYPE=targeted\n' >"${selinux_file}"
 
 # virt-builder applies operations in its own fixed order; useradd is sequenced before
 # --ssh-inject so a non-root SSH_USER exists when the key is injected.
@@ -612,12 +619,15 @@ mkdir -p "$(dirname "${ROOTFS_PATH}")"
 virt-tar-out -a "${scratch}" / "${rootfs_tar}"
 virt-make-fs --type=ext4 --format=qcow2 --size="${IMAGE_SIZE}" "${rootfs_tar}" "${ROOTFS_PATH}"
 
-# Normalize the inherited mount config and request a first-boot SELinux relabel so the
-# host-written authorized_keys gets the right context on an enforcing guest.
+# Normalize the inherited mount config and disable guest-internal SELinux. Disabling SELinux
+# means the host-written authorized_keys is read without a relabel and the first boot does not
+# relabel+reboot (which would risk a false BOOT_TIMEOUT). This is the guest's internal SELinux
+# only; it is independent of the host-side virt_image_t/0644 labeling of the image file (which
+# still applies — see §2 / ADR #6).
 guestfish --rw -a "${ROOTFS_PATH}" -i <<GFEOF
 upload ${fstab_file} /etc/fstab
+upload ${selinux_file} /etc/selinux/config
 rm-f /etc/crypttab
-touch /.autorelabel
 GFEOF
 
 # The caller owns the file it just wrote; chmod is unprivileged. 0644 lets the separate
@@ -782,7 +792,10 @@ file mode 0644, caller ownership, and no escalation in the script/argv. Gated on
 env var; runs under TCG when /dev/kvm is absent.
 
 Tier 2 (capable host): boot the built image to the kdive-ready serial marker. Gated additionally on
-the libvirt boot env (reuses the qemu:///system harness shape from test_libvirt_boot_integration).
+the libvirt boot env (adapts the qemu:///system harness shape from test_libvirt_boot_integration).
+Tier 2 builds the base image into, and runs its copy-on-write overlay under, the operator's
+pre-prepared virt_image_t-labeled directory (located via KDIVE_ROOTFS) so the separate qemu user can
+read both the overlay and its read-only backing file under qemu:///system; it cleans both up afterward.
 
 Neither tier runs in default CI (no network/tools/KVM). The always-on protection is the
 check-no-sudo guard + the prereqs unit tests + the documented boot-contract precondition.
@@ -812,8 +825,8 @@ def require_build_tier() -> None:
         pytest.skip(f"missing build tools: {', '.join(missing)} (install libguestfs-tools).")
 
 
-def build_image(target: Path) -> None:
-    key = target.parent / "id_ed25519.pub"
+def build_image(target: Path, *, key_dir: Path | None = None) -> None:
+    key = (key_dir or target.parent) / "id_ed25519.pub"
     key.write_text("ssh-ed25519 AAAATESTKEYONLY test@kdive\n", encoding="utf-8")
     env = {
         **os.environ,
@@ -845,17 +858,28 @@ def test_tier1_layout_and_permissions(tmp_path: Path) -> None:
     assert stat.st_uid == os.getuid(), "image must be owned by the caller"
     assert stat.st_mode & 0o077 == 0o044, f"image must be 0644-readable, got {oct(stat.st_mode & 0o777)}"
 
-    # Single whole-disk ext4 filesystem, no partition table.
-    listing = subprocess.run(
-        ["virt-filesystems", "--all", "--long", "-a", str(image)],
+    # No partition table: a whole-disk filesystem reports no partitions.
+    partitions = subprocess.run(
+        ["virt-filesystems", "--partitions", "-a", str(image)],
         check=True,
         capture_output=True,
         text=True,
         timeout=120,
     ).stdout
-    assert "/dev/sda " in listing or "/dev/sda\n" in listing, f"expected whole-disk filesystem:\n{listing}"
-    assert "ext4" in listing, f"expected ext4 filesystem:\n{listing}"
-    assert "partition" not in listing.lower(), f"unexpected partition table:\n{listing}"
+    assert partitions.strip() == "", f"expected no partition table, got:\n{partitions}"
+
+    # Exactly one whole-disk filesystem, and it is ext4 (parse "device: type" lines; do not
+    # hard-code the device node).
+    filesystems = subprocess.run(
+        ["guestfish", "--ro", "-a", str(image), "run", ":", "list-filesystems"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    ).stdout
+    entries = [line.split(":", 1) for line in filesystems.splitlines() if ":" in line]
+    assert len(entries) == 1, f"expected exactly one filesystem, got:\n{filesystems}"
+    assert entries[0][1].strip() == "ext4", f"expected ext4, got:\n{filesystems}"
 
     # Normalized /etc/fstab: only the root entry; /etc/crypttab absent.
     code, fstab = guestfish_cat(image, "/etc/fstab")
@@ -876,68 +900,138 @@ def test_tier1_layout_and_permissions(tmp_path: Path) -> None:
 
 def require_boot_tier() -> dict[str, str]:
     require_build_tier()
-    needed = ["KDIVE_LIBVIRT_TEST", "KDIVE_SOURCE", "KDIVE_DOMAIN", "KDIVE_LIBVIRT_URI"]
+    needed = ["KDIVE_LIBVIRT_TEST", "KDIVE_SOURCE", "KDIVE_DOMAIN", "KDIVE_LIBVIRT_URI", "KDIVE_ROOTFS"]
     values = {name: os.environ[name] for name in needed if name in os.environ}
     missing = [name for name in needed if name not in values]
     if "KDIVE_LIBVIRT_TEST" in values and values["KDIVE_LIBVIRT_TEST"] != "1":
         missing.append("KDIVE_LIBVIRT_TEST=1")
     if missing:
-        pytest.skip(f"boot tier skipped; set {', '.join(missing)} (KVM-capable libvirt host).")
+        pytest.skip(
+            f"boot tier skipped; set {', '.join(missing)} (KVM-capable libvirt host). "
+            "KDIVE_ROOTFS must point into a pre-prepared, virt_image_t-labeled, qemu-traversable "
+            "directory (the §5 host-prep dir): Tier 2 builds and boots there under qemu:///system."
+        )
     return values
 
 
 def test_tier2_boot_reaches_readiness_marker(tmp_path: Path) -> None:
     env = require_boot_tier()
-    image = tmp_path / "minimal.qcow2"
-    build_image(image)
+    # KDIVE_ROOTFS locates the operator's pre-prepared, virt_image_t-labeled, qemu-traversable dir.
+    # Both the base image and the run tree (overlay) must live here so the separate qemu user can
+    # read the overlay AND its read-only backing file under qemu:///system (libvirt relabels only the
+    # writable overlay, not the backing file — libvirt_qemu.py:380-381,377-394).
+    prepared_dir = Path(env["KDIVE_ROOTFS"]).expanduser().parent
+    base_image = prepared_dir / "kdive-build-test.qcow2"
+    artifact_root = prepared_dir / "kdive-build-test-runs"
 
     from kdive.artifacts.store import ArtifactStore
     from kdive.config import RootfsProfile, TargetProfile
+    from kdive.domain import ArtifactRef, StepResult, StepStatus
     from kdive.server import create_run_handler, target_boot_handler
 
     source = Path(env["KDIVE_SOURCE"]).expanduser()
     kernel_image = source / "arch" / "x86" / "boot" / "bzImage"
     assert kernel_image.is_file(), f"build a bzImage at {kernel_image} before running Tier 2"
 
-    artifact_root = tmp_path / "runs"
     run_id = "run-unprivileged-build-tier2"
-    create_run_handler(
-        run_id=run_id,
-        source_path=str(source),
-        artifact_root=artifact_root,
-        store=ArtifactStore(artifact_root),
-    )
-    target_profile = TargetProfile(
-        name="local-qemu",
-        architecture="x86_64",
-        target_ref=env["KDIVE_DOMAIN"],
-        managed_domain=True,
-        managed_domain_prefix="kdive-",
-        libvirt_uri=env["KDIVE_LIBVIRT_URI"],
-    )
-    rootfs_profile = RootfsProfile(
-        name="minimal",
-        source=str(image),
-        source_kind="builder",
-        mutability="copy_on_write",
-        readiness_marker="kdive-ready",
-        ssh_host="127.0.0.1",
-        ssh_port=22,
-        ssh_user="root",
-    )
-    result = target_boot_handler(
-        run_id=run_id,
-        artifact_root=artifact_root,
-        kernel_image_path=str(kernel_image),
-        target_profiles={"local-qemu": target_profile},
-        rootfs_profiles={"minimal": rootfs_profile},
-    )
-    payload = result.model_dump(mode="json")
-    assert payload["status"] != "error", payload
-    assert "kdive-ready" in str(payload), f"boot did not reach the kdive-ready marker: {payload}"
+    # The copy_on_write overlay lands under artifact_root (libvirt_qemu.py:377-394); its ancestor
+    # dirs are created with umask-masked mkdir() (store.py:68-71), so under qemu:///system the
+    # separate qemu user can only traverse them if they are 0755. Force a 0022 umask for the run
+    # tree (and the build) so the chain is qemu-traversable regardless of the operator's login umask.
+    previous_umask = os.umask(0o022)
+    try:
+        # A prior run killed before the finally below would wedge create_run with "run already
+        # exists" because artifact_root persists in the prepared dir — pre-clean both artifacts.
+        shutil.rmtree(artifact_root, ignore_errors=True)
+        base_image.unlink(missing_ok=True)
+
+        build_image(base_image, key_dir=tmp_path)  # built file inherits virt_image_t; builder chmods 0644
+
+        create_response = create_run_handler(
+            artifact_root=artifact_root,
+            source_path=str(source),
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+            run_id=run_id,
+        )
+        assert create_response.ok is True, create_response.model_dump(mode="json")
+
+        # Boot reads the kernel image from a recorded build StepResult, not a boot arg — seed it.
+        ArtifactStore(artifact_root, create_root=False).record_step_result(
+            run_id,
+            StepResult(
+                step_name="build",
+                status=StepStatus.SUCCEEDED,
+                summary="seeded",
+                artifacts=[ArtifactRef(path=str(kernel_image), kind="kernel-image")],
+                details={"architecture": "x86_64", "output_path": str(kernel_image.parent)},
+            ),
+        )
+
+        boot_response = target_boot_handler(
+            artifact_root=artifact_root,
+            run_id=run_id,
+            force_reboot=True,
+            target_profiles={
+                "local-qemu": TargetProfile(
+                    name="local-qemu",
+                    architecture="x86_64",
+                    target_ref=env["KDIVE_DOMAIN"],
+                    managed_domain=True,
+                    managed_domain_prefix="kdive-",
+                    libvirt_uri=env["KDIVE_LIBVIRT_URI"],
+                    timeout_seconds=600,
+                )
+            },
+            rootfs_profiles={
+                "minimal": RootfsProfile(
+                    name="minimal",
+                    source=str(base_image),
+                    source_type="disk_image",
+                    source_kind="builder",
+                    mutability="copy_on_write",
+                    readiness_marker="kdive-ready",
+                )
+            },
+        )
+
+        assert boot_response.ok is True, boot_response.model_dump(mode="json")
+        assert boot_response.data["matched_marker"] == "kdive-ready"
+    finally:
+        shutil.rmtree(artifact_root, ignore_errors=True)
+        base_image.unlink(missing_ok=True)
+        os.umask(previous_umask)
 ```
 
-> **Verify at implementation:** the exact `create_run_handler` / `target_boot_handler` signatures and the `virt-filesystems` whole-disk device name (`/dev/sda` inside the libguestfs appliance) against the current code and a real build before relying on Tier 2 in an opted-in run. The Tier 2 handler call mirrors `tests/test_libvirt_boot_integration.py` — align argument names with that file if they have drifted.
+> **Adapted from** `tests/test_libvirt_boot_integration.py` — the call shape matches (no `store=` on create,
+> no `kernel_image_path=` on boot, the build step seeded, boot dict keys equal to the names passed at create),
+> but with deliberate deltas: `mutability="copy_on_write"` (vs the reference's `read_only`) to exercise the
+> overlay → read-only-backing-file chain the 0644 base-image fix is about; an added `source_kind="builder"`;
+> a hardcoded `kdive-ready` readiness marker; and a narrowed assertion set (only `matched_marker`, dropping
+> the reference's `data["domain"]` check). `timeout_seconds=600` gives the TCG path headroom. Keep the
+> shared call shape in sync with the reference test when it changes.
+>
+> **Why build into the prepared dir, not `tmp_path`:** the per-boot overlay lands at
+> `attempt_dir/rootfs-overlay.qcow2` under `artifact_root` (`libvirt_qemu.py:377-394`) and its read-only
+> backing file is the base image (`:380-381`). Under the default `qemu:///system` the separate `qemu` user
+> must read **both** — and libvirt's security driver relabels only the writable overlay, never the backing
+> file. So both the base image and `artifact_root` live in the `virt_image_t`-labeled, qemu-traversable §5
+> host-prep dir (derived from `KDIVE_ROOTFS`), **not** pytest's `0700` `tmp_path`. That is what makes the test
+> genuinely exercise the 0644 + `virt_image_t` read-only-backing-file read; under `tmp_path` it would
+> false-fail with EACCES before the 0644 path is ever reached. A test-specific filename
+> (`kdive-build-test.qcow2`) keeps the operator's production `minimal.qcow2` untouched, and the `finally`
+> block removes both the base image and the run tree.
+>
+> **Two non-obvious preconditions the test enforces itself, so it cannot false-fail like round-2 #1.**
+> (a) *Run-tree traversal:* the overlay's ancestor dirs (`artifact_root → <run_id> → boot → attempt-N`) are
+> created with umask-masked `mkdir()` (`store.py:68-71`, `libvirt_qemu.py:884`), and libvirt relabels/chowns
+> only the overlay *file*, never widens `+x` on those operator-owned dirs — so under an operator umask of
+> `077` the chain is `0700` and the `qemu` user gets EACCES traversing it (the same failure class round-2 #1
+> raised, relocated to the overlay path). The test sets `os.umask(0o022)` for the run tree and restores it in
+> `finally`. (b) *Re-run safety:* because `artifact_root` now persists in the prepared dir (not throwaway
+> `tmp_path`), a prior run killed before cleanup would wedge `create_run` with "run already exists"; the test
+> pre-cleans `artifact_root` and `base_image` before `create_run_handler` in addition to the `finally`.
 
 - [ ] **Step 2: Confirm both tiers skip cleanly without opt-in**
 
@@ -982,7 +1076,10 @@ in two unprivileged libguestfs stages: `virt-builder` customizes a Fedora image 
 then `virt-tar-out` + `virt-make-fs --type=ext4` repack the root tree into a **single whole-disk
 ext4 qcow2 with no partition table**. That layout is required: the boot provider boots
 `root=/dev/vda` with no initramfs, so a partitioned image would panic. The build normalizes
-`/etc/fstab` to a lone `/` entry so the guest reaches `multi-user.target`.
+`/etc/fstab` to a lone `/` entry so the guest reaches `multi-user.target`. It also disables
+guest-internal SELinux in the image, so the host-written SSH key is read without a relabel and the
+first boot does not relabel+reboot. That is separate from the host-side `virt_image_t` label on the
+image *file*, which is still required (see below).
 
 Configure it with environment variables (defaults in parentheses):
 
