@@ -136,6 +136,7 @@ from kdive.introspect.handlers import (
 )
 from kdive.introspect.tools import register_introspect_tools
 from kdive.logging import SECRET_REGISTRY, configure_logging
+from kdive.model import Model
 from kdive.postmortem.crash_handler import (
     debug_postmortem_crash_handler,
 )
@@ -289,6 +290,81 @@ def _require_dict(value: object, message: str) -> dict[str, Any]:
 
 
 DEFAULT_ARTIFACT_ROOT = Path(".kdive/runs")
+
+
+class HostPrerequisitesContext(Model):
+    artifact_root: str | None = None
+
+
+class HostPrerequisitesProfiles(Model):
+    build_profile: str | None = None
+    target_profile: str | None = None
+    rootfs_profile: str | None = None
+
+
+class HostPrerequisitesOptions(Model):
+    source_path: str | None = None
+    enable_libvirt_check: bool = False
+
+
+class CreateRunProfiles(Model):
+    source_path: str
+    build_profile: str | None = None
+    target_profile: str | None = None
+    rootfs_profile: str | None = None
+
+
+class CreateRunContext(Model):
+    artifact_root: str | None = None
+    run_id: str | None = None
+
+
+class CreateRunOptions(Model):
+    debug_profile: str | None = None
+    test_suite: str | None = None
+    build_overrides: dict[str, Any] | None = None
+    boot_overrides: dict[str, Any] | None = None
+    profile_specs: dict[str, dict[str, Any]] | None = None
+
+
+class KernelBuildContext(Model):
+    run_id: str
+    artifact_root: str | None = None
+
+
+class KernelBuildOptions(Model):
+    build_profile: str | None = None
+    force_rebuild: bool = False
+
+
+class TargetBootContext(Model):
+    run_id: str
+    artifact_root: str | None = None
+
+
+class TargetBootProfiles(Model):
+    target_profile: str | None = None
+    rootfs_profile: str | None = None
+
+
+class TargetBootOptions(Model):
+    force_reboot: bool = False
+    boot_overrides: dict[str, Any] | None = None
+    acknowledged_permissions: list[str] | None = None
+
+
+class TargetRunContext(Model):
+    run_id: str
+    artifact_root: str | None = None
+
+
+class TargetRunOptions(Model):
+    test_suite: str | None = None
+    commands: list[list[str]] | None = None
+    force_rerun: bool = False
+    attempt: int | None = None
+
+
 SERVER_CONFIG_ENV_VAR = "KDIVE_CONFIG"
 DEFAULT_TEST_SUITES = {
     "smoke-basic": TestSuiteProfile(
@@ -4388,42 +4464,36 @@ def create_app(
 
     @app.tool(name="host.check_prerequisites")
     def host_check_prerequisites(
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        source_path: str | None = None,
-        enable_libvirt_check: bool = False,
-        build_profile: str | None = None,
-        target_profile: str | None = None,
-        rootfs_profile: str | None = None,
+        context: HostPrerequisitesContext | None = None,
+        profiles: HostPrerequisitesProfiles | None = None,
+        options: HostPrerequisitesOptions | None = None,
     ) -> dict[str, Any]:
+        context = context or HostPrerequisitesContext()
+        profiles = profiles or HostPrerequisitesProfiles()
+        options = options or HostPrerequisitesOptions()
         return prerequisites_handler(
-            artifact_root=Path(artifact_root),
-            source_path=source_path,
-            enable_libvirt_check=enable_libvirt_check,
-            build_profile=build_profile,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
+            artifact_root=Path(context.artifact_root or str(DEFAULT_ARTIFACT_ROOT)),
+            source_path=options.source_path,
+            enable_libvirt_check=options.enable_libvirt_check,
+            build_profile=profiles.build_profile,
+            target_profile=profiles.target_profile,
+            rootfs_profile=profiles.rootfs_profile,
         ).model_dump(mode="json")
 
     @app.tool(name="kernel.create_run")
     def kernel_create_run(
-        source_path: str,
-        build_profile: str | None = None,
-        target_profile: str | None = None,
-        rootfs_profile: str | None = None,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        run_id: str | None = None,
-        debug_profile: str | None = None,
-        test_suite: str | None = None,
-        build_overrides: dict[str, Any] | None = None,
-        boot_overrides: dict[str, Any] | None = None,
-        profile_specs: dict[str, dict[str, Any]] | None = None,
+        profiles: CreateRunProfiles,
+        context: CreateRunContext | None = None,
+        options: CreateRunOptions | None = None,
     ) -> dict[str, Any]:
+        context = context or CreateRunContext()
+        options = options or CreateRunOptions()
         try:
             resolved_build_overrides, resolved_boot_overrides, build_spec, target_spec, rootfs_spec = (
                 _create_run_shapes_from_tool_args(
-                    build_overrides=build_overrides,
-                    boot_overrides=boot_overrides,
-                    profile_specs=profile_specs,
+                    build_overrides=options.build_overrides,
+                    boot_overrides=options.boot_overrides,
+                    profile_specs=options.profile_specs,
                 )
             )
         except (ValueError, ValidationError) as exc:
@@ -4431,14 +4501,14 @@ def create_app(
                 mode="json"
             )
         return create_run_handler(
-            artifact_root=Path(artifact_root),
-            source_path=source_path,
-            build_profile=build_profile,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
-            run_id=run_id,
-            debug_profile=debug_profile,
-            test_suite=test_suite,
+            artifact_root=Path(context.artifact_root or str(DEFAULT_ARTIFACT_ROOT)),
+            source_path=profiles.source_path,
+            build_profile=profiles.build_profile,
+            target_profile=profiles.target_profile,
+            rootfs_profile=profiles.rootfs_profile,
+            run_id=context.run_id,
+            debug_profile=options.debug_profile,
+            test_suite=options.test_suite,
             build_overrides=resolved_build_overrides,
             boot_overrides=resolved_boot_overrides,
             sensitive_paths=sensitive_paths,
@@ -4455,62 +4525,56 @@ def create_app(
 
     @app.tool(name="kernel.build")
     def kernel_build(
-        run_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        build_profile: str | None = None,
-        force_rebuild: bool = False,
+        context: KernelBuildContext,
+        options: KernelBuildOptions | None = None,
     ) -> dict[str, Any]:
+        options = options or KernelBuildOptions()
         return kernel_build_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            build_profile=build_profile,
-            force_rebuild=force_rebuild,
+            artifact_root=Path(context.artifact_root or str(DEFAULT_ARTIFACT_ROOT)),
+            run_id=context.run_id,
+            build_profile=options.build_profile,
+            force_rebuild=options.force_rebuild,
         ).model_dump(mode="json")
 
     @app.tool(name="target.boot")
     def target_boot(
-        run_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        target_profile: str | None = None,
-        rootfs_profile: str | None = None,
-        force_reboot: bool = False,
-        boot_overrides: dict[str, Any] | None = None,
-        acknowledged_permissions: list[str] | None = None,
+        context: TargetBootContext,
+        profiles: TargetBootProfiles | None = None,
+        options: TargetBootOptions | None = None,
     ) -> dict[str, Any]:
+        profiles = profiles or TargetBootProfiles()
+        options = options or TargetBootOptions()
         try:
-            resolved_boot_overrides = BootOverrides(**boot_overrides) if boot_overrides else None
+            resolved_boot_overrides = BootOverrides(**options.boot_overrides) if options.boot_overrides else None
         except (ValueError, ValidationError) as exc:
             return ToolResponse.failure(category=ErrorCategory.CONFIGURATION_ERROR, message=str(exc)).model_dump(
                 mode="json"
             )
         return target_boot_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
-            force_reboot=force_reboot,
+            artifact_root=Path(context.artifact_root or str(DEFAULT_ARTIFACT_ROOT)),
+            run_id=context.run_id,
+            target_profile=profiles.target_profile,
+            rootfs_profile=profiles.rootfs_profile,
+            force_reboot=options.force_reboot,
             boot_overrides=resolved_boot_overrides,
-            acknowledged_permissions=acknowledged_permissions,
+            acknowledged_permissions=options.acknowledged_permissions,
             sensitive_paths=sensitive_paths,
             admission=admission_service,
         ).model_dump(mode="json")
 
     @app.tool(name="target.run_tests")
     def target_run_tests(
-        run_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        test_suite: str | None = None,
-        commands: list[list[str]] | None = None,
-        force_rerun: bool = False,
-        attempt: int | None = None,
+        context: TargetRunContext,
+        options: TargetRunOptions | None = None,
     ) -> dict[str, Any]:
+        options = options or TargetRunOptions()
         return target_run_tests_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            test_suite=test_suite,
-            commands=commands,
-            force_rerun=force_rerun,
-            attempt=attempt,
+            artifact_root=Path(context.artifact_root or str(DEFAULT_ARTIFACT_ROOT)),
+            run_id=context.run_id,
+            test_suite=options.test_suite,
+            commands=options.commands,
+            force_rerun=options.force_rerun,
+            attempt=options.attempt,
             admission=admission_service,
             session_registry=durable_registry,
         ).model_dump(mode="json")

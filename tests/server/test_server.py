@@ -378,13 +378,14 @@ def test_create_app_registers_future_provider_tools() -> None:
         assert {"provider_name", "timeout_seconds", "operation_label"}.isdisjoint(properties)
 
 
-def test_target_run_tests_tool_is_registered_with_full_arguments() -> None:
+def test_target_run_tests_tool_uses_grouped_context_and_options() -> None:
     app = create_app()
     tool = app._tool_manager._tools["target.run_tests"]
 
     assert "target.run_tests" in tool_names()
-    assert "force_rerun" in tool.parameters["properties"]
-    assert "commands" in tool.parameters["properties"]
+    properties = tool.parameters["properties"]
+    assert {"context", "options"}.issubset(properties)
+    assert {"force_rerun", "commands", "run_id", "artifact_root"}.isdisjoint(properties)
     assert tool.fn.__name__ == "target_run_tests"
 
 
@@ -426,6 +427,38 @@ def test_workflow_build_boot_test_tool_uses_grouped_options() -> None:
     assert {"force_rerun_tests", "force_recollect", "force_rebuild", "force_reboot"}.isdisjoint(properties)
     assert tool.fn.__name__ == "workflow_build_boot_test"
     assert tool.fn.__module__ == "kdive.workflow.tools"
+
+
+def test_root_kernel_and_host_tools_use_grouped_inputs() -> None:
+    app = create_app()
+
+    expected_properties = {
+        "host.check_prerequisites": {"context", "profiles", "options"},
+        "kernel.create_run": {"profiles", "context", "options"},
+        "kernel.build": {"context", "options"},
+        "target.boot": {"context", "profiles", "options"},
+        "target.run_tests": {"context", "options"},
+    }
+    flat_properties = {
+        "artifact_root",
+        "source_path",
+        "run_id",
+        "build_profile",
+        "target_profile",
+        "rootfs_profile",
+        "force_rebuild",
+        "force_reboot",
+        "force_rerun",
+        "boot_overrides",
+        "build_overrides",
+        "profile_specs",
+        "commands",
+    }
+
+    for tool_name, expected in expected_properties.items():
+        properties = app._tool_manager._tools[tool_name].parameters["properties"]
+        assert expected.issubset(properties), tool_name
+        assert flat_properties.isdisjoint(properties), tool_name
 
 
 def test_create_run_freezes_merged_profiles(tmp_path):
@@ -590,20 +623,20 @@ def test_create_run_tool_accepts_overrides_and_rejects_bad_args(tmp_path: Path):
     tool_fn = _get_tool_fn(app, "kernel.create_run")
     params = inspect.signature(tool_fn).parameters
 
-    assert "build_overrides" in params
-    assert "boot_overrides" in params
-    assert "profile_specs" in params
-    assert "kernel_args" not in params
-    assert "make_variables" not in params
+    assert set(params) == {"profiles", "context", "options"}
 
     ok = tool_fn(
-        source_path=str(src),
-        build_profile="x86_64-default",
-        target_profile="local-qemu",
-        rootfs_profile="minimal",
-        artifact_root=str(tmp_path / "runs"),
-        boot_overrides={"kernel_args": ["dhash_entries=1"]},
-        build_overrides={"make_variables": {"CC": "clang"}, "config_lines": ["CONFIG_DEBUG_INFO=y"]},
+        profiles=server.CreateRunProfiles(
+            source_path=str(src),
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+        ),
+        context=server.CreateRunContext(artifact_root=str(tmp_path / "runs")),
+        options=server.CreateRunOptions(
+            boot_overrides={"kernel_args": ["dhash_entries=1"]},
+            build_overrides={"make_variables": {"CC": "clang"}, "config_lines": ["CONFIG_DEBUG_INFO=y"]},
+        ),
     )
     assert ok["ok"] is True
     run_id = ok["run_id"]
@@ -611,12 +644,14 @@ def test_create_run_tool_accepts_overrides_and_rejects_bad_args(tmp_path: Path):
     assert manifest.resolved_build_profile.config_lines == ["CONFIG_DEBUG_INFO=y"]
 
     bad = tool_fn(
-        source_path=str(src),
-        build_profile="x86_64-default",
-        target_profile="local-qemu",
-        rootfs_profile="minimal",
-        artifact_root=str(tmp_path / "runs2"),
-        boot_overrides={"kernel_args": ["bad;arg"]},
+        profiles=server.CreateRunProfiles(
+            source_path=str(src),
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+        ),
+        context=server.CreateRunContext(artifact_root=str(tmp_path / "runs2")),
+        options=server.CreateRunOptions(boot_overrides={"kernel_args": ["bad;arg"]}),
     )
     assert bad["ok"] is False
     assert bad["error"]["category"] == "configuration_error"
@@ -628,11 +663,7 @@ def test_target_boot_tool_accepts_grouped_boot_overrides() -> None:
     tool_fn = _get_tool_fn(server.create_app(), "target.boot")
     params = inspect.signature(tool_fn).parameters
 
-    assert "boot_overrides" in params
-    assert "acknowledged_permissions" in params
-    assert "kernel_args" not in params
-    assert "rootfs_source" not in params
-    assert "rootfs_overrides" not in params
+    assert set(params) == {"context", "profiles", "options"}
 
 
 def test_introspect_tool_is_registered() -> None:
