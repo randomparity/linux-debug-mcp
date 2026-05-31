@@ -357,6 +357,15 @@ def test_debug_tool_malformed_grouped_input_returns_configuration_error() -> Non
     assert response["error"]["category"] == "configuration_error"
 
 
+def test_workflow_tool_malformed_grouped_input_returns_configuration_error() -> None:
+    response = _get_tool_fn(create_app(), "workflow.build_boot_test")(
+        profiles={"unexpected": "field"},
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["category"] == "configuration_error"
+
+
 def test_create_app_registers_future_provider_tools() -> None:
     app = create_app()
     tools = app._tool_manager._tools

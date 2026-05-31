@@ -12,6 +12,7 @@ from kdive.domain import ToolResponse
 from kdive.model import Model
 from kdive.providers.debug import GdbMiEngine, GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard
+from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, optional_model_arg
 from kdive.workflow.handlers import WorkflowHandlerDependencies
 
 
@@ -111,26 +112,30 @@ def register_workflow_tools(
 
     @app.tool(name="workflow.build_boot_test")
     def workflow_build_boot_test(
-        profiles: WorkflowProfileInputs,
-        context: WorkflowRunContext | None = None,
-        options: WorkflowBuildBootTestOptions | None = None,
+        profiles: WorkflowProfileInputs | dict[str, Any],
+        context: WorkflowRunContext | dict[str, Any] | None = None,
+        options: WorkflowBuildBootTestOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        context = context or WorkflowRunContext()
-        options = options or WorkflowBuildBootTestOptions()
+        try:
+            profiles_model = model_arg(profiles, WorkflowProfileInputs)
+            context_model = optional_model_arg(context, WorkflowRunContext)
+            options_model = optional_model_arg(options, WorkflowBuildBootTestOptions)
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return build_boot_test_handler(
-            artifact_root=Path(context.artifact_root or default_artifact_root_text),
-            source_path=profiles.source_path,
-            build_profile=profiles.build_profile,
-            target_profile=profiles.target_profile,
-            rootfs_profile=profiles.rootfs_profile,
-            run_id=context.run_id,
-            test_suite=options.test_suite,
-            commands=options.commands,
-            force_rebuild=options.force_rebuild,
-            force_reboot=options.force_reboot,
-            force_rerun_tests=options.force_rerun_tests,
-            force_recollect=options.force_recollect,
-            acknowledged_permissions=options.acknowledged_permissions,
+            artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
+            source_path=profiles_model.source_path,
+            build_profile=profiles_model.build_profile,
+            target_profile=profiles_model.target_profile,
+            rootfs_profile=profiles_model.rootfs_profile,
+            run_id=context_model.run_id,
+            test_suite=options_model.test_suite,
+            commands=options_model.commands,
+            force_rebuild=options_model.force_rebuild,
+            force_reboot=options_model.force_reboot,
+            force_rerun_tests=options_model.force_rerun_tests,
+            force_recollect=options_model.force_recollect,
+            acknowledged_permissions=options_model.acknowledged_permissions,
             admission=admission,
             session_registry=session_registry,
             dependencies=dependencies,
@@ -138,24 +143,28 @@ def register_workflow_tools(
 
     @app.tool(name="workflow.build_boot_debug")
     def workflow_build_boot_debug(
-        profiles: WorkflowProfileInputs,
-        context: WorkflowRunContext | None = None,
-        options: WorkflowBuildBootDebugOptions | None = None,
+        profiles: WorkflowProfileInputs | dict[str, Any],
+        context: WorkflowRunContext | dict[str, Any] | None = None,
+        options: WorkflowBuildBootDebugOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        context = context or WorkflowRunContext()
-        options = options or WorkflowBuildBootDebugOptions()
+        try:
+            profiles_model = model_arg(profiles, WorkflowProfileInputs)
+            context_model = optional_model_arg(context, WorkflowRunContext)
+            options_model = optional_model_arg(options, WorkflowBuildBootDebugOptions)
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return build_boot_debug_handler(
-            artifact_root=Path(context.artifact_root or default_artifact_root_text),
-            source_path=profiles.source_path,
-            build_profile=profiles.build_profile,
-            target_profile=profiles.target_profile,
-            rootfs_profile=profiles.rootfs_profile,
-            run_id=context.run_id,
-            debug_profile=options.debug_profile,
-            force_rebuild=options.force_rebuild,
-            force_reboot=options.force_reboot,
-            new_session=options.new_session,
-            acknowledged_permissions=options.acknowledged_permissions,
+            artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
+            source_path=profiles_model.source_path,
+            build_profile=profiles_model.build_profile,
+            target_profile=profiles_model.target_profile,
+            rootfs_profile=profiles_model.rootfs_profile,
+            run_id=context_model.run_id,
+            debug_profile=options_model.debug_profile,
+            force_rebuild=options_model.force_rebuild,
+            force_reboot=options_model.force_reboot,
+            new_session=options_model.new_session,
+            acknowledged_permissions=options_model.acknowledged_permissions,
             admission=admission,
             session_registry=session_registry,
             transaction=transaction,
