@@ -10,10 +10,10 @@ import pytest
 
 from kdive.seams.process_identity import ProcProcessIdentityProbe
 from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetKey
-from kdive.transport.base import LineRole, OpenRequest, TcpEndpoint, TransportRef
-from kdive.transport.bounded import Deadline
-from kdive.transport.proxy import _S003_TARGET_ALTERNATE, AgentProxyBackend
-from kdive.transport.serial_local import SerialLocalTransport
+from kdive.transport.backends.proxy import _S003_TARGET_ALTERNATE, AgentProxyBackend
+from kdive.transport.backends.serial_local import SerialLocalTransport
+from kdive.transport.core.base import LineRole, OpenRequest, TcpEndpoint, TransportRef
+from kdive.transport.core.bounded import Deadline
 
 # Require agent-proxy in CI (KDIVE_REQUIRE_AGENT_PROXY=1) so the break path is a real merge
 # gate; skip only on a dev host that did NOT opt in. When required-but-absent the test runs

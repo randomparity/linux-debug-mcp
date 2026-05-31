@@ -7,7 +7,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from kdive.seams.target import Arch, ConsoleKind, PlatformMetadata, TargetKey
-from kdive.transport.base import (
+from kdive.transport.core.base import (
     DEFAULT_MIN_LEASE_TTL_SECONDS,
     BackendAttachment,
     BreakMethod,

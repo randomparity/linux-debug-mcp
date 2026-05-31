@@ -27,7 +27,7 @@ from kdive.seams.target import (
     TargetKey,
     TargetState,
 )
-from kdive.transport.break_types import BreakProxy, BreakSshRunner
+from kdive.transport.core.break_types import BreakProxy, BreakSshRunner
 
 DEFAULT_MIN_LEASE_TTL_SECONDS = 300
 

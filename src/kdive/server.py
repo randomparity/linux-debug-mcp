@@ -125,7 +125,9 @@ from kdive.target.handlers import DEFAULT_TEST_SUITES as _DEFAULT_TEST_SUITES
 from kdive.target.handlers import target_boot_handler, target_run_tests_handler
 from kdive.tools.artifacts import register_artifact_tools
 from kdive.tools.providers import register_provider_tools
-from kdive.transport.base import (
+from kdive.transport.backends.proxy import AgentProxyBackend
+from kdive.transport.backends.qemu_gdbstub import QemuGdbstubTransport
+from kdive.transport.core.base import (
     EndpointExposure,
     Transport,
     TransportLocality,
@@ -136,8 +138,6 @@ from kdive.transport.handlers import (
     transport_inject_break_handler,
     transport_open_handler,
 )
-from kdive.transport.proxy import AgentProxyBackend
-from kdive.transport.qemu_gdbstub import QemuGdbstubTransport
 from kdive.transport.tools import TransportToolContext, TransportToolHandlers, register_transport_tools
 from kdive.workflow.handlers import (
     WorkflowHandlerDependencies,

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from kdive.seams.process_identity import ProcessIdentityProbe, ProcProcessIdentityProbe
-from kdive.transport.bounded import (
+from kdive.transport.core.bounded import (
     BoundedIOTimeout,
     Deadline,
     allocate_loopback_ports,

@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction, _best_effort_reap, _OpenState, _write_backend_partial
 from kdive.seams.target import TargetKey
-from kdive.transport.base import RecordState, Transport, TransportSession, new_session_id
+from kdive.transport.core.base import RecordState, Transport, TransportSession, new_session_id
 
 
 def _key() -> TargetKey:

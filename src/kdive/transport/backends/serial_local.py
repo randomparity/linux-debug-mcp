@@ -19,7 +19,14 @@ from types import MappingProxyType
 
 from kdive.domain import ErrorCategory
 from kdive.safety.runtime_locks import RuntimeLockError, device_lock_filename, private_runtime_lock_dir
-from kdive.transport.base import (
+from kdive.transport.backends.proxy import (
+    AgentProxyBackend,
+    LocalDeviceSource,
+    ProxyBackend,
+    ProxyHandle,
+    RemoteTerminalServerSource,
+)
+from kdive.transport.core.base import (
     BackendAttachment,
     BreakResources,
     EndpointExposure,
@@ -32,14 +39,7 @@ from kdive.transport.base import (
     TransportSession,
     UnixSocketEndpoint,
 )
-from kdive.transport.bounded import Deadline, await_accept, check_not_cancelled, open_device
-from kdive.transport.proxy import (
-    AgentProxyBackend,
-    LocalDeviceSource,
-    ProxyBackend,
-    ProxyHandle,
-    RemoteTerminalServerSource,
-)
+from kdive.transport.core.bounded import Deadline, await_accept, check_not_cancelled, open_device
 
 OnPartial = Callable[[str, object], None]
 

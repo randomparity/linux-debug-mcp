@@ -8,7 +8,7 @@ from kdive.coordination.selection import (
 )
 from kdive.seams.break_policy import ReferenceBreakPolicy
 from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetKey
-from kdive.transport.base import BreakMethod, LineRole, TransportRef
+from kdive.transport.core.base import BreakMethod, LineRole, TransportRef
 
 _TK = TargetKey(provisioner="local-qemu", target_id="run-1")
 

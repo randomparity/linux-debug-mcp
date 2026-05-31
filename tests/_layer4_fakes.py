@@ -16,7 +16,7 @@ from kdive.safety.secrets import SecretReferenceKind
 from kdive.seams.guard import InProcessStopCapableGuard
 from kdive.seams.secrets import EnvSecretsBackend, SecretsStore
 from kdive.seams.target import BreakHint, ConsoleKind, PlatformMetadata, TargetKey, TargetState
-from kdive.transport.base import (
+from kdive.transport.core.base import (
     BackendAttachment,
     BreakMethod,
     BreakPlan,

@@ -86,10 +86,10 @@ def test_inject_break_drops_kgdb_target_into_debugger(tmp_path: Path) -> None:
     role of the serial line; no kgdb-enabled guest is required."""
     from kdive.seams.process_identity import ProcProcessIdentityProbe
     from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetKey
-    from kdive.transport.base import LineRole, OpenRequest, TcpEndpoint, TransportRef
-    from kdive.transport.bounded import Deadline
-    from kdive.transport.proxy import _S003_TARGET_ALTERNATE, AgentProxyBackend
-    from kdive.transport.serial_local import SerialLocalTransport
+    from kdive.transport.backends.proxy import _S003_TARGET_ALTERNATE, AgentProxyBackend
+    from kdive.transport.backends.serial_local import SerialLocalTransport
+    from kdive.transport.core.base import LineRole, OpenRequest, TcpEndpoint, TransportRef
+    from kdive.transport.core.bounded import Deadline
 
     controller_fd, peripheral_fd = pty.openpty()
     peripheral_name = os.ttyname(peripheral_fd)
@@ -203,7 +203,7 @@ def test_qemu_gdbstub_flow_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyP
         kernel_build_handler,
         target_boot_handler,
     )
-    from kdive.transport.base import ExecutionState
+    from kdive.transport.core.base import ExecutionState
 
     # Register the live profiles into the server's DEFAULT_* dicts so the handlers can resolve them.
     monkeypatch.setitem(

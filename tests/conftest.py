@@ -24,7 +24,7 @@ from kdive.seams.target import (
     TargetKey,
 )
 from kdive.server import create_run_handler
-from kdive.transport.base import LineRole, TransportRef
+from kdive.transport.core.base import LineRole, TransportRef
 
 
 @pytest.fixture(autouse=True)

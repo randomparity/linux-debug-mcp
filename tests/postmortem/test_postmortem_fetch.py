@@ -14,7 +14,7 @@ from kdive.domain import (
 from kdive.postmortem.handlers import debug_postmortem_fetch_handler
 from kdive.postmortem.models import DebugPostmortemFetchRequest
 from kdive.providers.local.local_ssh_tests import SshCommandResult
-from kdive.transport.base import ExecutionState
+from kdive.transport.core.base import ExecutionState
 
 SECRET_KEY_REF = "s3cr3t-key"  # pragma: allowlist secret
 _LISTING = (

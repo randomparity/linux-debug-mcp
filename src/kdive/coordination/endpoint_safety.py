@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 
-from kdive.transport.base import (
+from kdive.transport.core.base import (
     Endpoint,
     EndpointExposure,
     TcpEndpoint,

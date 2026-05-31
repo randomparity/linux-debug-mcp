@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from kdive.transport.bounded import (
+from kdive.transport.core.bounded import (
     BoundedIOCancelled,
     BoundedIOTimeout,
     Deadline,

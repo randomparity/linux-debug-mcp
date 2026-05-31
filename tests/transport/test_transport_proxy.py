@@ -7,14 +7,14 @@ import time
 import pytest
 
 from kdive.seams.process_identity import ProcessIdentity, ProcProcessIdentityProbe
-from kdive.transport.bounded import Deadline
-from kdive.transport.proxy import (
+from kdive.transport.backends.proxy import (
     AgentProxyBackend,
     LocalDeviceSource,
     ProxyHandle,
     ProxyIdentityError,
     RemoteTerminalServerSource,
 )
+from kdive.transport.core.bounded import Deadline
 
 
 class _FakeProc:
@@ -301,7 +301,7 @@ def test_start_fails_closed_and_reaps_when_no_start_time_fingerprint():
 def test_start_reaps_the_spawned_child_when_verification_is_cancelled(monkeypatch):
     """cancel during verification raises BoundedIOCancelled out of _verify_identity; start()
     must reap the already-spawned child before propagating (round-3 review F1)."""
-    from kdive.transport.bounded import BoundedIOCancelled
+    from kdive.transport.core.bounded import BoundedIOCancelled
 
     proc = _FakeProc(pid=8000, dies_on_term=True)
     backend = AgentProxyBackend(spawner=lambda *a, **k: proc, identity_probe=_Probe(start_time="t"))
@@ -445,13 +445,13 @@ def test_health_is_degraded_when_a_foreign_process_owns_the_port():
 
 
 def test_break_escape_is_the_pinned_telnet_iac_break():
-    from kdive.transport.proxy import _BREAK_ESCAPE
+    from kdive.transport.backends.proxy import _BREAK_ESCAPE
 
     assert _BREAK_ESCAPE == b"\xff\xf3"  # agent-proxy.c defaultBrkStr {0xff,0xf3}
 
 
 def test_send_break_writes_the_pinned_escape_to_the_console_port():
-    from kdive.transport.proxy import _BREAK_ESCAPE
+    from kdive.transport.backends.proxy import _BREAK_ESCAPE
 
     listener, port = _live_listener()
     received = []
@@ -476,7 +476,7 @@ def test_send_break_rechecks_ownership_after_connect_and_writes_nothing():
     """The port can be stolen in the window between the pre-connect ownership check and the
     write (F2). send_break must re-verify ownership AFTER connect, immediately before the
     write, and refuse — writing no BREAK bytes to the now-foreign listener."""
-    from kdive.transport.proxy import _BREAK_ESCAPE
+    from kdive.transport.backends.proxy import _BREAK_ESCAPE
 
     class _OwnsThenLoses:
         def __init__(self):

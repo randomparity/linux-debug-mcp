@@ -17,8 +17,8 @@ from kdive.providers.debug import ProviderDebugError
 from kdive.safety.redaction import Redactor
 from kdive.seams.guard import GuardConflict
 from kdive.seams.target import TargetKey
-from kdive.transport.base import BreakPlan, ExecutionState, LineRole, OpenRequest, TransportSession
-from kdive.transport.break_inject import BreakRequestMethod, InjectBreakError
+from kdive.transport.core.base import BreakPlan, ExecutionState, LineRole, OpenRequest, TransportSession
+from kdive.transport.core.break_inject import BreakRequestMethod, InjectBreakError
 
 
 def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any] | None = None) -> ToolResponse:

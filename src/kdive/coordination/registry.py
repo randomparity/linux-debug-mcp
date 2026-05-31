@@ -13,7 +13,7 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from kdive.seams.target import TargetKey
-from kdive.transport.base import ExecutionState, TransportSession
+from kdive.transport.core.base import ExecutionState, TransportSession
 
 logger = logging.getLogger(__name__)
 

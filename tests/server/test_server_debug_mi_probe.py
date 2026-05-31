@@ -29,7 +29,7 @@ from kdive.seams.target import (
     TargetKey,
 )
 from kdive.server import debug_start_session_handler, target_run_tests_handler
-from kdive.transport.base import ExecutionState, LineRole, TransportRef
+from kdive.transport.core.base import ExecutionState, LineRole, TransportRef
 
 RUN_ID = "run-1"
 KEY = TargetKey(provisioner="local-qemu", target_id=RUN_ID)

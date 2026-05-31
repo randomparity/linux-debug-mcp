@@ -60,7 +60,7 @@ def test_endpoint_unsafe_maps_to_transport_conflict(tmp_path):
 
     from kdive.coordination.admission import AdmissionService, SnapshotStore, TargetSnapshot
     from kdive.seams.target import TargetState
-    from kdive.transport.base import LineRole, TransportRef
+    from kdive.transport.core.base import LineRole, TransportRef
 
     store = SnapshotStore()
     broker_channel = TransportRef(

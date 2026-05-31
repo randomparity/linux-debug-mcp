@@ -28,7 +28,7 @@ from kdive.server import (
     debug_start_session_handler,
 )
 from kdive.target.handlers import _admit_run_tests_ssh_tier
-from kdive.transport.base import LineRole, TransportRef
+from kdive.transport.core.base import LineRole, TransportRef
 
 from kdive.artifacts.store import ArtifactStore  # isort: skip
 

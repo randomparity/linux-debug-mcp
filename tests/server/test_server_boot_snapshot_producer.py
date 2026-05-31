@@ -5,7 +5,7 @@ from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, TargetProfile
 from kdive.coordination.admission import AdmissionError, AdmissionService, SnapshotStore
 from kdive.seams.target import BreakHint, ConsoleKind, PlatformMetadata, TargetKey
 from kdive.server import target_boot_handler
-from kdive.transport.base import LineRole, OpenRequest, TransportRef
+from kdive.transport.core.base import LineRole, OpenRequest, TransportRef
 
 
 def _platform() -> PlatformMetadata:

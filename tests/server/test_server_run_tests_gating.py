@@ -15,7 +15,7 @@ from kdive.seams.target import (
     TargetKey,
 )
 from kdive.server import target_run_tests_handler
-from kdive.transport.base import (
+from kdive.transport.core.base import (
     ExecutionState,
     LineRole,
     RecordState,

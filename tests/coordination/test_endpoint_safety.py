@@ -5,7 +5,7 @@ from kdive.coordination.endpoint_safety import (
     assert_loopback_endpoint,
     refuse_unsafe_exposure,
 )
-from kdive.transport.base import (
+from kdive.transport.core.base import (
     EndpointExposure,
     TcpEndpoint,
     TransportCapability,

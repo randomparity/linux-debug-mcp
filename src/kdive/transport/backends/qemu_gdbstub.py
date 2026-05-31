@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from types import MappingProxyType
 
 from kdive.domain import ErrorCategory
-from kdive.transport.base import (
+from kdive.transport.core.base import (
     BackendAttachment,
     EndpointExposure,
     OpenRequest,
@@ -16,8 +16,8 @@ from kdive.transport.base import (
     TransportLocality,
     TransportSession,
 )
-from kdive.transport.bounded import Deadline
-from kdive.transport.rsp_probe import rsp_reachable
+from kdive.transport.core.bounded import Deadline
+from kdive.transport.core.rsp_probe import rsp_reachable
 
 
 class QemuGdbstubAttachError(Exception):

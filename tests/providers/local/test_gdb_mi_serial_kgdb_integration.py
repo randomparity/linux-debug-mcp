@@ -23,7 +23,9 @@ from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.seams.process_identity import ProcProcessIdentityProbe
 from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetKey
-from kdive.transport.base import (
+from kdive.transport.backends.proxy import _S003_TARGET_ALTERNATE, AgentProxyBackend
+from kdive.transport.backends.serial_local import SerialLocalTransport
+from kdive.transport.core.base import (
     BreakMethod,
     BreakPlan,
     LineRole,
@@ -33,9 +35,7 @@ from kdive.transport.base import (
     TransportSession,
     new_session_id,
 )
-from kdive.transport.bounded import Deadline
-from kdive.transport.proxy import _S003_TARGET_ALTERNATE, AgentProxyBackend
-from kdive.transport.serial_local import SerialLocalTransport
+from kdive.transport.core.bounded import Deadline
 
 # Require agent-proxy in CI (KDIVE_REQUIRE_AGENT_PROXY=1) so the serial-KGDB break/continue
 # prerequisite is a real merge gate; skip only on a dev host that did NOT opt in. The skip reason

@@ -5,9 +5,9 @@ import threading
 from kdive.coordination.admission import AdmissionService, ExecutionProof
 from kdive.coordination.registry import SessionRegistry
 from kdive.seams.target import TargetKey
-from kdive.transport.base import ExecutionState, TcpEndpoint, TransportSession
-from kdive.transport.bounded import BoundedIOTimeout, Deadline, connect_tcp
-from kdive.transport.rsp_probe import RSP_MAX_ACCUMULATE_BYTES, rsp_frame
+from kdive.transport.core.base import ExecutionState, TcpEndpoint, TransportSession
+from kdive.transport.core.bounded import BoundedIOTimeout, Deadline, connect_tcp
+from kdive.transport.core.rsp_probe import RSP_MAX_ACCUMULATE_BYTES, rsp_frame
 
 
 def probe_execution_state(

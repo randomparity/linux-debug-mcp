@@ -89,7 +89,7 @@ from kdive.server import (
     transport_inject_break_handler,
     transport_open_handler,
 )
-from kdive.transport.base import (
+from kdive.transport.core.base import (
     ExecutionState,
     LineRole,
     OpenRequest,

@@ -52,7 +52,7 @@ from kdive.server import (
     workflow_build_boot_debug_handler,
     workflow_build_boot_test_handler,
 )
-from kdive.transport.base import (
+from kdive.transport.core.base import (
     ExecutionState,
     LineRole,
     RecordState,

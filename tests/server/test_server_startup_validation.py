@@ -20,7 +20,7 @@ import pytest
 from kdive.coordination.registry import InstanceLockError, SessionRegistry
 from kdive.seams.target import TargetKey
 from kdive.server import create_app
-from kdive.transport.base import (
+from kdive.transport.core.base import (
     EndpointExposure,
     ExecutionState,
     RecordState,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 
-from kdive.transport.bounded import BoundedIOTimeout, Deadline, connect_tcp
+from kdive.transport.core.bounded import BoundedIOTimeout, Deadline, connect_tcp
 
 # Cap on bytes buffered while waiting for a complete RSP frame from an unauthenticated peer. A
 # valid `$...#xx` halt-reason reply is a few dozen bytes; the bound stops a hostile or broken peer

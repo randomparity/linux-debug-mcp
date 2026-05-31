@@ -13,7 +13,7 @@ from kdive.providers.local.debug.gdb_mi import (
     MiRecord,
     ResolvedSymbol,
 )
-from kdive.transport.base import TcpEndpoint
+from kdive.transport.core.base import TcpEndpoint
 
 
 class FakeController:

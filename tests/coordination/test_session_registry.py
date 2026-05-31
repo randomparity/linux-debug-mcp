@@ -5,7 +5,7 @@ import pytest
 
 from kdive.coordination.registry import InstanceLockError, RecoveryTombstone, SessionRegistry
 from kdive.seams.target import TargetKey
-from kdive.transport.base import ExecutionState, RecordState, TransportSession, new_session_id
+from kdive.transport.core.base import ExecutionState, RecordState, TransportSession, new_session_id
 
 
 def _key() -> TargetKey:

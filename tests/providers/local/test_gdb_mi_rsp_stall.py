@@ -11,7 +11,7 @@ from kdive.providers.local.debug.gdb_mi import (
     GdbMiError,
     _timeout_error,
 )
-from kdive.transport.base import TcpEndpoint
+from kdive.transport.core.base import TcpEndpoint
 
 _DONE: list[dict[str, object]] = [{"type": "result", "message": "done", "payload": None, "token": None}]
 _CONNECTED: list[dict[str, object]] = [{"type": "result", "message": "connected", "payload": None, "token": None}]

@@ -20,7 +20,7 @@ from kdive.seams.guard import GuardToken, StopCapableGuard
 from kdive.seams.lifecycle import LifecycleDispatcher, LifecycleEvent
 from kdive.seams.secrets import SecretsResolver
 from kdive.seams.target import TargetKey
-from kdive.transport.base import (
+from kdive.transport.core.base import (
     BackendAttachment,
     ExecutionState,
     OpenRequest,
@@ -29,7 +29,7 @@ from kdive.transport.base import (
     TransportSession,
     new_session_id,
 )
-from kdive.transport.break_inject import BreakRequestMethod, InjectBreakError, inject_break
+from kdive.transport.core.break_inject import BreakRequestMethod, InjectBreakError, inject_break
 
 logger = logging.getLogger(__name__)
 

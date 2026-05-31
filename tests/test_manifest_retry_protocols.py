@@ -5,7 +5,7 @@ from kdive.introspect import execution as introspect_execution
 from kdive.kernel import handlers as kernel_handlers
 from kdive.postmortem import crash_handler
 from kdive.postmortem import handlers as postmortem_handlers
-from kdive.transport.base import Transport
+from kdive.transport.core.base import Transport
 
 
 def test_path_specific_manifest_retry_helpers_do_not_reuse_generic_name() -> None:

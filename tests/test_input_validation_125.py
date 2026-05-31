@@ -21,7 +21,7 @@ from kdive.prereqs.checks import PortProbeResult, _default_port_probe
 from kdive.prereqs.drgn_probe import PROBE_SCRIPT
 from kdive.providers.local.debug.gdb_mi import MAX_MEMORY_READ_BYTES, GdbMiError
 from kdive.seams.target import TargetKey
-from kdive.transport.serial_local import SerialLocalConfigError, SerialLocalTransport
+from kdive.transport.backends.serial_local import SerialLocalConfigError, SerialLocalTransport
 
 
 # --- TD-04: serial-local port/baud int() coercion ---------------------------------------------

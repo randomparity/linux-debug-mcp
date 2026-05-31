@@ -12,8 +12,8 @@ from kdive.coordination.transaction import TransportTransaction
 from kdive.debug.operations import _break_entry_method, _interrupt_op_data
 from kdive.providers.local.debug.gdb_mi import StopRecord
 from kdive.seams.target import TargetKey
-from kdive.transport.base import BreakMethod, BreakPlan, TransportSession
-from kdive.transport.break_inject import InjectBreakError
+from kdive.transport.core.base import BreakMethod, BreakPlan, TransportSession
+from kdive.transport.core.break_inject import InjectBreakError
 
 KEY = TargetKey(provisioner="local-qemu", target_id="run-xyz")
 

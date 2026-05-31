@@ -4,8 +4,8 @@ from pathlib import Path
 from typing import Literal
 
 from kdive.domain import ErrorCategory
-from kdive.transport.base import BreakMethod, BreakPlan
-from kdive.transport.break_types import BreakProxy, BreakSshRunner
+from kdive.transport.core.base import BreakMethod, BreakPlan
+from kdive.transport.core.break_types import BreakProxy, BreakSshRunner
 
 BreakRequestMethod = Literal["auto"] | BreakMethod
 

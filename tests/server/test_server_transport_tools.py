@@ -28,8 +28,8 @@ from kdive.server import (
     transport_inject_break_handler,
     transport_open_handler,
 )
-from kdive.transport.base import BreakMethod, BreakPlan, ExecutionState, LineRole, TransportRef
-from kdive.transport.break_inject import InjectBreakError
+from kdive.transport.core.base import BreakMethod, BreakPlan, ExecutionState, LineRole, TransportRef
+from kdive.transport.core.break_inject import InjectBreakError
 
 # `KEY` is TargetKey(provisioner="local-qemu", target_id="run-1"); the handlers derive the
 # TargetKey from `run_id`, so every test addresses the seeded snapshot with this run id.

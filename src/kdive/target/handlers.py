@@ -33,7 +33,7 @@ from kdive.rootfs.sources import RootfsSourceError, resolve_rootfs_source
 from kdive.safety.paths import PathSafetyError, validate_rootfs_source
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import BreakHint, ConsoleKind, KernelProvenance, PlatformMetadata, TargetKey
-from kdive.transport.base import ExecutionState, LineRole, TransportRef
+from kdive.transport.core.base import ExecutionState, LineRole, TransportRef
 from kdive.transport.handlers import _require_snapshot
 
 logger = logging.getLogger(__name__)

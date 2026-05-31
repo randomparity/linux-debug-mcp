@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
 from kdive.seams.target import TargetKey
-from kdive.transport.base import ExecutionState, TransportSession
+from kdive.transport.core.base import ExecutionState, TransportSession
 
 logger = logging.getLogger(__name__)
 

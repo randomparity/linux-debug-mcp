@@ -56,7 +56,7 @@ from kdive.server import (
     debug_start_session_handler,
     target_run_tests_handler,
 )
-from kdive.transport.base import (
+from kdive.transport.core.base import (
     ExecutionState,
     LineRole,
     RecordState,
@@ -107,7 +107,7 @@ def test_create_app_binds_lifecycle_dispatcher_and_force_drop_reaches_admission(
     # Seed the snapshot and open a session through the WIRED transaction so the subscriber is
     # registered on the WIRED dispatcher.
     publish_ready_snapshot(admission, target_key=KEY, generation=1, transports=[RSP_CHANNEL], platform=PLATFORM)
-    from kdive.transport.base import OpenRequest
+    from kdive.transport.core.base import OpenRequest
 
     request = OpenRequest(
         target_key=KEY,

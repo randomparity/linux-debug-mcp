@@ -70,7 +70,7 @@ from kdive.seams.target import (
     TargetKey,
     TargetState,
 )
-from kdive.transport.base import ExecutionState, LineRole, OpenRequest, TransportRef
+from kdive.transport.core.base import ExecutionState, LineRole, OpenRequest, TransportRef
 
 KEY = TargetKey(provisioner="local-qemu", target_id="exec-state-machine")
 PLATFORM = PlatformMetadata(

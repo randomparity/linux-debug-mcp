@@ -39,7 +39,7 @@ from kdive.seams.guard import GuardConflict, PreconditionError, SessionGuard, Se
 from kdive.seams.target import ConsoleKind, TargetKey
 from kdive.symbols.build_id import BuildIdReadError, read_elf_build_id
 from kdive.symbols.verify import BUILD_ID_RE, ProvenanceMismatch, verify_vmlinux_provenance
-from kdive.transport.base import LineRole, OpenRequest, TransportRef, TransportSession
+from kdive.transport.core.base import LineRole, OpenRequest, TransportRef, TransportSession
 from kdive.transport.handlers import (
     _ensure_debug_operation_enabled,
     _halt_debug_transport,

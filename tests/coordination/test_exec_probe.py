@@ -6,14 +6,14 @@ from kdive.coordination.admission import AdmissionService, SnapshotStore, Target
 from kdive.coordination.exec_probe import probe_execution_state, probe_rsp_halted
 from kdive.coordination.registry import SessionRegistry
 from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetKey, TargetState
-from kdive.transport.base import (
+from kdive.transport.core.base import (
     ExecutionState,
     RecordState,
     TcpEndpoint,
     TransportSession,
     new_session_id,
 )
-from kdive.transport.rsp_probe import rsp_frame
+from kdive.transport.core.rsp_probe import rsp_frame
 
 
 def _platform() -> PlatformMetadata:

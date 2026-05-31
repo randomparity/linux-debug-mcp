@@ -17,7 +17,7 @@ from kdive.seams.guard import (
     TeardownStep,
 )
 from kdive.seams.target import TargetKey
-from kdive.transport.base import ExecutionState
+from kdive.transport.core.base import ExecutionState
 
 
 def _ctx(reason: str = "ended", session_id: str | None = "sess-1") -> SessionGuardContext:

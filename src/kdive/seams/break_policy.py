@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from kdive.seams.target import ConsoleKind, PlatformMetadata
-from kdive.transport.base import BreakMethod, BreakPlan, LineRole, TransportRef
+from kdive.transport.core.base import BreakMethod, BreakPlan, LineRole, TransportRef
 
 _SUPPORTS_UART_BREAK = "supports_uart_break"
 _PROVIDES_RSP = "provides_rsp"

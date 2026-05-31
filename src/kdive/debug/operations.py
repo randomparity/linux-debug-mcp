@@ -47,8 +47,8 @@ from kdive.providers.debug import (
 from kdive.safety.redaction import Redactor
 from kdive.seams.guard import SessionGuard, SessionGuardContext
 from kdive.seams.target import TargetKey
-from kdive.transport.base import BreakMethod, ExecutionState, TransportSession
-from kdive.transport.break_inject import InjectBreakError
+from kdive.transport.core.base import BreakMethod, ExecutionState, TransportSession
+from kdive.transport.core.break_inject import InjectBreakError
 from kdive.transport.handlers import _ensure_debug_operation_enabled, _resolve_debug_profile
 
 

@@ -31,7 +31,7 @@ from kdive.server import (
     debug_start_session_handler,
     target_run_tests_handler,
 )
-from kdive.transport.base import ExecutionState, LineRole, TransportRef
+from kdive.transport.core.base import ExecutionState, LineRole, TransportRef
 
 # build_txn seeds the snapshot for TargetKey("local-qemu", "run-1"); use that run_id so the
 # handler's target_key = TargetKey("local-qemu", run_id) matches.

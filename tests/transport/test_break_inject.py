@@ -1,8 +1,8 @@
 import pytest
 
 from kdive.domain import ErrorCategory
-from kdive.transport.base import BreakMethod, BreakPlan
-from kdive.transport.break_inject import InjectBreakError, inject_break
+from kdive.transport.core.base import BreakMethod, BreakPlan
+from kdive.transport.core.break_inject import InjectBreakError, inject_break
 
 
 class _RecordingProxy:

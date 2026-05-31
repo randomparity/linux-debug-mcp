@@ -6,7 +6,8 @@ import pytest
 
 from kdive.domain import ErrorCategory
 from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetKey
-from kdive.transport.base import (
+from kdive.transport.backends.qemu_gdbstub import QemuGdbstubAttachError, QemuGdbstubTransport
+from kdive.transport.core.base import (
     BackendAttachment,
     EndpointExposure,
     LineRole,
@@ -16,8 +17,7 @@ from kdive.transport.base import (
     TransportRef,
     TransportSession,
 )
-from kdive.transport.bounded import Deadline
-from kdive.transport.qemu_gdbstub import QemuGdbstubAttachError, QemuGdbstubTransport
+from kdive.transport.core.bounded import Deadline
 
 
 def _request(port: int) -> OpenRequest:
@@ -121,7 +121,7 @@ def test_attach_rejects_invalid_port_with_configuration_error(monkeypatch, bad_p
     # any network IO, not as a raw ValueError/TypeError from int().
     called = []
     monkeypatch.setattr(
-        "kdive.transport.qemu_gdbstub.rsp_reachable",
+        "kdive.transport.backends.qemu_gdbstub.rsp_reachable",
         lambda *a, **k: (called.append(True), True)[1],
     )
     request = OpenRequest(
@@ -157,7 +157,7 @@ def test_attach_rejects_a_non_loopback_host_without_any_network_io(monkeypatch):
     (round-3 review F2): loopback is enforced before rsp_reachable is ever called."""
     called = []
     monkeypatch.setattr(
-        "kdive.transport.qemu_gdbstub.rsp_reachable",
+        "kdive.transport.backends.qemu_gdbstub.rsp_reachable",
         lambda *a, **k: (called.append(True), True)[1],
     )
     for host in ("10.0.0.5", "192.168.1.10", "8.8.8.8", "evil.example.com"):

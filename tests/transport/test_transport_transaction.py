@@ -19,7 +19,7 @@ from kdive.coordination.lease import ConsoleLeaseManager, LeaseOwner
 from kdive.coordination.registry import RecoveryTombstone, SessionRegistry
 from kdive.seams.guard import GuardConflict, InProcessStopCapableGuard
 from kdive.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleEvent, LifecycleKind
-from kdive.transport.base import RecordState, TcpEndpoint
+from kdive.transport.core.base import RecordState, TcpEndpoint
 
 
 def test_open_happy_path_returns_loopback_session(tmp_path):
@@ -367,9 +367,9 @@ def test_delete_record_session_id_fence_skips_on_mismatch(tmp_path):
     path."""
     from datetime import UTC, datetime
 
-    from kdive.transport.base import ExecutionState as ES
-    from kdive.transport.base import TransportSession as TS
-    from kdive.transport.base import new_session_id
+    from kdive.transport.core.base import ExecutionState as ES
+    from kdive.transport.core.base import TransportSession as TS
+    from kdive.transport.core.base import new_session_id
 
     fresh_id = new_session_id()
     stale_id = new_session_id()
