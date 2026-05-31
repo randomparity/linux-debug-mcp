@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from kdive.domain import PrerequisiteCheck, PrerequisiteStatus
-from kdive.handlers.prerequisites import prerequisites_handler
+from kdive.prereqs.handlers import prerequisites_handler
 
 USAGE = "Usage: python -m kdive.dev_setup check-host"
 

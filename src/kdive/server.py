@@ -104,7 +104,6 @@ from kdive.domain import (
     StepStatus,
     ToolResponse,
 )
-from kdive.handlers.prerequisites import prerequisites_handler
 from kdive.introspect.handlers import debug_introspect_helper_handler, debug_introspect_run_handler
 from kdive.introspect.tools import register_introspect_tools
 from kdive.introspect_helpers import HelperSpec, get_helper_registry
@@ -147,6 +146,7 @@ from kdive.prereqs.drgn_probe import (
     build_probe_checks,
     python_missing_checks,
 )
+from kdive.prereqs.handlers import prerequisites_handler
 from kdive.prereqs.kdump_probe import build_kdump_checks, render_kdump_probe_script
 from kdive.providers.local.gdb_mi import (
     CANONICAL_PROBE_SYMBOL,

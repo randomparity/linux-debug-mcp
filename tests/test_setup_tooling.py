@@ -148,7 +148,7 @@ def test_dev_setup_formats_prerequisite_checks() -> None:
     ]
 
 
-def test_dev_setup_imports_prerequisites_from_handler_package() -> None:
+def test_dev_setup_imports_prerequisites_from_prereq_package() -> None:
     import ast
 
     from kdive import dev_setup
@@ -158,8 +158,8 @@ def test_dev_setup_imports_prerequisites_from_handler_package() -> None:
         (node.module, alias.name) for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) for alias in node.names
     ]
     assert ("kdive.server", "prerequisites_handler") not in imports
-    assert ("kdive.handlers.prerequisites", "prerequisites_handler") in imports
-    assert dev_setup.prerequisites_handler.__module__ == "kdive.handlers.prerequisites"
+    assert ("kdive.prereqs.handlers", "prerequisites_handler") in imports
+    assert dev_setup.prerequisites_handler.__module__ == "kdive.prereqs.handlers"
 
 
 def test_dev_setup_check_host_returns_nonzero_for_failed_checks(monkeypatch, capsys) -> None:

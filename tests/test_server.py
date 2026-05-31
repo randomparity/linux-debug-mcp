@@ -198,7 +198,7 @@ def test_prerequisites_handler_returns_checks(tmp_path: Path) -> None:
 
 
 def test_prerequisites_handler_lives_outside_server_catch_all() -> None:
-    assert prerequisites_handler.__module__ == "kdive.handlers.prerequisites"
+    assert prerequisites_handler.__module__ == "kdive.prereqs.handlers"
 
 
 def test_debug_operation_handlers_live_outside_server_catch_all() -> None:
@@ -633,7 +633,8 @@ def test_introspect_tool_is_registered() -> None:
     assert tool.fn.__name__ == "debug_introspect_run"
     assert tool.fn.__module__ == "kdive.introspect.tools"
     assert "script" in tool.parameters["properties"]
-    assert "timeout_seconds" in tool.parameters["properties"]
+    assert "options" in tool.parameters["properties"]
+    assert "timeout_seconds" not in tool.parameters["properties"]
 
     app = create_app()
     for tool_name in (
