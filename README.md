@@ -126,8 +126,10 @@ current boundaries.
 
 Two local x86_64 workflows: build-boot-test (build, boot, run smoke tests, collect
 artifacts) and build-boot-debug (build, boot, start a gdbstub debug session), plus
-artifact manifests and discovery-only future-provider stubs. A full architecture
-document is in progress; the sections above are the current orientation.
+live introspection, transport recovery tools, postmortem vmcore/crash triage,
+artifact manifests, and discovery-only future-provider stubs. The runtime-checked
+tool inventory and expanded debug/postmortem/transport sections live in
+[Tool Reference](docs/tool-reference.md).
 
 ## Quick Start
 

@@ -1,5 +1,6 @@
 .superpowers/
 .kdive/
+.desloppify/
 .venv/
 __pycache__/
 *.py[cod]

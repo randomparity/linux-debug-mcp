@@ -1,13 +1,72 @@
 # Tool Reference
 
-KDIVE exposes local kernel build, boot, smoke-test, artifact, and
-QEMU gdbstub debug tools over stdio MCP. The default artifact root is
-`.kdive/runs`.
+KDIVE exposes local kernel build, boot, smoke-test, artifact, transport, live
+debug, introspection, postmortem, and future-provider planning tools over stdio
+MCP. The default artifact root is `.kdive/runs`.
 
 Use `providers.list` and `host.check_prerequisites` before choosing a workflow.
 Client setup is covered in [Client Setup](client-setup.md), and Fedora
 libvirt/QEMU host preparation is covered in the
 [Fedora Libvirt User Guide](fedora-libvirt-user-guide.md).
+
+## Registered MCP Tool Inventory
+
+This list is checked against `create_app()` in tests so the reference changes
+with the runtime MCP surface.
+
+- `artifacts.collect`
+- `artifacts.get_manifest`
+- `console.open_session`
+- `console.read`
+- `console.write`
+- `debug.backtrace`
+- `debug.clear_breakpoint`
+- `debug.clear_watchpoint`
+- `debug.continue`
+- `debug.end_session`
+- `debug.evaluate`
+- `debug.finish`
+- `debug.interrupt`
+- `debug.introspect.check_prerequisites`
+- `debug.introspect.from_vmcore`
+- `debug.introspect.from_vmcore_helper`
+- `debug.introspect.helper`
+- `debug.introspect.run`
+- `debug.list_breakpoints`
+- `debug.list_variables`
+- `debug.load_module_symbols`
+- `debug.next`
+- `debug.postmortem.check_prereqs`
+- `debug.postmortem.crash`
+- `debug.postmortem.fetch`
+- `debug.postmortem.list_dumps`
+- `debug.postmortem.triage`
+- `debug.read_memory`
+- `debug.read_registers`
+- `debug.read_symbol`
+- `debug.set_breakpoint`
+- `debug.set_watchpoint`
+- `debug.start_session`
+- `debug.step`
+- `hardware.boot_kernel`
+- `hardware.power_control`
+- `host.check_prerequisites`
+- `kernel.build`
+- `kernel.create_run`
+- `providers.list`
+- `provision.prepare_target`
+- `remote.build_kernel`
+- `remote.sync_artifacts`
+- `reservation.release_host`
+- `reservation.request_host`
+- `target.boot`
+- `target.run_tests`
+- `transport.close`
+- `transport.inject_break`
+- `transport.open`
+- `workflow.build_boot_debug`
+- `workflow.build_boot_test`
+- `workflow.reserve_provision_boot`
 
 ## Discovery Tools
 
@@ -109,17 +168,22 @@ keys, discover guest addresses, generate kernel configs, or apply config
 fragments automatically.
 
 `kernel.create_run` accepts either named profiles (`build_profile`,
-`target_profile`, `rootfs_profile`) or inline specs (`build_profile_spec`,
-`target_profile_spec`, `rootfs_profile_spec`) — exactly one per kind. An inline
-spec is validated by the same model as the named profile and frozen into the run
+`target_profile`, `rootfs_profile`) or inline specs under `profile_specs`
+(`build`, `target`, `rootfs`) — exactly one per kind. An inline spec is
+validated by the same model as the named profile and frozen into the run
 manifest; an inline `rootfs_source` is subject to the same path-safety guards as
-a `rootfs_source` override.
+a `boot_overrides.rootfs_source` override.
 
-Per-run rootfs field overrides (besides `source`) are supplied via the
-`rootfs_overrides` object on `kernel.create_run` / `target.boot`: `mutability`,
+Per-run build changes are supplied with `build_overrides` (`make_variables`,
+`config_lines`, `base_config`). Per-run boot changes are supplied with
+`boot_overrides` (`kernel_args`, `rootfs_source`, `rootfs`). Rootfs field
+overrides besides `source` live under `boot_overrides.rootfs`: `mutability`,
 `access_method`, `readiness_marker`, `ssh_host`, `ssh_port`, `ssh_user`,
 `ssh_key_ref`, and `ssh_options`. Each is validated like the corresponding
 `RootfsProfile` field and replaces that field on the resolved profile at boot.
+Because `target.boot` can define, update, start, stop, or destroy MCP-owned
+libvirt domains, booting or rebooting requires `acknowledged_permissions` to
+include the destructive permissions advertised by `providers.list`.
 
 ## Local Debug Tools
 
@@ -133,9 +197,17 @@ Implemented debug tools:
 - `debug.start_session`
 - `debug.interrupt`
 - `debug.continue`
+- `debug.step`
+- `debug.next`
+- `debug.finish`
 - `debug.set_breakpoint`
+- `debug.set_watchpoint`
 - `debug.clear_breakpoint`
+- `debug.clear_watchpoint`
 - `debug.list_breakpoints`
+- `debug.backtrace`
+- `debug.list_variables`
+- `debug.load_module_symbols`
 - `debug.read_registers`
 - `debug.read_symbol`
 - `debug.read_memory`
@@ -164,6 +236,27 @@ redacted.
 
 `workflow.build_boot_debug` does not run `target.run_tests`. Run SSH smoke tests
 separately when guest command coverage is needed.
+
+## Introspection, Transport, And Postmortem Tools
+
+Live drgn introspection tools (`debug.introspect.run`,
+`debug.introspect.helper`, and `debug.introspect.check_prerequisites`) execute
+against a booted target and share the same run/profile checks as the debug
+workflow. Offline drgn introspection (`debug.introspect.from_vmcore` and
+`debug.introspect.from_vmcore_helper`) reads a fetched vmcore plus matching
+`vmlinux` and optional modules.
+
+Transport tools (`transport.open`, `transport.close`, and
+`transport.inject_break`) expose the low-level session boundary used by the
+debug tier. Most callers should prefer `debug.start_session` and
+`debug.end_session`; transport tools are for explicit recovery and integration
+workflows.
+
+Postmortem tools (`debug.postmortem.check_prereqs`,
+`debug.postmortem.list_dumps`, `debug.postmortem.fetch`,
+`debug.postmortem.crash`, and `debug.postmortem.triage`) cover kdump readiness,
+vmcore discovery/fetch, crash utility batches, and composite triage. See
+[Debug Postmortem](debug-postmortem.md) for request and artifact details.
 
 ## Artifact Layout
 
