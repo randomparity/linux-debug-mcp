@@ -6,7 +6,6 @@ import os
 import re
 import shlex
 import tempfile
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -24,7 +23,7 @@ from kdive.artifacts.handlers import (
     get_manifest_handler,
 )
 from kdive.artifacts.manifest import RunManifest
-from kdive.artifacts.store import ArtifactStore, ManifestStateError
+from kdive.artifacts.store import ArtifactStore, ManifestStateError, record_step_with_retry
 from kdive.config import (
     BootOverrides,
     BuildOverrides,
@@ -257,33 +256,6 @@ RUN_STDOUT_CAP = 2 * 1024 * 1024
 SSH_TIMEOUT_GRACE_SECONDS = 10
 
 
-def _record_step_with_retry(
-    store: ArtifactStore,
-    run_id: str,
-    result: StepResult,
-    *,
-    append: bool = False,
-    replace_succeeded: bool = False,
-    attempts: int = 5,
-    initial_delay_seconds: float = 0.01,
-) -> None:
-    """Single manifest-lock retry-with-backoff for recording a terminal step (TD-99). The build,
-    introspect (``append=True`` — every ``introspect:<call_id>`` is a fresh entry, never a replace),
-    and fetch (``replace_succeeded`` — a ``force`` re-fetch overwrites the SUCCEEDED step) paths all
-    funnel through this one loop instead of cloning it. Only a transient "manifest is locked"
-    ManifestStateError is retried; any other error (or the final attempt) propagates."""
-    delay_seconds = initial_delay_seconds
-    for attempt in range(attempts):
-        try:
-            store.record_step_result(run_id, result, append=append, replace_succeeded=replace_succeeded)
-            return
-        except ManifestStateError as exc:
-            if "manifest is locked" not in str(exc) or attempt == attempts - 1:
-                raise
-            time.sleep(delay_seconds)
-            delay_seconds *= 2
-
-
 _INTROSPECT_STEP_NAME_RE = re.compile(r"^introspect:")
 _POSTMORTEM_CRASH_STEP_RE = re.compile(r"^postmortem\.crash:[0-9a-f]{32}$")
 
@@ -315,7 +287,7 @@ def _chmod_best_effort(path: Path, mode: int) -> None:
 
 def _record_terminal_introspect_result(store: ArtifactStore, run_id: str, result: StepResult) -> None:
     # Spec §5.2 step 13: every introspect:<call_id> is a fresh entry (UUIDv4) — append, never replace.
-    _record_step_with_retry(store, run_id, result, append=True)
+    record_step_with_retry(store, run_id, result, append=True)
 
 
 def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any] | None = None) -> ToolResponse:

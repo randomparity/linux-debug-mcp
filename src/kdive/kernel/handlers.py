@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 from kdive.artifacts.manifest import RunManifest
-from kdive.artifacts.store import ArtifactStore, ManifestStateError
+from kdive.artifacts.store import ArtifactStore, ManifestStateError, record_step_with_retry
 from kdive.config import BuildProfile
 from kdive.default_profiles import DEFAULT_BUILD_PROFILES
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
@@ -51,31 +50,8 @@ def _build_profile_from_manifest(manifest: RunManifest) -> BuildProfile:
         raise ValueError(f"unknown build profile: {profile_name}") from exc
 
 
-def _record_step_with_retry(
-    store: ArtifactStore,
-    run_id: str,
-    result: StepResult,
-    *,
-    append: bool = False,
-    replace_succeeded: bool = False,
-    attempts: int = 5,
-    initial_delay_seconds: float = 0.01,
-) -> None:
-    """Retry transient manifest-lock failures while recording a terminal step."""
-    delay_seconds = initial_delay_seconds
-    for attempt in range(attempts):
-        try:
-            store.record_step_result(run_id, result, append=append, replace_succeeded=replace_succeeded)
-            return
-        except ManifestStateError as exc:
-            if "manifest is locked" not in str(exc) or attempt == attempts - 1:
-                raise
-            time.sleep(delay_seconds)
-            delay_seconds *= 2
-
-
 def _record_terminal_build_result(store: ArtifactStore, run_id: str, result: StepResult) -> None:
-    _record_step_with_retry(store, run_id, result)
+    record_step_with_retry(store, run_id, result)
 
 
 def kernel_build_handler(
