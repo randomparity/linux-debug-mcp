@@ -21,7 +21,7 @@ from kdive.coordination.lease import ConsoleLeaseManager
 from kdive.coordination.registry import RecoveryTombstone, SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ErrorCategory
-from kdive.providers.local.qemu_gdbstub import ProviderDebugError
+from kdive.providers.local.debug.qemu_gdbstub import ProviderDebugError
 from kdive.seams.guard import InProcessStopCapableGuard
 from kdive.server import (
     transport_close_handler,

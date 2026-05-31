@@ -38,16 +38,16 @@ from kdive.providers.introspect import (
 from kdive.providers.introspect import (
     user_script_sha256 as user_script_sha256,
 )
-from kdive.providers.local.drgn_live_wrapper import (
+from kdive.providers.local.introspect.drgn_live_wrapper import (
     WRAPPER_TEMPLATE as WRAPPER_TEMPLATE,
 )
-from kdive.providers.local.drgn_vmcore_wrapper import (
+from kdive.providers.local.introspect.drgn_vmcore_wrapper import (
     VMCORE_WRAPPER_TEMPLATE as VMCORE_WRAPPER_TEMPLATE,
 )
-from kdive.providers.local.drgn_wrapper_common import (
+from kdive.providers.local.introspect.drgn_wrapper_common import (
     _WRAPPER_BODY as _WRAPPER_BODY,
 )
-from kdive.providers.local.drgn_wrapper_common import (
+from kdive.providers.local.introspect.drgn_wrapper_common import (
     RUNNER_DEFAULT_CAPS as RUNNER_DEFAULT_CAPS,
 )
 

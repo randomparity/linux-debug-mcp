@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from kdive.domain import ErrorCategory
-from kdive.providers.local.gdb_mi import (
+from kdive.providers.local.debug.gdb_mi import (
     RSP_REMOTE_TIMEOUT_SEC,
     GdbMiEngine,
     GdbMiError,

@@ -46,7 +46,7 @@ from kdive.coordination.admission import AdmissionService, publish_ready_snapsho
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from kdive.providers.local.gdb_mi import GdbMiSessionRegistry
+from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
 from kdive.providers.local.local_ssh_tests import TestExecutionResult
 from kdive.seams.lifecycle import LifecycleEvent, LifecycleKind
 from kdive.seams.target import (

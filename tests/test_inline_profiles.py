@@ -6,7 +6,7 @@ from conftest import make_source_tree
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, RootfsProfile, TargetProfile
 from kdive.domain import ArtifactRef, StepResult, StepStatus
-from kdive.providers.local.libvirt_qemu import BootExecutionResult
+from kdive.providers.local.target.libvirt_qemu import BootExecutionResult
 from kdive.server import create_run_handler, target_boot_handler
 
 

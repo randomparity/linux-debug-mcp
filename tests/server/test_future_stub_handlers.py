@@ -38,9 +38,9 @@ from kdive.providers.handlers import (
     reservation_request_host_handler,
     workflow_reserve_provision_boot_handler,
 )
-from kdive.providers.local.libvirt_qemu import LibvirtQemuProvider
-from kdive.providers.local.local_kernel_build import LocalKernelBuildProvider
+from kdive.providers.local.build.local_kernel_build import LocalKernelBuildProvider
 from kdive.providers.local.local_ssh_tests import LocalSshTestProvider
+from kdive.providers.local.target.libvirt_qemu import LibvirtQemuProvider
 from kdive.providers.registry import ProviderRegistry
 from kdive.providers.stubs import remote_build_stub_capability
 from kdive.server import create_app

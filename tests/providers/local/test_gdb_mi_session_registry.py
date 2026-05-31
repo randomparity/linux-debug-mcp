@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from kdive.domain import ErrorCategory
-from kdive.providers.local.gdb_mi import GdbMiAttachment, GdbMiError, GdbMiSessionRegistry
+from kdive.providers.local.debug.gdb_mi import GdbMiAttachment, GdbMiError, GdbMiSessionRegistry
 
 
 class _Ctrl:

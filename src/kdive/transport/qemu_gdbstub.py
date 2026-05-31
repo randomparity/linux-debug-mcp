@@ -29,7 +29,7 @@ class QemuGdbstubAttachError(Exception):
 class QemuGdbstubTransport(Transport):
     """RSP passthrough to QEMU's gdbstub (§6.3). No agent-proxy, no console, no halt.
     This transport only exposes bounded RSP connectivity; gdb/MI session ownership lives
-    in the MCP handlers and ``kdive.providers.local.gdb_mi``."""
+    in the MCP handlers and ``kdive.providers.local.debug.gdb_mi``."""
 
     @property
     def capability(self) -> TransportCapability:

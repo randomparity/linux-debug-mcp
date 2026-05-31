@@ -69,7 +69,7 @@ from kdive.coordination.registry import (
 )
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ErrorCategory, StepResult, StepStatus
-from kdive.providers.local.gdb_mi import GdbMiSessionRegistry
+from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
 from kdive.safety.redaction import REDACTION, Redactor
 from kdive.seams.guard import InProcessStopCapableGuard
 from kdive.seams.lifecycle import (

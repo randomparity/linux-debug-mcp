@@ -21,7 +21,7 @@ from kdive.coordination.admission import AdmissionService, publish_ready_snapsho
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from kdive.providers.local.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiSessionRegistry
+from kdive.providers.local.debug.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiSessionRegistry
 from kdive.seams.target import (
     BreakHint,
     ConsoleKind,

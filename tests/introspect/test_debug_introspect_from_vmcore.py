@@ -396,7 +396,7 @@ def test_operations_in_allowlist() -> None:
 
 
 def test_capability_advertises_vmcore_ops_concurrent_safe() -> None:
-    from kdive.providers.local.local_drgn_introspect import local_drgn_introspect_capability
+    from kdive.providers.local.introspect.local_drgn_introspect import local_drgn_introspect_capability
 
     cap = local_drgn_introspect_capability()
     assert "debug.introspect.from_vmcore" in cap.operations

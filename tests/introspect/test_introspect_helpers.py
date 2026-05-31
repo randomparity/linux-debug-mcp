@@ -238,7 +238,7 @@ def test_helper_op_in_allowlist() -> None:
 
 
 def test_capability_advertises_helper_op() -> None:
-    from kdive.providers.local.local_drgn_introspect import local_drgn_introspect_capability
+    from kdive.providers.local.introspect.local_drgn_introspect import local_drgn_introspect_capability
 
     assert "debug.introspect.helper" in local_drgn_introspect_capability().operations
 

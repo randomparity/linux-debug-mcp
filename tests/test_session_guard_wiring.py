@@ -20,7 +20,7 @@ from kdive.coordination.admission import AdmissionError, AdmissionService, publi
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ArtifactRef, RunRequest, StepResult, StepStatus
-from kdive.providers.local.gdb_mi import GdbMiSessionRegistry
+from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard, SessionGuardContext
 from kdive.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleEvent, LifecycleKind
 from kdive.server import (

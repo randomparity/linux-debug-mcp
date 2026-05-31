@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from kdive.domain import ErrorCategory
-from kdive.providers.local.gdb_mi import (
+from kdive.providers.local.debug.gdb_mi import (
     BreakpointRef,
     Frame,
     GdbMiEngine,

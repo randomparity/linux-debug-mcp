@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from kdive.domain import ErrorCategory
-from kdive.providers.local.gdb_mi import GdbMiEngine, GdbMiError, LoadedModule
+from kdive.providers.local.debug.gdb_mi import GdbMiEngine, GdbMiError, LoadedModule
 from kdive.transport.base import TcpEndpoint
 
 _DONE: list[dict[str, object]] = [{"type": "result", "message": "done", "payload": None, "token": None}]

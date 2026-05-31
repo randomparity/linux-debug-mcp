@@ -9,7 +9,7 @@ import pytest
 
 from kdive.config import RootfsProfile, TargetProfile
 from kdive.domain import ErrorCategory, StepStatus
-from kdive.providers.local.libvirt_qemu import (
+from kdive.providers.local.target.libvirt_qemu import (
     CommandResult,
     ConsoleResult,
     LibvirtQemuProvider,
@@ -1239,7 +1239,7 @@ def test_render_domain_xml_copy_on_write_points_at_overlay_and_is_writable(tmp_p
 
 
 def test_capability_advertises_qemu_img() -> None:
-    from kdive.providers.local.libvirt_qemu import local_libvirt_qemu_capability
+    from kdive.providers.local.target.libvirt_qemu import local_libvirt_qemu_capability
 
     capability = local_libvirt_qemu_capability()
     assert "qemu-img" in capability.required_host_tools

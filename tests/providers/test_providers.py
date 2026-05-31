@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS
@@ -9,9 +11,18 @@ from kdive.domain import (
     TargetKind,
 )
 from kdive.model import Model
-from kdive.providers.local.qemu_gdbstub import DebugSession, DebugSessionState
+from kdive.providers.local.debug.qemu_gdbstub import DebugSession, DebugSessionState
 from kdive.providers.plugins import ProviderPluginSpec, local_provider_plugin_specs
 from kdive.providers.registry import ProviderRegistry
+
+
+def test_local_provider_modules_are_grouped_by_capability_family() -> None:
+    local_root = Path(__file__).parents[2] / "src" / "kdive" / "providers" / "local"
+    flat_modules = {path.name for path in local_root.glob("*.py")}
+
+    assert flat_modules == {"__init__.py", "local_ssh_tests.py"}
+    for family in ("build", "debug", "introspect", "postmortem", "target"):
+        assert (local_root / family / "__init__.py").is_file()
 
 
 def capability(name: str) -> ProviderCapability:

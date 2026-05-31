@@ -14,7 +14,7 @@ from test_server_debug_core_ops import (
     _start,
 )
 
-from kdive.providers.local.gdb_mi import GdbMiSessionRegistry
+from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
 from kdive.seams.target import BreakHint, ConsoleKind, PlatformMetadata
 from kdive.server import is_lossy_out_of_band
 

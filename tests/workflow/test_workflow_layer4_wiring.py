@@ -40,7 +40,7 @@ from kdive.domain import (
     StepStatus,
     ToolResponse,
 )
-from kdive.providers.local.gdb_mi import GdbMiSessionRegistry
+from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
 from kdive.seams.target import (
     BreakHint,
     ConsoleKind,

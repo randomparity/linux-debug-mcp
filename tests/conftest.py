@@ -14,9 +14,9 @@ from kdive.coordination.admission import AdmissionService, publish_ready_snapsho
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from kdive.providers.local.libvirt_qemu import BootExecutionResult, ProviderBootError
+from kdive.providers.local.debug.qemu_gdbstub import DebugSession
 from kdive.providers.local.local_ssh_tests import TestExecutionResult
-from kdive.providers.local.qemu_gdbstub import DebugSession
+from kdive.providers.local.target.libvirt_qemu import BootExecutionResult, ProviderBootError
 from kdive.seams.target import (
     BreakHint,
     ConsoleKind,
@@ -37,7 +37,7 @@ def _stub_extract_build_id():
     ``subprocess.run`` deeper to drive readelf behaviour.
     """
     with patch(
-        "kdive.providers.local.local_kernel_build._extract_build_id",
+        "kdive.providers.local.build.local_kernel_build._extract_build_id",
         return_value="0123456789abcdef0123456789abcdef01234567",  # pragma: allowlist secret
     ):
         yield
@@ -559,7 +559,7 @@ class FakeMiEngine:
     ``probe_crash`` raises an unwrapped RuntimeError to exercise the broad guaranteed-resume catch)."""
 
     def __init__(self, *, fail_on: str | None = None, resume_confirmed: bool = True) -> None:
-        from kdive.providers.local.gdb_mi import GdbMiAttachment  # noqa: PLC0415
+        from kdive.providers.local.debug.gdb_mi import GdbMiAttachment  # noqa: PLC0415
 
         self._attachment_cls = GdbMiAttachment
         self.fail_on = fail_on
@@ -572,7 +572,7 @@ class FakeMiEngine:
 
     # --- attach probe ---
     def attach(self, *, rsp_endpoint, vmlinux_path, transcript_path):
-        from kdive.providers.local.gdb_mi import GdbMiError  # noqa: PLC0415
+        from kdive.providers.local.debug.gdb_mi import GdbMiError  # noqa: PLC0415
 
         if self.fail_on == "attach":
             raise GdbMiError("attach blew up", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
@@ -582,7 +582,7 @@ class FakeMiEngine:
         )
 
     def probe_read(self, attachment):
-        from kdive.providers.local.gdb_mi import GdbMiError, MiRecord  # noqa: PLC0415
+        from kdive.providers.local.debug.gdb_mi import GdbMiError, MiRecord  # noqa: PLC0415
 
         if self.fail_on == "probe":
             raise GdbMiError("rsp timeout", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
@@ -591,7 +591,7 @@ class FakeMiEngine:
         return MiRecord(type="result", message="connected", payload=None)
 
     def resolve_symbol(self, attachment, symbol_name: str):
-        from kdive.providers.local.gdb_mi import GdbMiError, ResolvedSymbol  # noqa: PLC0415
+        from kdive.providers.local.debug.gdb_mi import GdbMiError, ResolvedSymbol  # noqa: PLC0415
 
         if self.fail_on == "resolve":
             raise GdbMiError("no such symbol", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
@@ -608,13 +608,13 @@ class FakeMiEngine:
 
     # --- Phase C ops ---
     def set_breakpoint(self, attachment, location: str):
-        from kdive.providers.local.gdb_mi import BreakpointRef  # noqa: PLC0415
+        from kdive.providers.local.debug.gdb_mi import BreakpointRef  # noqa: PLC0415
 
         self.calls.append(("set_breakpoint", (location,)))
         return BreakpointRef(number="1", type="breakpoint", func=location, addr="0xffffffff81234560")
 
     def set_watchpoint(self, attachment, expression: str):
-        from kdive.providers.local.gdb_mi import BreakpointRef  # noqa: PLC0415
+        from kdive.providers.local.debug.gdb_mi import BreakpointRef  # noqa: PLC0415
 
         self.calls.append(("set_watchpoint", (expression,)))
         return BreakpointRef(number="2", type="hw watchpoint", what=expression)
@@ -626,7 +626,7 @@ class FakeMiEngine:
         self.calls.append(("clear_watchpoint", (number,)))
 
     def list_breakpoints(self, attachment):
-        from kdive.providers.local.gdb_mi import BreakpointRef  # noqa: PLC0415
+        from kdive.providers.local.debug.gdb_mi import BreakpointRef  # noqa: PLC0415
 
         self.calls.append(("list_breakpoints", ()))
         return [BreakpointRef(number="1", type="breakpoint", func="do_sys_open")]
@@ -644,19 +644,19 @@ class FakeMiEngine:
         return self._stop("finish", timeout_sec, "function-finished", "__x64_sys_open")
 
     def interrupt(self, attachment):
-        from kdive.providers.local.gdb_mi import Frame, StopRecord  # noqa: PLC0415
+        from kdive.providers.local.debug.gdb_mi import Frame, StopRecord  # noqa: PLC0415
 
         self.calls.append(("interrupt", ()))
         return StopRecord(reason="signal-received", frame=Frame(level=0, func="do_sys_open"))
 
     def backtrace(self, attachment):
-        from kdive.providers.local.gdb_mi import Frame  # noqa: PLC0415
+        from kdive.providers.local.debug.gdb_mi import Frame  # noqa: PLC0415
 
         self.calls.append(("backtrace", ()))
         return [Frame(level=0, func="do_sys_open"), Frame(level=1, func="__x64_sys_open")]
 
     def list_variables(self, attachment):
-        from kdive.providers.local.gdb_mi import Variable  # noqa: PLC0415
+        from kdive.providers.local.debug.gdb_mi import Variable  # noqa: PLC0415
 
         self.calls.append(("list_variables", ()))
         return [Variable(name="fd", value="3")]
@@ -678,7 +678,7 @@ class FakeMiEngine:
         return {"inspector": inspector, "kernel_version": "Linux version 6.9.0"}
 
     def _stop(self, name: str, timeout_sec, reason: str, func: str):
-        from kdive.providers.local.gdb_mi import Frame, StopRecord  # noqa: PLC0415
+        from kdive.providers.local.debug.gdb_mi import Frame, StopRecord  # noqa: PLC0415
 
         self.calls.append((name, (timeout_sec,)))
         return StopRecord(reason=reason, frame=Frame(level=0, func=func))
@@ -721,7 +721,7 @@ def build_debug_transport(tmp_path: Path, run_id: str, *, generation: int = 1):
 def seed_live_mi_session(sessions, session_id: str, transcript_path: Path):
     """Register a noop live attachment under ``session_id`` so the per-op handlers find a live
     session (the durable DebugSession is seeded separately on disk)."""
-    from kdive.providers.local.gdb_mi import GdbMiAttachment  # noqa: PLC0415
+    from kdive.providers.local.debug.gdb_mi import GdbMiAttachment  # noqa: PLC0415
 
     attachment = GdbMiAttachment(
         controller=_NoopMiController(), rsp_host="127.0.0.1", rsp_port=1234, transcript_path=transcript_path

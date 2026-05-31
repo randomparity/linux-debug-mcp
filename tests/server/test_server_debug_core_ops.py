@@ -28,7 +28,7 @@ from kdive.debug.tools import DebugToolContext, DebugToolHandlers
 from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from kdive.introspect import execution as introspect_execution
 from kdive.providers.debug import GdbMiSessionRegistry as GdbMiSessionRegistryContract
-from kdive.providers.local.gdb_mi import (
+from kdive.providers.local.debug.gdb_mi import (
     CANONICAL_PROBE_SYMBOL,
     BreakpointRef,
     Frame,

@@ -167,25 +167,25 @@ from kdive.providers.debug import (
     GdbMiSessionRegistry,
     ProviderDebugError,
 )
-from kdive.providers.local.gdb_mi import (
-    CANONICAL_PROBE_SYMBOL,
-)
-from kdive.providers.local.gdb_mi import (
-    GdbMiEngine as LocalGdbMiEngine,
-)
-from kdive.providers.local.gdb_mi import (
-    GdbMiSessionRegistry as LocalGdbMiSessionRegistry,
-)
-from kdive.providers.local.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
-from kdive.providers.local.local_kernel_build import (
+from kdive.providers.local.build.local_kernel_build import (
     BuildIdMissing,
     LocalKernelBuildProvider,
     ReadelfUnavailable,
+)
+from kdive.providers.local.debug.gdb_mi import (
+    CANONICAL_PROBE_SYMBOL,
+)
+from kdive.providers.local.debug.gdb_mi import (
+    GdbMiEngine as LocalGdbMiEngine,
+)
+from kdive.providers.local.debug.gdb_mi import (
+    GdbMiSessionRegistry as LocalGdbMiSessionRegistry,
 )
 from kdive.providers.local.local_ssh_tests import (
     LocalSshTestProvider,
     TestPlan,
 )
+from kdive.providers.local.target.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner, TestExecutionResult, build_ssh_argv
 from kdive.rootfs.sources import RootfsSourceError, resolve_rootfs_source
 from kdive.safety.paths import (
