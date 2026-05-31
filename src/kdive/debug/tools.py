@@ -255,10 +255,9 @@ def _tool_function_name(tool_name: str) -> str:
     return tool_name.replace(".", "_")
 
 
-def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: DebugToolHandlers) -> None:
-    tool_context = context
-    default_artifact_root = str(context.default_artifact_root)
-
+def _register_debug_session_lifecycle_tools(
+    app: FastMCP, *, tool_context: DebugToolContext, default_artifact_root: str, handlers: DebugToolHandlers
+) -> None:
     @app.tool(name="debug.start_session")
     def debug_start_session(
         run_id: str,
@@ -285,54 +284,109 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
             )
         )
 
-    def _register_registers_query(tool_name: str, handler: DebugReadRegistersHandler) -> None:
-        def debug_registers_query(
-            run_id: str,
-            registers: list[str],
-            context: DebugSessionContext | dict[str, Any] | None = None,
-        ) -> dict[str, Any]:
-            try:
-                artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
-            except (TypeError, ValueError) as exc:
-                return adapter_validation_failure(exc)
-            return _dump(
-                handler(
-                    artifact_root=artifact_root,
-                    run_id=run_id,
-                    registers=registers,
-                    debug_session_id=debug_session_id,
-                    runtime=_debug_runtime(tool_context, include_admission=False),
-                )
+    @app.tool(name="debug.end_session")
+    def debug_end_session(
+        run_id: str,
+        context: DebugSessionContext | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
+        return _dump(
+            handlers.end_session(
+                artifact_root=artifact_root,
+                run_id=run_id,
+                debug_session_id=debug_session_id,
+                admission=tool_context.admission,
+                transaction=tool_context.transaction,
+                session_registry=tool_context.session_registry,
+                session_guard=tool_context.session_guard,
+                gdb_mi_engine=tool_context.gdb_mi_engine,
+                gdb_mi_sessions=tool_context.gdb_mi_sessions,
             )
+        )
 
-        debug_registers_query.__name__ = _tool_function_name(tool_name)
-        app.tool(name=tool_name)(debug_registers_query)
 
-    def _register_symbol_query(tool_name: str, handler: DebugReadSymbolHandler) -> None:
-        def debug_symbol_query(
-            run_id: str,
-            symbol: str,
-            context: DebugSessionContext | dict[str, Any] | None = None,
-        ) -> dict[str, Any]:
-            try:
-                artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
-            except (TypeError, ValueError) as exc:
-                return adapter_validation_failure(exc)
-            return _dump(
-                handler(
-                    artifact_root=artifact_root,
-                    run_id=run_id,
-                    symbol=symbol,
-                    debug_session_id=debug_session_id,
-                    runtime=_debug_runtime(tool_context, include_admission=False),
-                )
+def _register_registers_query(
+    app: FastMCP,
+    *,
+    tool_context: DebugToolContext,
+    default_artifact_root: str,
+    tool_name: str,
+    handler: DebugReadRegistersHandler,
+) -> None:
+    def debug_registers_query(
+        run_id: str,
+        registers: list[str],
+        context: DebugSessionContext | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
+        return _dump(
+            handler(
+                artifact_root=artifact_root,
+                run_id=run_id,
+                registers=registers,
+                debug_session_id=debug_session_id,
+                runtime=_debug_runtime(tool_context, include_admission=False),
             )
+        )
 
-        debug_symbol_query.__name__ = _tool_function_name(tool_name)
-        app.tool(name=tool_name)(debug_symbol_query)
+    debug_registers_query.__name__ = _tool_function_name(tool_name)
+    app.tool(name=tool_name)(debug_registers_query)
 
-    _register_registers_query("debug.read_registers", handlers.read_registers)
-    _register_symbol_query("debug.read_symbol", handlers.read_symbol)
+
+def _register_symbol_query(
+    app: FastMCP,
+    *,
+    tool_context: DebugToolContext,
+    default_artifact_root: str,
+    tool_name: str,
+    handler: DebugReadSymbolHandler,
+) -> None:
+    def debug_symbol_query(
+        run_id: str,
+        symbol: str,
+        context: DebugSessionContext | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
+        return _dump(
+            handler(
+                artifact_root=artifact_root,
+                run_id=run_id,
+                symbol=symbol,
+                debug_session_id=debug_session_id,
+                runtime=_debug_runtime(tool_context, include_admission=False),
+            )
+        )
+
+    debug_symbol_query.__name__ = _tool_function_name(tool_name)
+    app.tool(name=tool_name)(debug_symbol_query)
+
+
+def _register_debug_read_tools(
+    app: FastMCP, *, tool_context: DebugToolContext, default_artifact_root: str, handlers: DebugToolHandlers
+) -> None:
+    _register_registers_query(
+        app,
+        tool_context=tool_context,
+        default_artifact_root=default_artifact_root,
+        tool_name="debug.read_registers",
+        handler=handlers.read_registers,
+    )
+    _register_symbol_query(
+        app,
+        tool_context=tool_context,
+        default_artifact_root=default_artifact_root,
+        tool_name="debug.read_symbol",
+        handler=handlers.read_symbol,
+    )
 
     @app.tool(name="debug.read_memory")
     def debug_read_memory(
@@ -379,6 +433,10 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
             )
         )
 
+
+def _register_debug_module_symbol_tools(
+    app: FastMCP, *, tool_context: DebugToolContext, default_artifact_root: str, handlers: DebugToolHandlers
+) -> None:
     @app.tool(name="debug.load_module_symbols")
     def debug_load_module_symbols(
         run_id: str,
@@ -408,127 +466,78 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
             )
         )
 
-    def _register_symbol_control(tool_name: str, handler: DebugSymbolControlHandler) -> None:
-        def debug_symbol_control(
-            run_id: str,
-            symbol: str,
-            context: DebugSessionContext | dict[str, Any] | None = None,
-        ) -> dict[str, Any]:
-            try:
-                artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
-            except (TypeError, ValueError) as exc:
-                return adapter_validation_failure(exc)
-            return _dump(
-                handler(
-                    artifact_root=artifact_root,
-                    run_id=run_id,
-                    symbol=symbol,
-                    debug_session_id=debug_session_id,
-                    runtime=_debug_runtime(tool_context, include_admission=True),
-                )
+
+def _register_symbol_control(
+    app: FastMCP,
+    *,
+    tool_context: DebugToolContext,
+    default_artifact_root: str,
+    tool_name: str,
+    handler: DebugSymbolControlHandler,
+) -> None:
+    def debug_symbol_control(
+        run_id: str,
+        symbol: str,
+        context: DebugSessionContext | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
+        return _dump(
+            handler(
+                artifact_root=artifact_root,
+                run_id=run_id,
+                symbol=symbol,
+                debug_session_id=debug_session_id,
+                runtime=_debug_runtime(tool_context, include_admission=True),
             )
+        )
 
-        debug_symbol_control.__name__ = _tool_function_name(tool_name)
-        app.tool(name=tool_name)(debug_symbol_control)
+    debug_symbol_control.__name__ = _tool_function_name(tool_name)
+    app.tool(name=tool_name)(debug_symbol_control)
 
-    def _register_breakpoint_id_control(tool_name: str, handler: DebugBreakpointIdControlHandler) -> None:
-        def debug_breakpoint_id_control(
-            run_id: str,
-            breakpoint_id: str,
-            context: DebugSessionContext | dict[str, Any] | None = None,
-        ) -> dict[str, Any]:
-            try:
-                artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
-            except (TypeError, ValueError) as exc:
-                return adapter_validation_failure(exc)
-            return _dump(
-                handler(
-                    artifact_root=artifact_root,
-                    run_id=run_id,
-                    breakpoint_id=breakpoint_id,
-                    debug_session_id=debug_session_id,
-                    runtime=_debug_runtime(tool_context, include_admission=True),
-                )
+
+def _register_breakpoint_id_control(
+    app: FastMCP,
+    *,
+    tool_context: DebugToolContext,
+    default_artifact_root: str,
+    tool_name: str,
+    handler: DebugBreakpointIdControlHandler,
+) -> None:
+    def debug_breakpoint_id_control(
+        run_id: str,
+        breakpoint_id: str,
+        context: DebugSessionContext | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
+        return _dump(
+            handler(
+                artifact_root=artifact_root,
+                run_id=run_id,
+                breakpoint_id=breakpoint_id,
+                debug_session_id=debug_session_id,
+                runtime=_debug_runtime(tool_context, include_admission=True),
             )
+        )
 
-        debug_breakpoint_id_control.__name__ = _tool_function_name(tool_name)
-        app.tool(name=tool_name)(debug_breakpoint_id_control)
+    debug_breakpoint_id_control.__name__ = _tool_function_name(tool_name)
+    app.tool(name=tool_name)(debug_breakpoint_id_control)
 
-    def _register_gated_query(tool_name: str, handler: DebugSessionQueryHandler) -> None:
-        def debug_session_query(
-            run_id: str,
-            context: DebugSessionContext | dict[str, Any] | None = None,
-        ) -> dict[str, Any]:
-            try:
-                artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
-            except (TypeError, ValueError) as exc:
-                return adapter_validation_failure(exc)
-            return _dump(
-                handler(
-                    artifact_root=artifact_root,
-                    run_id=run_id,
-                    debug_session_id=debug_session_id,
-                    runtime=_debug_runtime(tool_context, include_admission=True),
-                )
-            )
 
-        debug_session_query.__name__ = _tool_function_name(tool_name)
-        app.tool(name=tool_name)(debug_session_query)
-
-    def _register_execution_control(tool_name: str, handler: DebugExecutionControlHandler) -> None:
-        def debug_execution_control(
-            run_id: str,
-            context: DebugSessionContext | dict[str, Any] | None = None,
-            options: DebugExecutionOptions | dict[str, Any] | None = None,
-        ) -> dict[str, Any]:
-            try:
-                artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
-                execution_options = optional_model_arg(options, DebugExecutionOptions)
-            except (TypeError, ValueError) as exc:
-                return adapter_validation_failure(exc)
-            return _dump(
-                handler(
-                    artifact_root=artifact_root,
-                    run_id=run_id,
-                    debug_session_id=debug_session_id,
-                    timeout_seconds=execution_options.timeout_seconds,
-                    runtime=_debug_runtime(tool_context, include_admission=True),
-                )
-            )
-
-        debug_execution_control.__name__ = _tool_function_name(tool_name)
-        app.tool(name=tool_name)(debug_execution_control)
-
-    for tool_name, handler in (
-        ("debug.set_breakpoint", handlers.set_breakpoint),
-        ("debug.set_watchpoint", handlers.set_watchpoint),
-    ):
-        _register_symbol_control(tool_name, handler)
-
-    for tool_name, handler in (
-        ("debug.clear_breakpoint", handlers.clear_breakpoint),
-        ("debug.clear_watchpoint", handlers.clear_watchpoint),
-    ):
-        _register_breakpoint_id_control(tool_name, handler)
-
-    for tool_name, handler in (
-        ("debug.list_breakpoints", handlers.list_breakpoints),
-        ("debug.backtrace", handlers.backtrace),
-        ("debug.list_variables", handlers.list_variables),
-    ):
-        _register_gated_query(tool_name, handler)
-
-    for tool_name, handler in (
-        ("debug.continue", handlers.continue_execution),
-        ("debug.step", handlers.step),
-        ("debug.next", handlers.next),
-        ("debug.finish", handlers.finish),
-        ("debug.interrupt", handlers.interrupt),
-    ):
-        _register_execution_control(tool_name, handler)
-
-    @app.tool(name="debug.end_session")
-    def debug_end_session(
+def _register_gated_query(
+    app: FastMCP,
+    *,
+    tool_context: DebugToolContext,
+    default_artifact_root: str,
+    tool_name: str,
+    handler: DebugSessionQueryHandler,
+) -> None:
+    def debug_session_query(
         run_id: str,
         context: DebugSessionContext | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -537,15 +546,124 @@ def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: D
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
-            handlers.end_session(
+            handler(
                 artifact_root=artifact_root,
                 run_id=run_id,
                 debug_session_id=debug_session_id,
-                admission=tool_context.admission,
-                transaction=tool_context.transaction,
-                session_registry=tool_context.session_registry,
-                session_guard=tool_context.session_guard,
-                gdb_mi_engine=tool_context.gdb_mi_engine,
-                gdb_mi_sessions=tool_context.gdb_mi_sessions,
+                runtime=_debug_runtime(tool_context, include_admission=True),
             )
         )
+
+    debug_session_query.__name__ = _tool_function_name(tool_name)
+    app.tool(name=tool_name)(debug_session_query)
+
+
+def _register_debug_breakpoint_tools(
+    app: FastMCP, *, tool_context: DebugToolContext, default_artifact_root: str, handlers: DebugToolHandlers
+) -> None:
+    for tool_name, handler in (
+        ("debug.set_breakpoint", handlers.set_breakpoint),
+        ("debug.set_watchpoint", handlers.set_watchpoint),
+    ):
+        _register_symbol_control(
+            app,
+            tool_context=tool_context,
+            default_artifact_root=default_artifact_root,
+            tool_name=tool_name,
+            handler=handler,
+        )
+
+    for tool_name, handler in (
+        ("debug.clear_breakpoint", handlers.clear_breakpoint),
+        ("debug.clear_watchpoint", handlers.clear_watchpoint),
+    ):
+        _register_breakpoint_id_control(
+            app,
+            tool_context=tool_context,
+            default_artifact_root=default_artifact_root,
+            tool_name=tool_name,
+            handler=handler,
+        )
+
+    for tool_name, handler in (
+        ("debug.list_breakpoints", handlers.list_breakpoints),
+        ("debug.backtrace", handlers.backtrace),
+        ("debug.list_variables", handlers.list_variables),
+    ):
+        _register_gated_query(
+            app,
+            tool_context=tool_context,
+            default_artifact_root=default_artifact_root,
+            tool_name=tool_name,
+            handler=handler,
+        )
+
+
+def _register_execution_control(
+    app: FastMCP,
+    *,
+    tool_context: DebugToolContext,
+    default_artifact_root: str,
+    tool_name: str,
+    handler: DebugExecutionControlHandler,
+) -> None:
+    def debug_execution_control(
+        run_id: str,
+        context: DebugSessionContext | dict[str, Any] | None = None,
+        options: DebugExecutionOptions | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            artifact_root, debug_session_id = _session_context(context, default_artifact_root=default_artifact_root)
+            execution_options = optional_model_arg(options, DebugExecutionOptions)
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
+        return _dump(
+            handler(
+                artifact_root=artifact_root,
+                run_id=run_id,
+                debug_session_id=debug_session_id,
+                timeout_seconds=execution_options.timeout_seconds,
+                runtime=_debug_runtime(tool_context, include_admission=True),
+            )
+        )
+
+    debug_execution_control.__name__ = _tool_function_name(tool_name)
+    app.tool(name=tool_name)(debug_execution_control)
+
+
+def _register_debug_execution_tools(
+    app: FastMCP, *, tool_context: DebugToolContext, default_artifact_root: str, handlers: DebugToolHandlers
+) -> None:
+    for tool_name, handler in (
+        ("debug.continue", handlers.continue_execution),
+        ("debug.step", handlers.step),
+        ("debug.next", handlers.next),
+        ("debug.finish", handlers.finish),
+        ("debug.interrupt", handlers.interrupt),
+    ):
+        _register_execution_control(
+            app,
+            tool_context=tool_context,
+            default_artifact_root=default_artifact_root,
+            tool_name=tool_name,
+            handler=handler,
+        )
+
+
+def register_debug_tools(app: FastMCP, *, context: DebugToolContext, handlers: DebugToolHandlers) -> None:
+    default_artifact_root = str(context.default_artifact_root)
+    _register_debug_session_lifecycle_tools(
+        app, tool_context=context, default_artifact_root=default_artifact_root, handlers=handlers
+    )
+    _register_debug_read_tools(
+        app, tool_context=context, default_artifact_root=default_artifact_root, handlers=handlers
+    )
+    _register_debug_module_symbol_tools(
+        app, tool_context=context, default_artifact_root=default_artifact_root, handlers=handlers
+    )
+    _register_debug_breakpoint_tools(
+        app, tool_context=context, default_artifact_root=default_artifact_root, handlers=handlers
+    )
+    _register_debug_execution_tools(
+        app, tool_context=context, default_artifact_root=default_artifact_root, handlers=handlers
+    )

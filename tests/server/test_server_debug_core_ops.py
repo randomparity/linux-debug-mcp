@@ -295,6 +295,16 @@ def test_debug_tool_registration_uses_bound_handlers_instead_of_name_dispatch() 
     assert not hasattr(debug_tools, "UNGATED_QUERY_TOOL_SPECS")
 
 
+def test_debug_tool_registration_is_split_by_operation_family() -> None:
+    for helper_name in (
+        "_register_debug_session_lifecycle_tools",
+        "_register_debug_read_tools",
+        "_register_debug_breakpoint_tools",
+        "_register_debug_execution_tools",
+    ):
+        assert hasattr(debug_tools, helper_name)
+
+
 def test_debug_operation_handler_builds_runtime_without_pass_through_layers() -> None:
     import inspect
 
