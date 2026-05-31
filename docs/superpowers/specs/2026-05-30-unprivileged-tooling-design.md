@@ -291,10 +291,12 @@ the context it runs in* — see the kvm context-skew note below.
   interactively while the MCP server FAILS the same probe in a service/cron/non-login-SSH context. The
   `suggested_fix` therefore recommends **`kvm` group membership** (durable across all contexts) rather
   than relying on the seat ACL. WARNING — not FAILED — because the workflow still works under TCG.
-- **`check_libvirt_connect(target_profile)`** → `check_id="libvirt.connect"`. Resolves the URI the profile
-  will use (profile `libvirt_uri`, else the build-time default), then runs `virsh -c <uri> capabilities`
-  as the probe. This proves an **authenticated read connection** the daemon services — strictly more than
-  the `virsh uri`-only `_libvirt_check`, which passes on local config it cannot actually use. It does
+- **`check_libvirt_connect(target_profile, *, enable_libvirt_check=False)`** → `check_id="libvirt.connect"`.
+  **Opt-in via `enable_libvirt_check`** (SKIPPED otherwise), mirroring the legacy `libvirt.uri` check's
+  opt-in posture. When enabled it resolves the URI the profile will use (profile `libvirt_uri`, else the
+  build-time default), then runs `virsh -c <uri> capabilities` as the probe. This proves an **authenticated
+  read connection** the daemon services — strictly more than the `virsh uri`-only `_libvirt_check`, which
+  passes on local config it cannot actually use. It does
   **not** prove `define`/`start` (`org.libvirt.unix.manage`) permission, so a PASS here can still be
   followed by a polkit denial at `target.boot`; the check is therefore **advisory**, like
   `check_gdbstub_port` (`prereqs/checks.py:450-504`) which warns that a free port can be taken before boot
@@ -414,8 +416,9 @@ existing integration tests do it.
      `kvm.access` `suggested_fix`, which still recommends `kvm` group for durability.)
    - Rejected: *keep `virsh uri` as the libvirt check* — it reads local config and passes when the user
      cannot actually connect. The check is `libvirt.connect`, proving an authenticated *read* connection;
-     it is **advisory** and does **not** prove `org.libvirt.unix.manage` (define/start) permission, so a
-     PASS can still be followed by a polkit denial at `target.boot`.
+     it is **opt-in via `enable_libvirt_check`** (SKIPPED otherwise, like the legacy `libvirt.uri` check) and
+     **advisory** — it does **not** prove `org.libvirt.unix.manage` (define/start) permission, so a PASS can
+     still be followed by a polkit denial at `target.boot`.
 3. **KVM access is a WARNING, not a FAILED.**
    - Rejected: *FAILED on missing `/dev/kvm`* — the workflow still functions under TCG, so a hard failure
      would block capable-but-unaccelerated hosts (e.g. nested virt without KVM). WARNING surfaces the
@@ -462,7 +465,7 @@ existing integration tests do it.
 | inherited `/etc/fstab` references absent partitions/subvols | `target.boot` (Tier 2) / Tier 1 fstab assertion | boot stalls in emergency mode before `kdive-ready`; prevented by the Stage-2 fstab/crypttab normalization and asserted by Tier 1 without a boot |
 | build toolchain missing | `rootfs.builder` check | `FAILED`, names `libguestfs-tools` |
 | `/dev/kvm` unusable | `kvm.access` check | `WARNING`, recommends `kvm` group (durable) + TCG consequence; notes context-skew |
-| libvirt URI not connectable | `libvirt.connect` check | `FAILED` (advisory — connectivity only), distinguishes polkit denial vs. dead per-user daemon |
+| libvirt URI not connectable | `libvirt.connect` check (opt-in via `enable_libvirt_check`; SKIPPED otherwise) | `FAILED` (advisory — connectivity only), distinguishes polkit denial vs. dead per-user daemon |
 | escalation command in `scripts/` or `justfile` | `just check-no-sudo` / pytest | non-zero / test failure |
 
 ## Verification

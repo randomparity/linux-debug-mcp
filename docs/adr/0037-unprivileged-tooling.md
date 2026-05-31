@@ -91,12 +91,13 @@ Three new pure check functions, surfaced through `host.check_prerequisites` (ADR
   only in an interactive login session, the same probe can PASS interactively and FAIL in the server's
   service/cron/non-login-SSH context; the `suggested_fix` therefore recommends **`kvm` group membership**
   (durable across contexts), not the ACL.
-- `check_libvirt_connect(target_profile)` (`libvirt.connect`) — `virsh -c <uri> capabilities` against the
-  URI the profile will use. This proves an authenticated *read* connection the daemon services (strictly
-  more than `virsh uri`), but is **advisory**: it does **not** prove `org.libvirt.unix.manage`
-  (define/start) permission, so a PASS can still be followed by a polkit denial at `target.boot` — the same
-  advisory posture as `check_gdbstub_port`. `suggested_fix` distinguishes a `qemu:///system` polkit denial
-  from a dead `qemu:///session` per-user daemon.
+- `check_libvirt_connect(target_profile, *, enable_libvirt_check=False)` (`libvirt.connect`) — **opt-in via
+  `enable_libvirt_check`** (SKIPPED otherwise), mirroring the legacy `libvirt.uri` check's opt-in posture.
+  When enabled it runs `virsh -c <uri> capabilities` against the URI the profile will use. This proves an
+  authenticated *read* connection the daemon services (strictly more than `virsh uri`), but is **advisory**:
+  it does **not** prove `org.libvirt.unix.manage` (define/start) permission, so a PASS can still be followed
+  by a polkit denial at `target.boot` — the same advisory posture as `check_gdbstub_port`. `suggested_fix`
+  distinguishes a `qemu:///system` polkit denial from a dead `qemu:///session` per-user daemon.
 - `check_rootfs_builder()` (`rootfs.builder`) — all five tools the build script hard-requires
   (`virt-builder`, `virt-tar-out`, `virt-make-fs`, `guestfish`, `qemu-img`) present; FAILED naming
   `libguestfs-tools` (which ships all five) when any is missing. It does not require `dnf`/`sudo`.

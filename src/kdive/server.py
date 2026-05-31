@@ -1299,7 +1299,9 @@ def prerequisites_handler(
     checks.append(target_err or check_gdbstub_port(target_obj, port_probe=port_probe))
     checks.append(check_kvm_access(kvm_probe=kvm_probe))
     checks.append(check_rootfs_builder(runner=runner))
-    checks.append(target_err or check_libvirt_connect(target_obj, runner=runner))
+    checks.append(
+        target_err or check_libvirt_connect(target_obj, runner=runner, enable_libvirt_check=enable_libvirt_check)
+    )
     failed = [check for check in checks if check.status == "failed"]
     return ToolResponse.success(
         summary=f"{len(failed)} prerequisite checks failed",

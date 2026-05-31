@@ -521,8 +521,7 @@ def check_rootfs_builder(*, runner: PrerequisiteRunner | None = None) -> Prerequ
             status=PrerequisiteStatus.FAILED,
             message=f"unprivileged build toolchain incomplete: missing {', '.join(missing)}",
             suggested_fix=(
-                "Install libguestfs-tools (provides virt-builder, virt-tar-out, virt-make-fs, "
-                "guestfish, qemu-img)."
+                "Install libguestfs-tools (provides virt-builder, virt-tar-out, virt-make-fs, guestfish, qemu-img)."
             ),
         )
     return PrerequisiteCheck(
@@ -571,13 +570,22 @@ def check_libvirt_connect(
     target_profile: TargetProfile | None,
     *,
     runner: PrerequisiteRunner | None = None,
+    enable_libvirt_check: bool = False,
 ) -> PrerequisiteCheck:
     """Report whether an authenticated *read* connection to the profile's libvirt URI succeeds.
 
     Runs ``virsh -c <uri> capabilities`` — strictly more than ``virsh uri``, which only reads local
     config. Advisory only (like ``check_gdbstub_port``): it does **not** prove ``org.libvirt.unix.manage``
     (define/start), so a PASS can still be followed by a polkit denial at ``target.boot``.
+
+    Opt-in via ``enable_libvirt_check`` (SKIPPED otherwise), mirroring the legacy ``libvirt.uri`` check.
     """
+    if not enable_libvirt_check:
+        return PrerequisiteCheck(
+            check_id="libvirt.connect",
+            status=PrerequisiteStatus.SKIPPED,
+            message="libvirt connectivity check not enabled",
+        )
     if target_profile is None:
         return PrerequisiteCheck(
             check_id="libvirt.connect", status=PrerequisiteStatus.SKIPPED, message="no target profile selected"
