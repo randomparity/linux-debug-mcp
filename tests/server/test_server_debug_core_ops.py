@@ -23,7 +23,9 @@ from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.debug import handlers as debug_handlers
 from kdive.debug import operations as debug_operations
+from kdive.debug import session_end as debug_session_end
 from kdive.debug import tools as debug_tools
+from kdive.debug.session_end import _end_mi_debug_session
 from kdive.debug.tools import DebugToolContext, DebugToolHandlers
 from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from kdive.introspect import execution as introspect_execution
@@ -47,8 +49,8 @@ from kdive.seams.target import (
     TargetKey,
 )
 from kdive.server import (
-    _end_mi_debug_session,
     debug_continue_handler,
+    debug_end_session_handler,
     debug_list_breakpoints_handler,
     debug_set_breakpoint_handler,
     debug_start_session_handler,
@@ -277,6 +279,11 @@ def test_debug_start_session_handler_lives_in_debug_layer() -> None:
     assert "from kdive.server import" not in session_handler_source
 
 
+def test_debug_end_session_handler_lives_in_debug_layer() -> None:
+    assert debug_end_session_handler.__module__.startswith("kdive.debug.")
+    assert not hasattr(server_module, "_end_mi_debug_session")
+
+
 def test_server_does_not_keep_duplicate_debug_session_helpers() -> None:
     server_source = Path(server_module.__file__).read_text(encoding="utf-8")
 
@@ -422,7 +429,7 @@ def test_debug_operation_handlers_accept_explicit_operation_core(tmp_path: Path)
     assert isinstance(captured["request"], debug_handlers.DebugReadRegistersRequest)
 
 
-def test_server_private_helpers_are_canonical_imports() -> None:
+def test_server_no_longer_reexports_private_debug_operation_helpers() -> None:
     for name in (
         "_debug_session_manifest_details",
         "_load_active_debug_session",
@@ -430,8 +437,8 @@ def test_server_private_helpers_are_canonical_imports() -> None:
         "_recorded_transport_session_id",
         "_teardown_stalled_debug_session",
     ):
-        assert getattr(server_module, name) is getattr(debug_operations, name)
-        assert getattr(server_module, name).__module__ == "kdive.debug.operations"
+        assert hasattr(debug_operations, name)
+        assert not hasattr(server_module, name)
 
     for name in ("_resume_debug_transport", "_teardown_debug_transport"):
         assert not hasattr(server_module, name)
@@ -649,7 +656,7 @@ def test_end_session_bookkeeping_fault_does_not_resume_before_recording(tmp_path
     def _boom(*_args, **_kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(server_module, "_persist_mi_debug_session", _boom)
+    monkeypatch.setattr(debug_session_end, "_persist_mi_debug_session", _boom)
     response = _end_mi_debug_session(
         artifact_root=artifact_root,
         run_id=RUN_ID,

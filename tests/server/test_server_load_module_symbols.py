@@ -94,6 +94,10 @@ def _call(artifact_root, registry, txn, admission, engine, sessions, session_id,
     return debug_load_module_symbols_handler(**kwargs)
 
 
+def test_debug_load_module_symbols_handler_lives_in_debug_layer() -> None:
+    assert debug_load_module_symbols_handler.__module__.startswith("kdive.debug.")
+
+
 def test_reads_sysfs_sections_and_loads(tmp_path: Path) -> None:
     artifact_root, registry, txn, admission, engine, sessions, sid = _started(tmp_path)
     ko = _ko_in_build_tree(artifact_root)
