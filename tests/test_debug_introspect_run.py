@@ -29,6 +29,7 @@ from kdive.domain import (
     StepStatus,
     ToolResponse,
 )
+from kdive.introspect import execution as introspect_execution
 from kdive.introspect.tools import IntrospectRunOptions, IntrospectTargetContext
 from kdive.providers.local.local_ssh_tests import SshCommandResult
 from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetState
@@ -38,25 +39,26 @@ VALID_BUILD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist
 
 
 def test_execute_introspect_call_keeps_ssh_phase_in_helper() -> None:
-    assert callable(server_module._run_introspect_ssh_with_cancellation)
-    assert "_run_introspect_ssh_with_cancellation" in server_module._execute_introspect_call.__code__.co_names
-    assert "threading" not in server_module._execute_introspect_call.__code__.co_names
+    assert introspect_execution._execute_introspect_call.__module__ == "kdive.introspect.execution"
+    assert callable(introspect_execution._run_introspect_ssh_with_cancellation)
+    assert "_run_introspect_ssh_with_cancellation" in introspect_execution._execute_introspect_call.__code__.co_names
+    assert "threading" not in introspect_execution._execute_introspect_call.__code__.co_names
 
 
 def test_execute_introspect_call_keeps_preflight_and_admission_phases_in_helpers() -> None:
-    assert callable(server_module._run_introspect_sudo_preflight)
-    assert callable(server_module._admit_introspect_call)
-    assert "_run_introspect_sudo_preflight" in server_module._execute_introspect_call.__code__.co_names
-    assert "_admit_introspect_call" in server_module._execute_introspect_call.__code__.co_names
-    assert "admit_ssh_tier" not in server_module._execute_introspect_call.__code__.co_names
+    assert callable(introspect_execution._run_introspect_sudo_preflight)
+    assert callable(introspect_execution._admit_introspect_call)
+    assert "_run_introspect_sudo_preflight" in introspect_execution._execute_introspect_call.__code__.co_names
+    assert "_admit_introspect_call" in introspect_execution._execute_introspect_call.__code__.co_names
+    assert "admit_ssh_tier" not in introspect_execution._execute_introspect_call.__code__.co_names
 
 
 def test_finalize_introspect_call_keeps_success_persistence_and_response_in_helpers() -> None:
-    assert callable(server_module._persist_introspect_success_artifacts)
-    assert callable(server_module._build_introspect_success_response)
-    assert "_persist_introspect_success_artifacts" in server_module._finalize_introspect_call.__code__.co_names
-    assert "_build_introspect_success_response" in server_module._finalize_introspect_call.__code__.co_names
-    assert "ArtifactRef" not in server_module._finalize_introspect_call.__code__.co_names
+    assert callable(introspect_execution._persist_introspect_success_artifacts)
+    assert callable(introspect_execution._build_introspect_success_response)
+    assert "_persist_introspect_success_artifacts" in introspect_execution._finalize_introspect_call.__code__.co_names
+    assert "_build_introspect_success_response" in introspect_execution._finalize_introspect_call.__code__.co_names
+    assert "ArtifactRef" not in introspect_execution._finalize_introspect_call.__code__.co_names
 
 
 def _make_run(tmp_path: Path) -> Path:
@@ -681,7 +683,7 @@ def test_malformed_build_id_rejected_as_provenance_corrupt(tmp_path: Path) -> No
 
 
 def test_call_budget_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("kdive.server.MAX_INTROSPECT_CALLS_PER_RUN", 4)
+    monkeypatch.setattr("kdive.introspect.execution.MAX_INTROSPECT_CALLS_PER_RUN", 4)
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     for _ in range(4):
         store.record_step_result(
@@ -1191,7 +1193,7 @@ def test_wrapper_render_error_rolls_back_admission(tmp_path: Path, monkeypatch: 
     def _boom(**_kwargs):
         raise WrapperRenderError("test forced render failure")
 
-    monkeypatch.setattr("kdive.server.render_wrapper", _boom)
+    monkeypatch.setattr("kdive.introspect.execution.render_wrapper", _boom)
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1549,16 +1551,14 @@ def test_root_ssh_user_omits_sudo_from_remote_argv(tmp_path: Path) -> None:
 
 
 def test_run_uses_runner_default_caps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import kdive.server as server
-
     captured: dict = {}
-    orig = server.render_wrapper
+    orig = introspect_execution.render_wrapper
 
     def spy(**kwargs):
         captured.update(kwargs)
         return orig(**kwargs)
 
-    monkeypatch.setattr(server, "render_wrapper", spy)
+    monkeypatch.setattr(introspect_execution, "render_wrapper", spy)
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1754,18 +1754,17 @@ def test_helper_args_invalid(tmp_path: Path) -> None:
 
 
 def test_helper_passes_cap_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import kdive.server as server
     from kdive.domain import DebugIntrospectHelperRequest
     from kdive.server import debug_introspect_helper_handler
 
     captured: dict = {}
-    orig = server.render_wrapper
+    orig = introspect_execution.render_wrapper
 
     def spy(**kwargs):
         captured.update(kwargs)
         return orig(**kwargs)
 
-    monkeypatch.setattr(server, "render_wrapper", spy)
+    monkeypatch.setattr(introspect_execution, "render_wrapper", spy)
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1789,7 +1788,7 @@ def test_helper_passes_cap_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         session_registry=FakeSessionRegistry(),
     )
     assert resp.ok is True, resp.error
-    assert captured["caps"] == server.HELPER_CAP_PROFILE
+    assert captured["caps"] == introspect_execution.HELPER_CAP_PROFILE
 
 
 def test_helper_redacts_secret_in_emit(tmp_path: Path) -> None:

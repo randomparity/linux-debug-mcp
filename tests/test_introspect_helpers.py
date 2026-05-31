@@ -249,7 +249,7 @@ def test_capability_advertises_helper_op() -> None:
 
 
 def test_post_validator_drift_on_zero_emits() -> None:
-    from kdive.server import _make_helper_post_validator
+    from kdive.introspect.execution import _make_helper_post_validator
 
     v = _make_helper_post_validator(get_helper_registry()["sysinfo"])
     verdict = v({"emits": []})
@@ -258,14 +258,14 @@ def test_post_validator_drift_on_zero_emits() -> None:
 
 
 def test_post_validator_drift_on_two_emits() -> None:
-    from kdive.server import _make_helper_post_validator
+    from kdive.introspect.execution import _make_helper_post_validator
 
     v = _make_helper_post_validator(get_helper_registry()["sysinfo"])
     assert v({"emits": [{}, {}]}).ok is False
 
 
 def test_post_validator_ok_on_valid_single_emit() -> None:
-    from kdive.server import _make_helper_post_validator
+    from kdive.introspect.execution import _make_helper_post_validator
 
     v = _make_helper_post_validator(get_helper_registry()["sysinfo"])
     good = {
@@ -287,7 +287,7 @@ def test_post_validator_ok_on_valid_single_emit() -> None:
 
 
 def test_post_validator_redacted_emit_still_validates() -> None:
-    from kdive.server import _make_helper_post_validator
+    from kdive.introspect.execution import _make_helper_post_validator
 
     v = _make_helper_post_validator(get_helper_registry()["dmesg"])
     payload = {"emits": [{"entries": [{"ts_usec": 1, "level": 6, "text": "[REDACTED]"}], "truncated": False}]}
@@ -297,7 +297,7 @@ def test_post_validator_redacted_emit_still_validates() -> None:
 def test_default_list_helpers_fit_helper_cap_profile() -> None:
     import json
 
-    from kdive.server import HELPER_CAP_PROFILE
+    from kdive.introspect.execution import HELPER_CAP_PROFILE
 
     deep_stack = [f"func_{i}+0x{i:x}/0x100" for i in range(64)]
     tasks_payload = {
@@ -319,7 +319,7 @@ def test_default_list_helpers_fit_helper_cap_profile() -> None:
 
 
 def test_post_validator_script_error_is_not_drift() -> None:
-    from kdive.server import _make_helper_post_validator
+    from kdive.introspect.execution import _make_helper_post_validator
 
     v = _make_helper_post_validator(get_helper_registry()["sysinfo"])
     payload = {
