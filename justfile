@@ -3,17 +3,14 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default:
     just --list
 
-setup: check-uv sync-dev check-host install-hooks
+setup: check-deps sync-dev check-host install-hooks
     @echo "Development environment is ready."
 
-check-uv:
-    @if ! command -v uv >/dev/null 2>&1; then \
-        echo "uv is required. Install it from https://docs.astral.sh/uv/getting-started/installation/"; \
-        exit 1; \
-    fi
+check-deps:
+    ./scripts/check-setup-deps.sh
     uv --version
 
-sync-dev: check-uv
+sync-dev: check-deps
     uv venv --allow-existing
     uv pip install -e '.[dev,test]'
 
@@ -25,7 +22,6 @@ rootfs:
     ./scripts/build-rootfs.sh
 
 install-hooks: sync-dev
-    uv run detect-secrets scan > .secrets.baseline
     uv run pre-commit install
     uv run pre-commit run --all-files
 

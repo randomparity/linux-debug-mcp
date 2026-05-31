@@ -5,17 +5,25 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _fake_command(bin_dir: Path, name: str) -> None:
+    path = bin_dir / name
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
 def test_justfile_defines_setup_workflow() -> None:
     justfile = (ROOT / "justfile").read_text(encoding="utf-8")
 
-    for target in ["setup:", "check-uv:", "sync-dev:", "check-host:", "install-hooks:", "lint:", "test:"]:
+    for target in ["setup:", "check-deps:", "sync-dev:", "check-host:", "install-hooks:", "lint:", "test:"]:
         assert target in justfile
 
+    assert "./scripts/check-setup-deps.sh" in justfile
     assert "uv --version" in justfile
     assert "uv venv --allow-existing" in justfile
     assert "uv pip install -e '.[dev,test]'" in justfile
     assert "uv run pre-commit install" in justfile
     assert "uv run python -m kdive.dev_setup check-host" in justfile
+    assert "detect-secrets scan > .secrets.baseline" not in justfile
     assert "python -c" not in justfile
     assert "host.check_prerequisites" in justfile
 
@@ -58,6 +66,71 @@ def test_justfile_parses_when_just_is_available() -> None:
 
     assert completed.returncode == 0, completed.stderr
     assert "setup" in completed.stdout
+
+
+def test_setup_dependency_check_accumulates_missing_fedora_packages(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for command in ["uv", "make", "bash", "git"]:
+        _fake_command(fake_bin, command)
+    os_release = tmp_path / "os-release"
+    os_release.write_text("ID=fedora\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        ["/bin/bash", "scripts/check-setup-deps.sh"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"PATH": str(fake_bin), "KDIVE_OS_RELEASE": str(os_release)},
+    )
+
+    assert completed.returncode == 1
+    assert (
+        "Missing setup dependencies: qemu-system-x86_64, virsh, gdb, crash, virt-builder, "
+        "virt-tar-out, virt-make-fs, guestfish, qemu-img, gcc or clang"
+    ) in completed.stderr
+    assert "dnf install" in completed.stderr
+    assert "qemu-system-x86" in completed.stderr
+    assert "libvirt-client" in completed.stderr
+    assert "libguestfs-tools" in completed.stderr
+    assert "gcc" in completed.stderr
+    assert completed.stderr.count("dnf install") == 1
+    assert completed.stderr.count("libguestfs-tools") == 1
+
+
+def test_setup_dependency_check_accepts_clang_as_c_compiler(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for command in [
+        "uv",
+        "make",
+        "bash",
+        "git",
+        "qemu-system-x86_64",
+        "virsh",
+        "gdb",
+        "crash",
+        "virt-builder",
+        "virt-tar-out",
+        "virt-make-fs",
+        "guestfish",
+        "qemu-img",
+        "clang",
+    ]:
+        _fake_command(fake_bin, command)
+
+    completed = subprocess.run(
+        ["/bin/bash", "scripts/check-setup-deps.sh"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"PATH": str(fake_bin), "KDIVE_OS_RELEASE": str(tmp_path / "missing-os-release")},
+    )
+
+    assert completed.returncode == 0
+    assert "Setup dependencies are present." in completed.stdout
 
 
 def test_dev_setup_formats_prerequisite_checks() -> None:
