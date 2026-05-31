@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from datetime import UTC, datetime
 
 from kdive.coordination.registry import SessionRegistry
-from kdive.coordination.transaction import _best_effort_reap, _OpenState, _write_backend_partial
+from kdive.coordination.transaction import TransportTransaction, _best_effort_reap, _OpenState, _write_backend_partial
 from kdive.seams.target import TargetKey
 from kdive.transport.base import RecordState, Transport, TransportSession, new_session_id
 
@@ -29,6 +30,20 @@ def _record(key: TargetKey) -> TransportSession:
         record_state=RecordState.OPENING,
         created_at=datetime.now(UTC),
     )
+
+
+def test_transport_open_delegates_write_ahead_phases() -> None:
+    helper_names = [
+        "_write_opening_record",
+        "_attach_open_backend",
+        "_commit_open_session",
+    ]
+    for helper_name in helper_names:
+        assert hasattr(TransportTransaction, helper_name)
+
+    open_source = inspect.getsource(TransportTransaction.open)
+    for helper_name in helper_names:
+        assert open_source.count(helper_name) == 1
 
 
 # --- TD-07: _best_effort_reap ----------------------------------------------------------------

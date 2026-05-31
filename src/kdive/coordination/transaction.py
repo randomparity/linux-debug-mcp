@@ -4,6 +4,7 @@ import contextlib
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import cast
@@ -12,7 +13,7 @@ from kdive.coordination.admission import AdmissionHandle, AdmissionService
 from kdive.coordination.endpoint_safety import assert_loopback_endpoint, refuse_unsafe_exposure
 from kdive.coordination.lease import ConsoleLeaseManager, LeaseOwner
 from kdive.coordination.registry import RecoveryTombstone, SessionRegistry
-from kdive.coordination.selection import select_stop_capable_channel
+from kdive.coordination.selection import Selection, select_stop_capable_channel
 from kdive.domain import ErrorCategory
 from kdive.seams.break_policy import BreakPolicy
 from kdive.seams.guard import GuardToken, StopCapableGuard
@@ -20,6 +21,7 @@ from kdive.seams.lifecycle import LifecycleDispatcher, LifecycleEvent
 from kdive.seams.secrets import SecretsResolver
 from kdive.seams.target import TargetKey
 from kdive.transport.base import (
+    BackendAttachment,
     ExecutionState,
     OpenRequest,
     RecordState,
@@ -96,6 +98,20 @@ class _OpenState:
     # lifecycle subscriber's force_drop() can deregister it (confirm_reaped → abandon) out-of-band,
     # the same way close() deregisters it (complete) on the in-owner path.
     admission_handle: AdmissionHandle | None = None
+
+
+@dataclass(frozen=True)
+class _OpeningRecord:
+    record: TransportSession
+    state: _OpenState
+
+
+@dataclass(frozen=True)
+class _AttachedOpenBackend:
+    attachment: BackendAttachment
+    state: _OpenState
+    backend_pid: int | None
+    backend_start: str | None
 
 
 class _SessionSubscriber:
@@ -246,6 +262,125 @@ class TransportTransaction:
             return
         self._dispatcher.subscribe(session.target_key, session.session_id, _SessionSubscriber(self, session, state))
 
+    def _write_opening_record(
+        self,
+        *,
+        request: OpenRequest,
+        handle: AdmissionHandle,
+        selection: Selection,
+        provider_name: str,
+        guard_token: GuardToken,
+        lease_token: str | None,
+        state: _OpenState,
+    ) -> _OpeningRecord:
+        # The fenced token is held in-process keyed by session_id; stop_guard_token persists only
+        # its secret as an audit marker (ADR 0003).
+        session_id = new_session_id()
+        self._tokens[session_id] = guard_token
+        state = replace(state, session_id=session_id)
+        record = TransportSession(
+            session_id=session_id,
+            target_key=request.target_key,
+            generation=request.generation,
+            provider=provider_name,
+            channel_id=selection.channel.channel_id,
+            record_state=RecordState.OPENING,
+            console_lease_token=lease_token,
+            stop_guard_token=guard_token.secret,
+            attach_epoch=handle.admit_epoch,
+            break_plan=selection.break_plan,
+            execution_state=ExecutionState.EXECUTING,
+            created_at=datetime.now(UTC),
+        )
+        self._registry.write_record(record)
+        return _OpeningRecord(record=record, state=state)
+
+    def _attach_open_backend(
+        self,
+        *,
+        request: OpenRequest,
+        transport: Transport,
+        record: TransportSession,
+        state: _OpenState,
+        resolved_secrets: dict[str, str],
+        publish_state: Callable[[_OpenState], None],
+    ) -> _AttachedOpenBackend:
+        backend_pid: int | None = None
+        backend_start: str | None = None
+
+        def on_partial(label: str, resource: object) -> None:
+            # Thin adapter: _write_backend_partial does the durable write-through (and documents
+            # the atomicity contract); the closure only mirrors the result onto the in-memory
+            # unwind state. The state update MUST stay here (synchronous with the partial) so an
+            # attach-time crash unwinds with a reapable pid — it cannot move into the helper.
+            nonlocal backend_pid, backend_start, state
+            if label != "backend_process":
+                return
+            result = _write_backend_partial(self._registry, record, resource)
+            if result is None:
+                return
+            backend_pid, backend_start = result
+            state = replace(state, backend_pid=backend_pid, backend_start=backend_start)
+            publish_state(state)
+
+        attachment = transport.attach(
+            request,
+            # caller-driven attach cancellation is wired in A9; here the deadline is the only bound.
+            cancel=threading.Event(),
+            deadline=time.monotonic() + _ATTACH_DEADLINE_SECONDS,
+            on_partial=on_partial,
+            secrets=resolved_secrets,
+        )
+        if attachment.backend_pid is not None:
+            # transports that report the pid on the returned attachment rather than via the
+            # on_partial("backend_process") partial (redundant-but-harmless when both fire).
+            backend_pid, backend_start = attachment.backend_pid, attachment.backend_start_time
+            state = replace(state, backend_pid=backend_pid, backend_start=backend_start)
+            publish_state(state)
+        return _AttachedOpenBackend(
+            attachment=attachment,
+            state=state,
+            backend_pid=backend_pid,
+            backend_start=backend_start,
+        )
+
+    def _commit_open_session(
+        self,
+        *,
+        request: OpenRequest,
+        handle: AdmissionHandle,
+        session: TransportSession,
+        state: _OpenState,
+        recovery: bool,
+        publish_state: Callable[[_OpenState], None],
+    ) -> _OpenState:
+        # Hold the admission key lock across promote → register → subscribe. Otherwise a concurrent
+        # lifecycle invalidation can cancel the promoted handle before the subscriber exists to tear
+        # down the backend/lease/guard. The key lock is re-entrant, so `promote()`'s own internal
+        # lock acquisition is a no-op.
+        with self._admission.key_lock(request.target_key):
+            self._admission.promote(handle)
+            self._handles[session.session_id] = handle
+            state = replace(state, admission_handle=handle)
+            publish_state(state)
+            self._subscribe_session(session, state)
+        if recovery:
+            # Recovery-gate clearance runs outside the admission key lock so slow filesystem writes
+            # do not stall the admission table. It is durable-first: the in-memory cache is cleared
+            # only after the durable tombstone unlink succeeds.
+            #
+            # Consequences:
+            #   * A raise from `_clear_recovery_durable` (EIO on `_fsync_dir`, EACCES, ENOSPC, …)
+            #     leaves the cache STILL MARKED and the tombstone STILL PRESENT — the gate is
+            #     fail-closed end-to-end with no try/except-restore handshake.
+            #   * Concurrent non-recovery `admit()` during the durable I/O sees the cache still set
+            #     and is correctly rejected `recovery_required`.
+            #   * If the process dies between the durable unlink and the cache clear, `reconcile()`
+            #     on the next start finds no tombstone (it's already gone) so the cache stays clear.
+            self._clear_recovery_durable(request.target_key, request.generation)
+            self._clear_recovery_cache(request.target_key, request.generation)
+        return state
+
     def open(
         self,
         request: OpenRequest,
@@ -285,6 +420,11 @@ class TransportTransaction:
         admit = self._admission.admit_recovery if recovery else self._admission.admit
         handle = admit(request.target_key, request)
         state = _OpenState()
+
+        def publish_state(updated: _OpenState) -> None:
+            nonlocal state
+            state = updated
+
         try:
             # The open path always admits with an authoritative channel; admission rejects open
             # requests without one. Bind a narrowed local for the rest of the transaction.
@@ -305,67 +445,36 @@ class TransportTransaction:
             state = replace(state, guard_token=guard_token)
             _crash(crash_after, "guard")
             # (5) console lease (only providers that own a console).
+            lease_token: str | None = None
             if capability.provides_console:
-                state = replace(state, lease_token=self._leases.acquire(request.target_key, LeaseOwner.TRANSPORT))
+                lease_token = self._leases.acquire(request.target_key, LeaseOwner.TRANSPORT)
+                state = replace(state, lease_token=lease_token)
             _crash(crash_after, "lease")
             # (6) secrets (never persisted/logged).
             resolved_secrets = self._secrets.resolve(list(channel.secret_refs))
-            # (7) write-ahead OPENING record. The fenced token is held in-process keyed by
-            # session_id (stop_guard_token persists only its secret as an audit marker — ADR 0003).
-            session_id = new_session_id()
-            self._tokens[session_id] = guard_token
-            state = replace(state, session_id=session_id)
-            record = TransportSession(
-                session_id=session_id,
-                target_key=request.target_key,
-                generation=request.generation,
-                provider=capability.provider_name,
-                channel_id=channel.channel_id,
-                record_state=RecordState.OPENING,
-                console_lease_token=state.lease_token,
-                stop_guard_token=guard_token.secret,
-                attach_epoch=handle.admit_epoch,
-                break_plan=selection.break_plan,
-                execution_state=ExecutionState.EXECUTING,
-                created_at=datetime.now(UTC),
+            opening = self._write_opening_record(
+                request=request,
+                handle=handle,
+                selection=selection,
+                provider_name=capability.provider_name,
+                guard_token=guard_token,
+                lease_token=lease_token,
+                state=state,
             )
-            self._registry.write_record(record)
+            record = opening.record
+            state = opening.state
             _crash(crash_after, "record_written")
 
-            # (8) attach. The on_partial closure WRITES THROUGH backend_pid/start-time into the
-            # durable OPENING record the instant "backend_process" is reported — before attach()
-            # returns — so a death before READY is reapable. It also records the pid on the unwind
-            # state so a crash before READY can reap the backend.
-            backend_pid: int | None = None
-            backend_start: str | None = None
-
-            def on_partial(label: str, resource: object) -> None:
-                # Thin adapter: _write_backend_partial does the durable write-through (and documents
-                # the atomicity contract); the closure only mirrors the result onto the in-memory
-                # unwind state. The state update MUST stay here (synchronous with the partial) so an
-                # attach-time crash unwinds with a reapable pid — it cannot move into the helper.
-                nonlocal backend_pid, backend_start, state
-                if label != "backend_process":
-                    return
-                result = _write_backend_partial(self._registry, record, resource)
-                if result is None:
-                    return
-                backend_pid, backend_start = result
-                state = replace(state, backend_pid=backend_pid, backend_start=backend_start)
-
-            attachment = transport.attach(
-                request,
-                # caller-driven attach cancellation is wired in A9; here the deadline is the only bound.
-                cancel=threading.Event(),
-                deadline=time.monotonic() + _ATTACH_DEADLINE_SECONDS,
-                on_partial=on_partial,
-                secrets=resolved_secrets,
+            attached = self._attach_open_backend(
+                request=request,
+                transport=transport,
+                record=record,
+                state=state,
+                resolved_secrets=resolved_secrets,
+                publish_state=publish_state,
             )
-            if attachment.backend_pid is not None:
-                # transports that report the pid on the returned attachment rather than via the
-                # on_partial("backend_process") partial (redundant-but-harmless when both fire).
-                backend_pid, backend_start = attachment.backend_pid, attachment.backend_start_time
-                state = replace(state, backend_pid=backend_pid, backend_start=backend_start)
+            attachment = attached.attachment
+            state = attached.state
             # (9) assemble + loopback assert + READY record.
             for endpoint in (attachment.console_endpoint, attachment.rsp_endpoint):
                 if endpoint is not None:
@@ -375,44 +484,21 @@ class TransportTransaction:
                     record_state=RecordState.READY,
                     console_endpoint=attachment.console_endpoint,
                     rsp_endpoint=attachment.rsp_endpoint,
-                    backend_pid=backend_pid,
-                    backend_start_time=backend_start,
+                    backend_pid=attached.backend_pid,
+                    backend_start_time=attached.backend_start,
                     artifacts=[attachment.console_artifact] if attachment.console_artifact else [],
                 )
             )
             self._registry.write_record(session)
             _crash(crash_after, "ready")
-            # (10) commit. A recovery attach clears the durable tombstone and admission cache
-            # together, never one without the other.
-            #
-            # Hold the admission key lock across promote → register → subscribe. Otherwise a
-            # concurrent lifecycle invalidation can cancel the promoted handle before the
-            # subscriber exists to tear down the backend/lease/guard. The key lock is re-entrant,
-            # so `promote()`'s own internal lock acquisition is a no-op.
-            with self._admission.key_lock(request.target_key):
-                self._admission.promote(handle)
-                self._handles[session_id] = handle
-                state = replace(state, admission_handle=handle)
-                self._subscribe_session(session, state)
-            if recovery:
-                # Recovery-gate clearance runs outside the admission key lock so slow filesystem
-                # writes do not stall the admission table. It is durable-first: the in-memory cache
-                # is cleared only after the durable tombstone unlink succeeds.
-                # Consequences:
-                #   * A raise from `_clear_recovery_durable` (EIO on `_fsync_dir`, EACCES,
-                #     ENOSPC, …) leaves the cache STILL MARKED and the tombstone STILL PRESENT —
-                #     the gate is fail-closed end-to-end with no try/except-restore handshake.
-                #   * Concurrent non-recovery `admit()` during the durable I/O sees the cache
-                #     still set and is correctly rejected `recovery_required` (the prior
-                #     ordering — clear cache inside the lock, then run durable I/O outside —
-                #     opened a millisecond-to-seconds window scaling with filesystem latency
-                #     where a non-recovery admit could slip past the gate while the durable I/O
-                #     was still in flight).
-                #   * If the process dies between the durable unlink and the cache clear,
-                #     `reconcile()` on the next start finds no tombstone (it's already gone) so
-                #     the cache stays clear — same outcome, just reached via cold restart.
-                self._clear_recovery_durable(request.target_key, request.generation)
-                self._clear_recovery_cache(request.target_key, request.generation)
+            state = self._commit_open_session(
+                request=request,
+                handle=handle,
+                session=session,
+                state=state,
+                recovery=recovery,
+                publish_state=publish_state,
+            )
             return session
         except BaseException:
             self._rollback(request.target_key, state, transport, handle)
