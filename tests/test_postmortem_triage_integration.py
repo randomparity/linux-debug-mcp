@@ -10,9 +10,9 @@ import pytest
 from kdive.artifacts.store import ArtifactStore
 from kdive.domain import (
     DebugIntrospectFromVmcoreRequest,
-    DebugPostmortemTriageRequest,
     RunRequest,
 )
+from kdive.postmortem.models import DebugPostmortemTriageRequest
 from kdive.server import (
     debug_introspect_from_vmcore_handler,
     debug_postmortem_triage_handler,

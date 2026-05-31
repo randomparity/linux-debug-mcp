@@ -17,8 +17,9 @@ from kdive.domain import (
     StepResult,
     StepStatus,
 )
-from kdive.providers.local_ssh_tests import SshCommandResult
+from kdive.providers.local.local_ssh_tests import SshCommandResult
 from kdive.server import PROBE_STDOUT_CAP, create_app, debug_introspect_check_prerequisites_handler
+from kdive.transport.base import ExecutionState
 
 VALID_BUILD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
@@ -122,6 +123,53 @@ def test_rootfs_profile_mismatch_is_configuration_error(tmp_path: Path) -> None:
     )
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert resp.error.details["code"] == "manifest_profile_mismatch"
+
+
+class _FakeSnapshot:
+    generation = 1
+    platform = None
+
+
+class _FakeAdmission:
+    def current_snapshot(self, target_key):  # noqa: ANN001
+        return _FakeSnapshot()
+
+    def current_execution_epoch(self, target_key):  # noqa: ANN001
+        return 0
+
+
+class _FakeRecord:
+    def __init__(self, state: ExecutionState) -> None:
+        self.execution_state = state
+
+
+class _FakeRegistry:
+    def __init__(self, state: ExecutionState) -> None:
+        self._state = state
+
+    def read_record(self, target_key):  # noqa: ANN001
+        return _FakeRecord(self._state)
+
+
+def test_halted_target_is_fast_rejected_before_introspect_prereq_probe(tmp_path: Path) -> None:
+    run_id = _booted_run(tmp_path)
+    runner = FakeSshRunner(results=[SshCommandResult(exit_status=0, stdout=_probe_json())])
+
+    resp = debug_introspect_check_prerequisites_handler(
+        _req(run_id),
+        artifact_root=tmp_path,
+        rootfs_profiles=_rootfs(),
+        ssh_runner=runner,
+        admission=_FakeAdmission(),
+        session_registry=_FakeRegistry(ExecutionState.HALTED),
+    )
+
+    assert resp.ok is False
+    assert resp.error is not None
+    assert resp.error.category == ErrorCategory.READINESS_FAILURE
+    assert resp.error.details["code"] == "target_halted"
+    assert "probing introspect prerequisites" in resp.error.message
+    assert runner.calls == []
 
 
 # ---------------------------------------------------------------------------

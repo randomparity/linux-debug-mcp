@@ -6,12 +6,12 @@ from pathlib import Path
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import RootfsProfile
 from kdive.domain import (
-    DebugPostmortemListDumpsRequest,
     RunRequest,
     StepResult,
     StepStatus,
 )
-from kdive.providers.local_ssh_tests import SshCommandResult
+from kdive.postmortem.models import DebugPostmortemListDumpsRequest
+from kdive.providers.local.local_ssh_tests import SshCommandResult
 from kdive.server import build_scp_argv, debug_postmortem_list_dumps_handler
 
 SECRET_KEY_REF = "s3cr3t-key"  # pragma: allowlist secret
@@ -108,6 +108,21 @@ def test_list_dumps_one_entry(tmp_path) -> None:
     assert resp.data["dumps"][0]["path"] == "/var/crash/d1"
     assert resp.data["dumps"][0]["kernel"] == "Linux version 6.8.0"
     assert "debug.postmortem.fetch" in resp.suggested_next_actions
+
+
+def test_list_dumps_returns_typed_failure_for_malformed_record(tmp_path) -> None:
+    run_id = _booted_run(tmp_path)
+    stdout = '{"dump_dir": "/var/crash", "exists": true, "dumps": [{"kernel": "missing dir"}]}'
+
+    resp = debug_postmortem_list_dumps_handler(
+        DebugPostmortemListDumpsRequest(run_id=run_id, target_ref="local-qemu"),
+        artifact_root=tmp_path,
+        rootfs_profiles=_rootfs(),
+        ssh_runner=_list_runner(stdout),
+    )
+
+    assert resp.ok is False
+    assert resp.error.details["code"] == "malformed_dump_listing"
 
 
 def test_list_dumps_bad_dump_dir(tmp_path) -> None:

@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from kdive.artifacts.store import ArtifactStore
-from kdive.domain import DebugPostmortemCrashRequest, RunRequest
+from kdive.domain import RunRequest
+from kdive.postmortem.models import DebugPostmortemCrashRequest
 from kdive.server import debug_postmortem_crash_handler
 
 pytestmark = pytest.mark.skipif(

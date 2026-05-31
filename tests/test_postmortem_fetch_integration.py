@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from kdive.domain import DebugPostmortemFetchRequest, DebugPostmortemListDumpsRequest
-from kdive.providers.local_ssh_tests import SubprocessSshRunner
+from kdive.postmortem.models import DebugPostmortemFetchRequest, DebugPostmortemListDumpsRequest
+from kdive.providers.local.local_ssh_tests import SubprocessSshRunner
 from kdive.server import (
     debug_postmortem_fetch_handler,
     debug_postmortem_list_dumps_handler,

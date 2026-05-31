@@ -42,7 +42,7 @@ from conftest import (
 
 from kdive.config import RootfsProfile
 from kdive.domain import ErrorCategory
-from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.providers.local.gdb_mi import GdbMiSessionRegistry
 from kdive.server import debug_continue_handler, debug_end_session_handler
 
 

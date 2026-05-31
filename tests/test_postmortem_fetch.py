@@ -6,13 +6,13 @@ from pathlib import Path
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import RootfsProfile
 from kdive.domain import (
-    DebugPostmortemFetchRequest,
     ErrorCategory,
     RunRequest,
     StepResult,
     StepStatus,
 )
-from kdive.providers.local_ssh_tests import SshCommandResult
+from kdive.postmortem.models import DebugPostmortemFetchRequest
+from kdive.providers.local.local_ssh_tests import SshCommandResult
 from kdive.server import debug_postmortem_fetch_handler
 from kdive.transport.base import ExecutionState
 
@@ -150,6 +150,16 @@ def test_fetch_dump_not_found(tmp_path) -> None:
     resp = _fetch(tmp_path, _FetchRunner(), dump_ref="/var/crash/missing")
     assert resp.ok is False
     assert resp.error.details["code"] == "dump_not_found"
+
+
+def test_fetch_returns_typed_failure_for_malformed_listing(tmp_path) -> None:
+    _booted(tmp_path)
+    runner = _FetchRunner(listing='{"dump_dir": "/var/crash", "exists": true, "dumps": [{"kernel": "missing dir"}]}')
+
+    resp = _fetch(tmp_path, runner)
+
+    assert resp.ok is False
+    assert resp.error.details["code"] == "malformed_dump_listing"
 
 
 def test_fetch_truncated_transfer_detected(tmp_path) -> None:

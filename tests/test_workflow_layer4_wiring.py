@@ -30,7 +30,7 @@ from conftest import (
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile
-from kdive.coordination.admission import AdmissionService, SnapshotStore
+from kdive.coordination.admission import AdmissionService, SnapshotStore, publish_ready_snapshot
 from kdive.coordination.registry import SessionRegistry
 from kdive.domain import (
     ArtifactRef,
@@ -40,13 +40,12 @@ from kdive.domain import (
     StepStatus,
     ToolResponse,
 )
-from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.providers.local.gdb_mi import GdbMiSessionRegistry
 from kdive.seams.target import (
     BreakHint,
     ConsoleKind,
     PlatformMetadata,
     TargetKey,
-    publish_ready_snapshot,
 )
 from kdive.server import (
     workflow_build_boot_debug_handler,

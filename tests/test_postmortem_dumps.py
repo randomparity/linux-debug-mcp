@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from kdive.domain import (
+from kdive.postmortem.models import (
     DebugPostmortemFetchRequest,
     DebugPostmortemListDumpsRequest,
     DumpEntry,
@@ -15,6 +15,7 @@ def test_list_request_defaults() -> None:
     req = DebugPostmortemListDumpsRequest(run_id="r1", target_ref="local-qemu")
     assert req.timeout_seconds == 20
     assert req.dump_dir is None
+    assert req.manifest_target_profile == "local-qemu"
 
 
 def test_fetch_request_defaults() -> None:
@@ -161,7 +162,6 @@ def test_derive_dump_id_disambiguates_collision() -> None:
 
 
 def test_plan_fetch_maps_files_to_refs() -> None:
-    from kdive.domain import DumpEntry
     from kdive.postmortem.dumps import plan_fetch
 
     entry = DumpEntry(

@@ -21,6 +21,7 @@ from kdive.coordination.lease import ConsoleLeaseManager
 from kdive.coordination.registry import RecoveryTombstone, SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ErrorCategory
+from kdive.providers.local.qemu_gdbstub import ProviderDebugError
 from kdive.seams.guard import InProcessStopCapableGuard
 from kdive.server import (
     transport_close_handler,
@@ -51,6 +52,8 @@ def _open(tmp_path, **kwargs):
 
 
 def test_transport_open_returns_session_and_records_endpoint(tmp_path):
+    assert transport_open_handler.__module__ == "kdive.transport.handlers"
+
     response, _txn, _admission, reg = _open(tmp_path)
 
     assert response.ok is True
@@ -88,6 +91,44 @@ def test_transport_open_recovery_clears_tombstone(tmp_path):
     assert reg.read_tombstone(KEY) is None
 
 
+def test_transport_open_maps_provider_debug_error(monkeypatch, tmp_path):
+    reg = SessionRegistry(directory=tmp_path)
+    txn, admission = build_txn(FakeQemuTransport(), registry=reg)
+
+    def fail_open(*_args, **_kwargs):
+        raise ProviderDebugError(
+            "provider refused open",
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            details={"provider_code": "rsp_refused"},
+        )
+
+    monkeypatch.setattr(txn, "open", fail_open)
+
+    response = transport_open_handler(run_id=RUN_ID, transaction=txn, admission=admission, session_registry=reg)
+
+    assert response.ok is False
+    assert response.error.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert response.error.details["code"] == "transport_open_failed"
+    assert response.error.details["provider_code"] == "rsp_refused"
+    assert response.error.details["exception_type"] == "ProviderDebugError"
+
+
+def test_transport_open_maps_unexpected_transaction_error(monkeypatch, tmp_path):
+    reg = SessionRegistry(directory=tmp_path)
+    txn, admission = build_txn(FakeQemuTransport(), registry=reg)
+
+    def fail_open(*_args, **_kwargs):
+        raise RuntimeError("raw open failure")
+
+    monkeypatch.setattr(txn, "open", fail_open)
+
+    response = transport_open_handler(run_id=RUN_ID, transaction=txn, admission=admission, session_registry=reg)
+
+    assert response.ok is False
+    assert response.error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert response.error.details == {"code": "transport_open_failed", "exception_type": "RuntimeError"}
+
+
 def test_transport_close_reaps_and_clears(tmp_path):
     response, txn, admission, reg = _open(tmp_path)
     session_id = response.data["session_id"]
@@ -101,6 +142,23 @@ def test_transport_close_reaps_and_clears(tmp_path):
     assert reg.read_record(KEY) is None
     # the promoted admission binding was deregistered, so a reopen is not blocked.
     assert admission._bindings.get(KEY, []) == []
+
+
+def test_transport_close_maps_unexpected_transaction_error(monkeypatch, tmp_path):
+    response, txn, _admission, reg = _open(tmp_path)
+    session_id = response.data["session_id"]
+
+    def fail_close(*_args, **_kwargs):
+        raise RuntimeError("raw close failure")
+
+    monkeypatch.setattr(txn, "close", fail_close)
+
+    closed = transport_close_handler(run_id=RUN_ID, session_id=session_id, transaction=txn, session_registry=reg)
+
+    assert closed.ok is False
+    assert closed.error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert closed.error.details == {"code": "transport_close_failed", "exception_type": "RuntimeError"}
+    assert reg.read_record(KEY) is not None
 
 
 def test_transport_close_signals_already_closed_when_record_reaped(tmp_path):
@@ -397,5 +455,38 @@ def test_inject_break_refused_when_profile_does_not_enable_it(tmp_path):
     assert result.ok is False
     assert result.error.category is ErrorCategory.CONFIGURATION_ERROR
     # the break mechanism was never invoked and the durable record stays EXECUTING.
+    assert called == []
+    assert reg.read_record(KEY).execution_state is ExecutionState.EXECUTING
+
+
+def test_inject_break_reports_manifest_load_error_when_artifact_root_supplied(tmp_path):
+    registry_dir = tmp_path / "registry"
+    registry_dir.mkdir()
+    response, txn, admission, reg = _open(registry_dir)
+    session_id = response.data["session_id"]
+    artifact_root = tmp_path / "runs"
+    manifest_path = artifact_root / RUN_ID / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text("{not-json", encoding="utf-8")
+    called: list[str] = []
+
+    def spy_break(**kwargs):
+        called.append(kwargs["method"])
+
+    result = transport_inject_break_handler(
+        run_id=RUN_ID,
+        session_id=session_id,
+        acknowledged_permissions=INJECT_PERMS,
+        artifact_root=artifact_root,
+        transaction=txn,
+        admission=admission,
+        session_registry=reg,
+        break_mechanism=spy_break,
+        probe_halted=lambda _session: True,
+    )
+
+    assert result.ok is False
+    assert result.error.category is ErrorCategory.CONFIGURATION_ERROR
+    assert result.error.details["code"] == "manifest_load_failed"
     assert called == []
     assert reg.read_record(KEY).execution_state is ExecutionState.EXECUTING

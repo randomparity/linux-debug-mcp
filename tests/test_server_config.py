@@ -105,7 +105,7 @@ def test_create_app_threads_configured_sensitive_paths_into_create_run(tmp_path:
         target_profile="local-qemu",
         rootfs_profile="minimal",
         artifact_root=str(tmp_path / "runs"),
-        rootfs_source=str(rootfs),
+        boot_overrides={"rootfs_source": str(rootfs)},
     )
 
     assert result["ok"] is False
@@ -125,7 +125,7 @@ def test_create_app_without_config_allows_nonsensitive_rootfs(tmp_path: Path) ->
         target_profile="local-qemu",
         rootfs_profile="minimal",
         artifact_root=str(tmp_path / "runs"),
-        rootfs_source=str(rootfs),
+        boot_overrides={"rootfs_source": str(rootfs)},
     )
 
     assert result["ok"] is True

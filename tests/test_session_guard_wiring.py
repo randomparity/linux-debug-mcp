@@ -16,14 +16,13 @@ from _layer4_fakes import KEY, PLATFORM, FakeQemuTransport, build_txn
 from conftest import FakeMiEngine, kernel_provenance_details, write_vmlinux_with_build_id
 
 from kdive.config import DebugProfile
-from kdive.coordination.admission import AdmissionError, AdmissionService
+from kdive.coordination.admission import AdmissionError, AdmissionService, publish_ready_snapshot
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ArtifactRef, RunRequest, StepResult, StepStatus
-from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.providers.local.gdb_mi import GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard, SessionGuardContext
 from kdive.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleEvent, LifecycleKind
-from kdive.seams.target import publish_ready_snapshot
 from kdive.server import (
     _admit_run_tests_ssh_tier,
     debug_end_session_handler,

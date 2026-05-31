@@ -41,7 +41,7 @@ def test_auto_dispatches_uart_break_to_proxy_send_break():
         proxy=proxy,
         proxy_handle=object(),
         ssh_runner=None,
-        ssh_argv_prefix=None,
+        ssh_argv_prefix=(),
     )
     assert proxy.breaks == 1
 
@@ -54,9 +54,23 @@ def test_agent_proxy_break_also_uses_send_break():
         proxy=proxy,
         proxy_handle=object(),
         ssh_runner=None,
-        ssh_argv_prefix=None,
+        ssh_argv_prefix=(),
     )
     assert proxy.breaks == 1
+
+
+def test_uart_break_without_proxy_raises_unavailable_not_attributeerror():
+    with pytest.raises(InjectBreakError) as exc:
+        inject_break(
+            method="uart_break",
+            break_plan=_plan(BreakMethod.UART_BREAK),
+            proxy=None,
+            proxy_handle=None,
+            ssh_runner=None,
+            ssh_argv_prefix=(),
+        )
+    assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details.get("code") == "break_inject_unavailable"
 
 
 def test_sysrq_g_writes_g_to_sysrq_trigger_over_ssh(tmp_path):
@@ -67,7 +81,7 @@ def test_sysrq_g_writes_g_to_sysrq_trigger_over_ssh(tmp_path):
         proxy=None,
         proxy_handle=None,
         ssh_runner=ssh,
-        ssh_argv_prefix=["ssh", "vm1"],
+        ssh_argv_prefix=("ssh", "vm1"),
         work_dir=tmp_path,
     )
     assert any("/proc/sysrq-trigger" in part for part in ssh.argv)
@@ -84,7 +98,7 @@ def test_sysrq_g_without_ssh_runner_raises_unavailable_not_attributeerror():
             proxy=None,
             proxy_handle=None,
             ssh_runner=None,
-            ssh_argv_prefix=[],
+            ssh_argv_prefix=(),
         )
     assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details.get("code") == "break_inject_unavailable"
@@ -98,7 +112,7 @@ def test_requested_method_not_in_admitted_plan_is_rejected():
             proxy=_RecordingProxy(),
             proxy_handle=object(),
             ssh_runner=_RecordingSsh(),
-            ssh_argv_prefix=["ssh", "vm1"],
+            ssh_argv_prefix=("ssh", "vm1"),
         )
     assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
 
@@ -111,5 +125,5 @@ def test_gdbstub_native_is_not_an_inject_break_argument():
             proxy=None,
             proxy_handle=None,
             ssh_runner=None,
-            ssh_argv_prefix=None,
+            ssh_argv_prefix=(),
         )

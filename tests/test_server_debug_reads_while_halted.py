@@ -17,7 +17,7 @@ from conftest import FakeMiEngine, build_debug_transport, kernel_provenance_deta
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile
 from kdive.domain import ArtifactRef, RunRequest, StepResult, StepStatus
-from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.providers.local.gdb_mi import GdbMiSessionRegistry
 from kdive.server import debug_read_registers_handler, debug_start_session_handler
 
 RUN_ID = "run-halted"

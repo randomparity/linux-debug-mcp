@@ -6,7 +6,7 @@ from kdive.artifacts.manifest import BootAttempt
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import RootfsProfile, TargetProfile, TestCommand, TestSuiteProfile
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
-from kdive.providers.local_ssh_tests import LocalSshTestProvider, TestExecutionResult
+from kdive.providers.local.local_ssh_tests import LocalSshTestProvider, TestExecutionResult
 from kdive.server import create_run_handler, target_run_tests_handler
 
 

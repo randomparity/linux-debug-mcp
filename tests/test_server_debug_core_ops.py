@@ -10,6 +10,7 @@ session-of-record other than the live engine attachment.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import get_type_hints
 
 from _layer4_fakes import FakeQemuTransport, build_txn
 from conftest import kernel_provenance_details, write_vmlinux_with_build_id
@@ -17,11 +18,13 @@ from conftest import kernel_provenance_details, write_vmlinux_with_build_id
 import kdive.server as server_module
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile
-from kdive.coordination.admission import AdmissionService
+from kdive.coordination.admission import AdmissionService, publish_ready_snapshot
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
+from kdive.debug import handlers as debug_handlers
+from kdive.debug.tools import DebugToolContext, DebugToolHandlers
 from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus
-from kdive.providers.gdb_mi import (
+from kdive.providers.local.gdb_mi import (
     CANONICAL_PROBE_SYMBOL,
     BreakpointRef,
     Frame,
@@ -38,11 +41,11 @@ from kdive.seams.target import (
     ConsoleKind,
     PlatformMetadata,
     TargetKey,
-    publish_ready_snapshot,
 )
 from kdive.server import (
     _end_mi_debug_session,
     debug_continue_handler,
+    debug_list_breakpoints_handler,
     debug_set_breakpoint_handler,
     debug_start_session_handler,
 )
@@ -236,6 +239,91 @@ def _profiles() -> dict[str, DebugProfile]:
     return {"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")}
 
 
+def test_debug_operation_handlers_route_directly_to_core_response() -> None:
+    """Public debug.* handlers should be the adapter layer; avoid a second pass-through wrapper tier."""
+    assert not hasattr(server_module, "_debug_read_response")
+    assert not hasattr(server_module, "_debug_stateful_response")
+    assert "debug_tool_operation_response" in server_module.debug_read_registers_handler.__code__.co_names
+    assert "_debug_operation_handler" in server_module.debug_set_breakpoint_handler.__code__.co_names
+
+
+def test_debug_operation_handlers_use_central_operation_specs() -> None:
+    """Operation names and manifest persistence policy should not be duplicated in each handler."""
+    specs = debug_handlers.DEBUG_HANDLER_OPERATION_SPECS
+    assert specs["debug.read_registers"].method_name == "read_registers"
+    assert specs["debug.read_registers"].persist_manifest is False
+    assert specs["debug.read_registers"].argument_names == ("registers",)
+    assert specs["debug.set_breakpoint"].method_name == "set_breakpoint"
+    assert specs["debug.set_breakpoint"].persist_manifest is True
+    assert specs["debug.set_breakpoint"].argument_names == ("symbol",)
+    assert specs["debug.read_memory"].argument_names == ("address", "byte_count")
+    assert specs["debug.evaluate"].argument_names == ("inspector", "arguments")
+    assert specs["debug.list_breakpoints"].persist_manifest is False
+    assert specs["debug.backtrace"].persist_manifest is False
+    assert specs["debug.list_variables"].persist_manifest is False
+
+    for handler in (server_module.debug_read_registers_handler, server_module.debug_set_breakpoint_handler):
+        assert "debug_handler_operation_spec" not in handler.__code__.co_names
+        assert "debug_operation_arguments" not in handler.__code__.co_names
+
+
+def test_debug_operation_forwarding_handlers_do_not_use_locals_bags() -> None:
+    for handler in (
+        server_module.debug_read_registers_handler,
+        server_module.debug_read_symbol_handler,
+        server_module.debug_read_memory_handler,
+        server_module.debug_evaluate_handler,
+        server_module.debug_set_breakpoint_handler,
+        server_module.debug_set_watchpoint_handler,
+        server_module.debug_clear_breakpoint_handler,
+        server_module.debug_clear_watchpoint_handler,
+        server_module.debug_list_breakpoints_handler,
+        server_module.debug_backtrace_handler,
+        server_module.debug_list_variables_handler,
+        server_module.debug_continue_handler,
+        server_module.debug_step_handler,
+        server_module.debug_next_handler,
+        server_module.debug_finish_handler,
+        server_module.debug_interrupt_handler,
+    ):
+        assert "locals" not in handler.__code__.co_names
+
+
+def test_debug_tool_registration_uses_typed_context_and_handler_protocols() -> None:
+    context_hints = get_type_hints(DebugToolContext)
+    assert context_hints["transaction"] is TransportTransaction
+    assert context_hints["admission"] is AdmissionService
+    assert context_hints["session_registry"] is SessionRegistry
+    assert context_hints["gdb_mi_sessions"] is GdbMiSessionRegistry
+    assert not hasattr(DebugToolContext, "common_kwargs")
+    assert not hasattr(DebugToolContext, "gated_kwargs")
+
+    handler_hints = get_type_hints(DebugToolHandlers)
+    assert handler_hints["start_session"].__name__ == "DebugStartSessionHandler"
+    assert handler_hints["read_registers"].__name__ == "DebugReadRegistersHandler"
+    assert handler_hints["continue_execution"].__name__ == "DebugExecutionControlHandler"
+    assert handler_hints["end_session"].__name__ == "DebugEndSessionHandler"
+
+
+def test_debug_operation_response_uses_runtime_bundle() -> None:
+    import inspect
+
+    assert hasattr(debug_handlers, "DebugRuntime")
+    params = inspect.signature(debug_handlers.debug_tool_operation_response).parameters
+    assert get_type_hints(debug_handlers.debug_tool_operation_response)["runtime"] is debug_handlers.DebugRuntime
+    assert "runtime" in params
+    for dependency_name in (
+        "debug_profiles",
+        "admission",
+        "transaction",
+        "session_registry",
+        "session_guard",
+        "gdb_mi_engine",
+        "gdb_mi_sessions",
+    ):
+        assert dependency_name not in params
+
+
 def _start(
     artifact_root: Path,
     *,
@@ -379,6 +467,33 @@ def test_stateful_op_preserves_transport_binding_and_mi_probe(tmp_path: Path) ->
     after = _debug_step_details(artifact_root)
     assert after["transport_session_id"] == before["transport_session_id"]
     assert after["mi_probe"] == before["mi_probe"]
+
+
+def test_list_breakpoints_does_not_rewrite_debug_manifest_step(tmp_path: Path) -> None:
+    artifact_root = _create_debug_ready_run(tmp_path)
+    registry = _make_registry(tmp_path / "reg")
+    txn, admission = _build_transaction(registry=registry)
+    engine = FakeMiEngine()
+    sessions = GdbMiSessionRegistry()
+    start = _start(artifact_root, registry=registry, txn=txn, admission=admission, engine=engine, sessions=sessions)
+    assert start.ok is True, start
+    session_id = start.data["debug_session_id"]
+    before = _debug_step_details(artifact_root)
+
+    response = debug_list_breakpoints_handler(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        debug_session_id=session_id,
+        debug_profiles=_profiles(),
+        admission=admission,
+        session_registry=registry,
+        gdb_mi_engine=engine,
+        gdb_mi_sessions=sessions,
+    )
+
+    assert response.ok is True, response
+    assert response.data["breakpoints"][0]["func"] == "do_sys_open"
+    assert _debug_step_details(artifact_root) == before
 
 
 def test_continue_dispatches_onto_live_attachment(tmp_path: Path) -> None:

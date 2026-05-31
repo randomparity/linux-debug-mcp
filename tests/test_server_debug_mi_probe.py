@@ -1,11 +1,10 @@
 """Phase-A gdb/MI attach-probe wiring in debug.start_session (#79).
 
-Handler-level tests: inject a real TransportTransaction (over FakeQemuTransport) plus a fake batch
-debug provider and a fake gdb/MI engine, and assert the probe runs over the guard-protected
-rsp_endpoint, the StopCapableGuard refuses a second stop-capable attach on the no-console
-qemu-gdbstub path, and the guaranteed-resume invariant holds on every fault (engine crash, RSP
-timeout, raised tool exception): the target is never left HALTED and ssh-tier is unblocked after a
-confirmed resume.
+Handler-level tests: inject a real TransportTransaction (over FakeQemuTransport), a fake gdb/MI
+engine, and the live session registry. The probe runs over the guard-protected rsp_endpoint, the
+StopCapableGuard refuses a second stop-capable attach on the no-console qemu-gdbstub path, and the
+guaranteed-resume invariant holds on every fault (engine crash, RSP timeout, raised tool exception):
+the target is never left HALTED and ssh-tier is unblocked after a confirmed resume.
 """
 
 from __future__ import annotations
@@ -18,17 +17,16 @@ from conftest import FakeMiEngine, FakeTestProvider, kernel_provenance_details, 
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile, RootfsProfile
-from kdive.coordination.admission import AdmissionService
+from kdive.coordination.admission import AdmissionService, publish_ready_snapshot
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from kdive.providers.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiSessionRegistry
+from kdive.providers.local.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiSessionRegistry
 from kdive.seams.target import (
     BreakHint,
     ConsoleKind,
     PlatformMetadata,
     TargetKey,
-    publish_ready_snapshot,
 )
 from kdive.server import debug_start_session_handler, target_run_tests_handler
 from kdive.transport.base import ExecutionState, LineRole, TransportRef
@@ -206,7 +204,8 @@ def test_probe_success_records_session_and_leaves_record_halted(tmp_path: Path) 
     # AC#1: the typed MI probe record (the ^connected attach proof) is surfaced in the response data.
     assert resp.data["mi_probe"]["record"]["message"] == "connected"
     record = registry.read_record(KEY)
-    assert record is not None and record.execution_state == ExecutionState.HALTED  # batch path owns the kernel
+    # The transport-owned durable record stays HALTED for the live gdb/MI session window.
+    assert record is not None and record.execution_state == ExecutionState.HALTED
 
 
 def test_probe_surfaces_resolved_symbol(tmp_path: Path) -> None:

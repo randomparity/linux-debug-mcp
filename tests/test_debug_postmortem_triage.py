@@ -4,11 +4,11 @@ from pathlib import Path
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.domain import (
-    DebugPostmortemTriageRequest,
     ErrorCategory,
     RunRequest,
     ToolResponse,
 )
+from kdive.postmortem.models import DebugPostmortemTriageRequest
 from kdive.server import debug_postmortem_triage_handler
 
 GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret

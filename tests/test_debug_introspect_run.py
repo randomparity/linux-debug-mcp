@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+import kdive.server as server_module
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile, RootfsProfile, TargetProfile
 from kdive.coordination.admission import (
@@ -26,12 +27,35 @@ from kdive.domain import (
     RunRequest,
     StepResult,
     StepStatus,
+    ToolResponse,
 )
-from kdive.providers.local_ssh_tests import SshCommandResult
+from kdive.providers.local.local_ssh_tests import SshCommandResult
 from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetState
 from kdive.server import RUN_STDOUT_CAP, debug_introspect_run_handler
 
 VALID_BUILD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
+
+
+def test_execute_introspect_call_keeps_ssh_phase_in_helper() -> None:
+    assert callable(server_module._run_introspect_ssh_with_cancellation)
+    assert "_run_introspect_ssh_with_cancellation" in server_module._execute_introspect_call.__code__.co_names
+    assert "threading" not in server_module._execute_introspect_call.__code__.co_names
+
+
+def test_execute_introspect_call_keeps_preflight_and_admission_phases_in_helpers() -> None:
+    assert callable(server_module._run_introspect_sudo_preflight)
+    assert callable(server_module._admit_introspect_call)
+    assert "_run_introspect_sudo_preflight" in server_module._execute_introspect_call.__code__.co_names
+    assert "_admit_introspect_call" in server_module._execute_introspect_call.__code__.co_names
+    assert "admit_ssh_tier" not in server_module._execute_introspect_call.__code__.co_names
+
+
+def test_finalize_introspect_call_keeps_success_persistence_and_response_in_helpers() -> None:
+    assert callable(server_module._persist_introspect_success_artifacts)
+    assert callable(server_module._build_introspect_success_response)
+    assert "_persist_introspect_success_artifacts" in server_module._finalize_introspect_call.__code__.co_names
+    assert "_build_introspect_success_response" in server_module._finalize_introspect_call.__code__.co_names
+    assert "ArtifactRef" not in server_module._finalize_introspect_call.__code__.co_names
 
 
 def _make_run(tmp_path: Path) -> Path:
@@ -285,6 +309,27 @@ def test_run_tool_exposes_acknowledged_permissions() -> None:
     tool = app._tool_manager._tools["debug.introspect.run"]
     params = inspect.signature(tool.fn).parameters
     assert "acknowledged_permissions" in params
+
+
+def test_run_tool_forwards_args_to_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, DebugIntrospectRunRequest] = {}
+
+    def fake_handler(request: DebugIntrospectRunRequest, **_kwargs: Any) -> ToolResponse:
+        captured["request"] = request
+        return ToolResponse.success(summary="ok")
+
+    monkeypatch.setattr(server_module, "debug_introspect_run_handler", fake_handler)
+    app = server_module.create_app()
+
+    raw = app._tool_manager._tools["debug.introspect.run"].fn(
+        run_id="r1",
+        target_ref="local-qemu",
+        script="print(1)",
+        args={"limit": 3},
+    )
+
+    assert raw["ok"] is True
+    assert captured["request"].args == {"limit": 3}
 
 
 def test_allow_write_requires_profile_op(tmp_path: Path) -> None:
@@ -1139,7 +1184,7 @@ def test_wrapper_render_error_rolls_back_admission(tmp_path: Path, monkeypatch: 
     # admission handle, (b) clean up the orphan agent_dir + sensitive_dir,
     # and (c) leave a forensic FAILED StepResult under introspect:<call_id>
     # so the operator can trace via `artifacts.get_manifest`.
-    from kdive.providers.local_drgn_introspect import WrapperRenderError
+    from kdive.providers.local.local_drgn_introspect import WrapperRenderError
 
     def _boom(**_kwargs):
         raise WrapperRenderError("test forced render failure")
@@ -1291,7 +1336,7 @@ def test_target_ref_mismatch_returns_configuration_error(tmp_path: Path) -> None
     assert response.ok is False
     assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert response.error.details["code"] == "manifest_profile_mismatch"
-    assert response.error.details["requested_target_ref"] == "some-other-target"
+    assert response.error.details["requested_target_profile"] == "some-other-target"
 
 
 # ---------------------------------------------------------------------------

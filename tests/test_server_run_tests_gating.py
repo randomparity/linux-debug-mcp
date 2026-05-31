@@ -5,16 +5,15 @@ from datetime import UTC, datetime
 from conftest import FakeTestProvider, create_booted_run, rootfs
 
 from kdive.artifacts.store import ArtifactStore
-from kdive.coordination.admission import AdmissionService, SnapshotStore
+from kdive.coordination.admission import AdmissionService, SnapshotStore, publish_ready_snapshot
 from kdive.coordination.registry import SessionRegistry
 from kdive.domain import ErrorCategory, StepResult, StepStatus
-from kdive.providers.local_ssh_tests import TestExecutionResult
+from kdive.providers.local.local_ssh_tests import TestExecutionResult
 from kdive.seams.target import (
     BreakHint,
     ConsoleKind,
     PlatformMetadata,
     TargetKey,
-    publish_ready_snapshot,
 )
 from kdive.server import target_run_tests_handler
 from kdive.transport.base import (

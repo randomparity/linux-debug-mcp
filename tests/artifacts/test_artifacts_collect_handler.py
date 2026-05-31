@@ -8,6 +8,10 @@ from kdive.domain import ArtifactRef, StepResult, StepStatus
 from kdive.server import artifacts_collect_handler, create_run_handler
 
 
+def test_artifacts_collect_handler_lives_in_artifacts_package() -> None:
+    assert artifacts_collect_handler.__module__ == "kdive.artifacts.handlers"
+
+
 def create_run(tmp_path: Path) -> Path:
     source = make_source_tree(tmp_path)
     artifact_root = tmp_path / "runs"

@@ -9,8 +9,8 @@ from conftest import FakeMiEngine, build_debug_transport, kernel_provenance_deta
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from kdive.providers.gdb_mi import GdbMiError, GdbMiSessionRegistry
-from kdive.providers.qemu_gdbstub import DebugSession
+from kdive.providers.local.gdb_mi import GdbMiError, GdbMiSessionRegistry
+from kdive.providers.local.qemu_gdbstub import DebugSession
 from kdive.seams.target import TargetKey
 from kdive.server import debug_end_session_handler, debug_read_memory_handler, debug_start_session_handler
 

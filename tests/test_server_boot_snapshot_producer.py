@@ -1,7 +1,7 @@
 import pytest
 from conftest import FakeBootProvider, create_run, profiles, record_build, target_profile
 
-from kdive.config import TargetProfile
+from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, TargetProfile
 from kdive.coordination.admission import AdmissionError, AdmissionService, SnapshotStore
 from kdive.seams.target import BreakHint, ConsoleKind, PlatformMetadata, TargetKey
 from kdive.server import target_boot_handler
@@ -42,6 +42,7 @@ def _boot(artifact_root, tmp_path, admission, *, force_reboot=False):
         provider=FakeBootProvider(),
         admission=admission,
         force_reboot=force_reboot,
+        acknowledged_permissions=TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"],
         **profiles(tmp_path, target=_debug_target()),
     )
 

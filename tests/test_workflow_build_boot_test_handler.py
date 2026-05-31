@@ -6,6 +6,7 @@ from conftest import make_source_tree
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import (
+    TARGET_DESTRUCTIVE_PERMISSIONS,
     BootOverrides,
     BuildOverrides,
     RootfsProfile,
@@ -18,9 +19,9 @@ from kdive.config import (
     TestSuiteProfile as _TestSuiteProfile,
 )
 from kdive.domain import ArtifactRef, ErrorCategory, StepStatus, ToolResponse
-from kdive.providers.libvirt_qemu import BootExecutionResult
-from kdive.providers.local_kernel_build import LocalKernelBuildProvider
-from kdive.providers.local_ssh_tests import TestExecutionResult as _TestExecutionResult
+from kdive.providers.local.libvirt_qemu import BootExecutionResult
+from kdive.providers.local.local_kernel_build import LocalKernelBuildProvider
+from kdive.providers.local.local_ssh_tests import TestExecutionResult as _TestExecutionResult
 from kdive.server import (
     create_run_handler,
     kernel_build_handler,
@@ -423,6 +424,7 @@ def test_override_flow_end_to_end(tmp_path: Path) -> None:
         provider=boot_provider,
         target_profiles=target_profiles,
         rootfs_profiles=rootfs_profiles,
+        acknowledged_permissions=TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"],
     )
     assert boot1.ok is True
     manifest = store.load_manifest(run_id)
@@ -437,6 +439,7 @@ def test_override_flow_end_to_end(tmp_path: Path) -> None:
         boot_overrides=BootOverrides(kernel_args=["dhash_entries=2"]),
         target_profiles=target_profiles,
         rootfs_profiles=rootfs_profiles,
+        acknowledged_permissions=TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"],
     )
     assert boot2.ok is True
     manifest = store.load_manifest(run_id)

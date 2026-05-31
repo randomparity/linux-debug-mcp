@@ -22,22 +22,18 @@ from typing import Any, Protocol, TypeVar
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
+from kdive.artifacts.handlers import artifacts_collect_handler
 from kdive.artifacts.manifest import BootAttempt, RunManifest
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import (
     ALLOWED_DEBUG_OPERATIONS,
-    CRASH_COMMAND_ALLOWLIST,
-    CRASH_PER_CMD_CAP,
-    CRASH_SCRIPT_BYTE_CAP,
-    CRASH_STDOUT_CAP,
     DEFAULT_FETCH_MAX_BYTES,
     FETCH_DISK_HEADROOM_BYTES,
     FETCH_TIMEOUT_BAND,
     INTROSPECT_DESTRUCTIVE_PERMISSIONS,
-    MAX_CRASH_COMMANDS,
     MAX_INTROSPECT_CALLS_PER_RUN,
-    MAX_POSTMORTEM_CRASH_CALLS_PER_RUN,
     PRELUDE_WARNING_FRACTION_PCT,
+    TARGET_DESTRUCTIVE_PERMISSIONS,
     TRIAGE_CRASH_COMMANDS,
     TRIAGE_DMESG_HELPER,
     TRIAGE_MODULES_HELPER,
@@ -61,27 +57,47 @@ from kdive.coordination.admission import (
     AdmissionService,
     SnapshotStore,
     TargetSnapshot,
+    publish_ready_snapshot,
 )
 from kdive.coordination.endpoint_safety import EndpointSafetyError
-from kdive.coordination.exec_probe import probe_execution_state, probe_rsp_halted
+from kdive.coordination.exec_probe import probe_execution_state
 from kdive.coordination.lease import ConsoleLeaseManager
 from kdive.coordination.registry import OrphanReap, RecoveryTombstone, SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
+from kdive.debug.handlers import (
+    DEBUG_METHOD_OPERATIONS,
+    DebugRuntime,
+    debug_backtrace_handler,
+    debug_clear_breakpoint_handler,
+    debug_clear_watchpoint_handler,
+    debug_continue_handler,
+    debug_evaluate_handler,
+    debug_finish_handler,
+    debug_interrupt_handler,
+    debug_list_breakpoints_handler,
+    debug_list_variables_handler,
+    debug_next_handler,
+    debug_read_memory_handler,
+    debug_read_registers_handler,
+    debug_read_symbol_handler,
+    debug_set_breakpoint_handler,
+    debug_set_watchpoint_handler,
+    debug_step_handler,
+)
+from kdive.debug.tools import DebugToolContext, DebugToolHandlers, register_debug_tools
+from kdive.default_profiles import (
+    DEFAULT_BUILD_PROFILES,
+    DEFAULT_DEBUG_PROFILES,
+    DEFAULT_ROOTFS_PROFILES,
+    DEFAULT_TARGET_PROFILES,
+)
 from kdive.domain import (
     ArtifactRef,
     DebugIntrospectCheckPrerequisitesRequest,
     DebugIntrospectFromVmcoreHelperRequest,
     DebugIntrospectFromVmcoreRequest,
-    DebugIntrospectHelperRequest,
     DebugIntrospectRunRequest,
-    DebugPostmortemCheckPrereqsRequest,
-    DebugPostmortemCrashRequest,
-    DebugPostmortemFetchRequest,
-    DebugPostmortemListDumpsRequest,
-    DebugPostmortemTriageRequest,
-    DumpEntry,
     ErrorCategory,
-    FetchedFile,
     PrerequisiteCheck,
     PrerequisiteStatus,
     RunRequest,
@@ -89,11 +105,17 @@ from kdive.domain import (
     StepStatus,
     ToolResponse,
 )
-from kdive.introspect_helpers import HELPER_REGISTRY, HelperSpec
+from kdive.handlers.prerequisites import prerequisites_handler
+from kdive.introspect.handlers import debug_introspect_helper_handler, debug_introspect_run_handler
+from kdive.introspect.tools import register_introspect_tools
+from kdive.introspect_helpers import HelperSpec, get_helper_registry
 from kdive.logging import SECRET_REGISTRY, configure_logging
-from kdive.postmortem.crash_batch import build_command_script, collect_command_outputs
-from kdive.postmortem.crash_commands import validate_crash_command, validate_modules_path
-from kdive.postmortem.crash_parsers import parse_command
+from kdive.postmortem.crash_commands import validate_modules_path
+from kdive.postmortem.crash_handler import (
+    _crash_build_id_fail_loud,
+    _crash_config_failure,
+    debug_postmortem_crash_handler,
+)
 from kdive.postmortem.dumps import (
     DEFAULT_DUMP_DIR,
     FetchSpec,
@@ -103,23 +125,21 @@ from kdive.postmortem.dumps import (
     plan_fetch,
     render_dump_list_script,
 )
+from kdive.postmortem.models import (
+    DebugPostmortemCheckPrereqsRequest,
+    DebugPostmortemCrashRequest,
+    DebugPostmortemFetchRequest,
+    DebugPostmortemListDumpsRequest,
+    DebugPostmortemTriageRequest,
+    DumpEntry,
+    FetchedFile,
+)
+from kdive.postmortem.tools import register_postmortem_tools
 from kdive.postmortem.triage import (
     CrashOutcome,
     DrgnOutcome,
     any_section_ok,
     assemble_report,
-)
-from kdive.prereqs.checks import (
-    PortProbeResult,
-    PrerequisiteRunner,
-    SubprocessPrerequisiteRunner,
-    check_gdbstub_port,
-    check_kernel_config,
-    check_kvm_access,
-    check_libvirt_connect,
-    check_prerequisites,
-    check_rootfs_builder,
-    check_rootfs_image,
 )
 from kdive.prereqs.drgn_probe import (
     PROBE_SCRIPT,
@@ -129,21 +149,7 @@ from kdive.prereqs.drgn_probe import (
     python_missing_checks,
 )
 from kdive.prereqs.kdump_probe import build_kdump_checks, render_kdump_probe_script
-from kdive.providers.contracts import (
-    ConsoleReadRequest,
-    ConsoleSessionRequest,
-    ConsoleWriteRequest,
-    HardwareControlRequest,
-    ProviderRequest,
-    ProvisioningRequest,
-    RealBootRequest,
-    RemoteArtifactSyncRequest,
-    RemoteBuildRequest,
-    ReservationReleaseRequest,
-    ReservationRequest,
-    ReserveProvisionBootRequest,
-)
-from kdive.providers.gdb_mi import (
+from kdive.providers.local.gdb_mi import (
     CANONICAL_PROBE_SYMBOL,
     MAX_MEMORY_READ_BYTES,
     GdbMiAttachment,
@@ -151,8 +157,8 @@ from kdive.providers.gdb_mi import (
     GdbMiError,
     GdbMiSessionRegistry,
 )
-from kdive.providers.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
-from kdive.providers.local_drgn_introspect import (
+from kdive.providers.local.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
+from kdive.providers.local.local_drgn_introspect import (
     SCRIPT_BYTE_CAP,
     TARGET_PYTHON_ARGV,
     WrapperRenderError,
@@ -162,12 +168,12 @@ from kdive.providers.local_drgn_introspect import (
     render_wrapper_skeleton,
     user_script_sha256,
 )
-from kdive.providers.local_kernel_build import (
+from kdive.providers.local.local_kernel_build import (
     BuildIdMissing,
     LocalKernelBuildProvider,
     ReadelfUnavailable,
 )
-from kdive.providers.local_ssh_tests import (
+from kdive.providers.local.local_ssh_tests import (
     LocalSshTestProvider,
     SshCommandResult,
     SshRunner,
@@ -176,14 +182,9 @@ from kdive.providers.local_ssh_tests import (
     TestPlan,
     build_ssh_argv,
 )
-from kdive.providers.qemu_gdbstub import (
+from kdive.providers.local.qemu_gdbstub import (
     DebugSession,
     ProviderDebugError,
-)
-from kdive.providers.registry import ProviderRegistry
-from kdive.providers.stubs import (
-    future_not_implemented_response,
-    select_future_provider,
 )
 from kdive.rootfs.sources import RootfsSourceError, resolve_rootfs_source
 from kdive.safety.paths import (
@@ -223,7 +224,6 @@ from kdive.seams.target import (
     KernelProvenance,
     PlatformMetadata,
     TargetKey,
-    publish_ready_snapshot,
 )
 from kdive.symbols.build_id import BuildIdReadError, read_elf_build_id
 from kdive.symbols.resolve import SymbolResolutionError, resolve_symbols
@@ -234,11 +234,10 @@ from kdive.symbols.verify import (
     verify_vmlinux_provenance,
 )
 from kdive.symbols.vmcore_build_id import (
-    VmcoreBuildIdAbsent,
-    VmcoreBuildIdError,
-    VmcoreFormatUnsupported,
     read_vmcore_build_id,
 )
+from kdive.tools.artifacts import register_artifact_tools
+from kdive.tools.providers import register_provider_tools
 from kdive.transport.base import (
     BreakMethod,
     EndpointExposure,
@@ -251,65 +250,23 @@ from kdive.transport.base import (
     TransportRegistry,
     TransportSession,
 )
-from kdive.transport.break_inject import InjectBreakError, inject_break
+from kdive.transport.break_inject import InjectBreakError
+from kdive.transport.handlers import (
+    _halt_debug_transport,
+    _require_snapshot,
+    transport_close_handler,
+    transport_inject_break_handler,
+    transport_open_handler,
+)
 from kdive.transport.proxy import AgentProxyBackend
 from kdive.transport.qemu_gdbstub import QemuGdbstubTransport
+from kdive.transport.tools import TransportToolContext, TransportToolHandlers, register_transport_tools
+from kdive.workflow.tools import register_workflow_tools
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_ARTIFACT_ROOT = Path(".kdive/runs")
 SERVER_CONFIG_ENV_VAR = "KDIVE_CONFIG"
-DEFAULT_BUILD_PROFILES = {
-    "x86_64-default": BuildProfile(name="x86_64-default", architecture="x86_64", base_config=["defconfig"]),
-    "x86_64-debug": BuildProfile(
-        name="x86_64-debug",
-        architecture="x86_64",
-        base_config=["defconfig"],
-        config_lines=[
-            "CONFIG_VIRTIO=y",
-            "CONFIG_VIRTIO_PCI=y",
-            "CONFIG_VIRTIO_BLK=y",
-            "CONFIG_VIRTIO_NET=y",
-            "CONFIG_VIRTIO_CONSOLE=y",
-            "CONFIG_SERIAL_8250=y",
-            "CONFIG_SERIAL_8250_CONSOLE=y",
-            "CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y",
-            "# CONFIG_RANDOMIZE_BASE is not set",
-        ],
-    ),
-}
-DEFAULT_TARGET_PROFILES = {
-    "local-qemu": TargetProfile(
-        name="local-qemu",
-        architecture="x86_64",
-        target_ref="kdive-dev",
-        managed_domain=True,
-        managed_domain_prefix="kdive-",
-        libvirt_uri="qemu:///system",
-    ),
-    "local-qemu-debug": TargetProfile(
-        name="local-qemu-debug",
-        architecture="x86_64",
-        target_ref="kdive-dev-debug",
-        managed_domain=True,
-        managed_domain_prefix="kdive-",
-        libvirt_uri="qemu:///system",
-        debug_gdbstub=True,
-        gdbstub_endpoint="127.0.0.1:1234",
-    ),
-}
-DEFAULT_ROOTFS_PROFILES = {
-    "minimal": RootfsProfile(
-        name="minimal",
-        source="/var/lib/kdive/rootfs/minimal.qcow2",
-        source_kind="builder",
-        mutability="copy_on_write",
-        readiness_marker="kdive-ready",
-        ssh_host="127.0.0.1",
-        ssh_port=22,
-        ssh_user="root",
-    ),
-}
 DEFAULT_TEST_SUITES = {
     "smoke-basic": TestSuiteProfile(
         name="smoke-basic",
@@ -322,28 +279,6 @@ DEFAULT_TEST_SUITES = {
             TestCommand(name="proc-cmdline", argv=["cat", "/proc/cmdline"]),
         ],
     )
-}
-DEFAULT_DEBUG_PROFILES = {
-    "qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default"),
-}
-DEBUG_METHOD_OPERATIONS = {
-    "read_registers": "debug.read_registers",
-    "read_symbol": "debug.read_symbol",
-    "read_memory": "debug.read_memory",
-    "evaluate": "debug.evaluate",
-    "set_breakpoint": "debug.set_breakpoint",
-    "set_watchpoint": "debug.set_watchpoint",
-    "clear_breakpoint": "debug.clear_breakpoint",
-    "clear_watchpoint": "debug.clear_watchpoint",
-    "list_breakpoints": "debug.list_breakpoints",
-    "backtrace": "debug.backtrace",
-    "list_variables": "debug.list_variables",
-    "continue_execution": "debug.continue",
-    "step": "debug.step",
-    "next": "debug.next",
-    "finish": "debug.finish",
-    "interrupt": "debug.interrupt",
-    "end_session": "debug.end_session",
 }
 RUNNING_BUILD_MESSAGE = (
     "previous build is still recorded as running; inspect logs and create a new run or manually clean stale build state"
@@ -503,7 +438,7 @@ def _rollback_introspect_admission(
 ) -> None:
     """Roll back a promoted admission handle on an introspect-call failure, logging (never
     swallowing) a rollback failure — a corrupt admission state for this target_key must be visible
-    to the operator (Iter-2 finding 3 / TD-08)."""
+    to the operator."""
     try:
         admission.rollback(handle)
     except Exception:  # noqa: BLE001 - surface, don't swallow: operator must see admission corruption
@@ -592,9 +527,8 @@ def _record_introspect_failure(
     ]
     if include_stdout_json:
         artifacts.append(ArtifactRef(path=str(agent_dir / "stdout.json"), kind="application/json"))
-    # Iter-2 finding 2: SSH now writes raw stdout/stderr straight to
-    # sensitive/, so register both for forensics on every failure path
-    # (subject to existence — admit-time / preflight failures skip SSH).
+    # Raw SSH stdout/stderr live under sensitive/; register existing files for
+    # forensics on every failure path. Admit-time and preflight failures skip SSH.
     for raw_name in ("stdout.raw", "stderr.raw"):
         raw_path = sensitive_dir / raw_name
         if raw_path.exists():
@@ -841,6 +775,37 @@ def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any]
         message=message,
         run_id=run_id,
         details=details,
+    )
+
+
+@dataclass(frozen=True)
+class _HandlerFailure:
+    category: ErrorCategory
+    message: str
+    run_id: str | None = None
+    details: dict[str, Any] | None = None
+
+
+def _configuration_handler_failure(
+    *,
+    run_id: str,
+    message: str,
+    details: dict[str, Any] | None = None,
+) -> _HandlerFailure:
+    return _HandlerFailure(
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        message=message,
+        run_id=run_id,
+        details=details,
+    )
+
+
+def _tool_response_from_handler_failure(failure: _HandlerFailure) -> ToolResponse:
+    return ToolResponse.failure(
+        category=failure.category,
+        message=failure.message,
+        run_id=failure.run_id,
+        details=failure.details,
     )
 
 
@@ -1260,243 +1225,6 @@ def get_manifest_handler(*, artifact_root: Path, run_id: str) -> ToolResponse:
     )
 
 
-_READINESS_CHECK_IDS = {"build": "kernel.config", "target": "gdbstub.port", "rootfs": "rootfs.image"}
-
-
-def _resolve_readiness_profile(
-    kind: str, name: str | None, registry: dict[str, Any]
-) -> tuple[Any, PrerequisiteCheck | None]:
-    """Resolve a readiness profile name to its object, or to a FAILED check for an unknown name.
-
-    A `None` name yields `(None, None)` so the readiness check renders SKIPPED. An unknown name yields a
-    FAILED check under that concern's check_id, so the preflight reports the bad name and still runs the
-    other checks.
-    """
-    if name is None:
-        return None, None
-    if name not in registry:
-        known = ", ".join(sorted(registry)) or "(none configured)"
-        return None, PrerequisiteCheck(
-            check_id=_READINESS_CHECK_IDS[kind],
-            status=PrerequisiteStatus.FAILED,
-            message=f"unknown {kind} profile: {name}",
-            suggested_fix=f"Select a known {kind} profile: {known}.",
-        )
-    return registry[name], None
-
-
-def prerequisites_handler(
-    *,
-    artifact_root: Path,
-    source_path: str | None,
-    enable_libvirt_check: bool = False,
-    build_profile: str | None = None,
-    target_profile: str | None = None,
-    rootfs_profile: str | None = None,
-    build_profiles: dict[str, BuildProfile] | None = None,
-    target_profiles: dict[str, TargetProfile] | None = None,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
-    port_probe: Callable[[str, int], PortProbeResult] | None = None,
-    runner: PrerequisiteRunner | None = None,
-    kvm_probe: Callable[[], bool] | None = None,
-) -> ToolResponse:
-    build_profiles = build_profiles if build_profiles is not None else DEFAULT_BUILD_PROFILES
-    target_profiles = target_profiles if target_profiles is not None else DEFAULT_TARGET_PROFILES
-    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
-    source = Path(source_path) if source_path else None
-    runner = runner or SubprocessPrerequisiteRunner()
-    checks = check_prerequisites(
-        artifact_root=artifact_root,
-        source_path=source,
-        enable_libvirt_check=enable_libvirt_check,
-        runner=runner,
-    )
-    build_obj, build_err = _resolve_readiness_profile("build", build_profile, build_profiles)
-    rootfs_obj, rootfs_err = _resolve_readiness_profile("rootfs", rootfs_profile, rootfs_profiles)
-    target_obj, target_err = _resolve_readiness_profile("target", target_profile, target_profiles)
-    checks.append(build_err or check_kernel_config(source, build_obj))
-    checks.append(rootfs_err or check_rootfs_image(rootfs_obj))
-    checks.append(target_err or check_gdbstub_port(target_obj, port_probe=port_probe))
-    checks.append(check_kvm_access(kvm_probe=kvm_probe))
-    checks.append(check_rootfs_builder(runner=runner))
-    checks.append(
-        target_err or check_libvirt_connect(target_obj, runner=runner, enable_libvirt_check=enable_libvirt_check)
-    )
-    failed = [check for check in checks if check.status == "failed"]
-    return ToolResponse.success(
-        summary=f"{len(failed)} prerequisite checks failed",
-        data={"checks": [check.model_dump(mode="json") for check in checks]},
-        suggested_next_actions=["Fix failed checks", "kernel.create_run"],
-    )
-
-
-def list_providers_handler() -> ToolResponse:
-    registry = ProviderRegistry.with_defaults()
-    providers = []
-    for provider in registry.list_capabilities():
-        provider_payload = provider.model_dump(mode="json")
-        plugin_metadata = registry.provider_plugin_metadata(provider.provider_name)
-        if plugin_metadata is not None:
-            provider_payload["plugin"] = plugin_metadata.model_dump(mode="json")
-            provider_payload["documentation_paths"] = list(plugin_metadata.documentation_paths)
-        providers.append(provider_payload)
-    return ToolResponse.success(
-        summary="listed provider capabilities",
-        data={"providers": providers},
-    )
-
-
-def _validation_error_details(exc: ValidationError) -> dict[str, Any]:
-    return {
-        "validation_errors": [
-            {
-                "field": ".".join(str(part) for part in error.get("loc", ())),
-                "type": error.get("type", "validation_error"),
-            }
-            for error in exc.errors(include_input=False)
-        ]
-    }
-
-
-def _future_stub_handler(
-    *,
-    contract: type[ProviderRequest],
-    operation: str,
-    payload: dict[str, Any],
-    registry: ProviderRegistry | None = None,
-) -> ToolResponse:
-    redactor = Redactor()
-    try:
-        request = contract(**payload)
-    except ValidationError as exc:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            message="future provider request failed validation",
-            details=redactor.redact_value(_validation_error_details(exc)),
-            suggested_next_actions=["providers.list"],
-        )
-
-    registry = registry or ProviderRegistry.with_defaults()
-    provider = select_future_provider(
-        registry,
-        operation=operation,
-        architecture=request.architecture,
-        provider_name=request.provider_name,
-    )
-    if isinstance(provider, ToolResponse):
-        return provider
-
-    plugin_metadata = registry.provider_plugin_metadata(provider.provider_name)
-    documentation_paths = (
-        list(plugin_metadata.documentation_paths) if plugin_metadata is not None else list(provider.documentation_paths)
-    )
-    return future_not_implemented_response(
-        provider=provider,
-        operation=operation,
-        architecture=request.architecture,
-        documentation_paths=documentation_paths,
-    )
-
-
-def remote_build_kernel_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
-    return _future_stub_handler(
-        contract=RemoteBuildRequest,
-        operation="remote.build_kernel",
-        payload=kwargs,
-        registry=registry,
-    )
-
-
-def remote_sync_artifacts_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
-    return _future_stub_handler(
-        contract=RemoteArtifactSyncRequest,
-        operation="remote.sync_artifacts",
-        payload=kwargs,
-        registry=registry,
-    )
-
-
-def reservation_request_host_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
-    return _future_stub_handler(
-        contract=ReservationRequest,
-        operation="reservation.request_host",
-        payload=kwargs,
-        registry=registry,
-    )
-
-
-def reservation_release_host_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
-    return _future_stub_handler(
-        contract=ReservationReleaseRequest,
-        operation="reservation.release_host",
-        payload=kwargs,
-        registry=registry,
-    )
-
-
-def provision_prepare_target_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
-    return _future_stub_handler(
-        contract=ProvisioningRequest,
-        operation="provision.prepare_target",
-        payload=kwargs,
-        registry=registry,
-    )
-
-
-def hardware_power_control_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
-    return _future_stub_handler(
-        contract=HardwareControlRequest,
-        operation="hardware.power_control",
-        payload=kwargs,
-        registry=registry,
-    )
-
-
-def hardware_boot_kernel_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
-    return _future_stub_handler(
-        contract=RealBootRequest,
-        operation="hardware.boot_kernel",
-        payload=kwargs,
-        registry=registry,
-    )
-
-
-def console_open_session_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
-    return _future_stub_handler(
-        contract=ConsoleSessionRequest,
-        operation="console.open_session",
-        payload=kwargs,
-        registry=registry,
-    )
-
-
-def console_read_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
-    return _future_stub_handler(
-        contract=ConsoleReadRequest,
-        operation="console.read",
-        payload=kwargs,
-        registry=registry,
-    )
-
-
-def console_write_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
-    return _future_stub_handler(
-        contract=ConsoleWriteRequest,
-        operation="console.write",
-        payload=kwargs,
-        registry=registry,
-    )
-
-
-def workflow_reserve_provision_boot_handler(*, registry: ProviderRegistry | None = None, **kwargs: Any) -> ToolResponse:
-    return _future_stub_handler(
-        contract=ReserveProvisionBootRequest,
-        operation="workflow.reserve_provision_boot",
-        payload=kwargs,
-        registry=registry,
-    )
-
-
 def kernel_build_handler(
     *,
     artifact_root: Path,
@@ -1574,10 +1302,9 @@ def kernel_build_handler(
             try:
                 execution = provider.execute_build(plan=plan, log_path=log_path, summary_path=summary_path)
             except ReadelfUnavailable as exc:
-                # Plan review finding 6 / spec §7 R2-F6: exc.artifacts carries the
-                # build artifacts the provider already produced (vmlinux, .config,
-                # build-log). Persist them in the FAILED StepResult so operators can
-                # inspect why readelf came up empty without re-running the build.
+                # exc.artifacts carries the build artifacts the provider already produced
+                # (vmlinux, .config, build-log). Persist them in the FAILED StepResult so
+                # operators can inspect why readelf came up empty without re-running the build.
                 failed = StepResult(
                     step_name="build",
                     status=StepStatus.FAILED,
@@ -1599,8 +1326,7 @@ def kernel_build_handler(
                     suggested_next_actions=["artifacts.get_manifest"],
                 )
             except BuildIdMissing as exc:
-                # Plan review finding 6 / spec §7 R2-F6: same artifact-preservation
-                # rationale as ReadelfUnavailable above.
+                # Same artifact-preservation rationale as ReadelfUnavailable above.
                 failed = StepResult(
                     step_name="build",
                     status=StepStatus.FAILED,
@@ -1949,12 +1675,12 @@ def _execute_boot_attempt(
 
 def _assert_profile_matches_manifest(
     *, kind: str, requested: str | None, manifest_value: str | None, run_id: str
-) -> ToolResponse | None:
+) -> _HandlerFailure | None:
     """The {target,rootfs}_profile passed to a step must equal the immutable manifest request
     (manifest invariant / TD-102). Returns a CONFIGURATION_ERROR on mismatch, else None."""
     if requested == manifest_value:
         return None
-    return _configuration_failure(
+    return _configuration_handler_failure(
         run_id=run_id,
         message=f"{kind}_profile must match the immutable run manifest request",
         details={"requested_profile": requested, "manifest_profile": manifest_value},
@@ -1969,7 +1695,7 @@ def _apply_boot_overrides(
     manifest: RunManifest,
     sensitive_paths: list[Path] | None,
     run_id: str,
-) -> tuple[TargetProfile, RootfsProfile] | ToolResponse:
+) -> tuple[TargetProfile, RootfsProfile] | _HandlerFailure:
     """Merge a BootOverrides into the resolved target/rootfs profiles (TD-102): kernel_args are
     merged, wait_for_debugger is replaced, and the rootfs source/fields are validated and copied in.
     Returns the updated ``(target, rootfs)`` pair, or a CONFIGURATION_ERROR ToolResponse if a rootfs
@@ -2000,7 +1726,7 @@ def _apply_boot_overrides(
         if rootfs_update:
             resolved_rootfs_profile = resolved_rootfs_profile.model_copy(update=rootfs_update)
     except (PathSafetyError, ValueError) as exc:
-        return _configuration_failure(run_id=run_id, message=str(exc))
+        return _configuration_handler_failure(run_id=run_id, message=str(exc))
     return resolved_target_profile, resolved_rootfs_profile
 
 
@@ -2025,7 +1751,7 @@ def _resolve_boot_inputs(
     default_libvirt_uri: str | None,
     boot_overrides: BootOverrides | None,
     sensitive_paths: list[Path] | None,
-) -> _ResolvedBootInputs | ToolResponse:
+) -> _ResolvedBootInputs | _HandlerFailure:
     """Resolve and validate the boot inputs (TD-102): the requested profiles must match the
     immutable manifest request; named profiles resolve from the registry (inline ones come frozen
     off the manifest); boot_overrides are merged into the resolved profiles; and the build must
@@ -2053,18 +1779,22 @@ def _resolve_boot_inputs(
         try:
             resolved_target_profile = target_profiles[requested_target_profile]
         except KeyError:
-            return _configuration_failure(run_id=run_id, message=f"unknown target profile: {requested_target_profile}")
+            return _configuration_handler_failure(
+                run_id=run_id, message=f"unknown target profile: {requested_target_profile}"
+            )
     if manifest.resolved_rootfs_profile is not None:
         resolved_rootfs_profile = manifest.resolved_rootfs_profile
     else:
         try:
             resolved_rootfs_profile = rootfs_profiles[requested_rootfs_profile]
         except KeyError:
-            return _configuration_failure(run_id=run_id, message=f"unknown rootfs profile: {requested_rootfs_profile}")
+            return _configuration_handler_failure(
+                run_id=run_id, message=f"unknown rootfs profile: {requested_rootfs_profile}"
+            )
     if resolved_target_profile.libvirt_uri is None and default_libvirt_uri is not None:
         resolved_target_profile = resolved_target_profile.model_copy(update={"libvirt_uri": default_libvirt_uri})
     if resolved_target_profile.target_ref is None:
-        return _configuration_failure(run_id=run_id, message="target profile target_ref is required")
+        return _configuration_handler_failure(run_id=run_id, message="target profile target_ref is required")
     target_ref = resolved_target_profile.target_ref
 
     effective_boot_overrides = boot_overrides
@@ -2079,19 +1809,21 @@ def _resolve_boot_inputs(
             sensitive_paths=sensitive_paths,
             run_id=run_id,
         )
-        if isinstance(merged, ToolResponse):
+        if isinstance(merged, _HandlerFailure):
             return merged
         resolved_target_profile, resolved_rootfs_profile = merged
 
     build_result = manifest.step_results.get("build")
     if build_result is None or build_result.status != StepStatus.SUCCEEDED:
-        return _configuration_failure(run_id=run_id, message="target boot requires a succeeded build")
+        return _configuration_handler_failure(run_id=run_id, message="target boot requires a succeeded build")
     kernel_image = _find_kernel_image(build_result)
     if kernel_image is None:
-        return _configuration_failure(run_id=run_id, message="succeeded build did not record a kernel-image artifact")
+        return _configuration_handler_failure(
+            run_id=run_id, message="succeeded build did not record a kernel-image artifact"
+        )
     build_architecture = build_result.details.get("architecture")
     if build_architecture is not None and build_architecture != resolved_target_profile.architecture:
-        return _configuration_failure(
+        return _configuration_handler_failure(
             run_id=run_id,
             message="build architecture does not match target profile architecture",
             details={
@@ -2274,6 +2006,7 @@ def target_boot_handler(
     rootfs_profiles: dict[str, RootfsProfile] | None = None,
     default_libvirt_uri: str | None = None,
     boot_overrides: BootOverrides | None = None,
+    acknowledged_permissions: list[str] | None = None,
     sensitive_paths: list[Path] | None = None,
     admission: AdmissionService | None = None,
 ) -> ToolResponse:
@@ -2297,8 +2030,8 @@ def target_boot_handler(
         boot_overrides=boot_overrides,
         sensitive_paths=sensitive_paths,
     )
-    if isinstance(resolved_inputs, ToolResponse):
-        return resolved_inputs
+    if isinstance(resolved_inputs, _HandlerFailure):
+        return _tool_response_from_handler_failure(resolved_inputs)
     resolved_target_profile = resolved_inputs.resolved_target_profile
     resolved_rootfs_profile = resolved_inputs.resolved_rootfs_profile
     target_ref = resolved_inputs.target_ref
@@ -2319,6 +2052,18 @@ def target_boot_handler(
             admission=admission,
             manifest=manifest,
             rootfs_profile=resolved_rootfs_profile,
+        )
+
+    missing = missing_destructive_permissions(
+        "target.boot",
+        acknowledged_permissions or [],
+        registry=TARGET_DESTRUCTIVE_PERMISSIONS,
+    )
+    if missing:
+        return _configuration_failure(
+            run_id=run_id,
+            message="target.boot requires acknowledged destructive permissions before booting",
+            details={"code": "permission_required", "required_permissions": missing},
         )
 
     provider = provider or LibvirtQemuProvider()
@@ -2614,7 +2359,7 @@ class _SupportsProbeRequest(Protocol):
     """
 
     run_id: str
-    target_ref: str
+    manifest_target_profile: str
     timeout_seconds: int
     debug_profile: str | None
     target_profile: str | None
@@ -2669,12 +2414,12 @@ def _resolve_probe_context(
                     "code": "manifest_profile_mismatch",
                 },
             )
-    if request.target_ref != manifest.request.target_profile:
+    if request.manifest_target_profile != manifest.request.target_profile:
         return None, _configuration_failure(
             run_id=run_id,
-            message="target_ref must match the immutable run manifest target_profile",
+            message="manifest_target_profile must match the immutable run manifest target_profile",
             details={
-                "requested_target_ref": request.target_ref,
+                "requested_target_profile": request.manifest_target_profile,
                 "manifest_target_profile": manifest.request.target_profile,
                 "code": "manifest_profile_mismatch",
             },
@@ -2737,6 +2482,8 @@ def debug_introspect_check_prerequisites_handler(
     artifact_root: Path,
     rootfs_profiles: dict[str, RootfsProfile] | None = None,
     ssh_runner: SshRunner | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     """Spec §3-§7: target-side drgn prerequisite probe."""
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
@@ -2746,6 +2493,18 @@ def debug_introspect_check_prerequisites_handler(
     assert _ctx is not None
     ctx = _ctx
     run_id = ctx.run_id
+
+    try:
+        halted = _reject_if_target_halted(
+            run_id=run_id,
+            admission=admission,
+            session_registry=session_registry,
+            action="probing introspect prerequisites",
+        )
+    except AdmissionError as exc:
+        return ToolResponse.failure(category=exc.category, run_id=run_id, message=str(exc), details={"code": exc.code})
+    if halted is not None:
+        return halted
 
     runner: SshRunner = ssh_runner or SubprocessSshRunner()
     probe_id = uuid.uuid4().hex
@@ -3276,7 +3035,10 @@ def debug_postmortem_list_dumps_handler(
     if failure is not None:
         return failure
     assert parsed is not None
-    entries = parse_dump_listing(parsed)
+    entries, failure = _parse_dump_listing_at_boundary(ctx, parsed)
+    if failure is not None:
+        return failure
+    assert entries is not None
     return ToolResponse.success(
         summary=f"found {len(entries)} captured dump(s) under {dump_dir}",
         run_id=ctx.run_id,
@@ -3288,11 +3050,44 @@ def debug_postmortem_list_dumps_handler(
     )
 
 
+_DUMP_LISTING_SHAPE_ERRORS = (KeyError, TypeError, ValueError, AttributeError, ValidationError)
+
+
+def _parse_dump_listing_at_boundary(
+    ctx: _ProbeContext, parsed: dict[str, Any]
+) -> tuple[list[DumpEntry] | None, ToolResponse | None]:
+    try:
+        return parse_dump_listing(parsed), None
+    except _DUMP_LISTING_SHAPE_ERRORS as exc:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=ctx.run_id,
+            message="dump enumeration returned malformed listing data",
+            details={
+                "code": "malformed_dump_listing",
+                "reason": _redact_and_truncate(ctx.redactor, str(exc), cap=256),
+            },
+        )
+
+
 def _match_dump(parsed: dict[str, Any], dump_ref: str) -> DumpEntry | None:
     for entry in parse_dump_listing(parsed):
         if entry.path == dump_ref:
             return entry
     return None
+
+
+def _match_dump_at_boundary(
+    ctx: _ProbeContext, parsed: dict[str, Any], dump_ref: str
+) -> tuple[DumpEntry | None, ToolResponse | None]:
+    entries, failure = _parse_dump_listing_at_boundary(ctx, parsed)
+    if failure is not None:
+        return None, failure
+    assert entries is not None
+    for entry in entries:
+        if entry.path == dump_ref:
+            return entry, None
+    return None, None
 
 
 def _core_name(entry: DumpEntry) -> str:
@@ -3311,8 +3106,7 @@ def _sha256_file(path: Path) -> str:
 
 
 def _record_fetch_result(store: ArtifactStore, run_id: str, result: StepResult, *, replace_succeeded: bool) -> None:
-    # A postmortem.fetch step: a `force` re-fetch replaces the SUCCEEDED step rather than no-op-ing
-    # (ADR 0029 decision 6 / review finding 2).
+    # A postmortem.fetch step: a `force` re-fetch replaces the SUCCEEDED step rather than no-op-ing.
     _record_step_with_retry(store, run_id, result, replace_succeeded=replace_succeeded)
 
 
@@ -3411,7 +3205,9 @@ def _admit_fetch_entry(
     if failure is not None:
         return None, failure
     assert parsed is not None
-    entry = _match_dump(parsed, request.dump_ref)
+    entry, failure = _match_dump_at_boundary(ctx, parsed, request.dump_ref)
+    if failure is not None:
+        return None, failure
     if entry is None:
         return None, _configuration_failure(
             run_id=run_id,
@@ -3482,8 +3278,8 @@ def _fetch_under_lock(
         manifest = ctx.store.load_manifest(run_id)
         prior = manifest.step_results.get(step_name)
         if prior is not None and prior.status == StepStatus.SUCCEEDED and not request.force:
-            # Cached short-circuit BEFORE enumeration: a prior SUCCEEDED fetch already
-            # validated dump_ref, so return the staged refs without any SSH (review finding 3).
+            # Cached short-circuit BEFORE enumeration: a prior SUCCEEDED fetch already validated
+            # dump_ref, so return the staged refs without any SSH.
             return _fetch_success_response(run_id, dict(prior.details), already_fetched=True)
         entry, failure = _admit_fetch_entry(ctx, runner=runner, request=request, dump_dir=dump_dir, dest_dir=dest_dir)
         if failure is not None:
@@ -3601,6 +3397,297 @@ def _introspect_args_json(request: DebugIntrospectRunRequest) -> str:
     return json.dumps(request.args or {})
 
 
+@dataclass(frozen=True)
+class _IntrospectSshRun:
+    result: SshCommandResult
+    started_at: datetime
+    started_monotonic: float
+
+
+@dataclass(frozen=True)
+class _IntrospectCallWorkspace:
+    call_id: str
+    agent_dir: Path
+    sensitive_call_dir: Path
+    wrapper: str
+    stdout_path: Path
+    stderr_path: Path
+
+
+@dataclass(frozen=True)
+class _IntrospectAdmission:
+    target_key: TargetKey
+    snapshot: TargetSnapshot
+    proof: Any
+    handle: AdmissionHandle
+
+
+def _prepare_introspect_call_workspace(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    request: DebugIntrospectRunRequest,
+    build_id: str,
+    caps: dict[str, int] | None,
+    operation_name: str,
+    resolved_rootfs: RootfsProfile,
+    redactor: Redactor,
+    write_mode_permissions: list[str],
+    admission: AdmissionService,
+    handle: AdmissionHandle,
+) -> tuple[_IntrospectCallWorkspace | None, ToolResponse | None]:
+    call_id = uuid.uuid4().hex
+    agent_dir = store.run_dir(run_id) / "debug" / "introspect" / call_id
+    sensitive_call_dir = store.run_dir(run_id) / "sensitive" / "debug" / "introspect" / call_id
+    agent_dir.mkdir(parents=True, mode=0o700)
+    sensitive_call_dir.mkdir(parents=True, mode=0o700)
+    # Defensive chmod — intermediate dirs may have inherited umask.
+    sensitive_call_dir.chmod(0o700)
+    sensitive_call_dir.parent.chmod(0o700)
+    sensitive_call_dir.parent.parent.chmod(0o700)
+
+    # Emit one audit line per write-mode call after call_id is minted, so
+    # audit and manifest records share the same stable call identity.
+    if request.allow_write:
+        logger.warning(
+            "audit: %s write-mode invocation run_id=%s call_id=%s permissions=%s",
+            operation_name,
+            run_id,
+            call_id,
+            write_mode_permissions,
+        )
+
+    args_json = _introspect_args_json(request)
+    try:
+        wrapper = render_wrapper(
+            user_script=request.script,
+            expected_build_id=build_id,
+            call_id=call_id,
+            args_json=args_json,
+            caps=caps,
+            allow_write=request.allow_write,
+        )
+        skeleton = render_wrapper_skeleton(
+            expected_build_id=build_id,
+            call_id=call_id,
+            user_script_sha256_hex=user_script_sha256(request.script),
+            args_json=args_json,
+            caps=caps,
+        )
+    except WrapperRenderError as exc:
+        # R6-F3: render failure before SSH ran. Release the admission handle,
+        # clean up the orphan directories, and write a forensic FAILED
+        # StepResult directly (no SSH means no stderr/stdout to redact via
+        # _record_introspect_failure).
+        _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=run_id)
+        shutil.rmtree(agent_dir, ignore_errors=True)
+        shutil.rmtree(sensitive_call_dir, ignore_errors=True)
+        failed = StepResult(
+            step_name=f"introspect:{call_id}",
+            status=StepStatus.FAILED,
+            summary=f"wrapper render error: {exc}",
+            artifacts=[],
+            details={
+                "call_id": call_id,
+                "code": "wrapper_render_error",
+                "ssh_user": resolved_rootfs.ssh_user,
+                "outcome_status": None,
+                "timeout_seconds": request.timeout_seconds,
+                "duration_ms": 0,
+                "wrapper_exit_code": None,
+                "allow_write": request.allow_write,
+            },
+        )
+        _record_terminal_introspect_result(store, run_id, failed)
+        return None, ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=f"wrapper render error: {exc}",
+            details={"code": "wrapper_render_error", "call_id": call_id},
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
+
+    # Create wrapper.py with mode=0o600 atomically — write_text + chmod leaves
+    # a window where the file is umask-default readable.
+    wrapper_path = sensitive_call_dir / "wrapper.py"
+    wrapper_fd = os.open(wrapper_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(wrapper_fd, "w", encoding="utf-8") as wrapper_handle:
+            wrapper_handle.write(wrapper)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            wrapper_path.unlink()
+        raise
+    (agent_dir / "wrapper.skeleton.py").write_text(skeleton, encoding="utf-8")
+
+    # Agent-visible request.json must not carry the plaintext script; the
+    # protected wrapper.py in sensitive/ is the only source copy.
+    request_dump = request.model_dump(mode="json")
+    request_dump["script"] = f"sha256:{user_script_sha256(request.script)}"
+    redacted_request = redactor.redact_value(request_dump)
+    (agent_dir / "request.json").write_text(json.dumps(redacted_request), encoding="utf-8")
+
+    return (
+        _IntrospectCallWorkspace(
+            call_id=call_id,
+            agent_dir=agent_dir,
+            sensitive_call_dir=sensitive_call_dir,
+            wrapper=wrapper,
+            stdout_path=sensitive_call_dir / "stdout.raw",
+            stderr_path=sensitive_call_dir / "stderr.raw",
+        ),
+        None,
+    )
+
+
+def _run_introspect_ssh_with_cancellation(
+    *,
+    runner: SshRunner,
+    ssh_argv: list[str],
+    handle: AdmissionHandle,
+    timeout_seconds: int,
+    stdout_path: Path,
+    stderr_path: Path,
+    wrapper: str,
+    now: Callable[[], datetime],
+) -> _IntrospectSshRun:
+    cancel_event = threading.Event()
+    stop_watcher = threading.Event()
+
+    def _watcher() -> None:
+        while not stop_watcher.is_set():
+            if handle.wait_cancelled(0.1):
+                cancel_event.set()
+                return
+
+    thread = threading.Thread(target=_watcher, daemon=True)
+    thread.start()
+    started_at = now()
+    started_monotonic = time.monotonic()
+    try:
+        ssh_result = runner.run(
+            ssh_argv,
+            timeout=timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            cancel=cancel_event,
+            stdin=wrapper,
+            max_stdout_bytes=RUN_STDOUT_CAP,
+        )
+    finally:
+        stop_watcher.set()
+        thread.join()
+    return _IntrospectSshRun(result=ssh_result, started_at=started_at, started_monotonic=started_monotonic)
+
+
+def _run_introspect_sudo_preflight(
+    *,
+    runner: SshRunner,
+    store: ArtifactStore,
+    run_id: str,
+    resolved_rootfs: RootfsProfile,
+    redactor: Redactor,
+) -> ToolResponse | None:
+    try:
+        sudo_argv = build_ssh_argv(
+            rootfs_profile=resolved_rootfs,
+            known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
+            command=["sudo", "-n", "true"],
+            command_timeout=5,
+        )
+    except ValueError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=_redact_and_truncate(redactor, str(exc), cap=256),
+            details={"code": "invalid_ssh_options"},
+        )
+    preflight_stdout = store.run_dir(run_id) / "logs" / "sudo_preflight.stdout"
+    preflight_stderr = store.run_dir(run_id) / "logs" / "sudo_preflight.stderr"
+    preflight_stdout.parent.mkdir(parents=True, exist_ok=True)
+    # Route preflight output under sensitive/ so guest stderr (which may carry secrets) does not land
+    # on disk in agent-visible logs/.
+    sensitive_preflight_stderr = store.run_dir(run_id) / "sensitive" / "sudo_preflight.stderr"
+    try:
+        sudo_result = runner.run(
+            sudo_argv,
+            timeout=5,
+            stdout_path=preflight_stdout,
+            stderr_path=sensitive_preflight_stderr,
+        )
+    except Exception as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=_redact_and_truncate(redactor, f"sudo preflight raised: {exc}", cap=256),
+            details={"code": "ssh_failure"},
+        )
+    # Persist a redacted copy in the agent-visible location so forensic tooling sees a stable
+    # artifact path even when the raw file is sealed under sensitive/.
+    if sensitive_preflight_stderr.exists():
+        _chmod_best_effort(sensitive_preflight_stderr, 0o600)
+        raw_preflight_stderr = sensitive_preflight_stderr.read_text(encoding="utf-8", errors="replace")
+        preflight_stderr.write_text(redactor.redact_text(raw_preflight_stderr), encoding="utf-8")
+    if sudo_result.exit_status != 0:
+        stderr_for_message = sudo_result.stderr or sudo_result.stderr_snippet or ""
+        message = _redact_and_truncate(redactor, stderr_for_message, cap=256)
+        return ToolResponse.failure(
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            run_id=run_id,
+            message=f"sudo -n true failed: {message}",
+            details={"code": "sudo_requires_password"},
+        )
+    return None
+
+
+def _admit_introspect_call(
+    *,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+    run_id: str,
+) -> tuple[_IntrospectAdmission | None, ToolResponse | None]:
+    if admission is None or session_registry is None:
+        return None, ToolResponse.failure(
+            category=ErrorCategory.READINESS_FAILURE,
+            run_id=run_id,
+            message="admission service unavailable",
+            details={"code": "admission_service_unavailable"},
+        )
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    snapshot = admission.current_snapshot(target_key)
+    if snapshot is None:
+        # No authoritative snapshot means boot has not published a READY target state for this run yet.
+        return None, ToolResponse.failure(
+            category=ErrorCategory.READINESS_FAILURE,
+            run_id=run_id,
+            message="no authoritative snapshot for target; boot must publish a READY snapshot first",
+            details={"code": "snapshot_missing"},
+        )
+    proof = probe_execution_state(
+        registry=session_registry,
+        admission=admission,
+        target_key=target_key,
+        generation=snapshot.generation,
+    )
+    try:
+        handle = admission.admit_ssh_tier(
+            target_key,
+            snapshot.generation,
+            snapshot.platform,
+            lease=snapshot.lease,
+            execution_proof=proof,
+        )
+    except AdmissionError as exc:
+        return None, ToolResponse.failure(
+            category=exc.category,
+            message=str(exc),
+            run_id=run_id,
+            details={"code": exc.code},
+            suggested_next_actions=["artifacts.collect"],
+        )
+    return _IntrospectAdmission(target_key=target_key, snapshot=snapshot, proof=proof, handle=handle), None
+
+
 def _execute_introspect_call(
     request: DebugIntrospectRunRequest,
     *,
@@ -3637,11 +3724,8 @@ def _execute_introspect_call(
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
 
-    # Iter-1 finding 1: every later step must honour the manifest-immutability
-    # invariant for profile fields. Mirrors `target_boot_handler` (server.py
-    # ~1373) and `debug_start_session_handler` (~2572). The introspect handler
-    # previously resolved whatever the caller passed, silently substituting a
-    # different rootfs/debug profile than the run booted with.
+    # Every later step must honour the run manifest's immutable profile fields,
+    # so live introspection cannot silently target a different rootfs/debug setup.
     if request.target_profile is not None and request.target_profile != manifest.request.target_profile:
         return _configuration_failure(
             run_id=run_id,
@@ -3676,16 +3760,14 @@ def _execute_introspect_call(
                 "code": "manifest_profile_mismatch",
             },
         )
-    # Iter-1 finding 3: spec §3.1 / line 84 describes `target_ref` as the
-    # "target profile name", so a divergent value names a different target
-    # than the run booted with. The handler previously read this field and
-    # discarded it, allowing agents to pass arbitrary values.
-    if request.target_ref != manifest.request.target_profile:
+    # The request's manifest target profile must name the same target profile
+    # recorded when the run was created.
+    if request.manifest_target_profile != manifest.request.target_profile:
         return _configuration_failure(
             run_id=run_id,
-            message="target_ref must match the immutable run manifest target_profile",
+            message="manifest_target_profile must match the immutable run manifest target_profile",
             details={
-                "requested_target_ref": request.target_ref,
+                "requested_target_profile": request.manifest_target_profile,
                 "manifest_target_profile": manifest.request.target_profile,
                 "code": "manifest_profile_mismatch",
             },
@@ -3847,214 +3929,67 @@ def _execute_introspect_call(
         )
 
     runner: SshRunner = ssh_runner or SubprocessSshRunner()
-    # Iter-1 finding 6: sudo as root is documented as a no-op in spec §3.2,
-    # so for root logins the preflight has nothing to assert and the real
-    # invocation should not prepend `sudo` either. The previous code skipped
-    # the preflight but still invoked `sudo python3 -`, producing a confusing
-    # in-SSH failure when sudo was missing on a root-login target.
+    # sudo as root is a no-op: root logins skip both the preflight and the
+    # runtime `sudo python3 -` prefix.
     use_sudo = resolved_rootfs.ssh_user != "root"
 
     # Spec §5.2 step 5: sudo preflight (only when sudo is needed).
     if use_sudo:
-        try:
-            sudo_argv = build_ssh_argv(
-                rootfs_profile=resolved_rootfs,
-                known_hosts_path=store.run_dir(run_id) / "sensitive" / "known_hosts",
-                command=["sudo", "-n", "true"],
-                command_timeout=5,
-            )
-        except ValueError as exc:
-            return ToolResponse.failure(
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                run_id=run_id,
-                message=_redact_and_truncate(redactor, str(exc), cap=256),
-                details={"code": "invalid_ssh_options"},
-            )
-        preflight_stdout = store.run_dir(run_id) / "logs" / "sudo_preflight.stdout"
-        preflight_stderr = store.run_dir(run_id) / "logs" / "sudo_preflight.stderr"
-        preflight_stdout.parent.mkdir(parents=True, exist_ok=True)
-        # Route preflight output under sensitive/ so guest stderr (which may
-        # carry secrets) does not land on disk in agent-visible logs/.
-        sensitive_preflight_stderr = store.run_dir(run_id) / "sensitive" / "sudo_preflight.stderr"
-        try:
-            sudo_result = runner.run(
-                sudo_argv,
-                timeout=5,
-                stdout_path=preflight_stdout,
-                stderr_path=sensitive_preflight_stderr,
-            )
-        except Exception as exc:
-            return ToolResponse.failure(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                run_id=run_id,
-                message=_redact_and_truncate(redactor, f"sudo preflight raised: {exc}", cap=256),
-                details={"code": "ssh_failure"},
-            )
-        # Persist a redacted copy in the agent-visible location so forensic
-        # tooling sees a stable artifact path even when the raw file is sealed
-        # under sensitive/.
-        if sensitive_preflight_stderr.exists():
-            _chmod_best_effort(sensitive_preflight_stderr, 0o600)
-            raw_preflight_stderr = sensitive_preflight_stderr.read_text(encoding="utf-8", errors="replace")
-            preflight_stderr.write_text(redactor.redact_text(raw_preflight_stderr), encoding="utf-8")
-        if sudo_result.exit_status != 0:
-            stderr_for_message = sudo_result.stderr or sudo_result.stderr_snippet or ""
-            message = _redact_and_truncate(redactor, stderr_for_message, cap=256)
-            return ToolResponse.failure(
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                run_id=run_id,
-                message=f"sudo -n true failed: {message}",
-                details={"code": "sudo_requires_password"},
-            )
+        preflight_failure = _run_introspect_sudo_preflight(
+            runner=runner,
+            store=store,
+            run_id=run_id,
+            resolved_rootfs=resolved_rootfs,
+            redactor=redactor,
+        )
+        if preflight_failure is not None:
+            return preflight_failure
 
     # Spec §5.2 step 6: admission gate.
-    if admission is None or session_registry is None:
-        return ToolResponse.failure(
-            category=ErrorCategory.READINESS_FAILURE,
-            run_id=run_id,
-            message="admission service unavailable",
-            details={"code": "admission_service_unavailable"},
-        )
-    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
-    snapshot = admission.current_snapshot(target_key)
-    if snapshot is None:
-        # Iter-1 finding 7: align with `_require_snapshot` and the rest of
-        # the debug.* handlers — "no snapshot exists" is `snapshot_missing`,
-        # not `target_not_ready`.
-        return ToolResponse.failure(
-            category=ErrorCategory.READINESS_FAILURE,
-            run_id=run_id,
-            message="no authoritative snapshot for target; boot must publish a READY snapshot first",
-            details={"code": "snapshot_missing"},
-        )
-    proof = probe_execution_state(
-        registry=session_registry,
+    introspect_admission, admission_failure = _admit_introspect_call(
         admission=admission,
-        target_key=target_key,
-        generation=snapshot.generation,
+        session_registry=session_registry,
+        run_id=run_id,
     )
-    try:
-        handle = admission.admit_ssh_tier(
-            target_key,
-            snapshot.generation,
-            snapshot.platform,
-            lease=snapshot.lease,
-            execution_proof=proof,
-        )
-    except AdmissionError as exc:
-        return ToolResponse.failure(
-            category=exc.category,
-            message=str(exc),
-            run_id=run_id,
-            details={"code": exc.code},
-            suggested_next_actions=["artifacts.collect"],
-        )
+    if admission_failure is not None:
+        return admission_failure
+    assert admission is not None
+    assert introspect_admission is not None
+    handle = introspect_admission.handle
 
     # R6-F3: Step 9.4 admitted us — Steps 9.5–9.10 must always complete
     # (Step 9.6 happy path) or roll back (this envelope) the admission
     # handle. Mirrors target_run_tests_handler:1588-1620.
     admission_disposed = False
     try:
-        call_id = uuid.uuid4().hex
-        agent_dir = store.run_dir(run_id) / "debug" / "introspect" / call_id
-        sensitive_call_dir = store.run_dir(run_id) / "sensitive" / "debug" / "introspect" / call_id
-        agent_dir.mkdir(parents=True, mode=0o700)
-        sensitive_call_dir.mkdir(parents=True, mode=0o700)
-        # Defensive chmod — intermediate dirs may have inherited umask.
-        sensitive_call_dir.chmod(0o700)
-        sensitive_call_dir.parent.chmod(0o700)
-        sensitive_call_dir.parent.parent.chmod(0o700)
-
-        # ADR 0011 / #56: one audit line per executed write-mode call, emitted as
-        # soon as the call_id is minted so it fires exactly once for every call
-        # that also gets a manifest step (independent of the later runner outcome).
-        if request.allow_write:
-            logger.warning(
-                "audit: %s write-mode invocation run_id=%s call_id=%s permissions=%s",
-                operation_name,
-                run_id,
-                call_id,
-                write_mode_permissions,
-            )
-
-        args_json = _introspect_args_json(request)
-        try:
-            wrapper = render_wrapper(
-                user_script=request.script,
-                expected_build_id=build_id,
-                call_id=call_id,
-                args_json=args_json,
-                caps=caps,
-                allow_write=request.allow_write,
-            )
-            skeleton = render_wrapper_skeleton(
-                expected_build_id=build_id,
-                call_id=call_id,
-                user_script_sha256_hex=user_script_sha256(request.script),
-                args_json=args_json,
-                caps=caps,
-            )
-        except WrapperRenderError as exc:
-            # R6-F3: render failure before SSH ran. Release the admission
-            # handle, clean up the orphan directories, and write a forensic
-            # FAILED StepResult directly (no SSH means no stderr/stdout to
-            # redact via _record_introspect_failure).
-            _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=run_id)
-            shutil.rmtree(agent_dir, ignore_errors=True)
-            shutil.rmtree(sensitive_call_dir, ignore_errors=True)
-            failed = StepResult(
-                step_name=f"introspect:{call_id}",
-                status=StepStatus.FAILED,
-                summary=f"wrapper render error: {exc}",
-                artifacts=[],
-                details={
-                    "call_id": call_id,
-                    "code": "wrapper_render_error",
-                    "ssh_user": resolved_rootfs.ssh_user,
-                    "outcome_status": None,
-                    "timeout_seconds": request.timeout_seconds,
-                    "duration_ms": 0,
-                    "wrapper_exit_code": None,
-                    "allow_write": request.allow_write,
-                },
-            )
-            _record_terminal_introspect_result(store, run_id, failed)
-            return ToolResponse.failure(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                run_id=run_id,
-                message=f"wrapper render error: {exc}",
-                details={"code": "wrapper_render_error", "call_id": call_id},
-                suggested_next_actions=["artifacts.get_manifest"],
-            )
-
-        # Create wrapper.py with mode=0o600 atomically — write_text + chmod
-        # leaves a window where the file is umask-default readable.
-        wrapper_path = sensitive_call_dir / "wrapper.py"
-        wrapper_fd = os.open(wrapper_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(wrapper_fd, "w", encoding="utf-8") as wrapper_handle:
-                wrapper_handle.write(wrapper)
-        except BaseException:
-            with contextlib.suppress(FileNotFoundError):
-                wrapper_path.unlink()
-            raise
-        (agent_dir / "wrapper.skeleton.py").write_text(skeleton, encoding="utf-8")
-
-        # Iter-1 finding 5: the agent-visible request.json must NOT carry the
-        # plaintext script — the wrapper.py copy in sensitive/ is the only
-        # protected source. Replace `script` with the same `sha256:` pointer
-        # used in wrapper.skeleton.py so the two agent-visible artifacts
-        # carry consistent sensitivity treatment.
-        request_dump = request.model_dump(mode="json")
-        request_dump["script"] = f"sha256:{user_script_sha256(request.script)}"
-        redacted_request = redactor.redact_value(request_dump)
-        (agent_dir / "request.json").write_text(json.dumps(redacted_request), encoding="utf-8")
+        workspace, workspace_failure = _prepare_introspect_call_workspace(
+            store=store,
+            run_id=run_id,
+            request=request,
+            build_id=build_id,
+            caps=caps,
+            operation_name=operation_name,
+            resolved_rootfs=resolved_rootfs,
+            redactor=redactor,
+            write_mode_permissions=write_mode_permissions,
+            admission=admission,
+            handle=handle,
+        )
+        if workspace_failure is not None:
+            admission_disposed = True
+            return workspace_failure
+        assert workspace is not None
+        call_id = workspace.call_id
+        agent_dir = workspace.agent_dir
+        sensitive_call_dir = workspace.sensitive_call_dir
+        wrapper = workspace.wrapper
+        stdout_path = workspace.stdout_path
+        stderr_path = workspace.stderr_path
 
         # Spec §5.2 steps 9–10: SSH invocation + cancellation watcher.
         user_timeout = request.timeout_seconds
-        # Iter-1 finding 6: ssh_user=root means sudo is a no-op (spec §3.2);
-        # invoking it anyway risks a confusing in-SSH failure when sudo is
-        # missing on a root-login target.
+        # ssh_user=root keeps the remote argv free of sudo for the same reason
+        # the preflight is skipped above.
         remote_argv = _target_python_remote_argv(timeout_seconds=user_timeout, use_sudo=use_sudo)
         try:
             ssh_argv = build_ssh_argv(
@@ -4078,52 +4013,20 @@ def _execute_introspect_call(
                 details={"code": "invalid_ssh_options", "call_id": call_id},
                 suggested_next_actions=["artifacts.collect"],
             )
-        # Iter-2 finding 2: SSH output may contain unredacted user-script
-        # stdout, drgn output, and stderr — write straight to <sensitive>/
-        # so the dir-mode 0700 + file-mode 0600 protection is uniform across
-        # success and failure paths and no `.tmp` file is ever left in the
-        # agent-visible directory.
-        stdout_path = sensitive_call_dir / "stdout.raw"
-        stderr_path = sensitive_call_dir / "stderr.raw"
+        ssh_run = _run_introspect_ssh_with_cancellation(
+            runner=runner,
+            ssh_argv=ssh_argv,
+            handle=handle,
+            timeout_seconds=user_timeout,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            wrapper=wrapper,
+            now=now,
+        )
+        ssh_result = ssh_run.result
 
-        cancel_event = threading.Event()
-        stop_watcher = threading.Event()
-
-        def _watcher() -> None:
-            while not stop_watcher.is_set():
-                if handle.wait_cancelled(0.1):
-                    cancel_event.set()
-                    return
-
-        thread = threading.Thread(target=_watcher, daemon=True)
-        thread.start()
-        started_at = now()
-        # Monotonic clock for duration_ms — wall-clock subtraction goes negative
-        # under NTP slew or leap-second smear and misfires PRELUDE_WARNING.
-        started_monotonic = time.monotonic()
-        try:
-            ssh_result = runner.run(
-                ssh_argv,
-                timeout=user_timeout + SSH_TIMEOUT_GRACE_SECONDS,
-                stdout_path=stdout_path,
-                stderr_path=stderr_path,
-                cancel=cancel_event,
-                stdin=wrapper,
-                max_stdout_bytes=RUN_STDOUT_CAP,
-            )
-        finally:
-            stop_watcher.set()
-            thread.join()
-
-        # Iter-2 finding 2: defense-in-depth — tighten file mode on the
-        # SSH-output files that the runner created with umask-default perms.
-        # The dir mode (0o700 on sensitive_call_dir) already blocks other
-        # local users; the explicit 0o600 chmod makes that explicit and
-        # survives any future relocation.
-        # Iter-3 finding 2: skip the exists() probe — `chmod` itself raises
-        # FileNotFoundError for a missing path, and a concurrent delete
-        # between exists() and chmod() would turn a benign race into a
-        # handler crash that drops the call's manifest record.
+        # Tighten raw SSH-output file modes. `chmod` is attempted directly so a
+        # missing file remains a best-effort no-op instead of a check/use race.
         for _raw_path in (stdout_path, stderr_path):
             _chmod_best_effort(_raw_path, 0o600)
 
@@ -4134,16 +4037,13 @@ def _execute_introspect_call(
             admission.complete(handle)
             admission_disposed = True
         except AdmissionError as exc:
-            # Iter-1 finding 2: previously this path returned without
-            # rolling back the handle (leaking it in admission._bindings)
-            # and without recording any StepResult — leaving SSH's on-disk
-            # artifacts orphaned with no manifest trace. Roll back the
-            # admission binding and append a FAILED introspect:<call_id>
-            # record so the manifest reflects the on-disk state.
+            # A completion failure still owns SSH artifacts on disk; roll back
+            # the admission binding and append a FAILED introspect:<call_id>
+            # record so the manifest reflects that state.
             _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=run_id)
             admission_disposed = True
             raw_stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else ""
-            duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+            duration_ms = int((time.monotonic() - ssh_run.started_monotonic) * 1000)
             return _record_introspect_failure(
                 store=store,
                 run_id=run_id,
@@ -4166,7 +4066,7 @@ def _execute_introspect_call(
 
         # Spec §5.2 step 11+: shared post-runner finalization (live + vmcore).
         finished_at = now()
-        duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+        duration_ms = int((time.monotonic() - ssh_run.started_monotonic) * 1000)
         return _finalize_introspect_call(
             store=store,
             run_id=run_id,
@@ -4179,7 +4079,7 @@ def _execute_introspect_call(
             redactor=redactor,
             expected_build_id=build_id,
             request_timeout_seconds=request.timeout_seconds,
-            started_at=started_at,
+            started_at=ssh_run.started_at,
             finished_at=finished_at,
             duration_ms=duration_ms,
             operation_name=operation_name,
@@ -4202,11 +4102,108 @@ def _execute_introspect_call(
             try:
                 admission.rollback(handle)
             except Exception:
-                # Iter-2 finding 3: don't let a secondary rollback failure
-                # disappear silently — the primary exception is re-raised below,
-                # but the operator still needs admission-state diagnostics.
+                # The primary exception is re-raised below, but a rollback
+                # failure still needs admission-state diagnostics.
                 logger.exception("admission rollback failed while unwinding introspect handler for run_id=%s", run_id)
         raise
+
+
+def _persist_introspect_success_artifacts(
+    *,
+    agent_dir: Path,
+    sensitive_call_dir: Path,
+    redacted_payload: Any,
+    raw_stderr: str,
+    redactor: Redactor,
+) -> list[ArtifactRef]:
+    (agent_dir / "stdout.json").write_text(json.dumps(redacted_payload), encoding="utf-8")
+    (agent_dir / "stderr.log").write_text(redactor.redact_text(raw_stderr), encoding="utf-8")
+
+    artifacts: list[ArtifactRef] = [
+        ArtifactRef(path=str(agent_dir / "request.json"), kind="application/json"),
+        ArtifactRef(path=str(agent_dir / "wrapper.skeleton.py"), kind="text/x-python"),
+        ArtifactRef(
+            path=str(sensitive_call_dir / "wrapper.py"),
+            kind="text/x-python",
+            sensitive=True,
+        ),
+        ArtifactRef(path=str(agent_dir / "stdout.json"), kind="application/json"),
+        ArtifactRef(path=str(agent_dir / "stderr.log"), kind="text/plain"),
+    ]
+    for raw_name in ("stdout.raw", "stderr.raw"):
+        raw_path = sensitive_call_dir / raw_name
+        if raw_path.exists():
+            artifacts.append(
+                ArtifactRef(
+                    path=str(raw_path),
+                    kind="application/octet-stream",
+                    sensitive=True,
+                )
+            )
+    return artifacts
+
+
+def _build_introspect_success_response(
+    *,
+    call_id: str,
+    redacted_payload: Any,
+    outcome_status: Any,
+    raw_stderr: str,
+    redactor: Redactor,
+    request_timeout_seconds: int,
+    started_at: datetime,
+    finished_at: datetime,
+    duration_ms: int,
+    public_artifacts: list[ArtifactRef],
+) -> dict[str, Any]:
+    payload = redacted_payload if isinstance(redacted_payload, dict) else {}
+    outcome_obj = payload.get("outcome")
+    emits = payload.get("emits", [])
+    user_stdout = payload.get("user_stdout", "")
+    truncated = payload.get("truncated", {})
+    prelude_ms = payload.get("prelude_ms", 0)
+    warnings = payload.get("warnings", [])
+
+    diagnostic: str | None = None
+    if prelude_ms * 100 >= PRELUDE_WARNING_FRACTION_PCT * request_timeout_seconds * 1000:
+        diagnostic = (
+            f"prelude ({prelude_ms} ms) consumed >= "
+            f"{PRELUDE_WARNING_FRACTION_PCT}% of timeout_seconds "
+            f"({request_timeout_seconds} s); consider raising timeout_seconds."
+        )
+
+    # Spec §4.3: only these keys are part of the response outcome contract for status=error.
+    _SCRIPT_ERROR_OUTCOME_KEYS = ("error_type", "error_message", "traceback")
+    status = "script_error" if outcome_status == "error" else "ok"
+    if status == "script_error" and isinstance(outcome_obj, dict):
+        outcome_for_response: dict[str, Any] = {"status": "error"}
+        for key in _SCRIPT_ERROR_OUTCOME_KEYS:
+            if key in outcome_obj:
+                outcome_for_response[key] = outcome_obj[key]
+    else:
+        outcome_for_response = {"status": "ok"}
+
+    response_data: dict[str, Any] = {
+        "call_id": call_id,
+        "status": status,
+        "outcome": outcome_for_response,
+        "emits": emits,
+        "user_stdout_snippet": _head_tail(user_stdout, head=2048, tail=2048),
+        "drgn_stderr_snippet": _head_tail(redactor.redact_text(raw_stderr), head=2048, tail=2048),
+        "build_id": payload.get("build_id"),
+        "truncated": truncated,
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "duration_ms": duration_ms,
+        "prelude_ms": prelude_ms,
+        "artifacts": [artifact.model_dump(mode="json") for artifact in public_artifacts],
+        "diagnostic": diagnostic,
+    }
+    # The live wrapper never emits warnings (vmcore-only field); include the key only when present
+    # so the live `debug.introspect.run` response is unchanged.
+    if warnings:
+        response_data["warnings"] = warnings
+    return response_data
 
 
 def _finalize_introspect_call(
@@ -4437,61 +4434,28 @@ def _finalize_introspect_call(
             redacted_payload=rp,
         )
 
-    # Spec §5.2 step 12: redaction post-processing for the happy path.
-    (agent_dir / "stdout.json").write_text(json.dumps(redacted_payload), encoding="utf-8")
-    (agent_dir / "stderr.log").write_text(redactor.redact_text(raw_stderr), encoding="utf-8")
-
-    emits = redacted_payload.get("emits", []) if isinstance(redacted_payload, dict) else []
-    user_stdout = redacted_payload.get("user_stdout", "") if isinstance(redacted_payload, dict) else ""
-    truncated = redacted_payload.get("truncated", {}) if isinstance(redacted_payload, dict) else {}
-    prelude_ms = redacted_payload.get("prelude_ms", 0) if isinstance(redacted_payload, dict) else 0
-    warnings = redacted_payload.get("warnings", []) if isinstance(redacted_payload, dict) else []
-
-    diagnostic: str | None = None
-    if prelude_ms * 100 >= PRELUDE_WARNING_FRACTION_PCT * request_timeout_seconds * 1000:
-        diagnostic = (
-            f"prelude ({prelude_ms} ms) consumed >= "
-            f"{PRELUDE_WARNING_FRACTION_PCT}% of timeout_seconds "
-            f"({request_timeout_seconds} s); consider raising timeout_seconds."
-        )
-
-    # Spec §4.3: only these keys are part of the response outcome contract for
-    # status=error. Allowlist (not spread) so a hostile wrapper cannot inject keys.
-    _SCRIPT_ERROR_OUTCOME_KEYS = ("error_type", "error_message", "traceback")
-    status = "script_error" if outcome_status == "error" else "ok"
-    if status == "script_error" and isinstance(outcome_obj, dict):
-        outcome_for_response: dict[str, Any] = {"status": "error"}
-        for _k in _SCRIPT_ERROR_OUTCOME_KEYS:
-            if _k in outcome_obj:
-                outcome_for_response[_k] = outcome_obj[_k]
-    else:
-        outcome_for_response = {"status": "ok"}
-
-    user_stdout_snippet = _head_tail(user_stdout, head=2048, tail=2048)
-    drgn_stderr_snippet = _head_tail(redactor.redact_text(raw_stderr), head=2048, tail=2048)
-
-    # Spec §5.2 step 13: manifest record under the lock.
-    artifacts: list[ArtifactRef] = [
-        ArtifactRef(path=str(agent_dir / "request.json"), kind="application/json"),
-        ArtifactRef(path=str(agent_dir / "wrapper.skeleton.py"), kind="text/x-python"),
-        ArtifactRef(
-            path=str(sensitive_call_dir / "wrapper.py"),
-            kind="text/x-python",
-            sensitive=True,
-        ),
-        ArtifactRef(path=str(agent_dir / "stdout.json"), kind="application/json"),
-        ArtifactRef(path=str(agent_dir / "stderr.log"), kind="text/plain"),
-    ]
-    for raw_name in ("stdout.raw", "stderr.raw"):
-        raw_path = sensitive_call_dir / raw_name
-        if raw_path.exists():
-            artifacts.append(
-                ArtifactRef(
-                    path=str(raw_path),
-                    kind="application/octet-stream",
-                    sensitive=True,
-                )
-            )
+    artifacts = _persist_introspect_success_artifacts(
+        agent_dir=agent_dir,
+        sensitive_call_dir=sensitive_call_dir,
+        redacted_payload=redacted_payload,
+        raw_stderr=raw_stderr,
+        redactor=redactor,
+    )
+    public_artifacts = [artifact for artifact in artifacts if not artifact.sensitive]
+    success_response = _build_introspect_success_response(
+        call_id=call_id,
+        redacted_payload=redacted_payload,
+        outcome_status=outcome_status,
+        raw_stderr=raw_stderr,
+        redactor=redactor,
+        request_timeout_seconds=request_timeout_seconds,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_ms=duration_ms,
+        public_artifacts=public_artifacts,
+    )
+    truncated = success_response["truncated"]
+    prelude_ms = success_response["prelude_ms"]
 
     verdict = post_validator(redacted_payload) if post_validator is not None else None
     step_status = StepStatus.SUCCEEDED
@@ -4538,8 +4502,6 @@ def _finalize_introspect_call(
     )
     _record_terminal_introspect_result(store, run_id, step)
 
-    public_artifacts = [a for a in artifacts if not a.sensitive]
-
     if verdict is not None and not verdict.ok:
         return ToolResponse.failure(
             category=verdict.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -4562,62 +4524,13 @@ def _finalize_introspect_call(
                 "prelude_ms": prelude_ms,
             },
         )
-    response_data: dict[str, Any] = {
-        "call_id": call_id,
-        "status": status,
-        "outcome": outcome_for_response,
-        "emits": emits,
-        "user_stdout_snippet": user_stdout_snippet,
-        "drgn_stderr_snippet": drgn_stderr_snippet,
-        "build_id": redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None,
-        "truncated": truncated,
-        "started_at": started_at.isoformat(),
-        "finished_at": finished_at.isoformat(),
-        "duration_ms": duration_ms,
-        "prelude_ms": prelude_ms,
-        "artifacts": [a.model_dump(mode="json") for a in public_artifacts],
-        "diagnostic": diagnostic,
-    }
-    # The live wrapper never emits warnings (vmcore-only field); include the key
-    # only when present so the live `debug.introspect.run` response is unchanged.
-    if warnings:
-        response_data["warnings"] = warnings
     return ToolResponse.success(
         summary=f"introspect call {call_id[:8]} ok",
         run_id=run_id,
         status=StepStatus.SUCCEEDED,
         artifacts=public_artifacts,
         suggested_next_actions=["artifacts.get_manifest", operation_name],
-        data=response_data,
-    )
-
-
-def debug_introspect_run_handler(
-    request: DebugIntrospectRunRequest,
-    *,
-    artifact_root: Path,
-    target_profiles: dict[str, TargetProfile] | None = None,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    ssh_runner: SshRunner | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
-    clock: Callable[[], datetime] | None = None,
-) -> ToolResponse:
-    """Thin wrapper over the shared core. `run` opts into no cap override and no post-validator."""
-    return _execute_introspect_call(
-        request,
-        artifact_root=artifact_root,
-        target_profiles=target_profiles,
-        rootfs_profiles=rootfs_profiles,
-        debug_profiles=debug_profiles,
-        ssh_runner=ssh_runner,
-        admission=admission,
-        session_registry=session_registry,
-        clock=clock,
-        operation_name="debug.introspect.run",
-        caps=None,
-        post_validator=None,
+        data=success_response,
     )
 
 
@@ -4680,67 +4593,6 @@ def _make_helper_post_validator(spec: HelperSpec) -> IntrospectPostValidator:
         )
 
     return _validate
-
-
-def debug_introspect_helper_handler(
-    request: DebugIntrospectHelperRequest,
-    *,
-    artifact_root: Path,
-    target_profiles: dict[str, TargetProfile] | None = None,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    ssh_runner: SshRunner | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
-    clock: Callable[[], datetime] | None = None,
-) -> ToolResponse:
-    """Spec §6. Resolve a curated helper, validate its args, and run its drgn
-    script through the shared core under the raised helper cap profile.
-    """
-    spec = HELPER_REGISTRY.get(request.name)
-    if spec is None:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=request.run_id,
-            message=f"unknown helper {request.name!r}; valid: {sorted(HELPER_REGISTRY)}",
-            details={"code": "unknown_helper", "valid": sorted(HELPER_REGISTRY)},
-            suggested_next_actions=["debug.introspect.helper"],
-        )
-    try:
-        validated_args = spec.args_model.model_validate(request.args)
-    except ValidationError as exc:
-        return ToolResponse.failure(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            run_id=request.run_id,
-            message=_redact_and_truncate(Redactor(), str(exc), cap=512),
-            details={"code": "helper_args_invalid"},
-            suggested_next_actions=["debug.introspect.helper"],
-        )
-    run_request = DebugIntrospectRunRequest(
-        run_id=request.run_id,
-        target_ref=request.target_ref,
-        script=spec.script,
-        timeout_seconds=request.timeout_seconds,
-        allow_write=False,
-        debug_profile=request.debug_profile,
-        target_profile=request.target_profile,
-        rootfs_profile=request.rootfs_profile,
-        args=validated_args.model_dump(mode="json"),
-    )
-    return _execute_introspect_call(
-        run_request,
-        artifact_root=artifact_root,
-        target_profiles=target_profiles,
-        rootfs_profiles=rootfs_profiles,
-        debug_profiles=debug_profiles,
-        ssh_runner=ssh_runner,
-        admission=admission,
-        session_registry=session_registry,
-        clock=clock,
-        operation_name="debug.introspect.helper",
-        caps=HELPER_CAP_PROFILE,
-        post_validator=_make_helper_post_validator(spec),
-    )
 
 
 def _execute_vmcore_introspect_call(
@@ -5033,16 +4885,17 @@ def debug_introspect_from_vmcore_helper_handler(
     build_id_reader: Callable[[Path], str] = read_elf_build_id,
     clock: Callable[[], datetime] | None = None,
 ) -> ToolResponse:
-    """Spec §3.1. Run a curated HELPER_REGISTRY helper against a vmcore, reusing
+    """Spec §3.1. Run a curated helper against a vmcore, reusing
     the live helper's post-validator and cap profile unchanged.
     """
-    spec = HELPER_REGISTRY.get(request.name)
+    helper_registry = get_helper_registry()
+    spec = helper_registry.get(request.name)
     if spec is None:
         return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
             run_id=request.run_id,
-            message=f"unknown helper {request.name!r}; valid: {sorted(HELPER_REGISTRY)}",
-            details={"code": "unknown_helper", "valid": sorted(HELPER_REGISTRY)},
+            message=f"unknown helper {request.name!r}; valid: {sorted(helper_registry)}",
+            details={"code": "unknown_helper", "valid": sorted(helper_registry)},
             suggested_next_actions=["debug.introspect.from_vmcore_helper"],
         )
     try:
@@ -5074,321 +4927,6 @@ def debug_introspect_from_vmcore_helper_handler(
         operation_name="debug.introspect.from_vmcore_helper",
         caps=HELPER_CAP_PROFILE,
         post_validator=_make_helper_post_validator(spec),
-    )
-
-
-def _crash_config_failure(run_id: str, code: str, message: str) -> ToolResponse:
-    return ToolResponse.failure(
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        run_id=run_id,
-        message=message,
-        details={"code": code},
-        suggested_next_actions=["artifacts.get_manifest", "debug.postmortem.crash"],
-    )
-
-
-def _validate_crash_commands(run_id: str, commands: list[str]) -> ToolResponse | None:
-    """Spec §3.4 / §6 step 2. Returns a failure response or None if all pass."""
-    if not commands or len(commands) > MAX_CRASH_COMMANDS:
-        return _crash_config_failure(run_id, "invalid_commands", f"commands must be 1..{MAX_CRASH_COMMANDS}")
-    stripped = [c.strip() for c in commands]
-    if len(set(stripped)) != len(stripped):
-        return _crash_config_failure(run_id, "invalid_commands", "duplicate command")
-    script_bytes = sum(len(c.encode("utf-8")) for c in stripped)
-    if script_bytes > CRASH_SCRIPT_BYTE_CAP:
-        return _crash_config_failure(run_id, "invalid_commands", "command script too large")
-    for command in stripped:
-        reason = validate_crash_command(command, CRASH_COMMAND_ALLOWLIST)
-        if reason is not None:
-            return ToolResponse.failure(
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                run_id=run_id,
-                message=f"command not permitted: {reason}",
-                details={"code": "command_not_permitted", "command": command, "reason": reason},
-                suggested_next_actions=["debug.postmortem.crash"],
-            )
-    return None
-
-
-def _crash_buildid_failloud(
-    run_id: str,
-    vmcore_path: Path,
-    vmlinux_path: Path,
-    vmcore_reader: Callable[[Path], str],
-    vmlinux_reader: Callable[[Path], str],
-) -> tuple[str, ToolResponse | None]:
-    """Spec §5. Returns (vmcore_build_id, None) on a verified match, else ("", failure)."""
-    try:
-        expected = vmlinux_reader(vmlinux_path)
-    except BuildIdReadError as exc:
-        return "", _crash_config_failure(run_id, "vmlinux_build_id_unreadable", f"vmlinux build-id unreadable: {exc}")
-    if not BUILD_ID_RE.match(expected):
-        return "", _crash_config_failure(run_id, "vmlinux_build_id_unreadable", "malformed vmlinux build-id")
-    try:
-        observed = vmcore_reader(vmcore_path)
-    except VmcoreFormatUnsupported as exc:
-        return "", _crash_config_failure(run_id, "vmcore_format_unsupported", str(exc))
-    except VmcoreBuildIdAbsent as exc:
-        return "", _crash_config_failure(run_id, "provenance_unverifiable", str(exc))
-    except VmcoreBuildIdError as exc:
-        return "", _crash_config_failure(run_id, "vmcore_build_id_unreadable", str(exc))
-    if observed != expected:
-        return "", _crash_config_failure(
-            run_id, "provenance_mismatch", "vmcore build-id does not match the supplied vmlinux"
-        )
-    return observed, None
-
-
-def debug_postmortem_crash_handler(
-    request: DebugPostmortemCrashRequest,
-    *,
-    artifact_root: Path,
-    runner: SshRunner | None = None,
-    vmcore_build_id_reader: Callable[[Path], str] = read_vmcore_build_id,
-    vmlinux_build_id_reader: Callable[[Path], str] = read_elf_build_id,
-    clock: Callable[[], datetime] | None = None,
-) -> ToolResponse:
-    """Spec §6 / ADR 0026. Host-side crash batch runner; no admission gate."""
-    run_id = request.run_id
-    now = clock or _utcnow
-    try:
-        store = ArtifactStore(artifact_root, create_root=False)
-        if not (store.run_dir(run_id) / "manifest.json").is_file():
-            return _crash_config_failure(run_id, "run_not_found", f"run not found: {run_id}")
-        manifest = store.load_manifest(run_id)
-    except ManifestStateError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-
-    if not (5 <= request.timeout_seconds <= 300):
-        return _crash_config_failure(
-            run_id, "invalid_timeout", f"timeout_seconds must be in [5, 300]; got {request.timeout_seconds}"
-        )
-    bad_commands = _validate_crash_commands(run_id, request.commands)
-    if bad_commands is not None:
-        return bad_commands
-    crash_steps = sum(1 for n in manifest.step_results if _POSTMORTEM_CRASH_STEP_RE.match(n))
-    if crash_steps >= MAX_POSTMORTEM_CRASH_CALLS_PER_RUN:
-        return _crash_config_failure(
-            run_id, "manifest_call_budget_exhausted", "crash call budget exhausted; start a new run"
-        )
-
-    run_dir = store.run_dir(run_id)
-    sensitive_dir = run_dir / "sensitive"
-    try:
-        mode = sensitive_dir.stat().st_mode & 0o777
-    except FileNotFoundError:
-        return _crash_config_failure(run_id, "sensitive_dir_missing", f"{sensitive_dir} is missing")
-    if mode & 0o077:
-        return _crash_config_failure(run_id, "sensitive_dir_too_permissive", f"{sensitive_dir} mode is {oct(mode)}")
-
-    provenance_shell = KernelProvenance(
-        build_id="",
-        release="",
-        vmlinux_ref=request.vmlinux_ref,
-        modules_ref=request.modules_ref,
-        cmdline="",
-        config_ref=None,
-    )
-    try:
-        resolved = resolve_symbols(provenance_shell, run_dir=run_dir)
-    except SymbolResolutionError as exc:
-        return _crash_config_failure(run_id, "symbol_resolution_failed", str(exc))
-    try:
-        vmcore_path = confine_run_relative(request.vmcore_ref, run_dir=run_dir)
-    except PathSafetyError as exc:
-        return _crash_config_failure(run_id, "vmcore_not_found", str(exc))
-    if not vmcore_path.is_file():
-        return _crash_config_failure(run_id, "vmcore_not_found", f"vmcore not found at {request.vmcore_ref!r}")
-
-    modules_path = str(resolved.modules_path) if resolved.modules_path is not None else None
-    if modules_path is not None and not validate_modules_path(modules_path):
-        return _crash_config_failure(run_id, "modules_path_unsafe", "resolved modules path has unsafe characters")
-
-    vmcore_build_id, failure = _crash_buildid_failloud(
-        run_id, vmcore_path, resolved.vmlinux_path, vmcore_build_id_reader, vmlinux_build_id_reader
-    )
-    if failure is not None:
-        return failure
-
-    call_id = uuid.uuid4().hex
-    agent_dir = run_dir / "debug" / "postmortem" / "crash" / call_id
-    sensitive_call_dir = run_dir / "sensitive" / "debug" / "postmortem" / "crash" / call_id
-    agent_dir.mkdir(parents=True, mode=0o700)
-    sensitive_call_dir.mkdir(parents=True, mode=0o700)
-    # mkdir(mode=) applies only to the leaf; tighten the intermediate sensitive
-    # dirs to 0700 too so the raw output tree never relies solely on the
-    # sensitive/ ancestor (mirrors _execute_vmcore_introspect_call).
-    sensitive_call_dir.chmod(0o700)
-    sensitive_call_dir.parent.chmod(0o700)
-    sensitive_call_dir.parent.parent.chmod(0o700)
-
-    stripped_commands = [c.strip() for c in request.commands]
-    cmd_script = build_command_script(stripped_commands, sensitive_call_dir, modules_path)
-    redactor = Redactor(secret_values=[])
-    (agent_dir / "request.json").write_text(
-        json.dumps(redactor.redact_value(request.model_dump(mode="json"))), encoding="utf-8"
-    )
-
-    stdout_path = sensitive_call_dir / "stdout.raw"
-    stderr_path = sensitive_call_dir / "stderr.raw"
-    active_runner: SshRunner = runner or SubprocessSshRunner()
-    argv = [
-        "prlimit",
-        f"--fsize={CRASH_PER_CMD_CAP}",
-        "timeout",
-        "--kill-after=2s",
-        f"{request.timeout_seconds}s",
-        "crash",
-        "-s",
-        str(resolved.vmlinux_path),
-        str(vmcore_path),
-    ]
-    started_at = now()
-    started_monotonic = time.monotonic()
-    ssh_result = active_runner.run(
-        argv,
-        timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
-        stdout_path=stdout_path,
-        stderr_path=stderr_path,
-        cancel=threading.Event(),
-        stdin=cmd_script,
-        max_stdout_bytes=CRASH_STDOUT_CAP,
-    )
-    # The per-command output files are written by the crash child at its own
-    # umask (commonly 0644) and carry raw, unredacted guest memory; tighten them
-    # (and stdout/stderr) to 0600 so they match the sensitive/ 0700 discipline.
-    raw_files = [stdout_path, stderr_path, *sensitive_call_dir.glob("cmd-*.out")]
-    mod_load_path = sensitive_call_dir / "mod-load.out"
-    if mod_load_path.exists():
-        raw_files.append(mod_load_path)
-    for raw_path in raw_files:
-        _chmod_best_effort(raw_path, 0o600)
-    duration_ms = int((time.monotonic() - started_monotonic) * 1000)
-    return _finalize_crash_call(
-        store=store,
-        run_id=run_id,
-        call_id=call_id,
-        ssh_result=ssh_result,
-        sensitive_call_dir=sensitive_call_dir,
-        agent_dir=agent_dir,
-        redactor=redactor,
-        commands=stripped_commands,
-        modules_requested=modules_path is not None,
-        vmcore_build_id=vmcore_build_id,
-        started_at=started_at,
-        finished_at=now(),
-        duration_ms=duration_ms,
-    )
-
-
-def _finalize_crash_call(
-    *,
-    store: ArtifactStore,
-    run_id: str,
-    call_id: str,
-    ssh_result: SshCommandResult,
-    sensitive_call_dir: Path,
-    agent_dir: Path,
-    redactor: Redactor,
-    commands: list[str],
-    modules_requested: bool,
-    vmcore_build_id: str,
-    started_at: datetime,
-    finished_at: datetime,
-    duration_ms: int,
-) -> ToolResponse:
-    """Spec §4.1 / §6 step 9. Runner-terminal failures win over the file-count
-    rule; a clean run with >=1 output file is a success with per-command markers."""
-    step_name = f"postmortem.crash:{call_id}"
-
-    def _infra_fail(code: str, message: str) -> ToolResponse:
-        store_step = StepResult(
-            step_name=step_name,
-            status=StepStatus.FAILED,
-            summary=message,
-            artifacts=[],
-            details={"call_id": call_id, "code": code, "duration_ms": duration_ms},
-        )
-        _record_terminal_introspect_result(store, run_id, store_step)
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=message,
-            details={"code": code, "call_id": call_id},
-            suggested_next_actions=["artifacts.get_manifest"],
-        )
-
-    if ssh_result.oversized_output:
-        return _infra_fail("oversized_output", "crash session stdout exceeded the cap")
-    if ssh_result.cancelled:
-        return _infra_fail("crash_cancelled", "crash call cancelled")
-    if ssh_result.stdin_failed:
-        return _infra_fail("crash_stdin_failure", "crash command script not fully written")
-    if ssh_result.timed_out or ssh_result.exit_status == 124:
-        return _infra_fail("crash_timeout", "crash run exceeded the timeout")
-
-    segments, truncated = collect_command_outputs(
-        sensitive_call_dir, commands, per_cmd_cap=CRASH_PER_CMD_CAP, total_cap=CRASH_STDOUT_CAP
-    )
-    if all(seg["capture"] == "not_captured" for seg in segments) and ssh_result.exit_status != 0:
-        return _infra_fail("crash_open_failure", "crash produced no command output (could not open the pair)")
-
-    results: dict[str, Any] = {}
-    transcript_parts: list[str] = []
-    for seg in segments:
-        command = seg["command"]
-        if seg["capture"] == "not_captured":
-            results[command] = {"parsed": False, "reason": "not_captured", "raw": None}
-            continue
-        raw = redactor.redact_text(seg["raw"] or "")
-        transcript_parts.append(f"$ {command}\n{raw}")
-        if seg["capture"] == "output_truncated":
-            results[command] = {"parsed": False, "reason": "output_truncated", "raw": raw}
-            continue
-        parsed = parse_command(command, raw)
-        results[command] = redactor.redact_value(parsed)
-
-    module_symbols = None
-    if modules_requested:
-        mod_file = sensitive_call_dir / "mod-load.out"
-        mod_text = mod_file.read_text(encoding="utf-8", errors="replace") if mod_file.is_file() else ""
-        status = "loaded" if mod_file.is_file() and "cannot" not in mod_text.lower() else "load_failed"
-        module_symbols = {"requested": True, "status": status, "detail": redactor.redact_text(mod_text[:512])}
-
-    transcript_path = agent_dir / "transcript.txt"
-    parsed_path = agent_dir / "parsed.json"
-    transcript_path.write_text(redactor.redact_text("\n\n".join(transcript_parts)), encoding="utf-8")
-    parsed_path.write_text(json.dumps(results), encoding="utf-8")
-    artifacts = [
-        ArtifactRef(path=str(transcript_path.relative_to(store.run_dir(run_id))), kind="crash_transcript"),
-        ArtifactRef(path=str(parsed_path.relative_to(store.run_dir(run_id))), kind="crash_parsed_json"),
-    ]
-    step = StepResult(
-        step_name=step_name,
-        status=StepStatus.SUCCEEDED,
-        summary=f"crash batch: {len(commands)} command(s)",
-        artifacts=artifacts,
-        details={"call_id": call_id, "vmcore_build_id": vmcore_build_id, "duration_ms": duration_ms},
-    )
-    _record_terminal_introspect_result(store, run_id, step)
-    data: dict[str, Any] = {
-        "call_id": call_id,
-        "vmcore_build_id": vmcore_build_id,
-        "results": results,
-        "truncated": truncated,
-        "crash_exit_code": ssh_result.exit_status,
-        "started_at": started_at.isoformat(),
-        "finished_at": finished_at.isoformat(),
-        "duration_ms": duration_ms,
-    }
-    if module_symbols is not None:
-        data["module_symbols"] = module_symbols
-    return ToolResponse.success(
-        summary=f"crash batch over {len(commands)} command(s)",
-        run_id=run_id,
-        data=data,
-        artifacts=artifacts,
-        suggested_next_actions=["artifacts.get_manifest", "debug.postmortem.crash"],
     )
 
 
@@ -5459,7 +4997,7 @@ def debug_postmortem_triage_handler(
     if resolved.modules_path is not None and not validate_modules_path(str(resolved.modules_path)):
         return _crash_config_failure(run_id, "modules_path_unsafe", "resolved modules path has unsafe characters")
 
-    vmcore_build_id, failure = _crash_buildid_failloud(
+    vmcore_build_id, failure = _crash_build_id_fail_loud(
         run_id, vmcore_path, resolved.vmlinux_path, vmcore_build_id_reader, vmlinux_build_id_reader
     )
     if failure is not None:
@@ -5621,22 +5159,6 @@ def debug_postmortem_triage_handler(
     )
 
 
-def _require_snapshot(admission: AdmissionService, target_key: TargetKey) -> TargetSnapshot:
-    """Read the authoritative snapshot for a target, raising `snapshot_missing` when boot has
-    not published one yet. `stale_handle` means a caller's handle/request is bound to a
-    now-superseded incarnation; "no snapshot exists at all" is a distinct precondition failure,
-    so it carries its own code. Single source of the `current_snapshot(...) → raise if None`
-    check shared by every snapshot-reading path (transport.open request builders + inject_break)."""
-    snapshot = admission.current_snapshot(target_key)
-    if snapshot is None:
-        raise AdmissionError(
-            "no authoritative snapshot for target; boot must publish a READY snapshot first",
-            category=ErrorCategory.READINESS_FAILURE,
-            code="snapshot_missing",
-        )
-    return snapshot
-
-
 def _debug_open_request(*, run_id: str, gdbstub_endpoint: dict[str, Any], admission: AdmissionService) -> OpenRequest:
     """Build the §4.3 transport.open request for the recorded gdbstub endpoint, reading
     `generation`/`platform` from the authoritative snapshot the boot step published (never
@@ -5659,30 +5181,6 @@ def _debug_open_request(*, run_id: str, gdbstub_endpoint: dict[str, Any], admiss
         required_caps=["rsp"],
         platform=snapshot.platform,
     )
-
-
-def _halt_debug_transport(
-    *,
-    session: TransportSession,
-    admission: AdmissionService,
-    session_registry: SessionRegistry,
-) -> None:
-    """Persist the EXECUTING→HALTED transition BEFORE the gdb attach runs (the attach halts the
-    kernel). The durable HALTED record is what the run-tests probe reads, and
-    note_execution_transition bumps the execution epoch so a pre-halt EXECUTING ssh proof can never
-    be replayed across the halt. The ordering (durable write, then note) makes target.run_tests
-    reject with `target_halted` for the whole window the debugger owns the kernel.
-
-    Spec §4.6 / ADR-0006 async-halt cancellation: after recording the transition, immediately
-    cancel the fence on every in-flight ssh-tier binding admitted at-or-before this halt's epoch.
-    Without this call the run-tests watcher would poll until the SSH provider's per-command
-    timeout (default 30s); with it, an admitted run_tests racing the halt observes the cancel
-    fence and rolls back in <5s. The two calls are not atomic — a fresh `admit_ssh_tier` admitted
-    between them carries the post-bump epoch (so its stamped proof at the old epoch is already
-    stale and rejected) and is correctly left untouched here."""
-    session_registry.write_record(session.model_copy(update={"execution_state": ExecutionState.HALTED}))
-    halt_epoch = admission.note_execution_transition(session.target_key, session.generation)
-    admission.cancel_ssh_tier(session.target_key, session.generation, halt_epoch=halt_epoch)
 
 
 def _resume_debug_transport(
@@ -6120,8 +5618,8 @@ def debug_start_session_handler(
                 request = _debug_open_request(run_id=run_id, gdbstub_endpoint=gdbstub_endpoint, admission=admission)
                 transport_session = transaction.open(request, recovery=recovery)
             except (GuardConflict, EndpointSafetyError) as exc:
-                # Finding F13: these are transport-resource conflicts (guard already held, or endpoint
-                # exposure refusal), not gdb attach failures.
+                # Guard and endpoint conflicts are transport-resource conflicts, not gdb attach
+                # failures.
                 return ToolResponse.failure(
                     category=ErrorCategory.TRANSPORT_CONFLICT,
                     message=str(exc),
@@ -6347,10 +5845,12 @@ def _load_active_debug_session(
 def _mark_legacy_session_recovery_required(
     *, run_id: str, admission: AdmissionService, session_registry: SessionRegistry
 ) -> None:
-    """Dual-write the `legacy_session_no_ownership` tombstone for a legacy DebugSession's target
-    (Finding #5): durable `write_tombstone` + admission cache `mark_recovery_required`, never one
-    alone. Generation is the authoritative snapshot's when one exists, else 0 (fail-closed at bare
-    startup — admission's gate treats a tombstone-not-strictly-older-than-the-snapshot as live)."""
+    """Mark an unmanaged debug session's target recovery-required in both durable and admission state.
+
+    The tombstone generation is the current authoritative snapshot generation when available. With
+    no snapshot, generation 0 is fail-closed because admission treats a tombstone that is not older
+    than the snapshot as live.
+    """
     target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
     snapshot = admission.current_snapshot(target_key)
     generation = snapshot.generation if snapshot is not None else 0
@@ -6365,14 +5865,12 @@ def _assert_layer4_ownership(
     run_id: str,
     session_registry: SessionRegistry | None,
 ) -> None:
-    """Pure ownership check (Finding F8). When `session_registry` is wired, raise
-    `legacy_session_no_ownership` if no `TargetKey("local-qemu", run_id)` durable record exists.
-    Does NOT tombstone — that side-effect belongs to `_fence_legacy_debug_session`, which the
-    stateful mutating debug.* path uses; pure-read paths just need the assertion so they cannot
-    silently halt the kernel as a side-effect of `target remote` against a legacy session.
+    """Assert that the run has a durable transport ownership record when a registry is wired.
 
-    Inert (None) when no `session_registry` is supplied — every legacy caller passes none, so the
-    read paths stay unchanged on a non-wired server."""
+    Read-only debug paths use this non-mutating check: they refuse unmanaged sessions but do not
+    write recovery tombstones. Servers without a wired registry run ungated because they have no
+    durable ownership model to consult.
+    """
     if session_registry is None:
         return
     target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
@@ -6393,12 +5891,12 @@ def _is_legacy_debug_session(
     transport_session_id: str | None,
     run_id: str,
 ) -> bool:
-    """A DebugSession that predates the transport-ownership model: on a WIRED server (admission +
-    registry both present) it has no bound ``transport_session_id`` and no durable SessionRegistry
-    record for ``TargetKey("local-qemu", run_id)``. The canonical predicate `debug_end_session_handler`
-    uses to route its post-detach tombstone (TD-11), replacing an inline boolean. (The mutating-op
-    pre-detach fence `_fence_legacy_debug_session` runs a related check in its own raise-path scope,
-    which does not carry ``transport_session_id``.)"""
+    """Return True for an unmanaged debug session on a fully wired server.
+
+    A managed session has both a persisted ``transport_session_id`` and a durable
+    ``SessionRegistry`` ownership record. ``debug.end_session`` uses this predicate to decide
+    whether a successful detach must write the recovery tombstone after force-ending the session.
+    """
     return (
         admission is not None
         and session_registry is not None
@@ -6413,24 +5911,14 @@ def _fence_legacy_debug_session(
     admission: AdmissionService | None,
     session_registry: SessionRegistry | None,
 ) -> None:
-    """Version-skew fence (§4.7/B7). A DebugSession persisted before the transport-ownership model
-    carries a raw gdbstub_endpoint but NO durable SessionRegistry record. On a WIRED server a
-    stateful mutating debug.* op must NOT silently resume it — that would bypass the durable model
-    and leave target.run_tests blind to a kernel a stale session already halted. Stateful mutating
-    debug.* ops take BOTH `admission` and `session_registry`; the read path takes
-    `session_registry` only (Finding F8) and runs the lighter `_assert_layer4_ownership` instead.
+    """Fail closed for unmanaged sessions before stateful mutating debug operations.
 
-    Additive: inert unless BOTH `admission` and `session_registry` are injected (every legacy caller
-    passes neither). When wired:
-    - A record EXISTS for TargetKey("local-qemu", run_id) ⇒ Layer-4-owned ⇒ proceed.
-    - NO record ⇒ legacy: dual-write a recovery_required tombstone and REFUSE with
-      DEBUG_ATTACH_FAILURE / `legacy_session_no_ownership`.
-
-    A probe-permits-force-end branch is intentionally NOT implemented in #10: the probe reads the
-    same SessionRegistry record this fence already confirmed absent, so it can only return UNKNOWN.
-    An out-of-band EXECUTING source could permit force-ending a legacy session in a future layer —
-    but #10 always refuses + tombstones. (`debug.end_session` is the one operation that must still
-    detach a legacy session; it bypasses this fence and writes the tombstone post-detach instead.)"""
+    On a server with admission and session registry wiring, a run without a durable ownership record
+    is unmanaged. Mutating debug operations refuse that session and write a recovery-required
+    tombstone so later SSH/test work cannot proceed against a target whose execution state is
+    unknown to the transport layer. ``debug.end_session`` is the only stateful exception: it detaches
+    first, then writes the same tombstone after a successful detach.
+    """
     if admission is None or session_registry is None:
         return
     target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
@@ -6451,11 +5939,12 @@ def _enforce_debug_ownership_fence(
     admission: AdmissionService | None,
     session_registry: SessionRegistry | None,
 ) -> None:
-    """Single enforcement point for the debug.* ownership fence (Finding F8 / TD-10). Every debug.*
-    path that connects gdb funnels the choice through here so it cannot drift between call sites: a
-    stateful mutating op (admission wired) runs the legacy fence — which tombstones and refuses a
-    legacy session — while a read/probe path (no admission) runs the lighter Layer-4 ownership
-    assertion. Both raise ProviderDebugError on a legacy session with no durable record."""
+    """Enforce the ownership rule for every debug path that may connect gdb.
+
+    Mutating paths with admission wiring write the recovery tombstone and refuse unmanaged sessions.
+    Read/probe paths without admission wiring run the non-mutating ownership assertion. Both paths
+    raise ``ProviderDebugError`` when a wired registry has no durable ownership record for the run.
+    """
     if admission is not None:
         _fence_legacy_debug_session(run_id=run_id, admission=admission, session_registry=session_registry)
     else:
@@ -6603,7 +6092,7 @@ def _interrupt_op_data(
     if method is BreakMethod.GDBSTUB_NATIVE or transaction is None or transport_session is None:
         stop = engine.interrupt(attachment)
     else:
-        transaction.inject_break_for_session(transport_session.session_id, method.value)
+        transaction.inject_break_for_session(transport_session.session_id, method)
         stop = engine.wait_for_stop(attachment, timeout_sec=_INJECT_BREAK_STOP_TIMEOUT_SEC)
     # No stop within the window means the break is unconfirmed — report `unknown`, never an
     # optimistic `stopped`. An out-of-band break over a lossy console can be silently dropped, so
@@ -6790,14 +6279,8 @@ def _debug_operation_response(
     method_name: str,
     kwargs: dict[str, object],
     persist_manifest: bool,
+    runtime: DebugRuntime,
     allow_ended: bool = False,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    transaction: TransportTransaction | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -6806,7 +6289,7 @@ def _debug_operation_response(
             return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-    if gdb_mi_engine is None or gdb_mi_sessions is None:
+    if runtime.gdb_mi_engine is None or runtime.gdb_mi_sessions is None:
         return ToolResponse.failure(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             message="the gdb/MI engine is not available on this server instance",
@@ -6820,25 +6303,29 @@ def _debug_operation_response(
             session = _load_active_debug_session(store, run_id, debug_session_id, allow_ended=allow_ended)
             # Mutating-op fence (tombstones the legacy session) when BOTH admission + registry are
             # wired; pure-read assertion (no tombstone — reads are non-destructive) when only the
-            # registry is wired. Finding F8: every debug.* path that connects gdb gets at least the
-            # ownership assertion, so a legacy session can never silently halt the kernel as a side
-            # effect of `target remote` against a run target.run_tests is unaware of. This runs BEFORE
-            # the live-attachment lookup (ADR 0021 fence-then-lookup).
-            _enforce_debug_ownership_fence(run_id=run_id, admission=admission, session_registry=session_registry)
+            # registry is wired. Every debug.* path that connects gdb gets at least the ownership
+            # assertion, so a legacy session can never silently halt the kernel as a side effect of
+            # `target remote` against a run target.run_tests is unaware of. This runs BEFORE the
+            # live-attachment lookup (ADR 0021 fence-then-lookup).
+            _enforce_debug_ownership_fence(
+                run_id=run_id,
+                admission=runtime.admission,
+                session_registry=runtime.session_registry,
+            )
             profile = _resolve_debug_profile(
                 profile_name=session.selected_debug_profile,
-                debug_profiles=debug_profiles,
+                debug_profiles=runtime.debug_profiles,
             )
             _ensure_debug_operation_enabled(profile, DEBUG_METHOD_OPERATIONS[method_name])
-            attachment = gdb_mi_sessions.require(session.session_id)
+            attachment = runtime.gdb_mi_sessions.require(session.session_id)
             # Every engine interaction for this op — the op itself AND the post-mutator ledger rebuild
             # (-break-list) — shares one guard (inside debug_lock, no concurrent op can require() a
             # stalled attachment). _run_debug_engine_op returns a ToolResponse for the abort cases
             # (transport_stall / inject-break) and (data, session) on success; a benign
             # GdbMiError/ProviderDebugError propagates to the outer handler below.
             op_result = _run_debug_engine_op(
-                engine=gdb_mi_engine,
-                gdb_mi_sessions=gdb_mi_sessions,
+                engine=runtime.gdb_mi_engine,
+                gdb_mi_sessions=runtime.gdb_mi_sessions,
                 attachment=attachment,
                 session=session,
                 method_name=method_name,
@@ -6846,10 +6333,10 @@ def _debug_operation_response(
                 redactor=redactor,
                 artifact_root=artifact_root,
                 run_id=run_id,
-                transaction=transaction,
-                admission=admission,
-                session_registry=session_registry,
-                session_guard=session_guard,
+                transaction=runtime.transaction,
+                admission=runtime.admission,
+                session_registry=runtime.session_registry,
+                session_guard=runtime.session_guard,
             )
             if isinstance(op_result, ToolResponse):
                 return op_result
@@ -6870,158 +6357,6 @@ def _debug_operation_response(
         data=redactor.redact_value(details),
         artifacts=_redacted_artifacts(op_artifacts, redactor),
         suggested_next_actions=["artifacts.get_manifest"],
-    )
-
-
-def _debug_read_response(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    debug_session_id: str | None,
-    method_name: str,
-    kwargs: dict[str, object],
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    """Pure-read debug.* path. Takes `session_registry` (Finding F8) but NOT `admission`: reads
-    do not register an ssh-tier admission, so the structural read/ssh-tier separation is
-    preserved (the `test_debug_read_not_ssh_gated` invariant still holds). The registry presence
-    drives the lighter `_assert_layer4_ownership` check, which closes the legacy-fence bypass
-    where a `debug.read_*` call would silently halt the kernel via `target remote` against a run
-    target.run_tests had no durable record for. `transaction`/`session_guard` are carried (not
-    `admission`) only so a `transport_stall` on a read still tears the dead transport down (ADR
-    0023); with no admission it leaves the conservative closed-while-halted recovery tombstone."""
-    return _debug_operation_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name=method_name,
-        kwargs=kwargs,
-        persist_manifest=False,
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_read_registers_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    registers: list[str],
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_read_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="read_registers",
-        kwargs={"registers": registers},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_read_symbol_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    symbol: str,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_read_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="read_symbol",
-        kwargs={"symbol": symbol},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_read_memory_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    address: int,
-    byte_count: int,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_read_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="read_memory",
-        kwargs={"address": address, "byte_count": byte_count},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_evaluate_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    inspector: str,
-    arguments: dict[str, object] | None = None,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_read_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="evaluate",
-        kwargs={"inspector": inspector, "arguments": arguments or {}},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -7347,397 +6682,6 @@ def _resolve_module_ko(
     return finder(build_tree, module)
 
 
-def _debug_stateful_response(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    debug_session_id: str | None,
-    method_name: str,
-    kwargs: dict[str, object],
-    allow_ended: bool = False,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    transaction: TransportTransaction | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_operation_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name=method_name,
-        kwargs=kwargs,
-        persist_manifest=True,
-        allow_ended=allow_ended,
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_set_breakpoint_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    symbol: str,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_stateful_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="set_breakpoint",
-        kwargs={"symbol": symbol},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_set_watchpoint_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    symbol: str,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_stateful_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="set_watchpoint",
-        kwargs={"symbol": symbol},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_clear_breakpoint_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    breakpoint_id: str,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_stateful_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="clear_breakpoint",
-        kwargs={"breakpoint_id": breakpoint_id},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_clear_watchpoint_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    breakpoint_id: str,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_stateful_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="clear_watchpoint",
-        kwargs={"breakpoint_id": breakpoint_id},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_list_breakpoints_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_stateful_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="list_breakpoints",
-        kwargs={},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_backtrace_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_stateful_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="backtrace",
-        kwargs={},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_list_variables_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_stateful_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="list_variables",
-        kwargs={},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_continue_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    timeout_seconds: int | None = None,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_stateful_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="continue_execution",
-        kwargs={"timeout_seconds": timeout_seconds},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_step_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    timeout_seconds: int | None = None,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_stateful_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="step",
-        kwargs={"timeout_seconds": timeout_seconds},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_next_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    timeout_seconds: int | None = None,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_stateful_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="next",
-        kwargs={"timeout_seconds": timeout_seconds},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_finish_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    timeout_seconds: int | None = None,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_stateful_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="finish",
-        kwargs={"timeout_seconds": timeout_seconds},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
-def debug_interrupt_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    timeout_seconds: int | None = None,
-    debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> ToolResponse:
-    return _debug_stateful_response(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        method_name="interrupt",
-        kwargs={"timeout_seconds": timeout_seconds},
-        debug_profiles=debug_profiles,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
 def _recorded_transport_session_id(*, artifact_root: Path, run_id: str) -> str | None:
     """Read the transport-ownership binding `debug.start_session` persisted into the debug step
     details (set only on the transaction-backed path). None when the run/manifest/step is absent or
@@ -7848,11 +6792,9 @@ def debug_end_session_handler(
     transport_session_id = (
         _recorded_transport_session_id(artifact_root=artifact_root, run_id=run_id) if transaction is not None else None
     )
-    # B7 review: end_session is the one stateful op that must still detach a LEGACY session (force-end
-    # is the operation here), so the pre-detach fence is bypassed. A legacy session is one whose target
-    # has no SessionRegistry ownership record; detect it BEFORE the detach so the post-detach tombstone
-    # path below runs even though end_session rewrites the manifest's debug step. A Layer-4-owned
-    # session has a record AND a `transport_session_id` — the transaction.close() branch governs it.
+    # end_session is the one stateful operation that may detach an unmanaged session. Detect it before
+    # detach because the detach rewrites the manifest's debug step; managed sessions keep both a
+    # durable ownership record and a transport_session_id, so transaction.close() governs them.
     is_legacy_session = _is_legacy_debug_session(
         admission=admission,
         session_registry=session_registry,
@@ -7893,337 +6835,13 @@ def debug_end_session_handler(
             )
         else:
             transaction.close(transport_session_id, force=True)
-    # B7 review (#10): a LEGACY session bypassed the pre-detach fence so end_session could force-end
-    # the unmanaged stop, but target.run_tests would otherwise stay BLIND to that detach — exactly the
-    # failure mode B7 fences against. Dual-write a recovery_required tombstone AFTER the successful
-    # detach so run_tests stays gated until a `transport.open(recovery=True)` (or reset) clears it.
+    # An unmanaged session bypasses the pre-detach fence only for this force-end operation. After a
+    # successful detach, keep SSH/test work gated until a recovery transport open or reset clears the
+    # recovery-required tombstone.
     if response.ok and is_legacy_session:
         assert admission is not None and session_registry is not None  # narrowed by is_legacy_session
         _mark_legacy_session_recovery_required(run_id=run_id, admission=admission, session_registry=session_registry)
     return response
-
-
-def _transport_disabled_failure(*, run_id: str) -> ToolResponse:
-    """The Layer-4 coordination collaborators (transaction/admission/registry) are not wired.
-    create_app wiring is B6; until then a transport tool fails closed rather than acting."""
-    return ToolResponse.failure(
-        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-        message="transport coordination is not available on this server instance",
-        run_id=run_id,
-        details={"code": "transport_unavailable"},
-    )
-
-
-def _transport_open_request(*, run_id: str, admission: AdmissionService) -> OpenRequest:
-    """Build the §4.3 transport.open request from the authoritative snapshot the boot step
-    published: it reads `generation`/`platform` and the RSP channel straight from the snapshot
-    (never re-derived — ADR 0007), so admission re-binds the request against its own facts and a
-    snapshot naming an unregistered provider flows through to the transaction's lookup (mapped to
-    CONFIGURATION_ERROR by the handler), not silently rewritten to qemu-gdbstub."""
-    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
-    snapshot = _require_snapshot(admission, target_key)
-    rsp_channel = next((ref for ref in snapshot.transports if ref.line_role is LineRole.RSP), None)
-    if rsp_channel is None:
-        raise AdmissionError(
-            "authoritative snapshot exposes no RSP channel for a stop-capable open",
-            category=ErrorCategory.READINESS_FAILURE,
-            code="no_rsp_channel",
-        )
-    return OpenRequest(
-        target_key=target_key,
-        generation=snapshot.generation,
-        transport_ref=rsp_channel,
-        required_caps=["rsp"],
-        platform=snapshot.platform,
-    )
-
-
-def transport_open_handler(
-    *,
-    run_id: str,
-    recovery: bool = False,
-    transaction: TransportTransaction | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
-) -> ToolResponse:
-    """transport.open: open a stop-capable transport session against the run's READY target,
-    returning the session id and the bound loopback RSP endpoint. `recovery=True` admits through
-    the recovery gate (clearing the recovery tombstone on commit) — the one path permitted while a
-    target is recovery_required."""
-    if transaction is None or admission is None or session_registry is None:
-        return _transport_disabled_failure(run_id=run_id)
-    # Finding F15: every failure path that surfaces `str(exc)` to the agent runs the text through
-    # `Redactor` so an `OSError`/`EndpointSafetyError` message containing a secret-looking
-    # endpoint path or generation number cannot leak. Details dicts pass through `redact_value`
-    # for the same reason. Matches the pattern at `_debug_operation_response`.
-    redactor = Redactor()
-    try:
-        request = _transport_open_request(run_id=run_id, admission=admission)
-        session = transaction.open(request, recovery=recovery)
-    except KeyError:
-        # carried review note #1: a request naming a provider absent from the transaction's
-        # transports map raises a bare KeyError; surface it as CONFIGURATION_ERROR, not a crash.
-        return _configuration_failure(
-            run_id=run_id,
-            message=redactor.redact_text(f"no transport provider registered for {request.transport_ref.provider!r}"),
-            details=redactor.redact_value({"code": "unknown_transport_provider"}),
-        )
-    except (GuardConflict, EndpointSafetyError) as exc:
-        # Finding F13: see transport.open's mirror branch — guard/endpoint conflicts route
-        # through TRANSPORT_CONFLICT, not the gdb-attach-specific DEBUG_ATTACH_FAILURE.
-        return ToolResponse.failure(
-            category=ErrorCategory.TRANSPORT_CONFLICT,
-            message=redactor.redact_text(str(exc)),
-            run_id=run_id,
-            details=redactor.redact_value({"code": getattr(exc, "code", "stop_capable_conflict")}),
-            suggested_next_actions=["providers.list"],
-        )
-    except AdmissionError as exc:
-        return ToolResponse.failure(
-            category=exc.category,
-            message=redactor.redact_text(str(exc)),
-            run_id=run_id,
-            details=redactor.redact_value({"code": exc.code}),
-            suggested_next_actions=["providers.list"],
-        )
-    return ToolResponse.success(
-        summary=f"transport session {session.session_id} open",
-        run_id=run_id,
-        data={
-            "session_id": session.session_id,
-            "provider": session.provider,
-            "channel_id": session.channel_id,
-            "generation": session.generation,
-            "rsp_endpoint": session.rsp_endpoint.model_dump(mode="json") if session.rsp_endpoint else None,
-            "console_endpoint": session.console_endpoint.model_dump(mode="json") if session.console_endpoint else None,
-        },
-        suggested_next_actions=["debug.start_session"],
-    )
-
-
-def _resolve_session_for_run(
-    *,
-    session_registry: SessionRegistry,
-    session_id: str,
-    run_id: str,
-) -> TransportSession | None:
-    """Look up a TransportSession by session_id and verify it belongs to `run_id` (Finding F7).
-    Returns the record on a match. Returns None if no record exists (caller decides whether that
-    is a no-op success — `transport.close` — or a `unknown_session` failure — `inject_break`).
-    Raises a `_SessionRunMismatch` (a stub `ValueError`) when the session exists but belongs to
-    a different run; the caller surfaces this as a `session_run_mismatch` configuration_error so
-    a caller cannot halt/close some OTHER run's kernel by passing its session_id under run_id=X."""
-    record = next((r for r in session_registry.list_records() if r.session_id == session_id), None)
-    if record is None:
-        return None
-    target_key = record.target_key
-    if target_key.provisioner != "local-qemu" or target_key.target_id != run_id:
-        raise _SessionRunMismatch(
-            f"session {session_id!r} belongs to target {target_key.provisioner}/{target_key.target_id}, "
-            f"not run {run_id!r}"
-        )
-    return record
-
-
-class _SessionRunMismatch(ValueError):
-    """Signal that a caller asked to operate on `session_id` under a `run_id` that does not own
-    it — see `_resolve_session_for_run` (Finding F7)."""
-
-
-def transport_close_handler(
-    *,
-    run_id: str,
-    session_id: str,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-) -> ToolResponse:
-    """transport.close: tear down an open transport session — close the backend, release the
-    guard/lease, deregister the admission binding, and delete the durable record. An unknown
-    session id is a no-op success (the record is already gone) but the response is marked
-    `data["already_closed"] = True` so the caller can distinguish "I closed a live session" from
-    "the session was already gone" (e.g. reaped out-of-band by reconcile() / lifecycle force_drop).
-    A session that exists but belongs to a different run is refused as `session_run_mismatch`
-    (Finding F7) — never close another run's session."""
-    if transaction is None or session_registry is None:
-        return _transport_disabled_failure(run_id=run_id)
-    try:
-        record = _resolve_session_for_run(session_registry=session_registry, session_id=session_id, run_id=run_id)
-    except _SessionRunMismatch as exc:
-        return _configuration_failure(
-            run_id=run_id,
-            message=str(exc),
-            details={"code": "session_run_mismatch"},
-        )
-    if record is None:
-        # The record was reaped out-of-band (reconcile() on restart, or a CRASHED/RESETTING
-        # lifecycle event drove force_drop) before this close arrived. transaction.close would
-        # no-op anyway; surface the distinction explicitly so callers can tell.
-        return ToolResponse.success(
-            summary=f"transport session {session_id} already closed",
-            run_id=run_id,
-            data={"session_id": session_id, "already_closed": True},
-            suggested_next_actions=["transport.open"],
-        )
-    transaction.close(session_id)
-    return ToolResponse.success(
-        summary=f"transport session {session_id} closed",
-        run_id=run_id,
-        data={"session_id": session_id, "already_closed": False},
-        suggested_next_actions=["transport.open"],
-    )
-
-
-def transport_inject_break_handler(
-    *,
-    run_id: str,
-    session_id: str,
-    acknowledged_permissions: list[str] | None = None,
-    artifact_root: Path | None = None,
-    transaction: TransportTransaction | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    break_mechanism: Callable[..., None] = inject_break,
-    probe_halted: Callable[[TransportSession], bool] = probe_rsp_halted,
-) -> ToolResponse:
-    """transport.inject_break: drop the target kernel into the debugger over an open session.
-
-    This is DESTRUCTIVE — it is refused unless the caller acknowledges every permission in
-    `TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"]`. The durable record is written
-    `execution_state=HALTED` BEFORE the break mechanism runs (so a death during the break can never
-    strand the record as EXECUTING and let an ssh-tier op admit against a halted kernel), and the
-    execution epoch is bumped to invalidate any pre-halt EXECUTING proof. If the break is
-    unconfirmable — the mechanism raises a known `InjectBreakError` OR any other exception (an
-    OSError, or the B6 real-mechanism missing-kwargs trap) — the record is written `UNKNOWN`,
-    NEVER left EXECUTING and never stranded at the optimistic HALTED.
-
-    Finding #4 / ADR 0006: after the mechanism returns successfully, the handler RE-PROBES the
-    execution state. The mechanism's return value alone is not authoritative — a silent-no-op
-    wiring or a misconfigured `break_plan` can return success while the kernel keeps running. If
-    the probe observes anything other than HALTED (including a probe exception / timeout), the
-    handler dual-writes UNKNOWN to the durable record and returns
-    DEBUG_ATTACH_FAILURE/break_unconfirmed — preserving the existing fail-closed posture.
-    """
-    if transaction is None or admission is None or session_registry is None:
-        return _transport_disabled_failure(run_id=run_id)
-    missing = missing_destructive_permissions("transport.inject_break", acknowledged_permissions or [])
-    if missing:
-        return _configuration_failure(
-            run_id=run_id,
-            message="transport.inject_break is destructive; acknowledge its required permissions to proceed",
-            details={"code": "permission_required", "required_permissions": missing},
-        )
-    # Finding F14: inject_break is destructive — gate it by `DebugProfile.enabled_operations` like
-    # every other halting debug.* op. Resolve the run's debug profile from its manifest when
-    # `artifact_root` is supplied (production wiring), otherwise fall through to the default
-    # profile name (test handlers that exercise the post-permission path don't load a manifest).
-    requested_profile = "qemu-gdbstub-default"
-    if artifact_root is not None:
-        try:
-            store = ArtifactStore(artifact_root, create_root=False)
-            requested_profile = store.load_manifest(run_id).request.debug_profile or "qemu-gdbstub-default"
-        except (ManifestStateError, FileNotFoundError, OSError):
-            # No manifest for this run (or unreadable) — fall back to the default profile name;
-            # _resolve_debug_profile will fail closed if the name is unknown in the registry.
-            pass
-    try:
-        resolved_profile = _resolve_debug_profile(profile_name=requested_profile, debug_profiles=debug_profiles)
-        _ensure_debug_operation_enabled(resolved_profile, "transport.inject_break")
-    except ProviderDebugError as exc:
-        return _configuration_failure(run_id=run_id, message=str(exc), details=exc.details)
-    try:
-        record = _resolve_session_for_run(
-            session_registry=session_registry,
-            session_id=session_id,
-            run_id=run_id,
-        )
-    except _SessionRunMismatch as exc:
-        # Finding F7: never halt some OTHER run's kernel because a caller passed a foreign
-        # session_id under run_id=X. Refuse before _halt_debug_transport writes HALTED.
-        return _configuration_failure(
-            run_id=run_id,
-            message=str(exc),
-            details={"code": "session_run_mismatch"},
-        )
-    if record is None:
-        return _configuration_failure(
-            run_id=run_id,
-            message=f"no open transport session for break injection: {session_id}",
-            details={"code": "unknown_session"},
-        )
-    # Persist HALTED + bump the execution epoch BEFORE the break runs (the ordering target.run_tests
-    # depends on to reject `target_halted` for the whole window the debugger owns the kernel). Reuse
-    # the one helper that defines the durable-write-then-note ordering.
-    _halt_debug_transport(session=record, admission=admission, session_registry=session_registry)
-    # Finding F15: redact every exception message / details dict before surfacing them to the
-    # agent. An InjectBreakError.details (or an OSError str) can carry endpoint paths, generation
-    # numbers, or attached secrets; matches the redaction pattern at `_debug_operation_response`.
-    redactor = Redactor()
-    try:
-        break_mechanism(method="auto", break_plan=record.break_plan)
-    except InjectBreakError as exc:
-        # A KNOWN break failure: record UNKNOWN (never the stale optimistic HALTED) and surface the
-        # mechanism's own ErrorCategory so admission fails closed until a fresh probe runs.
-        session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
-        exc_details = dict(getattr(exc, "details", {}) or {})
-        details = redactor.redact_value(
-            {
-                **exc_details,
-                "code": "break_unconfirmed",
-                "execution_state": ExecutionState.UNKNOWN.value,
-            }
-        )
-        return ToolResponse.failure(
-            category=exc.category,
-            message=redactor.redact_text(str(exc)),
-            run_id=run_id,
-            details=details,
-            suggested_next_actions=["providers.list"],
-        )
-    except Exception as exc:
-        # ANY other mechanism failure (OSError, a missing-kwargs TypeError from a real wiring bug)
-        # MUST hold the same invariant: an unconfirmable break can never leave EXECUTING or a stale
-        # HALTED, so fail closed to UNKNOWN rather than crash after the durable HALTED write.
-        session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            message=redactor.redact_text(f"break mechanism failed unexpectedly: {exc}"),
-            run_id=run_id,
-            details=redactor.redact_value(
-                {"code": "break_unconfirmed", "execution_state": ExecutionState.UNKNOWN.value}
-            ),
-            suggested_next_actions=["providers.list"],
-        )
-    # Post-probe (Finding F2/F4): perform a REAL bounded RSP `?` exchange against the session's
-    # rsp_endpoint to confirm the kernel actually halted. Reading the cached `execution_state`
-    # flag back (the prior implementation) was circular — `_halt_debug_transport` above writes
-    # HALTED to that same field, so a kernel that silently kept running would still report HALTED
-    # and `break_unconfirmed` was unreachable on the success path (ADR 0001's rejected design).
-    # A probe exception or any non-stop-reply observation is fail-closed to UNKNOWN — matching
-    # the existing exception-branch posture and the §5.6 "no optimistic admit" rule.
-    try:
-        halted_observed = probe_halted(record)
-    except Exception:  # noqa: BLE001 — probe failure ⇒ unknown, fail closed
-        halted_observed = False
-    if not halted_observed:
-        session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
-        return ToolResponse.failure(
-            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-            message="inject_break: post-probe did not confirm HALTED",
-            run_id=run_id,
-            details={
-                "code": "break_unconfirmed",
-                "execution_state": ExecutionState.UNKNOWN.value,
-                "probe_observed": ExecutionState.UNKNOWN.value,
-            },
-            suggested_next_actions=["providers.list"],
-        )
-    return ToolResponse.success(
-        summary=f"break injected on transport session {session_id}; target halted",
-        run_id=run_id,
-        data={"session_id": session_id, "execution_state": ExecutionState.HALTED.value},
-        suggested_next_actions=["debug.start_session"],
-    )
 
 
 def _bundle_for_manifest(
@@ -8271,14 +6889,10 @@ def _bundle_for_manifest(
             else:
                 missing_optional.append({"step": step.name, "artifact": artifact.model_dump(mode="json")})
 
-    # Iter-2 finding 1: dynamic step results (e.g., introspect:<call_id>)
-    # are not in the fixed `manifest.steps` list but DO exist in
-    # `manifest.step_results`. Without this pass, every introspect artifact
-    # is silently dropped from the bundle, _collection_covers_manifest
-    # returns False on every subsequent call (forcing a re-bundle that
-    # still misses the same artifacts), and forensic exports lose every
-    # introspect call. Group them under their actual step_results key so
-    # the bundle's "artifacts_by_step" shape stays self-describing.
+    # Dynamic step results (e.g., introspect:<call_id>) are not in the fixed `manifest.steps` list
+    # but do exist in `manifest.step_results`. Group them under their actual step_results key so
+    # forensic exports include every dynamic call and the bundle's "artifacts_by_step" shape stays
+    # self-describing.
     fixed_step_names = {step.name for step in manifest.steps}
     for step_name, result in manifest.step_results.items():
         if step_name in fixed_step_names:
@@ -8330,92 +6944,6 @@ def _collection_covers_manifest(*, manifest: RunManifest, collect_result: StepRe
     return current.issubset(collected)
 
 
-def artifacts_collect_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    force_recollect: bool = False,
-) -> ToolResponse:
-    try:
-        store = ArtifactStore(artifact_root, create_root=False)
-        manifest_path = store.run_dir(run_id) / "manifest.json"
-        if not manifest_path.is_file():
-            return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
-        manifest = store.load_manifest(run_id)
-    except ManifestStateError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-    existing = manifest.step_results.get("collect_artifacts")
-    if (
-        existing
-        and existing.status == StepStatus.SUCCEEDED
-        and not force_recollect
-        and _collection_covers_manifest(manifest=manifest, collect_result=existing)
-    ):
-        return _recorded_collect_success_response(run_id=run_id, result=existing)
-    try:
-        with store.collect_lock(run_id):
-            locked_manifest = store.load_manifest(run_id)
-            existing = locked_manifest.step_results.get("collect_artifacts")
-            replace_succeeded = force_recollect or bool(existing and existing.status == StepStatus.SUCCEEDED)
-            if (
-                existing
-                and existing.status == StepStatus.SUCCEEDED
-                and not force_recollect
-                and _collection_covers_manifest(manifest=locked_manifest, collect_result=existing)
-            ):
-                return _recorded_collect_success_response(run_id=run_id, result=existing)
-            bundle_path = store.run_dir(run_id) / "summaries" / "artifact-bundle.json"
-            bundle, artifacts, missing_required, missing_optional = _bundle_for_manifest(
-                manifest=locked_manifest,
-                run_dir=store.run_dir(run_id),
-                bundle_path=bundle_path,
-            )
-            bundle_path.parent.mkdir(parents=True, exist_ok=True)
-            bundle_path.write_text(
-                json.dumps(Redactor().redact_value(bundle), indent=2, default=str),
-                encoding="utf-8",
-            )
-            status = StepStatus.FAILED if missing_required else StepStatus.SUCCEEDED
-            result = StepResult(
-                step_name="collect_artifacts",
-                status=status,
-                summary=(
-                    "artifact collection succeeded"
-                    if status == StepStatus.SUCCEEDED
-                    else "artifact collection found missing required artifacts"
-                ),
-                artifacts=artifacts,
-                details={"bundle": bundle, "rollup": bundle["rollup"]},
-            )
-            store.record_step_result(run_id, result, replace_succeeded=replace_succeeded)
-    except ManifestStateError as exc:
-        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
-    redactor = Redactor()
-    safe_bundle = redactor.redact_value(bundle)
-    safe_artifacts = _redacted_artifacts(artifacts, redactor)
-    if missing_required:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            message=redactor.redact_text(result.summary),
-            run_id=run_id,
-            details={
-                "bundle": safe_bundle,
-                "rollup": safe_bundle["rollup"],
-                "missing_required": redactor.redact_value(missing_required),
-                "missing_optional": redactor.redact_value(missing_optional),
-            },
-            artifacts=safe_artifacts,
-            suggested_next_actions=["artifacts.get_manifest"],
-        )
-    return ToolResponse.success(
-        summary=redactor.redact_text(result.summary),
-        run_id=run_id,
-        data={"bundle": safe_bundle, "rollup": safe_bundle["rollup"]},
-        artifacts=safe_artifacts,
-        suggested_next_actions=["artifacts.get_manifest"],
-    )
-
-
 def _workflow_failure_response(
     *,
     run_id: str | None,
@@ -8458,6 +6986,7 @@ def workflow_build_boot_test_handler(
     force_reboot: bool = False,
     force_rerun_tests: bool = False,
     force_recollect: bool = False,
+    acknowledged_permissions: list[str] | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
@@ -8552,6 +7081,7 @@ def workflow_build_boot_test_handler(
         target_profile=target_profile,
         rootfs_profile=rootfs_profile,
         force_reboot=force_reboot,
+        acknowledged_permissions=acknowledged_permissions,
         admission=admission,
     )
     if not boot_response.ok:
@@ -8635,6 +7165,7 @@ def workflow_build_boot_debug_handler(
     force_rebuild: bool = False,
     force_reboot: bool = False,
     new_session: bool = False,
+    acknowledged_permissions: list[str] | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
     transaction: TransportTransaction | None = None,
@@ -8733,6 +7264,7 @@ def workflow_build_boot_debug_handler(
         target_profile=target_profile,
         rootfs_profile=rootfs_profile,
         force_reboot=force_reboot,
+        acknowledged_permissions=acknowledged_permissions,
         admission=admission,
     )
     if not boot_response.ok:
@@ -8827,6 +7359,34 @@ def _overrides_from_tool_args(
         else None
     )
     return build_overrides, boot_overrides
+
+
+CreateRunToolShapes = tuple[
+    BuildOverrides | None,
+    BootOverrides | None,
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+]
+
+
+def _create_run_shapes_from_tool_args(
+    *,
+    build_overrides: dict[str, Any] | None,
+    boot_overrides: dict[str, Any] | None,
+    profile_specs: dict[str, dict[str, Any]] | None,
+) -> CreateRunToolShapes:
+    specs = profile_specs or {}
+    unknown_specs = set(specs) - {"build", "target", "rootfs"}
+    if unknown_specs:
+        raise ValueError(f"unknown profile_specs keys: {', '.join(sorted(unknown_specs))}")
+    return (
+        BuildOverrides(**build_overrides) if build_overrides else None,
+        BootOverrides(**boot_overrides) if boot_overrides else None,
+        specs.get("build"),
+        specs.get("target"),
+        specs.get("rootfs"),
+    )
 
 
 def load_server_config() -> ServerConfig | None:
@@ -8927,19 +7487,19 @@ def _build_transport_machinery(
     # delete + handle deregistration) is reachable from production.
     lifecycle_dispatcher = InProcessLifecycleDispatcher()
 
-    # Production lifecycle-event source (Finding #3 / ADR 0006): `registry.reconcile()`'s
-    # orphan-backend reap is the one production point at which "the backend died" is known in
-    # #10. The closure drives `admission.invalidate_lifecycle(target_key, CRASHED)`, which runs
-    # the §4.5 chain end-to-end (close_admission → dispatcher.emit → _SessionSubscriber.force_drop
-    # → guard/lease release + record delete + handle deregister). Registry imports stay free of
-    # admission/lifecycle — the closure's body lives here, the registry just invokes it.
+    # Production lifecycle-event source: `registry.reconcile()`'s orphan-backend reap is the one
+    # production point at which "the backend died" is known. The closure drives
+    # `admission.invalidate_lifecycle(target_key, CRASHED)`, which runs the §4.5 chain end-to-end
+    # (close_admission → dispatcher.emit → _SessionSubscriber.force_drop → guard/lease release +
+    # record delete + handle deregister). Registry imports stay free of admission/lifecycle — the
+    # closure's body lives here, the registry just invokes it.
     #
-    # Finding F1: only close admission when we actually killed a live orphan backend
+    # Only close admission when we actually killed a live orphan backend
     # (`close_admission_required`). For the common cold-restart case where the durable record's
-    # backend was already dead (or `backend_pid is None` — qemu-gdbstub), we emit the lifecycle
-    # event for any subscriber but do NOT set `_closed_at` for the target. No production code
-    # path calls `reopen()`, so a `_closed_at` write would permanently brick admission for the
-    # target until process restart.
+    # backend was already dead (or `backend_pid is None` — qemu-gdbstub), we emit the lifecycle event
+    # for any subscriber but do NOT set `_closed_at` for the target. No production code path calls
+    # `reopen()`, so a `_closed_at` write would permanently brick admission for the target until
+    # process restart.
     def _on_orphan_reaped(reap: OrphanReap) -> None:
         admission.invalidate_lifecycle(
             LifecycleEvent(target_key=reap.target_key, kind=LifecycleKind.CRASHED),
@@ -8989,10 +7549,9 @@ def _build_transport_machinery(
     # acquire-on-construct, release-on-process-exit.
     session_registry.acquire_instance_lock()
     report = session_registry.reconcile(proxy=AgentProxyBackend(), admission=admission)
-    # Finding F9: surface every callback failure through the project logger. `reconcile()` no
-    # longer silently swallows them; reaped records were still deleted, but the lifecycle event
-    # for those targets may have been lost. Visibility lets operators triage; this is not fatal
-    # because reconcile-before-serve must always proceed (a wedge here would deny service).
+    # Surface every callback failure through the project logger. `reconcile()` still deletes reaped
+    # records, but a callback failure can lose the lifecycle event for those targets. Visibility
+    # lets operators triage; this is not fatal because reconcile-before-serve must always proceed.
     for record, exc in report.failures:
         logger.warning(
             "transport: reconcile lifecycle callback raised for session %s (target %s): %s",
@@ -9076,24 +7635,19 @@ def create_app(
         run_id: str | None = None,
         debug_profile: str | None = None,
         test_suite: str | None = None,
-        kernel_args: list[str] | None = None,
-        rootfs_source: str | None = None,
-        make_variables: dict[str, str] | None = None,
-        config_lines: list[str] | None = None,
-        rootfs_overrides: dict[str, Any] | None = None,
-        build_profile_spec: dict[str, Any] | None = None,
-        target_profile_spec: dict[str, Any] | None = None,
-        rootfs_profile_spec: dict[str, Any] | None = None,
+        build_overrides: dict[str, Any] | None = None,
+        boot_overrides: dict[str, Any] | None = None,
+        profile_specs: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         try:
-            build_overrides, boot_overrides = _overrides_from_tool_args(
-                kernel_args=kernel_args,
-                rootfs_source=rootfs_source,
-                make_variables=make_variables,
-                config_lines=config_lines,
-                rootfs_overrides=rootfs_overrides,
+            resolved_build_overrides, resolved_boot_overrides, build_spec, target_spec, rootfs_spec = (
+                _create_run_shapes_from_tool_args(
+                    build_overrides=build_overrides,
+                    boot_overrides=boot_overrides,
+                    profile_specs=profile_specs,
+                )
             )
-        except ValueError as exc:
+        except (ValueError, ValidationError) as exc:
             return ToolResponse.failure(category=ErrorCategory.CONFIGURATION_ERROR, message=str(exc)).model_dump(
                 mode="json"
             )
@@ -9106,259 +7660,15 @@ def create_app(
             run_id=run_id,
             debug_profile=debug_profile,
             test_suite=test_suite,
-            build_overrides=build_overrides,
-            boot_overrides=boot_overrides,
+            build_overrides=resolved_build_overrides,
+            boot_overrides=resolved_boot_overrides,
             sensitive_paths=sensitive_paths,
-            build_profile_spec=build_profile_spec,
-            target_profile_spec=target_profile_spec,
-            rootfs_profile_spec=rootfs_profile_spec,
+            build_profile_spec=build_spec,
+            target_profile_spec=target_spec,
+            rootfs_profile_spec=rootfs_spec,
         ).model_dump(mode="json")
 
-    @app.tool(name="providers.list")
-    def providers_list() -> dict[str, Any]:
-        return list_providers_handler().model_dump(mode="json")
-
-    @app.tool(name="remote.build_kernel")
-    def remote_build_kernel(
-        architecture: str,
-        source_ref: str,
-        build_profile: str,
-        provider_name: str | None = None,
-        timeout_seconds: int = 300,
-        operation_label: str | None = None,
-        run_id: str | None = None,
-        output_artifact_ref: str | None = None,
-    ) -> dict[str, Any]:
-        return remote_build_kernel_handler(
-            architecture=architecture,
-            source_ref=source_ref,
-            build_profile=build_profile,
-            provider_name=provider_name,
-            timeout_seconds=timeout_seconds,
-            operation_label=operation_label,
-            run_id=run_id,
-            output_artifact_ref=output_artifact_ref,
-        ).model_dump(mode="json")
-
-    @app.tool(name="remote.sync_artifacts")
-    def remote_sync_artifacts(
-        architecture: str,
-        external_artifact_ref: str,
-        provider_name: str | None = None,
-        timeout_seconds: int = 300,
-        operation_label: str | None = None,
-        run_id: str | None = None,
-        destination_artifact_ref: str | None = None,
-    ) -> dict[str, Any]:
-        return remote_sync_artifacts_handler(
-            architecture=architecture,
-            external_artifact_ref=external_artifact_ref,
-            provider_name=provider_name,
-            timeout_seconds=timeout_seconds,
-            operation_label=operation_label,
-            run_id=run_id,
-            destination_artifact_ref=destination_artifact_ref,
-        ).model_dump(mode="json")
-
-    @app.tool(name="reservation.request_host")
-    def reservation_request_host(
-        architecture: str,
-        reservation_pool: str,
-        provider_name: str | None = None,
-        timeout_seconds: int = 300,
-        operation_label: str | None = None,
-        run_id: str | None = None,
-        reservation_token_ref: str | None = None,
-    ) -> dict[str, Any]:
-        return reservation_request_host_handler(
-            architecture=architecture,
-            reservation_pool=reservation_pool,
-            provider_name=provider_name,
-            timeout_seconds=timeout_seconds,
-            operation_label=operation_label,
-            run_id=run_id,
-            reservation_token_ref=reservation_token_ref,
-        ).model_dump(mode="json")
-
-    @app.tool(name="reservation.release_host")
-    def reservation_release_host(
-        architecture: str,
-        reservation_id: str,
-        provider_name: str | None = None,
-        timeout_seconds: int = 300,
-        operation_label: str | None = None,
-        run_id: str | None = None,
-    ) -> dict[str, Any]:
-        return reservation_release_host_handler(
-            architecture=architecture,
-            reservation_id=reservation_id,
-            provider_name=provider_name,
-            timeout_seconds=timeout_seconds,
-            operation_label=operation_label,
-            run_id=run_id,
-        ).model_dump(mode="json")
-
-    @app.tool(name="provision.prepare_target")
-    def provision_prepare_target(
-        architecture: str,
-        target_name: str,
-        provisioning_profile: str,
-        provider_name: str | None = None,
-        timeout_seconds: int = 300,
-        operation_label: str | None = None,
-        run_id: str | None = None,
-        reservation_id: str | None = None,
-        credential_ref: str | None = None,
-    ) -> dict[str, Any]:
-        return provision_prepare_target_handler(
-            architecture=architecture,
-            target_name=target_name,
-            provisioning_profile=provisioning_profile,
-            provider_name=provider_name,
-            timeout_seconds=timeout_seconds,
-            operation_label=operation_label,
-            run_id=run_id,
-            reservation_id=reservation_id,
-            credential_ref=credential_ref,
-        ).model_dump(mode="json")
-
-    @app.tool(name="hardware.power_control")
-    def hardware_power_control(
-        architecture: str,
-        target_name: str,
-        action: str,
-        provider_name: str | None = None,
-        timeout_seconds: int = 300,
-        operation_label: str | None = None,
-        run_id: str | None = None,
-        bmc_credential_ref: str | None = None,
-    ) -> dict[str, Any]:
-        return hardware_power_control_handler(
-            architecture=architecture,
-            target_name=target_name,
-            action=action,
-            provider_name=provider_name,
-            timeout_seconds=timeout_seconds,
-            operation_label=operation_label,
-            run_id=run_id,
-            bmc_credential_ref=bmc_credential_ref,
-        ).model_dump(mode="json")
-
-    @app.tool(name="hardware.boot_kernel")
-    def hardware_boot_kernel(
-        architecture: str,
-        target_name: str,
-        kernel_artifact_ref: str,
-        provider_name: str | None = None,
-        timeout_seconds: int = 300,
-        operation_label: str | None = None,
-        run_id: str | None = None,
-        boot_profile: str | None = None,
-        reservation_id: str | None = None,
-    ) -> dict[str, Any]:
-        return hardware_boot_kernel_handler(
-            architecture=architecture,
-            target_name=target_name,
-            kernel_artifact_ref=kernel_artifact_ref,
-            provider_name=provider_name,
-            timeout_seconds=timeout_seconds,
-            operation_label=operation_label,
-            run_id=run_id,
-            boot_profile=boot_profile,
-            reservation_id=reservation_id,
-        ).model_dump(mode="json")
-
-    @app.tool(name="console.open_session")
-    def console_open_session(
-        architecture: str,
-        target_name: str,
-        access_method: str,
-        provider_name: str | None = None,
-        timeout_seconds: int = 300,
-        operation_label: str | None = None,
-        run_id: str | None = None,
-        credential_ref: str | None = None,
-    ) -> dict[str, Any]:
-        return console_open_session_handler(
-            architecture=architecture,
-            target_name=target_name,
-            access_method=access_method,
-            provider_name=provider_name,
-            timeout_seconds=timeout_seconds,
-            operation_label=operation_label,
-            run_id=run_id,
-            credential_ref=credential_ref,
-        ).model_dump(mode="json")
-
-    @app.tool(name="console.read")
-    def console_read(
-        architecture: str,
-        console_session_id: str,
-        max_bytes: int = 4096,
-        provider_name: str | None = None,
-        timeout_seconds: int = 300,
-        operation_label: str | None = None,
-        run_id: str | None = None,
-    ) -> dict[str, Any]:
-        return console_read_handler(
-            architecture=architecture,
-            console_session_id=console_session_id,
-            max_bytes=max_bytes,
-            provider_name=provider_name,
-            timeout_seconds=timeout_seconds,
-            operation_label=operation_label,
-            run_id=run_id,
-        ).model_dump(mode="json")
-
-    @app.tool(name="console.write")
-    def console_write(
-        architecture: str,
-        console_session_id: str,
-        data: str,
-        provider_name: str | None = None,
-        timeout_seconds: int = 300,
-        operation_label: str | None = None,
-        run_id: str | None = None,
-    ) -> dict[str, Any]:
-        return console_write_handler(
-            architecture=architecture,
-            console_session_id=console_session_id,
-            data=data,
-            provider_name=provider_name,
-            timeout_seconds=timeout_seconds,
-            operation_label=operation_label,
-            run_id=run_id,
-        ).model_dump(mode="json")
-
-    @app.tool(name="workflow.reserve_provision_boot")
-    def workflow_reserve_provision_boot(
-        architecture: str,
-        reservation_pool: str,
-        target_name: str,
-        provisioning_profile: str,
-        kernel_artifact_ref: str,
-        provider_name: str | None = None,
-        timeout_seconds: int = 300,
-        operation_label: str | None = None,
-        run_id: str | None = None,
-        reservation_token_ref: str | None = None,
-        credential_ref: str | None = None,
-        bmc_credential_ref: str | None = None,
-    ) -> dict[str, Any]:
-        return workflow_reserve_provision_boot_handler(
-            architecture=architecture,
-            reservation_pool=reservation_pool,
-            target_name=target_name,
-            provisioning_profile=provisioning_profile,
-            kernel_artifact_ref=kernel_artifact_ref,
-            provider_name=provider_name,
-            timeout_seconds=timeout_seconds,
-            operation_label=operation_label,
-            run_id=run_id,
-            reservation_token_ref=reservation_token_ref,
-            credential_ref=credential_ref,
-            bmc_credential_ref=bmc_credential_ref,
-        ).model_dump(mode="json")
+    register_provider_tools(app)
 
     @app.tool(name="artifacts.get_manifest")
     def artifacts_get_manifest(run_id: str, artifact_root: str = str(DEFAULT_ARTIFACT_ROOT)) -> dict[str, Any]:
@@ -9385,19 +7695,12 @@ def create_app(
         target_profile: str | None = None,
         rootfs_profile: str | None = None,
         force_reboot: bool = False,
-        kernel_args: list[str] | None = None,
-        rootfs_source: str | None = None,
-        rootfs_overrides: dict[str, Any] | None = None,
+        boot_overrides: dict[str, Any] | None = None,
+        acknowledged_permissions: list[str] | None = None,
     ) -> dict[str, Any]:
         try:
-            _build_overrides, boot_overrides = _overrides_from_tool_args(
-                kernel_args=kernel_args,
-                rootfs_source=rootfs_source,
-                make_variables=None,
-                config_lines=None,
-                rootfs_overrides=rootfs_overrides,
-            )
-        except ValueError as exc:
+            resolved_boot_overrides = BootOverrides(**boot_overrides) if boot_overrides else None
+        except (ValueError, ValidationError) as exc:
             return ToolResponse.failure(category=ErrorCategory.CONFIGURATION_ERROR, message=str(exc)).model_dump(
                 mode="json"
             )
@@ -9407,7 +7710,8 @@ def create_app(
             target_profile=target_profile,
             rootfs_profile=rootfs_profile,
             force_reboot=force_reboot,
-            boot_overrides=boot_overrides,
+            boot_overrides=resolved_boot_overrides,
+            acknowledged_permissions=acknowledged_permissions,
             sensitive_paths=sensitive_paths,
             admission=admission_service,
         ).model_dump(mode="json")
@@ -9432,762 +7736,97 @@ def create_app(
             session_registry=durable_registry,
         ).model_dump(mode="json")
 
-    @app.tool(name="debug.introspect.run")
-    def debug_introspect_run(
-        run_id: str,
-        target_ref: str,
-        script: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        timeout_seconds: int = 30,
-        allow_write: bool = False,
-        acknowledged_permissions: list[str] | None = None,
-        debug_profile: str | None = None,
-        target_profile: str | None = None,
-        rootfs_profile: str | None = None,
-    ) -> dict[str, Any]:
-        request = DebugIntrospectRunRequest(
-            run_id=run_id,
-            target_ref=target_ref,
-            script=script,
-            timeout_seconds=timeout_seconds,
-            allow_write=allow_write,
-            acknowledged_permissions=acknowledged_permissions or [],
-            debug_profile=debug_profile,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
-        )
-        return debug_introspect_run_handler(
-            request,
-            artifact_root=Path(artifact_root),
-            admission=admission_service,
-            session_registry=durable_registry,
-        ).model_dump(mode="json")
+    register_introspect_tools(
+        app,
+        default_artifact_root=DEFAULT_ARTIFACT_ROOT,
+        admission=admission_service,
+        session_registry=durable_registry,
+        run_handler=debug_introspect_run_handler,
+        helper_handler=debug_introspect_helper_handler,
+        check_prereqs_handler=debug_introspect_check_prerequisites_handler,
+        from_vmcore_handler=debug_introspect_from_vmcore_handler,
+        from_vmcore_helper_handler=debug_introspect_from_vmcore_helper_handler,
+    )
 
-    @app.tool(name="debug.introspect.helper")
-    def debug_introspect_helper(
-        run_id: str,
-        target_ref: str,
-        name: str,
-        args: dict[str, Any] | None = None,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        timeout_seconds: int = 30,
-        debug_profile: str | None = None,
-        target_profile: str | None = None,
-        rootfs_profile: str | None = None,
-    ) -> dict[str, Any]:
-        request = DebugIntrospectHelperRequest(
-            run_id=run_id,
-            target_ref=target_ref,
-            name=name,
-            args=args or {},
-            timeout_seconds=timeout_seconds,
-            debug_profile=debug_profile,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
-        )
-        return debug_introspect_helper_handler(
-            request,
-            artifact_root=Path(artifact_root),
-            admission=admission_service,
-            session_registry=durable_registry,
-        ).model_dump(mode="json")
+    register_postmortem_tools(
+        app,
+        default_artifact_root=DEFAULT_ARTIFACT_ROOT,
+        admission=admission_service,
+        session_registry=durable_registry,
+        crash_handler=debug_postmortem_crash_handler,
+        triage_handler=debug_postmortem_triage_handler,
+        check_prereqs_handler=debug_postmortem_check_prereqs_handler,
+        list_dumps_handler=debug_postmortem_list_dumps_handler,
+        fetch_handler=debug_postmortem_fetch_handler,
+    )
 
-    @app.tool(name="debug.introspect.check_prerequisites")
-    def debug_introspect_check_prerequisites(
-        run_id: str,
-        target_ref: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        timeout_seconds: int = 20,
-        debug_profile: str | None = None,
-        target_profile: str | None = None,
-        rootfs_profile: str | None = None,
-    ) -> dict[str, Any]:
-        request = DebugIntrospectCheckPrerequisitesRequest(
-            run_id=run_id,
-            target_ref=target_ref,
-            timeout_seconds=timeout_seconds,
-            debug_profile=debug_profile,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
-        )
-        return debug_introspect_check_prerequisites_handler(
-            request,
-            artifact_root=Path(artifact_root),
-        ).model_dump(mode="json")
+    register_artifact_tools(
+        app,
+        default_artifact_root=DEFAULT_ARTIFACT_ROOT,
+        collect_handler=artifacts_collect_handler,
+    )
 
-    @app.tool(name="debug.introspect.from_vmcore")
-    def debug_introspect_from_vmcore(
-        run_id: str,
-        vmcore_ref: str,
-        vmlinux_ref: str,
-        script: str,
-        modules_ref: str | None = None,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        timeout_seconds: int = 30,
-        allow_write: bool = False,
-        args: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        request = DebugIntrospectFromVmcoreRequest(
-            run_id=run_id,
-            vmcore_ref=vmcore_ref,
-            vmlinux_ref=vmlinux_ref,
-            script=script,
-            modules_ref=modules_ref,
-            timeout_seconds=timeout_seconds,
-            allow_write=allow_write,
-            args=args or {},
-        )
-        return debug_introspect_from_vmcore_handler(
-            request,
-            artifact_root=Path(artifact_root),
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.introspect.from_vmcore_helper")
-    def debug_introspect_from_vmcore_helper(
-        run_id: str,
-        vmcore_ref: str,
-        vmlinux_ref: str,
-        name: str,
-        modules_ref: str | None = None,
-        args: dict[str, Any] | None = None,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        timeout_seconds: int = 30,
-    ) -> dict[str, Any]:
-        request = DebugIntrospectFromVmcoreHelperRequest(
-            run_id=run_id,
-            vmcore_ref=vmcore_ref,
-            vmlinux_ref=vmlinux_ref,
-            name=name,
-            modules_ref=modules_ref,
-            args=args or {},
-            timeout_seconds=timeout_seconds,
-        )
-        return debug_introspect_from_vmcore_helper_handler(
-            request,
-            artifact_root=Path(artifact_root),
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.postmortem.crash")
-    def debug_postmortem_crash(
-        run_id: str,
-        vmcore_ref: str,
-        vmlinux_ref: str,
-        commands: list[str],
-        modules_ref: str | None = None,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        timeout_seconds: int = 60,
-    ) -> dict[str, Any]:
-        request = DebugPostmortemCrashRequest(
-            run_id=run_id,
-            vmcore_ref=vmcore_ref,
-            vmlinux_ref=vmlinux_ref,
-            commands=commands,
-            modules_ref=modules_ref,
-            timeout_seconds=timeout_seconds,
-        )
-        return debug_postmortem_crash_handler(
-            request,
-            artifact_root=Path(artifact_root),
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.postmortem.triage")
-    def debug_postmortem_triage(
-        run_id: str,
-        vmcore_ref: str,
-        vmlinux_ref: str,
-        modules_ref: str | None = None,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        timeout_seconds: int = 60,
-    ) -> dict[str, Any]:
-        request = DebugPostmortemTriageRequest(
-            run_id=run_id,
-            vmcore_ref=vmcore_ref,
-            vmlinux_ref=vmlinux_ref,
-            modules_ref=modules_ref,
-            timeout_seconds=timeout_seconds,
-        )
-        return debug_postmortem_triage_handler(
-            request,
-            artifact_root=Path(artifact_root),
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.postmortem.check_prereqs")
-    def debug_postmortem_check_prereqs(
-        run_id: str,
-        target_ref: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        timeout_seconds: int = 20,
-        debug_profile: str | None = None,
-        target_profile: str | None = None,
-        rootfs_profile: str | None = None,
-    ) -> dict[str, Any]:
-        request = DebugPostmortemCheckPrereqsRequest(
-            run_id=run_id,
-            target_ref=target_ref,
-            timeout_seconds=timeout_seconds,
-            debug_profile=debug_profile,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
-        )
-        return debug_postmortem_check_prereqs_handler(
-            request,
-            artifact_root=Path(artifact_root),
-            admission=admission_service,
-            session_registry=durable_registry,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.postmortem.list_dumps")
-    def debug_postmortem_list_dumps(
-        run_id: str,
-        target_ref: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        dump_dir: str | None = None,
-        timeout_seconds: int = 20,
-        debug_profile: str | None = None,
-        target_profile: str | None = None,
-        rootfs_profile: str | None = None,
-    ) -> dict[str, Any]:
-        request = DebugPostmortemListDumpsRequest(
-            run_id=run_id,
-            target_ref=target_ref,
-            dump_dir=dump_dir,
-            timeout_seconds=timeout_seconds,
-            debug_profile=debug_profile,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
-        )
-        return debug_postmortem_list_dumps_handler(
-            request,
-            artifact_root=Path(artifact_root),
-            admission=admission_service,
-            session_registry=durable_registry,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.postmortem.fetch")
-    def debug_postmortem_fetch(
-        run_id: str,
-        target_ref: str,
-        dump_ref: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        force: bool = False,
-        dump_dir: str | None = None,
-        max_bytes: int | None = None,
-        timeout_seconds: int = 300,
-        debug_profile: str | None = None,
-        target_profile: str | None = None,
-        rootfs_profile: str | None = None,
-    ) -> dict[str, Any]:
-        request = DebugPostmortemFetchRequest(
-            run_id=run_id,
-            target_ref=target_ref,
-            dump_ref=dump_ref,
-            force=force,
-            dump_dir=dump_dir,
-            max_bytes=max_bytes,
-            timeout_seconds=timeout_seconds,
-            debug_profile=debug_profile,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
-        )
-        return debug_postmortem_fetch_handler(
-            request,
-            artifact_root=Path(artifact_root),
-            admission=admission_service,
-            session_registry=durable_registry,
-        ).model_dump(mode="json")
-
-    @app.tool(name="artifacts.collect")
-    def artifacts_collect(
-        run_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        force_recollect: bool = False,
-    ) -> dict[str, Any]:
-        return artifacts_collect_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            force_recollect=force_recollect,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.start_session")
-    def debug_start_session(
-        run_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_profile: str | None = None,
-        new_session: bool = False,
-    ) -> dict[str, Any]:
-        return debug_start_session_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            debug_profile=debug_profile,
-            new_session=new_session,
+    register_debug_tools(
+        app,
+        context=DebugToolContext(
+            default_artifact_root=DEFAULT_ARTIFACT_ROOT,
             transaction=transport_transaction,
             admission=admission_service,
             session_registry=durable_registry,
             session_guard=session_guard,
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
+        ),
+        handlers=DebugToolHandlers(
+            start_session=debug_start_session_handler,
+            read_registers=debug_read_registers_handler,
+            read_symbol=debug_read_symbol_handler,
+            read_memory=debug_read_memory_handler,
+            evaluate=debug_evaluate_handler,
+            load_module_symbols=debug_load_module_symbols_handler,
+            set_breakpoint=debug_set_breakpoint_handler,
+            set_watchpoint=debug_set_watchpoint_handler,
+            clear_breakpoint=debug_clear_breakpoint_handler,
+            clear_watchpoint=debug_clear_watchpoint_handler,
+            list_breakpoints=debug_list_breakpoints_handler,
+            backtrace=debug_backtrace_handler,
+            list_variables=debug_list_variables_handler,
+            continue_execution=debug_continue_handler,
+            step=debug_step_handler,
+            next=debug_next_handler,
+            finish=debug_finish_handler,
+            interrupt=debug_interrupt_handler,
+            end_session=debug_end_session_handler,
+        ),
+    )
 
-    @app.tool(name="debug.read_registers")
-    def debug_read_registers(
-        run_id: str,
-        registers: list[str],
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return debug_read_registers_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            registers=registers,
-            debug_session_id=debug_session_id,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.read_symbol")
-    def debug_read_symbol(
-        run_id: str,
-        symbol: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return debug_read_symbol_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            symbol=symbol,
-            debug_session_id=debug_session_id,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.read_memory")
-    def debug_read_memory(
-        run_id: str,
-        address: int,
-        byte_count: int,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return debug_read_memory_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            address=address,
-            byte_count=byte_count,
-            debug_session_id=debug_session_id,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.evaluate")
-    def debug_evaluate(
-        run_id: str,
-        inspector: str,
-        arguments: dict[str, object] | None = None,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return debug_evaluate_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            inspector=inspector,
-            arguments=arguments,
-            debug_session_id=debug_session_id,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.load_module_symbols")
-    def debug_load_module_symbols(
-        run_id: str,
-        module: str,
-        sections: dict[str, str] | None = None,
-        ko_path: str | None = None,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return debug_load_module_symbols_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            module=module,
-            sections=sections,
-            ko_path=ko_path,
-            debug_session_id=debug_session_id,
+    register_transport_tools(
+        app,
+        context=TransportToolContext(
+            default_artifact_root=DEFAULT_ARTIFACT_ROOT,
             transaction=transport_transaction,
             admission=admission_service,
             session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
+        ),
+        handlers=TransportToolHandlers(
+            open=transport_open_handler,
+            close=transport_close_handler,
+            inject_break=transport_inject_break_handler,
+        ),
+    )
 
-    @app.tool(name="debug.set_breakpoint")
-    def debug_set_breakpoint(
-        run_id: str,
-        symbol: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return debug_set_breakpoint_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            symbol=symbol,
-            debug_session_id=debug_session_id,
-            admission=admission_service,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.set_watchpoint")
-    def debug_set_watchpoint(
-        run_id: str,
-        symbol: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return debug_set_watchpoint_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            symbol=symbol,
-            debug_session_id=debug_session_id,
-            admission=admission_service,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.clear_breakpoint")
-    def debug_clear_breakpoint(
-        run_id: str,
-        breakpoint_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return debug_clear_breakpoint_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            breakpoint_id=breakpoint_id,
-            debug_session_id=debug_session_id,
-            admission=admission_service,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.clear_watchpoint")
-    def debug_clear_watchpoint(
-        run_id: str,
-        breakpoint_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return debug_clear_watchpoint_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            breakpoint_id=breakpoint_id,
-            debug_session_id=debug_session_id,
-            admission=admission_service,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.list_breakpoints")
-    def debug_list_breakpoints(
-        run_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return debug_list_breakpoints_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            debug_session_id=debug_session_id,
-            admission=admission_service,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.backtrace")
-    def debug_backtrace(
-        run_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return debug_backtrace_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            debug_session_id=debug_session_id,
-            admission=admission_service,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.list_variables")
-    def debug_list_variables(
-        run_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return debug_list_variables_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            debug_session_id=debug_session_id,
-            admission=admission_service,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.continue")
-    def debug_continue(
-        run_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-        timeout_seconds: int | None = None,
-    ) -> dict[str, Any]:
-        return debug_continue_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            debug_session_id=debug_session_id,
-            timeout_seconds=timeout_seconds,
-            admission=admission_service,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.step")
-    def debug_step(
-        run_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-        timeout_seconds: int | None = None,
-    ) -> dict[str, Any]:
-        return debug_step_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            debug_session_id=debug_session_id,
-            timeout_seconds=timeout_seconds,
-            admission=admission_service,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.next")
-    def debug_next(
-        run_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-        timeout_seconds: int | None = None,
-    ) -> dict[str, Any]:
-        return debug_next_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            debug_session_id=debug_session_id,
-            timeout_seconds=timeout_seconds,
-            admission=admission_service,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.finish")
-    def debug_finish(
-        run_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-        timeout_seconds: int | None = None,
-    ) -> dict[str, Any]:
-        return debug_finish_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            debug_session_id=debug_session_id,
-            timeout_seconds=timeout_seconds,
-            admission=admission_service,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.interrupt")
-    def debug_interrupt(
-        run_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-        timeout_seconds: int | None = None,
-    ) -> dict[str, Any]:
-        return debug_interrupt_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            debug_session_id=debug_session_id,
-            timeout_seconds=timeout_seconds,
-            admission=admission_service,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="debug.end_session")
-    def debug_end_session(
-        run_id: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        debug_session_id: str | None = None,
-    ) -> dict[str, Any]:
-        return debug_end_session_handler(
-            artifact_root=Path(artifact_root),
-            run_id=run_id,
-            debug_session_id=debug_session_id,
-            transaction=transport_transaction,
-            admission=admission_service,
-            session_registry=durable_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
-
-    @app.tool(name="transport.open")
-    def transport_open(run_id: str, recovery: bool = False) -> dict[str, Any]:
-        return transport_open_handler(
-            run_id=run_id,
-            recovery=recovery,
-            transaction=transport_transaction,
-            admission=admission_service,
-            session_registry=durable_registry,
-        ).model_dump(mode="json")
-
-    @app.tool(name="transport.close")
-    def transport_close(run_id: str, session_id: str) -> dict[str, Any]:
-        return transport_close_handler(
-            run_id=run_id,
-            session_id=session_id,
-            transaction=transport_transaction,
-            session_registry=durable_registry,
-        ).model_dump(mode="json")
-
-    @app.tool(name="transport.inject_break")
-    def transport_inject_break(
-        run_id: str,
-        session_id: str,
-        acknowledged_permissions: list[str] | None = None,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-    ) -> dict[str, Any]:
-        # The real break_mechanism args (proxy/proxy_handle/ssh_runner/ssh_argv_prefix) belong to the
-        # gated agent-proxy/PTY harness (a C3 integration concern); the only local-qemu break is
-        # gdbstub-native, which needs no injection. So the wrapper keeps the default mechanism: B5's
-        # handler fails closed to UNKNOWN+failure on any mechanism error, so a missing-harness call is
-        # safe. Full break wiring is deferred to C3.
-        return transport_inject_break_handler(
-            run_id=run_id,
-            session_id=session_id,
-            acknowledged_permissions=acknowledged_permissions,
-            artifact_root=Path(artifact_root),
-            transaction=transport_transaction,
-            admission=admission_service,
-            session_registry=durable_registry,
-        ).model_dump(mode="json")
-
-    @app.tool(name="workflow.build_boot_test")
-    def workflow_build_boot_test(
-        source_path: str,
-        build_profile: str,
-        target_profile: str,
-        rootfs_profile: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        run_id: str | None = None,
-        test_suite: str | None = None,
-        commands: list[list[str]] | None = None,
-        force_rebuild: bool = False,
-        force_reboot: bool = False,
-        force_rerun_tests: bool = False,
-        force_recollect: bool = False,
-    ) -> dict[str, Any]:
-        return workflow_build_boot_test_handler(
-            artifact_root=Path(artifact_root),
-            source_path=source_path,
-            build_profile=build_profile,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
-            run_id=run_id,
-            test_suite=test_suite,
-            commands=commands,
-            force_rebuild=force_rebuild,
-            force_reboot=force_reboot,
-            force_rerun_tests=force_rerun_tests,
-            force_recollect=force_recollect,
-            admission=admission_service,
-            session_registry=durable_registry,
-        ).model_dump(mode="json")
-
-    @app.tool(name="workflow.build_boot_debug")
-    def workflow_build_boot_debug(
-        source_path: str,
-        build_profile: str,
-        target_profile: str,
-        rootfs_profile: str,
-        artifact_root: str = str(DEFAULT_ARTIFACT_ROOT),
-        run_id: str | None = None,
-        debug_profile: str | None = None,
-        force_rebuild: bool = False,
-        force_reboot: bool = False,
-        new_session: bool = False,
-    ) -> dict[str, Any]:
-        return workflow_build_boot_debug_handler(
-            artifact_root=Path(artifact_root),
-            source_path=source_path,
-            build_profile=build_profile,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
-            run_id=run_id,
-            debug_profile=debug_profile,
-            force_rebuild=force_rebuild,
-            force_reboot=force_reboot,
-            new_session=new_session,
-            admission=admission_service,
-            session_registry=durable_registry,
-            transaction=transport_transaction,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ).model_dump(mode="json")
+    register_workflow_tools(
+        app,
+        default_artifact_root=DEFAULT_ARTIFACT_ROOT,
+        admission=admission_service,
+        session_registry=durable_registry,
+        transaction=transport_transaction,
+        session_guard=session_guard,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
+        build_boot_test_handler=workflow_build_boot_test_handler,
+        build_boot_debug_handler=workflow_build_boot_debug_handler,
+    )
 
     return app
 

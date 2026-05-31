@@ -15,17 +15,16 @@ from conftest import FakeMiEngine, FakeTestProvider, kernel_provenance_details, 
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile, RootfsProfile
-from kdive.coordination.admission import AdmissionService
+from kdive.coordination.admission import AdmissionService, publish_ready_snapshot
 from kdive.coordination.registry import RecoveryTombstone, SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.providers.local.gdb_mi import GdbMiSessionRegistry
 from kdive.seams.target import (
     BreakHint,
     ConsoleKind,
     PlatformMetadata,
     TargetKey,
-    publish_ready_snapshot,
 )
 from kdive.server import (
     debug_end_session_handler,

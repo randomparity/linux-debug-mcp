@@ -12,11 +12,12 @@ from conftest import (
     target_profile,
 )
 
+from kdive import server
 from kdive.artifacts.store import ArtifactStore
-from kdive.config import BootOverrides, RootfsOverrides, RootfsProfile, TargetProfile
+from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, BootOverrides, RootfsOverrides, RootfsProfile, TargetProfile
 from kdive.coordination.admission import AdmissionService, SnapshotStore
-from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
-from kdive.providers.libvirt_qemu import BootExecutionResult, ProviderBootError
+from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
+from kdive.providers.local.libvirt_qemu import BootExecutionResult, ProviderBootError
 from kdive.seams.target import TargetKey
 from kdive.server import target_boot_handler
 
@@ -30,6 +31,7 @@ def boot(
     target: TargetProfile | None = None,
     **kwargs: object,
 ):
+    kwargs.setdefault("acknowledged_permissions", TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"])
     return target_boot_handler(
         artifact_root=artifact_root,
         run_id=run_id,
@@ -62,6 +64,41 @@ def test_target_boot_requires_succeeded_build(tmp_path: Path) -> None:
     assert response.error is not None
     assert response.error.category == "configuration_error"
     assert "succeeded build" in response.error.message
+
+
+def test_target_boot_requires_destructive_permission_ack_before_boot(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    record_build(artifact_root)
+    provider = FakeBootProvider()
+
+    response = boot(artifact_root, tmp_path, provider=provider, acknowledged_permissions=[])
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert response.error.details["code"] == "permission_required"
+    assert response.error.details["required_permissions"] == TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"]
+    assert provider.plans == []
+
+
+def test_resolve_boot_inputs_returns_internal_failure_not_tool_response(tmp_path: Path) -> None:
+    artifact_root = create_run(tmp_path)
+    manifest = ArtifactStore(artifact_root, create_root=False).load_manifest("run-abc123")
+
+    result = server._resolve_boot_inputs(
+        manifest=manifest,
+        run_id="run-abc123",
+        target_profile=None,
+        rootfs_profile=None,
+        target_profiles={},
+        rootfs_profiles={},
+        default_libvirt_uri=None,
+        boot_overrides=None,
+        sensitive_paths=None,
+    )
+
+    assert not isinstance(result, ToolResponse)
+    assert result.message == "unknown target profile: local-qemu"
 
 
 def test_target_boot_rejects_succeeded_build_without_kernel_image(tmp_path: Path) -> None:
@@ -102,6 +139,7 @@ def test_target_boot_public_defaults_resolve_manifest_profile_names(tmp_path: Pa
         run_id="run-abc123",
         provider=provider,
         rootfs_profiles={"minimal": rootfs_profile(tmp_path)},
+        acknowledged_permissions=TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"],
     )
 
     assert response.ok is True
@@ -130,6 +168,7 @@ def test_target_boot_records_debug_endpoint_in_manifest(tmp_path: Path) -> None:
             )
         },
         rootfs_profiles={"minimal": rootfs_profile(tmp_path)},
+        acknowledged_permissions=TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"],
     )
 
     assert response.ok is True
@@ -575,6 +614,7 @@ def _booted_run_with_rootfs(tmp_path: Path, rootfs: RootfsProfile):
         provider=FakeBootProvider(),
         target_profiles={"local-qemu": target_profile()},
         rootfs_profiles={"minimal": rootfs},
+        acknowledged_permissions=TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"],
     ), artifact_root
 
 

@@ -14,12 +14,12 @@ from kdive.domain import (
     RunRequest,
     StepStatus,
 )
-from kdive.providers.local_ssh_tests import SshCommandResult
+from kdive.providers.local.local_ssh_tests import SshCommandResult
 from kdive.server import (
     debug_introspect_from_vmcore_handler,
     debug_introspect_from_vmcore_helper_handler,
 )
-from kdive.symbols import BuildIdReadError
+from kdive.symbols.build_id import BuildIdReadError
 
 VALID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
@@ -353,7 +353,7 @@ def test_operations_in_allowlist() -> None:
 
 
 def test_capability_advertises_vmcore_ops_concurrent_safe() -> None:
-    from kdive.providers.local_drgn_introspect import local_drgn_introspect_capability
+    from kdive.providers.local.local_drgn_introspect import local_drgn_introspect_capability
 
     cap = local_drgn_introspect_capability()
     assert "debug.introspect.from_vmcore" in cap.operations

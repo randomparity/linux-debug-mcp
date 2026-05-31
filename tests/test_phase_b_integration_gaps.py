@@ -42,16 +42,15 @@ from conftest import (
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile
-from kdive.coordination.admission import AdmissionService
+from kdive.coordination.admission import AdmissionService, publish_ready_snapshot
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from kdive.providers.gdb_mi import GdbMiSessionRegistry
-from kdive.providers.local_ssh_tests import TestExecutionResult
+from kdive.providers.local.gdb_mi import GdbMiSessionRegistry
+from kdive.providers.local.local_ssh_tests import TestExecutionResult
 from kdive.seams.lifecycle import LifecycleEvent, LifecycleKind
 from kdive.seams.target import (
     TargetKey,
-    publish_ready_snapshot,
 )
 from kdive.server import (
     _halt_debug_transport,

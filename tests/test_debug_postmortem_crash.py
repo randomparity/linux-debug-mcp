@@ -6,11 +6,11 @@ import pytest
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.domain import (
-    DebugPostmortemCrashRequest,
     ErrorCategory,
     RunRequest,
 )
-from kdive.providers.local_ssh_tests import SshCommandResult
+from kdive.postmortem.models import DebugPostmortemCrashRequest
+from kdive.providers.local.local_ssh_tests import SshCommandResult
 from kdive.server import debug_postmortem_crash_handler
 
 GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
@@ -143,11 +143,16 @@ def _raising_reader(exc: Exception):
     ],
 )
 def test_vmcore_reader_failures_fail_loud(tmp_path, exc_name, expected_code) -> None:
-    import kdive.symbols as symbols
+    from kdive.symbols.vmcore_build_id import VmcoreBuildIdAbsent, VmcoreBuildIdError, VmcoreFormatUnsupported
 
     _run(tmp_path)
     runner = _FakeRunner(outputs={})
-    exc = getattr(symbols, exc_name)("crafted")
+    exceptions = {
+        "VmcoreFormatUnsupported": VmcoreFormatUnsupported,
+        "VmcoreBuildIdAbsent": VmcoreBuildIdAbsent,
+        "VmcoreBuildIdError": VmcoreBuildIdError,
+    }
+    exc = exceptions[exc_name]("crafted")
     resp = debug_postmortem_crash_handler(
         DebugPostmortemCrashRequest(
             run_id="r1",
@@ -166,7 +171,7 @@ def test_vmcore_reader_failures_fail_loud(tmp_path, exc_name, expected_code) -> 
 
 
 def test_vmlinux_build_id_unreadable_fails_loud(tmp_path) -> None:
-    from kdive.symbols import BuildIdReadError
+    from kdive.symbols.build_id import BuildIdReadError
 
     _run(tmp_path)
     runner = _FakeRunner(outputs={})
@@ -353,8 +358,8 @@ def test_argv_carries_prlimit_disk_bound(tmp_path) -> None:
 
 
 def test_modules_path_unsafe_rejected_no_run(tmp_path, monkeypatch) -> None:
-    import kdive.server as server
-    from kdive.symbols import ResolvedSymbols
+    import kdive.postmortem.crash_handler as crash_handler_module
+    from kdive.symbols.resolve import ResolvedSymbols
 
     store = _run(tmp_path)
     rd = store.run_dir("r1")
@@ -367,7 +372,7 @@ def test_modules_path_unsafe_rejected_no_run(tmp_path, monkeypatch) -> None:
             warnings=[],
         )
 
-    monkeypatch.setattr(server, "resolve_symbols", _fake_resolve)
+    monkeypatch.setattr(crash_handler_module, "resolve_symbols", _fake_resolve)
     runner = _FakeRunner(outputs={})
     resp = debug_postmortem_crash_handler(
         DebugPostmortemCrashRequest(
@@ -388,8 +393,8 @@ def test_modules_path_unsafe_rejected_no_run(tmp_path, monkeypatch) -> None:
 
 
 def test_module_symbols_status_reported(tmp_path, monkeypatch) -> None:
-    import kdive.server as server
-    from kdive.symbols import ResolvedSymbols
+    import kdive.postmortem.crash_handler as crash_handler_module
+    from kdive.symbols.resolve import ResolvedSymbols
 
     store = _run(tmp_path)
     rd = store.run_dir("r1")
@@ -402,7 +407,7 @@ def test_module_symbols_status_reported(tmp_path, monkeypatch) -> None:
             warnings=[],
         )
 
-    monkeypatch.setattr(server, "resolve_symbols", _fake_resolve)
+    monkeypatch.setattr(crash_handler_module, "resolve_symbols", _fake_resolve)
 
     class _ModRunner(_FakeRunner):
         def run(self, argv, *, stdin=None, **kwargs):  # type: ignore[override]
@@ -433,14 +438,14 @@ def test_module_symbols_status_reported(tmp_path, monkeypatch) -> None:
 
 
 def test_module_symbols_load_failed(tmp_path, monkeypatch) -> None:
-    import kdive.server as server
-    from kdive.symbols import ResolvedSymbols
+    import kdive.postmortem.crash_handler as crash_handler_module
+    from kdive.symbols.resolve import ResolvedSymbols
 
     store = _run(tmp_path)
     rd = store.run_dir("r1")
     (rd / "build" / "mods").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(
-        server,
+        crash_handler_module,
         "resolve_symbols",
         lambda _prov, *, run_dir: ResolvedSymbols(
             vmlinux_path=run_dir / "build" / "vmlinux",

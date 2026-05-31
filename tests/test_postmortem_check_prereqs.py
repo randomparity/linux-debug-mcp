@@ -10,13 +10,13 @@ from pydantic import ValidationError
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import RootfsProfile
 from kdive.domain import (
-    DebugPostmortemCheckPrereqsRequest,
     ErrorCategory,
     RunRequest,
     StepResult,
     StepStatus,
 )
-from kdive.providers.local_ssh_tests import SshCommandResult
+from kdive.postmortem.models import DebugPostmortemCheckPrereqsRequest
+from kdive.providers.local.local_ssh_tests import SshCommandResult
 from kdive.server import (
     _reject_if_target_halted,
     debug_postmortem_check_prereqs_handler,

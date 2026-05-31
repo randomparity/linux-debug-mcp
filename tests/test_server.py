@@ -7,15 +7,16 @@ from kdive.artifacts.store import ArtifactStore
 from kdive.config import BootOverrides, BuildOverrides, RootfsProfile, TargetProfile
 from kdive.domain import ArtifactRef, StepResult, StepStatus
 from kdive.prereqs.checks import PortProbeResult
+from kdive.providers.handlers import list_providers_handler
 from kdive.server import (
     DEFAULT_TEST_SUITES,
     create_app,
     create_run_handler,
     get_manifest_handler,
-    list_providers_handler,
     not_implemented_handler,
     prerequisites_handler,
 )
+from kdive.transport import handlers as transport_handlers
 
 
 def _get_tool_fn(app, name):
@@ -39,6 +40,11 @@ def create_test_run(tmp_path: Path, run_id: str = "run-abc123") -> tuple[Path, P
 
 def tool_names() -> set[str]:
     return set(create_app()._tool_manager._tools)
+
+
+def test_server_reuses_transport_debug_helpers() -> None:
+    assert server._require_snapshot is transport_handlers._require_snapshot
+    assert server._halt_debug_transport is transport_handlers._halt_debug_transport
 
 
 def test_create_run_handler_creates_manifest(tmp_path: Path) -> None:
@@ -191,6 +197,21 @@ def test_prerequisites_handler_returns_checks(tmp_path: Path) -> None:
     assert any(check["check_id"] == "python.version" for check in response.data["checks"])
 
 
+def test_prerequisites_handler_lives_outside_server_catch_all() -> None:
+    assert prerequisites_handler.__module__ == "kdive.handlers.prerequisites"
+
+
+def test_debug_operation_handlers_live_outside_server_catch_all() -> None:
+    assert server.debug_read_registers_handler.__module__ == "kdive.debug.handlers"
+    assert server.debug_set_breakpoint_handler.__module__ == "kdive.debug.handlers"
+    assert server.debug_continue_handler.__module__ == "kdive.debug.handlers"
+
+
+def test_live_introspect_handlers_live_outside_server_catch_all() -> None:
+    assert server.debug_introspect_run_handler.__module__ == "kdive.introspect.handlers"
+    assert server.debug_introspect_helper_handler.__module__ == "kdive.introspect.handlers"
+
+
 def test_prerequisites_handler_readiness_skipped_without_profiles(tmp_path: Path) -> None:
     response = prerequisites_handler(artifact_root=tmp_path / "runs", source_path=None)
     by_id = {c["check_id"]: c for c in response.data["checks"]}
@@ -304,8 +325,10 @@ def test_create_app_registers_sprint_4_tools_as_real_handlers() -> None:
     assert "debug.read_memory" in tool_names
     assert "debug.end_session" in tool_names
     assert tools["workflow.build_boot_debug"].fn.__name__ == "workflow_build_boot_debug"
-    assert "debug_profile" in tools["workflow.build_boot_debug"].parameters["properties"]
-    assert "new_session" in tools["workflow.build_boot_debug"].parameters["properties"]
+    assert tools["workflow.build_boot_debug"].fn.__module__ == "kdive.workflow.tools"
+    workflow_debug_properties = tools["workflow.build_boot_debug"].parameters["properties"]
+    assert {"profiles", "context", "options"}.issubset(workflow_debug_properties)
+    assert {"debug_profile", "new_session", "force_rebuild", "force_reboot"}.isdisjoint(workflow_debug_properties)
     assert tools["debug.start_session"].fn.__name__ == "debug_start_session"
     assert "debug_profile" in tools["debug.start_session"].parameters["properties"]
     assert "new_session" in tools["debug.start_session"].parameters["properties"]
@@ -343,7 +366,8 @@ def test_create_app_registers_future_provider_tools() -> None:
     for tool_name, fields in expected_fields.items():
         properties = tools[tool_name].parameters["properties"]
         assert fields.issubset(properties)
-        assert {"provider_name", "timeout_seconds", "operation_label"}.issubset(properties)
+        assert {"provider_context", "execution_options"}.issubset(properties)
+        assert {"provider_name", "timeout_seconds", "operation_label"}.isdisjoint(properties)
 
 
 def test_target_run_tests_tool_is_registered_with_full_arguments() -> None:
@@ -378,14 +402,22 @@ def test_artifacts_collect_tool_is_registered_with_force_recollect() -> None:
     assert tool.fn.__name__ == "artifacts_collect"
 
 
-def test_workflow_build_boot_test_tool_is_registered_with_force_flags() -> None:
+def test_create_app_registers_artifact_tools_through_package_module() -> None:
+    tool = create_app()._tool_manager._tools["artifacts.collect"]
+
+    assert tool.fn.__module__ == "kdive.tools.artifacts"
+
+
+def test_workflow_build_boot_test_tool_uses_grouped_options() -> None:
     app = create_app()
     tool = app._tool_manager._tools["workflow.build_boot_test"]
 
     assert "workflow.build_boot_test" in tool_names()
-    assert "force_rerun_tests" in tool.parameters["properties"]
-    assert "force_recollect" in tool.parameters["properties"]
+    properties = tool.parameters["properties"]
+    assert {"profiles", "context", "options"}.issubset(properties)
+    assert {"force_rerun_tests", "force_recollect", "force_rebuild", "force_reboot"}.isdisjoint(properties)
     assert tool.fn.__name__ == "workflow_build_boot_test"
+    assert tool.fn.__module__ == "kdive.workflow.tools"
 
 
 def test_create_run_freezes_merged_profiles(tmp_path):
@@ -543,9 +575,18 @@ def test_overrides_from_tool_args_none_when_no_build_overrides():
 
 
 def test_create_run_tool_accepts_overrides_and_rejects_bad_args(tmp_path: Path):
+    import inspect
+
     src = make_source_tree(tmp_path)
     app = server.create_app()
     tool_fn = _get_tool_fn(app, "kernel.create_run")
+    params = inspect.signature(tool_fn).parameters
+
+    assert "build_overrides" in params
+    assert "boot_overrides" in params
+    assert "profile_specs" in params
+    assert "kernel_args" not in params
+    assert "make_variables" not in params
 
     ok = tool_fn(
         source_path=str(src),
@@ -553,9 +594,8 @@ def test_create_run_tool_accepts_overrides_and_rejects_bad_args(tmp_path: Path):
         target_profile="local-qemu",
         rootfs_profile="minimal",
         artifact_root=str(tmp_path / "runs"),
-        kernel_args=["dhash_entries=1"],
-        make_variables={"CC": "clang"},
-        config_lines=["CONFIG_DEBUG_INFO=y"],
+        boot_overrides={"kernel_args": ["dhash_entries=1"]},
+        build_overrides={"make_variables": {"CC": "clang"}, "config_lines": ["CONFIG_DEBUG_INFO=y"]},
     )
     assert ok["ok"] is True
     run_id = ok["run_id"]
@@ -568,18 +608,42 @@ def test_create_run_tool_accepts_overrides_and_rejects_bad_args(tmp_path: Path):
         target_profile="local-qemu",
         rootfs_profile="minimal",
         artifact_root=str(tmp_path / "runs2"),
-        kernel_args=["bad;arg"],
+        boot_overrides={"kernel_args": ["bad;arg"]},
     )
     assert bad["ok"] is False
     assert bad["error"]["category"] == "configuration_error"
+
+
+def test_target_boot_tool_accepts_grouped_boot_overrides() -> None:
+    import inspect
+
+    tool_fn = _get_tool_fn(server.create_app(), "target.boot")
+    params = inspect.signature(tool_fn).parameters
+
+    assert "boot_overrides" in params
+    assert "acknowledged_permissions" in params
+    assert "kernel_args" not in params
+    assert "rootfs_source" not in params
+    assert "rootfs_overrides" not in params
 
 
 def test_introspect_tool_is_registered() -> None:
     assert "debug.introspect.run" in tool_names()
     tool = create_app()._tool_manager._tools["debug.introspect.run"]
     assert tool.fn.__name__ == "debug_introspect_run"
+    assert tool.fn.__module__ == "kdive.introspect.tools"
     assert "script" in tool.parameters["properties"]
     assert "timeout_seconds" in tool.parameters["properties"]
+
+    app = create_app()
+    for tool_name in (
+        "debug.introspect.run",
+        "debug.introspect.helper",
+        "debug.introspect.check_prerequisites",
+        "debug.introspect.from_vmcore",
+        "debug.introspect.from_vmcore_helper",
+    ):
+        assert app._tool_manager._tools[tool_name].fn.__module__ == "kdive.introspect.tools"
 
 
 def test_default_minimal_rootfs_is_builder_copy_on_write() -> None:

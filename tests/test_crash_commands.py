@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from kdive.postmortem.crash_commands import (
-    validate_crash_command,
+    crash_command_rejection_reason,
     validate_modules_path,
 )
 
@@ -12,7 +12,7 @@ ALLOW = {"bt", "ps", "log", "kmem", "sys", "mod"}
 
 @pytest.mark.parametrize("cmd", ["bt", "ps -A", "kmem -i", "sys", "log"])
 def test_allowed_commands_pass(cmd: str) -> None:
-    assert validate_crash_command(cmd, ALLOW) is None
+    assert crash_command_rejection_reason(cmd, ALLOW) is None
 
 
 @pytest.mark.parametrize(
@@ -29,20 +29,20 @@ def test_allowed_commands_pass(cmd: str) -> None:
     ],
 )
 def test_shell_reaching_commands_rejected(cmd: str) -> None:
-    assert validate_crash_command(cmd, ALLOW) is not None
+    assert crash_command_rejection_reason(cmd, ALLOW) is not None
 
 
 def test_embedded_newline_rejected() -> None:
-    assert validate_crash_command("bt\nps", ALLOW) is not None
+    assert crash_command_rejection_reason("bt\nps", ALLOW) is not None
 
 
 def test_non_allowlisted_verb_rejected() -> None:
-    reason = validate_crash_command("gdb foo", ALLOW)
+    reason = crash_command_rejection_reason("gdb foo", ALLOW)
     assert reason is not None and "allowlist" in reason
 
 
 def test_empty_command_rejected() -> None:
-    assert validate_crash_command("   ", ALLOW) is not None
+    assert crash_command_rejection_reason("   ", ALLOW) is not None
 
 
 @pytest.mark.parametrize("path", ["/run/r1/target/mods", "build/mods_v2.1", "a/b-c/d.e"])

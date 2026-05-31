@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kdive.domain import DebugPostmortemTriageReport
+from kdive.postmortem.models import DebugPostmortemTriageReport
 from kdive.postmortem.triage import (
     CrashOutcome,
     DrgnOutcome,
