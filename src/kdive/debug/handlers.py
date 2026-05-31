@@ -167,27 +167,6 @@ def debug_tool_operation_response(
     )
 
 
-def _runtime(
-    *,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    admission: AdmissionService | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-) -> DebugRuntime:
-    return debug_runtime_from_handler_args(
-        debug_profiles=debug_profiles,
-        admission=admission,
-        transaction=transaction,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-    )
-
-
 def debug_read_registers_handler(
     *,
     artifact_root: Path,
@@ -201,20 +180,19 @@ def debug_read_registers_handler(
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
-    return debug_tool_operation_response(
+    return _debug_operation_handler(
         operation_name="debug.read_registers",
         values={"registers": registers},
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        runtime=_runtime(
-            debug_profiles=debug_profiles,
-            transaction=transaction,
-            session_registry=session_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ),
+        debug_profiles=debug_profiles,
+        admission=None,
+        transaction=transaction,
+        session_registry=session_registry,
+        session_guard=session_guard,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -231,20 +209,19 @@ def debug_read_symbol_handler(
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
-    return debug_tool_operation_response(
+    return _debug_operation_handler(
         operation_name="debug.read_symbol",
         values={"symbol": symbol},
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        runtime=_runtime(
-            debug_profiles=debug_profiles,
-            transaction=transaction,
-            session_registry=session_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ),
+        debug_profiles=debug_profiles,
+        admission=None,
+        transaction=transaction,
+        session_registry=session_registry,
+        session_guard=session_guard,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -262,20 +239,19 @@ def debug_read_memory_handler(
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
-    return debug_tool_operation_response(
+    return _debug_operation_handler(
         operation_name="debug.read_memory",
         values={"address": address, "byte_count": byte_count},
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        runtime=_runtime(
-            debug_profiles=debug_profiles,
-            transaction=transaction,
-            session_registry=session_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ),
+        debug_profiles=debug_profiles,
+        admission=None,
+        transaction=transaction,
+        session_registry=session_registry,
+        session_guard=session_guard,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -293,20 +269,19 @@ def debug_evaluate_handler(
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
-    return debug_tool_operation_response(
+    return _debug_operation_handler(
         operation_name="debug.evaluate",
         values={"inspector": inspector, "arguments": arguments or {}},
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        runtime=_runtime(
-            debug_profiles=debug_profiles,
-            transaction=transaction,
-            session_registry=session_registry,
-            session_guard=session_guard,
-            gdb_mi_engine=gdb_mi_engine,
-            gdb_mi_sessions=gdb_mi_sessions,
-        ),
+        debug_profiles=debug_profiles,
+        admission=None,
+        transaction=transaction,
+        session_registry=session_registry,
+        session_guard=session_guard,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
     )
 
 
@@ -331,7 +306,7 @@ def _debug_operation_handler(
         artifact_root=artifact_root,
         run_id=run_id,
         debug_session_id=debug_session_id,
-        runtime=_runtime(
+        runtime=debug_runtime_from_handler_args(
             debug_profiles=debug_profiles,
             admission=admission,
             transaction=transaction,
