@@ -212,6 +212,30 @@ def test_inject_break_writes_halted_before_break(tmp_path):
     assert reg.read_record(KEY).execution_state is ExecutionState.HALTED
 
 
+def test_inject_break_default_uses_transaction_session_break(monkeypatch, tmp_path):
+    response, txn, admission, reg = _open(tmp_path)
+    session_id = response.data["session_id"]
+    calls: list[tuple[str, str]] = []
+
+    def inject_break_for_session(session_id_arg: str, requested_method: str) -> None:
+        calls.append((session_id_arg, requested_method))
+
+    monkeypatch.setattr(txn, "inject_break_for_session", inject_break_for_session)
+
+    result = transport_inject_break_handler(
+        run_id=RUN_ID,
+        session_id=session_id,
+        acknowledged_permissions=INJECT_PERMS,
+        transaction=txn,
+        admission=admission,
+        session_registry=reg,
+        probe_halted=lambda _session: True,
+    )
+
+    assert result.ok is True
+    assert calls == [(session_id, "auto")]
+
+
 def test_inject_break_timeout_records_unknown_not_executing(tmp_path):
     response, txn, admission, reg = _open(tmp_path)
     session_id = response.data["session_id"]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import ALLOWED_DEBUG_OPERATIONS, DebugProfile, missing_destructive_permissions
@@ -17,8 +17,8 @@ from kdive.providers.debug import ProviderDebugError
 from kdive.safety.redaction import Redactor
 from kdive.seams.guard import GuardConflict
 from kdive.seams.target import TargetKey
-from kdive.transport.base import ExecutionState, LineRole, OpenRequest, TransportSession
-from kdive.transport.break_inject import InjectBreakError, inject_break
+from kdive.transport.base import BreakPlan, ExecutionState, LineRole, OpenRequest, TransportSession
+from kdive.transport.break_inject import BreakRequestMethod, InjectBreakError
 
 
 def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any] | None = None) -> ToolResponse:
@@ -217,6 +217,10 @@ class _SessionRunMismatch(ValueError):
     pass
 
 
+class BreakMechanism(Protocol):
+    def __call__(self, *, method: BreakRequestMethod, break_plan: BreakPlan | None) -> None: ...
+
+
 def transport_close_handler(
     *,
     run_id: str,
@@ -276,7 +280,7 @@ def transport_inject_break_handler(
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
     debug_profiles: dict[str, DebugProfile] | None = None,
-    break_mechanism: Callable[..., None] = inject_break,
+    break_mechanism: BreakMechanism | None = None,
     probe_halted: Callable[[TransportSession], bool] = probe_rsp_halted,
 ) -> ToolResponse:
     if transaction is None or admission is None or session_registry is None:
@@ -325,7 +329,10 @@ def transport_inject_break_handler(
     _halt_debug_transport(session=record, admission=admission, session_registry=session_registry)
     redactor = Redactor()
     try:
-        break_mechanism(method="auto", break_plan=record.break_plan)
+        if break_mechanism is None:
+            transaction.inject_break_for_session(session_id, "auto")
+        else:
+            break_mechanism(method="auto", break_plan=record.break_plan)
     except InjectBreakError as exc:
         session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
         exc_details = dict(getattr(exc, "details", {}) or {})
