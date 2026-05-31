@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-import subprocess
+import subprocess  # nosec B404
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Protocol, runtime_checkable
@@ -98,7 +98,9 @@ class ExternalSecretsBackend(SecretsBackend):
 
     @staticmethod
     def _default_runner(argv: list[str], timeout: float) -> tuple[int, str, str]:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+        proc = subprocess.run(  # nosec B603
+            argv, capture_output=True, text=True, timeout=timeout, check=False
+        )
         return proc.returncode, proc.stdout, proc.stderr
 
     @property

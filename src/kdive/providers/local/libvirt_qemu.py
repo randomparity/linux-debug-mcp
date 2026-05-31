@@ -4,14 +4,17 @@ import ipaddress
 import json
 import logging
 import shutil
-import subprocess
+import subprocess  # nosec B404
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
-from xml.etree import ElementTree
+from xml.etree import ElementTree  # nosec B405
+
+from defusedxml.common import DefusedXmlException
+from defusedxml.ElementTree import fromstring as safe_xml_fromstring
 
 from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, RootfsProfile, TargetProfile
 from kdive.domain import (
@@ -203,7 +206,7 @@ class SubprocessLibvirtRunner:
 
     def run(self, argv: list[str], *, timeout: int, log_path: Path | None = None) -> CommandResult:
         try:
-            completed = subprocess.run(
+            completed = subprocess.run(  # nosec B603
                 argv,
                 check=False,
                 capture_output=True,
@@ -827,8 +830,8 @@ class LibvirtQemuProvider:
 
     def validate_existing_domain_ownership(self, plan: BootPlan, domain_xml: str) -> None:
         try:
-            root = ElementTree.fromstring(domain_xml)
-        except ElementTree.ParseError as exc:
+            root = safe_xml_fromstring(domain_xml)
+        except (ElementTree.ParseError, DefusedXmlException) as exc:
             raise self._configuration_error(f"failed to parse existing domain XML: {exc}") from exc
 
         metadata_path = f"metadata/{self._metadata_tag('kdive')}"

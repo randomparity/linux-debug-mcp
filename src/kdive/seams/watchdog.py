@@ -140,7 +140,8 @@ class WatchdogPolicy:
             if is_owner:
                 capture = _CapturedState()
                 self._captures[ctx.session_id] = capture  # claim before releasing the lock
-        assert capture is not None
+        if capture is None:
+            raise RuntimeError("watchdog capture was not claimed")
         return self._first_relax(capture) if is_owner else self._reissue_relax(capture)
 
     def _first_relax(self, capture: _CapturedState) -> RelaxReport:

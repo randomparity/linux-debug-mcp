@@ -5,7 +5,7 @@ import os
 import re
 import shutil
 import socket
-import subprocess
+import subprocess  # nosec B404
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -35,7 +35,7 @@ class SubprocessPrerequisiteRunner:
         # errors="replace": tool output (e.g. gdb's banner) is not guaranteed clean UTF-8, and a
         # strict decode would raise UnicodeDecodeError out of a prerequisite probe. Replacement keeps
         # the output usable for the substring/version checks the callers perform.
-        completed = subprocess.run(
+        completed = subprocess.run(  # nosec B603
             command,
             check=False,
             capture_output=True,

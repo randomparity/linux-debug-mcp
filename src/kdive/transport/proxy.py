@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import signal
 import socket
-import subprocess
+import subprocess  # nosec B404
 import threading
 import time
 from collections.abc import Callable

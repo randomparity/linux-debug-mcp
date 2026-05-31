@@ -6,7 +6,7 @@ import os
 import shlex
 import shutil
 import signal
-import subprocess
+import subprocess  # nosec B404
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -126,7 +126,7 @@ class SubprocessSshRunner:
             stdout_path.open("w", encoding="utf-8") as stdout_file,
             stderr_path.open("w", encoding="utf-8") as stderr_file,
         ):
-            proc = subprocess.Popen(
+            proc = subprocess.Popen(  # nosec B603
                 argv,
                 stdout=stdout_file,
                 stderr=stderr_file,
@@ -147,7 +147,8 @@ class SubprocessSshRunner:
                 # write into a daemon thread keeps the poll loop responsive;
                 # killing the process group closes the pipe so the writer
                 # observes BrokenPipeError and exits.
-                assert proc.stdin is not None
+                if proc.stdin is None:
+                    raise RuntimeError("stdin pipe was not created for ssh subprocess")
                 stdin_handle = proc.stdin
                 payload = stdin
 

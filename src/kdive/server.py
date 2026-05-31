@@ -265,6 +265,21 @@ from kdive.workflow.tools import register_workflow_tools
 
 logger = logging.getLogger(__name__)
 
+_RequiredT = TypeVar("_RequiredT")
+
+
+def _require_value(value: _RequiredT | None, message: str) -> _RequiredT:
+    if value is None:
+        raise RuntimeError(message)
+    return value
+
+
+def _require_dict(value: object, message: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise RuntimeError(message)
+    return value
+
+
 DEFAULT_ARTIFACT_ROOT = Path(".kdive/runs")
 SERVER_CONFIG_ENV_VAR = "KDIVE_CONFIG"
 DEFAULT_TEST_SUITES = {
@@ -2490,8 +2505,7 @@ def debug_introspect_check_prerequisites_handler(
     _ctx, failure = _resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
     if failure is not None:
         return failure
-    assert _ctx is not None
-    ctx = _ctx
+    ctx = _require_value(_ctx, "probe context missing after successful resolution")
     run_id = ctx.run_id
 
     try:
@@ -2689,7 +2703,7 @@ def _assemble_probe_response(
     if no_json is not None:
         return no_json
 
-    assert isinstance(parsed, dict)
+    parsed = _require_dict(parsed, "probe stdout parser returned non-dict without failure")
     checks, verdict = build_probe_checks(parsed, host_build_id=ctx.host_build_id)
     return _probe_success(
         ctx,
@@ -2751,8 +2765,7 @@ def debug_postmortem_check_prereqs_handler(
     _ctx, failure = _resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
     if failure is not None:
         return failure
-    assert _ctx is not None
-    ctx = _ctx
+    ctx = _require_value(_ctx, "probe context missing after successful resolution")
     run_id = ctx.run_id
 
     try:
@@ -2886,7 +2899,7 @@ def _assemble_kdump_response(
     )
     if failure is not None:
         return failure
-    assert parsed is not None
+    parsed = _require_value(parsed, "kdump probe parser returned no data without failure")
 
     checks, mechanism = build_kdump_checks(parsed)
     kdump_ready = not any(c.status == PrerequisiteStatus.FAILED for c in checks)
@@ -2986,7 +2999,7 @@ def _run_dump_enumeration(
     parsed, failure = _parse_enumeration_result(ctx, ssh_result=ssh_result, stdout_path=stdout_path)
     if failure is not None:
         return None, failure
-    assert parsed is not None
+    parsed = _require_value(parsed, "dump enumeration parser returned no data without failure")
     (agent_dir / "probe.json").write_text(json.dumps(ctx.redactor.redact_value(parsed)), encoding="utf-8")
     return parsed, None
 
@@ -3005,12 +3018,11 @@ def debug_postmortem_list_dumps_handler(
     _ctx, failure = _resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
     if failure is not None:
         return failure
-    assert _ctx is not None
-    ctx = _ctx
+    ctx = _require_value(_ctx, "probe context missing after successful resolution")
     dump_dir, dd_failure = _validated_dump_dir(request, ctx.run_id)
     if dd_failure is not None:
         return dd_failure
-    assert dump_dir is not None
+    dump_dir = _require_value(dump_dir, "dump directory missing after validation")
     try:
         halted = _reject_if_target_halted(
             run_id=ctx.run_id,
@@ -3034,11 +3046,11 @@ def debug_postmortem_list_dumps_handler(
     )
     if failure is not None:
         return failure
-    assert parsed is not None
+    parsed = _require_value(parsed, "dump enumeration returned no data without failure")
     entries, failure = _parse_dump_listing_at_boundary(ctx, parsed)
     if failure is not None:
         return failure
-    assert entries is not None
+    entries = _require_value(entries, "dump listing parser returned no entries without failure")
     return ToolResponse.success(
         summary=f"found {len(entries)} captured dump(s) under {dump_dir}",
         run_id=ctx.run_id,
@@ -3083,7 +3095,7 @@ def _match_dump_at_boundary(
     entries, failure = _parse_dump_listing_at_boundary(ctx, parsed)
     if failure is not None:
         return None, failure
-    assert entries is not None
+    entries = _require_value(entries, "dump listing parser returned no entries without failure")
     for entry in entries:
         if entry.path == dump_ref:
             return entry, None
@@ -3204,7 +3216,7 @@ def _admit_fetch_entry(
     )
     if failure is not None:
         return None, failure
-    assert parsed is not None
+    parsed = _require_value(parsed, "dump enumeration returned no data without failure")
     entry, failure = _match_dump_at_boundary(ctx, parsed, request.dump_ref)
     if failure is not None:
         return None, failure
@@ -3284,7 +3296,7 @@ def _fetch_under_lock(
         entry, failure = _admit_fetch_entry(ctx, runner=runner, request=request, dump_dir=dump_dir, dest_dir=dest_dir)
         if failure is not None:
             return failure
-        assert entry is not None
+        entry = _require_value(entry, "fetch entry missing after admission")
         if dest_dir.exists():
             shutil.rmtree(dest_dir)
         dest_dir.mkdir(parents=True, mode=0o700)
@@ -3311,7 +3323,7 @@ def _fetch_under_lock(
             if failure is not None:
                 shutil.rmtree(dest_dir, ignore_errors=True)
                 return failure
-            assert staged is not None
+            staged = _require_value(staged, "fetch stage returned no file without failure")
             fetched.append(staged)
             ref_map[spec.ref_key] = staged.ref
         details: dict[str, Any] = {
@@ -3348,13 +3360,12 @@ def debug_postmortem_fetch_handler(
     )
     if failure is not None:
         return failure
-    assert _ctx is not None
-    ctx = _ctx
+    ctx = _require_value(_ctx, "probe context missing after successful resolution")
     run_id = ctx.run_id
     dump_dir, dd_failure = _validated_dump_dir(request, run_id)
     if dd_failure is not None:
         return dd_failure
-    assert dump_dir is not None
+    dump_dir = _require_value(dump_dir, "dump directory missing after validation")
     try:
         halted = _reject_if_target_halted(
             run_id=run_id, admission=admission, session_registry=session_registry, action="fetching a dump"
@@ -3953,8 +3964,8 @@ def _execute_introspect_call(
     )
     if admission_failure is not None:
         return admission_failure
-    assert admission is not None
-    assert introspect_admission is not None
+    admission = _require_value(admission, "admission service missing after successful admission")
+    introspect_admission = _require_value(introspect_admission, "admission handle missing after successful admission")
     handle = introspect_admission.handle
 
     # R6-F3: Step 9.4 admitted us — Steps 9.5–9.10 must always complete
@@ -3978,7 +3989,7 @@ def _execute_introspect_call(
         if workspace_failure is not None:
             admission_disposed = True
             return workspace_failure
-        assert workspace is not None
+        workspace = _require_value(workspace, "introspection workspace missing after successful preparation")
         call_id = workspace.call_id
         agent_dir = workspace.agent_dir
         sensitive_call_dir = workspace.sensitive_call_dir
@@ -6839,7 +6850,10 @@ def debug_end_session_handler(
     # successful detach, keep SSH/test work gated until a recovery transport open or reset clears the
     # recovery-required tombstone.
     if response.ok and is_legacy_session:
-        assert admission is not None and session_registry is not None  # narrowed by is_legacy_session
+        admission = _require_value(admission, "admission service missing for legacy session recovery marker")
+        session_registry = _require_value(
+            session_registry, "session registry missing for legacy session recovery marker"
+        )
         _mark_legacy_session_recovery_required(run_id=run_id, admission=admission, session_registry=session_registry)
     return response
 

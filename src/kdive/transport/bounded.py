@@ -4,7 +4,7 @@ import os
 import select
 import socket
 import stat
-import subprocess
+import subprocess  # nosec B404
 import threading
 import time
 from collections.abc import Collection
@@ -160,4 +160,4 @@ def spawn(
     """
     _slice(deadline, cancel)
     # list argv, never a shell — not a shell injection vector
-    return subprocess.Popen(argv, shell=False, pass_fds=pass_fds)
+    return subprocess.Popen(argv, shell=False, pass_fds=pass_fds)  # nosec B603

@@ -471,6 +471,29 @@ def test_validate_existing_domain_ownership_allows_matching_owner_across_run_ids
     provider.validate_existing_domain_ownership(reuse_plan, existing_xml)
 
 
+def test_validate_existing_domain_ownership_rejects_entity_declarations(tmp_path: Path) -> None:
+    plan = make_plan(tmp_path)
+    provider = LibvirtQemuProvider()
+    existing_xml = """
+    <!DOCTYPE domain [
+      <!ENTITY provider "local-libvirt-qemu">
+    ]>
+    <domain type="kvm">
+      <name>debug-vm</name>
+      <metadata>
+        <ldmcp:kdive xmlns:ldmcp="urn:kdive:domain">
+          <ldmcp:provider>&provider;</ldmcp:provider>
+          <ldmcp:domain>debug-vm</ldmcp:domain>
+          <ldmcp:target_profile>local-qemu</ldmcp:target_profile>
+        </ldmcp:kdive>
+      </metadata>
+    </domain>
+    """
+
+    with pytest.raises(ProviderBootError, match="failed to parse existing domain XML"):
+        provider.validate_existing_domain_ownership(plan, existing_xml)
+
+
 def test_execute_boot_maps_missing_virsh_to_missing_dependency(tmp_path: Path) -> None:
     class MissingVirshRunner:
         def which(self, command: str) -> str | None:
