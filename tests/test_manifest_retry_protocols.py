@@ -16,7 +16,9 @@ def test_server_reuses_extracted_introspect_rollback_helper() -> None:
 
 
 def test_postmortem_dump_handlers_are_owned_by_postmortem_module() -> None:
+    assert postmortem_handlers.debug_postmortem_check_prereqs_handler.__module__ == "kdive.postmortem.handlers"
     assert postmortem_handlers.debug_postmortem_list_dumps_handler.__module__ == "kdive.postmortem.handlers"
     assert postmortem_handlers.debug_postmortem_fetch_handler.__module__ == "kdive.postmortem.handlers"
+    assert server.debug_postmortem_check_prereqs_handler is postmortem_handlers.debug_postmortem_check_prereqs_handler
     assert server.debug_postmortem_list_dumps_handler is postmortem_handlers.debug_postmortem_list_dumps_handler
     assert server.debug_postmortem_fetch_handler is postmortem_handlers.debug_postmortem_fetch_handler

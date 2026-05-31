@@ -48,6 +48,7 @@ from kdive.postmortem.dumps import (
     render_dump_list_script,
 )
 from kdive.postmortem.models import (
+    DebugPostmortemCheckPrereqsRequest,
     DebugPostmortemCrashRequest,
     DebugPostmortemFetchRequest,
     DebugPostmortemListDumpsRequest,
@@ -56,6 +57,7 @@ from kdive.postmortem.models import (
     FetchedFile,
 )
 from kdive.postmortem.triage import CrashOutcome, DrgnOutcome, any_section_ok, assemble_report
+from kdive.prereqs.kdump_probe import render_kdump_probe_script
 from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner, build_ssh_argv
 from kdive.safety.paths import PathSafetyError, confine_run_relative
 from kdive.safety.redaction import Redactor
@@ -342,6 +344,100 @@ def _fetch_success_response(run_id: str, details: dict[str, object], *, already_
             "debug.postmortem.triage",
             "debug.introspect.from_vmcore",
         ],
+    )
+
+
+def debug_postmortem_check_prereqs_handler(
+    request: DebugPostmortemCheckPrereqsRequest,
+    *,
+    artifact_root: Path,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    ssh_runner: SshRunner | None = None,
+    admission: Any | None = None,
+    session_registry: Any | None = None,
+) -> ToolResponse:
+    from kdive.server import (
+        DEFAULT_ROOTFS_PROFILES,
+        PROBE_STDOUT_CAP,
+        AdmissionError,
+        _assemble_kdump_response,
+        _chmod_best_effort,
+        _configuration_failure,
+        _prepare_probe_dirs,
+        _redact_and_truncate,
+        _reject_if_target_halted,
+        _require_value,
+        _resolve_probe_context,
+        _target_python_remote_argv,
+    )
+
+    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    resolved_ctx, failure = _resolve_probe_context(
+        request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles
+    )
+    if failure is not None:
+        return failure
+    ctx = _require_value(resolved_ctx, "probe context missing after successful resolution")
+    run_id = ctx.run_id
+
+    try:
+        halted = _reject_if_target_halted(run_id=run_id, admission=admission, session_registry=session_registry)
+    except AdmissionError as exc:
+        return ToolResponse.failure(category=exc.category, run_id=run_id, message=str(exc), details={"code": exc.code})
+    if halted is not None:
+        return halted
+
+    runner: SshRunner = ssh_runner or SubprocessSshRunner()
+    probe_id = uuid.uuid4().hex
+    agent_dir, sensitive_dir = _prepare_probe_dirs(
+        ctx.store, run_id, probe_id, category=("debug", "postmortem", "check_prereqs")
+    )
+
+    use_sudo = ctx.rootfs.ssh_user != "root"
+    remote_argv = _target_python_remote_argv(timeout_seconds=request.timeout_seconds, use_sudo=use_sudo)
+    script = render_kdump_probe_script(systemctl_timeout=max(2, request.timeout_seconds // 2))
+    try:
+        ssh_argv = build_ssh_argv(
+            rootfs_profile=ctx.rootfs,
+            known_hosts_path=ctx.store.run_dir(run_id) / "sensitive" / "known_hosts",
+            command=remote_argv,
+            command_timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
+        )
+    except ValueError as exc:
+        return _configuration_failure(
+            run_id=run_id,
+            message=_redact_and_truncate(ctx.redactor, str(exc), cap=256),
+            details={"code": "invalid_ssh_options"},
+        )
+
+    stdout_path = sensitive_dir / "stdout.raw"
+    stderr_path = sensitive_dir / "stderr.raw"
+    try:
+        ssh_result = runner.run(
+            ssh_argv,
+            timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            stdin=script,
+            max_stdout_bytes=PROBE_STDOUT_CAP,
+        )
+    except Exception as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message=_redact_and_truncate(ctx.redactor, f"ssh probe raised: {exc}", cap=256),
+            details={"code": "ssh_failure"},
+        )
+    for path in (stdout_path, stderr_path):
+        _chmod_best_effort(path, 0o600)
+
+    return _assemble_kdump_response(
+        ctx,
+        ssh_result=ssh_result,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        agent_dir=agent_dir,
+        probe_id=probe_id,
     )
 
 
