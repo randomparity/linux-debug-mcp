@@ -336,3 +336,22 @@ def test_libvirt_connect_fails_when_virsh_missing() -> None:
     target = TargetProfile(name="t", architecture="x86_64", libvirt_uri="qemu:///system")
     check = check_libvirt_connect(target, runner=LibvirtCapabilitiesRunner(set(), code=0))
     assert check.status == "failed"
+
+
+def test_handler_includes_new_capability_checks() -> None:
+    from kdive.server import prerequisites_handler
+
+    response = prerequisites_handler(
+        artifact_root=Path("/tmp/does-not-matter"),
+        source_path=None,
+        target_profile=None,
+        runner=FakeRunner({"virt-builder", "qemu-img", "virsh"}),
+        kvm_probe=lambda: True,
+    )
+    ids = {check["check_id"] for check in response.data["checks"]}
+    assert {"kvm.access", "rootfs.builder", "libvirt.connect"} <= ids
+    by_id = {check["check_id"]: check for check in response.data["checks"]}
+    assert by_id["kvm.access"]["status"] == "passed"
+    assert by_id["rootfs.builder"]["status"] == "passed"
+    # No target profile selected -> libvirt.connect is SKIPPED, not FAILED.
+    assert by_id["libvirt.connect"]["status"] == "skipped"
