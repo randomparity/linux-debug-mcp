@@ -408,6 +408,16 @@ def test_target_run_tests_tool_uses_grouped_context_and_options() -> None:
     assert tool.fn.__name__ == "target_run_tests"
 
 
+def test_target_run_tests_tool_and_handler_are_target_owned() -> None:
+    from kdive.target import handlers as target_handlers
+
+    tool = create_app()._tool_manager._tools["target.run_tests"]
+
+    assert tool.fn.__module__ == "kdive.target.tools"
+    assert target_handlers.target_run_tests_handler.__module__ == "kdive.target.handlers"
+    assert server.target_run_tests_handler is target_handlers.target_run_tests_handler
+
+
 def test_target_run_tests_handler_response_serializes(tmp_path: Path) -> None:
     source, artifact_root = create_test_run(tmp_path)
     store = ArtifactStore(artifact_root, source_paths=[source])

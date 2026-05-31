@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from kdive.config import BootOverrides
 from kdive.coordination.admission import AdmissionService
+from kdive.coordination.registry import SessionRegistry
 from kdive.domain import ToolResponse
 from kdive.model import Model
 from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, optional_model_arg
@@ -29,6 +30,21 @@ class TargetBootHandler(Protocol):
     ) -> ToolResponse: ...
 
 
+class TargetRunTestsHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        run_id: str,
+        test_suite: str | None,
+        commands: list[list[str]] | None,
+        force_rerun: bool,
+        attempt: int | None,
+        admission: AdmissionService | None,
+        session_registry: SessionRegistry | None,
+    ) -> ToolResponse: ...
+
+
 class TargetBootContext(Model):
     run_id: str
     artifact_root: str | None = None
@@ -45,13 +61,27 @@ class TargetBootOptions(Model):
     acknowledged_permissions: list[str] | None = None
 
 
+class TargetRunContext(Model):
+    run_id: str
+    artifact_root: str | None = None
+
+
+class TargetRunOptions(Model):
+    test_suite: str | None = None
+    commands: list[list[str]] | None = None
+    force_rerun: bool = False
+    attempt: int | None = None
+
+
 def register_target_tools(
     app: FastMCP,
     *,
     default_artifact_root: Path,
     sensitive_paths: list[Path],
     admission: AdmissionService,
+    session_registry: SessionRegistry,
     target_boot_handler: TargetBootHandler,
+    target_run_tests_handler: TargetRunTestsHandler,
 ) -> None:
     default_artifact_root_text = str(default_artifact_root)
 
@@ -80,4 +110,25 @@ def register_target_tools(
             acknowledged_permissions=options_model.acknowledged_permissions,
             sensitive_paths=sensitive_paths,
             admission=admission,
+        ).model_dump(mode="json")
+
+    @app.tool(name="target.run_tests")
+    def target_run_tests(
+        context: TargetRunContext | dict[str, Any],
+        options: TargetRunOptions | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            context_model = model_arg(context, TargetRunContext)
+            options_model = optional_model_arg(options, TargetRunOptions)
+        except (TypeError, ValueError, ValidationError) as exc:
+            return adapter_validation_failure(exc)
+        return target_run_tests_handler(
+            artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
+            run_id=context_model.run_id,
+            test_suite=options_model.test_suite,
+            commands=options_model.commands,
+            force_rerun=options_model.force_rerun,
+            attempt=options_model.attempt,
+            admission=admission,
+            session_registry=session_registry,
         ).model_dump(mode="json")
