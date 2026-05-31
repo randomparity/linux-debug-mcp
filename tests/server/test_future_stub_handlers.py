@@ -250,6 +250,21 @@ def test_future_provider_tool_schema_groups_repeated_provider_metadata() -> None
         assert repeated not in signature.parameters
 
 
+def test_future_provider_tool_request_variation_is_table_driven() -> None:
+    specs = provider_tools.FUTURE_PROVIDER_TOOL_REQUEST_SPECS
+
+    assert set(specs) == {operation for _, _, _, operation in VALID_CALLS}
+    assert specs["remote.build_kernel"].request_type is RemoteBuildRequest
+    assert specs["remote.build_kernel"].operation_fields == ("source_ref", "build_profile")
+    assert specs["remote.build_kernel"].options_model is provider_tools.RemoteBuildArtifactOptions
+    assert specs["console.write"].request_type is ConsoleWriteRequest
+    assert specs["console.write"].operation_fields == ("console_session_id", "data")
+    assert specs["console.write"].options_model is None
+    assert all(
+        spec.common_fields == ("architecture", "provider_context", "execution_options") for spec in specs.values()
+    )
+
+
 def test_future_provider_tool_grouped_metadata_reaches_request_validation() -> None:
     response = _tool_response(
         "remote.build_kernel",

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any, Protocol, cast, get_type_hints
 
 from mcp.server.fastmcp import FastMCP
@@ -84,6 +85,70 @@ class WorkflowReserveProvisionBootOptions(Model):
     bmc_credential_ref: str | None = None
 
 
+@dataclass(frozen=True)
+class FutureProviderToolRequestSpec:
+    request_type: type[ProviderRequest]
+    operation_fields: tuple[str, ...]
+    options_model: type[Model] | None = None
+    common_fields: tuple[str, ...] = ("architecture", "provider_context", "execution_options")
+
+
+FUTURE_PROVIDER_TOOL_REQUEST_SPECS: dict[str, FutureProviderToolRequestSpec] = {
+    "remote.build_kernel": FutureProviderToolRequestSpec(
+        request_type=RemoteBuildRequest,
+        operation_fields=("source_ref", "build_profile"),
+        options_model=RemoteBuildArtifactOptions,
+    ),
+    "remote.sync_artifacts": FutureProviderToolRequestSpec(
+        request_type=RemoteArtifactSyncRequest,
+        operation_fields=("external_artifact_ref",),
+        options_model=RemoteSyncArtifactOptions,
+    ),
+    "reservation.request_host": FutureProviderToolRequestSpec(
+        request_type=ReservationRequest,
+        operation_fields=("reservation_pool",),
+        options_model=ReservationRequestOptions,
+    ),
+    "reservation.release_host": FutureProviderToolRequestSpec(
+        request_type=ReservationReleaseRequest,
+        operation_fields=("reservation_id",),
+    ),
+    "provision.prepare_target": FutureProviderToolRequestSpec(
+        request_type=ProvisioningRequest,
+        operation_fields=("target_name", "provisioning_profile"),
+        options_model=ProvisioningOptions,
+    ),
+    "hardware.power_control": FutureProviderToolRequestSpec(
+        request_type=HardwareControlRequest,
+        operation_fields=("target_name", "action"),
+        options_model=HardwarePowerOptions,
+    ),
+    "hardware.boot_kernel": FutureProviderToolRequestSpec(
+        request_type=RealBootRequest,
+        operation_fields=("target_name", "kernel_artifact_ref"),
+        options_model=HardwareBootOptions,
+    ),
+    "console.open_session": FutureProviderToolRequestSpec(
+        request_type=ConsoleSessionRequest,
+        operation_fields=("target_name", "access_method"),
+        options_model=ConsoleOpenOptions,
+    ),
+    "console.read": FutureProviderToolRequestSpec(
+        request_type=ConsoleReadRequest,
+        operation_fields=("console_session_id", "max_bytes"),
+    ),
+    "console.write": FutureProviderToolRequestSpec(
+        request_type=ConsoleWriteRequest,
+        operation_fields=("console_session_id", "data"),
+    ),
+    "workflow.reserve_provision_boot": FutureProviderToolRequestSpec(
+        request_type=ReserveProvisionBootRequest,
+        operation_fields=("reservation_pool", "target_name", "provisioning_profile", "kernel_artifact_ref"),
+        options_model=WorkflowReserveProvisionBootOptions,
+    ),
+}
+
+
 def _model_payload(value: Model | dict[str, Any] | None, model_type: type[Model]) -> dict[str, Any]:
     if value is None:
         return {}
@@ -102,6 +167,29 @@ def _provider_fields(
         **_model_payload(provider_context, ProviderToolContext),
         **_model_payload(execution_options, ProviderExecutionOptions),
     }
+
+
+def _future_provider_request(
+    tool_name: str,
+    *,
+    architecture: str,
+    provider_context: ProviderToolContext | dict[str, Any] | None,
+    execution_options: ProviderExecutionOptions | dict[str, Any] | None,
+    operation_values: Mapping[str, Any],
+    options: Model | dict[str, Any] | None = None,
+) -> ProviderRequest:
+    spec = FUTURE_PROVIDER_TOOL_REQUEST_SPECS[tool_name]
+    payload = {
+        **_provider_fields(
+            architecture=architecture,
+            provider_context=provider_context,
+            execution_options=execution_options,
+        ),
+        **{field: operation_values[field] for field in spec.operation_fields},
+    }
+    if spec.options_model is not None:
+        payload.update(_model_payload(options, spec.options_model))
+    return spec.request_type(**payload)
 
 
 def _evaluated_signature(request_factory: _FutureProviderRequestFactory) -> inspect.Signature:
@@ -160,15 +248,16 @@ def register_provider_tools(app: FastMCP) -> None:
         execution_options: ProviderExecutionOptions | None = None,
         artifact_options: RemoteBuildArtifactOptions | None = None,
     ) -> RemoteBuildRequest:
-        return RemoteBuildRequest(
-            **_provider_fields(
+        return cast(
+            RemoteBuildRequest,
+            _future_provider_request(
+                "remote.build_kernel",
                 architecture=architecture,
                 provider_context=provider_context,
                 execution_options=execution_options,
+                operation_values=locals(),
+                options=artifact_options,
             ),
-            source_ref=source_ref,
-            build_profile=build_profile,
-            **_model_payload(artifact_options, RemoteBuildArtifactOptions),
         )
 
     @_register_future_provider_tool(
@@ -182,14 +271,16 @@ def register_provider_tools(app: FastMCP) -> None:
         execution_options: ProviderExecutionOptions | None = None,
         artifact_options: RemoteSyncArtifactOptions | None = None,
     ) -> RemoteArtifactSyncRequest:
-        return RemoteArtifactSyncRequest(
-            **_provider_fields(
+        return cast(
+            RemoteArtifactSyncRequest,
+            _future_provider_request(
+                "remote.sync_artifacts",
                 architecture=architecture,
                 provider_context=provider_context,
                 execution_options=execution_options,
+                operation_values=locals(),
+                options=artifact_options,
             ),
-            external_artifact_ref=external_artifact_ref,
-            **_model_payload(artifact_options, RemoteSyncArtifactOptions),
         )
 
     @_register_future_provider_tool(
@@ -203,14 +294,16 @@ def register_provider_tools(app: FastMCP) -> None:
         execution_options: ProviderExecutionOptions | None = None,
         reservation_options: ReservationRequestOptions | None = None,
     ) -> ReservationRequest:
-        return ReservationRequest(
-            **_provider_fields(
+        return cast(
+            ReservationRequest,
+            _future_provider_request(
+                "reservation.request_host",
                 architecture=architecture,
                 provider_context=provider_context,
                 execution_options=execution_options,
+                operation_values=locals(),
+                options=reservation_options,
             ),
-            reservation_pool=reservation_pool,
-            **_model_payload(reservation_options, ReservationRequestOptions),
         )
 
     @_register_future_provider_tool(
@@ -223,13 +316,15 @@ def register_provider_tools(app: FastMCP) -> None:
         provider_context: ProviderToolContext | None = None,
         execution_options: ProviderExecutionOptions | None = None,
     ) -> ReservationReleaseRequest:
-        return ReservationReleaseRequest(
-            **_provider_fields(
+        return cast(
+            ReservationReleaseRequest,
+            _future_provider_request(
+                "reservation.release_host",
                 architecture=architecture,
                 provider_context=provider_context,
                 execution_options=execution_options,
+                operation_values=locals(),
             ),
-            reservation_id=reservation_id,
         )
 
     @_register_future_provider_tool(
@@ -244,15 +339,16 @@ def register_provider_tools(app: FastMCP) -> None:
         execution_options: ProviderExecutionOptions | None = None,
         provisioning_options: ProvisioningOptions | None = None,
     ) -> ProvisioningRequest:
-        return ProvisioningRequest(
-            **_provider_fields(
+        return cast(
+            ProvisioningRequest,
+            _future_provider_request(
+                "provision.prepare_target",
                 architecture=architecture,
                 provider_context=provider_context,
                 execution_options=execution_options,
+                operation_values=locals(),
+                options=provisioning_options,
             ),
-            target_name=target_name,
-            provisioning_profile=provisioning_profile,
-            **_model_payload(provisioning_options, ProvisioningOptions),
         )
 
     @_register_future_provider_tool(
@@ -267,15 +363,16 @@ def register_provider_tools(app: FastMCP) -> None:
         execution_options: ProviderExecutionOptions | None = None,
         power_options: HardwarePowerOptions | None = None,
     ) -> HardwareControlRequest:
-        return HardwareControlRequest(
-            **_provider_fields(
+        return cast(
+            HardwareControlRequest,
+            _future_provider_request(
+                "hardware.power_control",
                 architecture=architecture,
                 provider_context=provider_context,
                 execution_options=execution_options,
+                operation_values=locals(),
+                options=power_options,
             ),
-            target_name=target_name,
-            action=action,
-            **_model_payload(power_options, HardwarePowerOptions),
         )
 
     @_register_future_provider_tool(
@@ -290,15 +387,16 @@ def register_provider_tools(app: FastMCP) -> None:
         execution_options: ProviderExecutionOptions | None = None,
         boot_options: HardwareBootOptions | None = None,
     ) -> RealBootRequest:
-        return RealBootRequest(
-            **_provider_fields(
+        return cast(
+            RealBootRequest,
+            _future_provider_request(
+                "hardware.boot_kernel",
                 architecture=architecture,
                 provider_context=provider_context,
                 execution_options=execution_options,
+                operation_values=locals(),
+                options=boot_options,
             ),
-            target_name=target_name,
-            kernel_artifact_ref=kernel_artifact_ref,
-            **_model_payload(boot_options, HardwareBootOptions),
         )
 
     @_register_future_provider_tool(
@@ -313,15 +411,16 @@ def register_provider_tools(app: FastMCP) -> None:
         execution_options: ProviderExecutionOptions | None = None,
         console_options: ConsoleOpenOptions | None = None,
     ) -> ConsoleSessionRequest:
-        return ConsoleSessionRequest(
-            **_provider_fields(
+        return cast(
+            ConsoleSessionRequest,
+            _future_provider_request(
+                "console.open_session",
                 architecture=architecture,
                 provider_context=provider_context,
                 execution_options=execution_options,
+                operation_values=locals(),
+                options=console_options,
             ),
-            target_name=target_name,
-            access_method=access_method,
-            **_model_payload(console_options, ConsoleOpenOptions),
         )
 
     @_register_future_provider_tool(
@@ -335,14 +434,15 @@ def register_provider_tools(app: FastMCP) -> None:
         provider_context: ProviderToolContext | None = None,
         execution_options: ProviderExecutionOptions | None = None,
     ) -> ConsoleReadRequest:
-        return ConsoleReadRequest(
-            **_provider_fields(
+        return cast(
+            ConsoleReadRequest,
+            _future_provider_request(
+                "console.read",
                 architecture=architecture,
                 provider_context=provider_context,
                 execution_options=execution_options,
+                operation_values=locals(),
             ),
-            console_session_id=console_session_id,
-            max_bytes=max_bytes,
         )
 
     @_register_future_provider_tool(
@@ -356,14 +456,15 @@ def register_provider_tools(app: FastMCP) -> None:
         provider_context: ProviderToolContext | None = None,
         execution_options: ProviderExecutionOptions | None = None,
     ) -> ConsoleWriteRequest:
-        return ConsoleWriteRequest(
-            **_provider_fields(
+        return cast(
+            ConsoleWriteRequest,
+            _future_provider_request(
+                "console.write",
                 architecture=architecture,
                 provider_context=provider_context,
                 execution_options=execution_options,
+                operation_values=locals(),
             ),
-            console_session_id=console_session_id,
-            data=data,
         )
 
     @_register_future_provider_tool(
@@ -380,15 +481,14 @@ def register_provider_tools(app: FastMCP) -> None:
         execution_options: ProviderExecutionOptions | None = None,
         workflow_options: WorkflowReserveProvisionBootOptions | None = None,
     ) -> ReserveProvisionBootRequest:
-        return ReserveProvisionBootRequest(
-            **_provider_fields(
+        return cast(
+            ReserveProvisionBootRequest,
+            _future_provider_request(
+                "workflow.reserve_provision_boot",
                 architecture=architecture,
                 provider_context=provider_context,
                 execution_options=execution_options,
+                operation_values=locals(),
+                options=workflow_options,
             ),
-            reservation_pool=reservation_pool,
-            target_name=target_name,
-            provisioning_profile=provisioning_profile,
-            kernel_artifact_ref=kernel_artifact_ref,
-            **_model_payload(workflow_options, WorkflowReserveProvisionBootOptions),
         )
