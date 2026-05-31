@@ -25,11 +25,9 @@ def test_postmortem_models_live_in_postmortem_package() -> None:
     assert not hasattr(domain, "DebugPostmortemCrashRequest")
 
 
-def test_debug_request_accepts_deprecated_target_ref_alias() -> None:
-    req = DebugIntrospectRunRequest(run_id="r1", target_ref="local-qemu", script="print(1)")
-
-    assert req.manifest_target_profile == "local-qemu"
-    assert not hasattr(req, "target_ref")
+def test_debug_request_rejects_deprecated_target_ref_alias() -> None:
+    with pytest.raises(ValidationError):
+        DebugIntrospectRunRequest(run_id="r1", target_ref="local-qemu", script="print(1)")
 
 
 def test_success_response_serializes_with_shared_envelope() -> None:
@@ -146,7 +144,7 @@ def test_prerequisite_check_serializes_status_and_fix() -> None:
 
 
 def test_debug_introspect_run_request_minimal() -> None:
-    req = DebugIntrospectRunRequest(run_id="r1", target_ref="local-qemu", script="print(1)")
+    req = DebugIntrospectRunRequest(run_id="r1", manifest_target_profile="local-qemu", script="print(1)")
     assert req.timeout_seconds == 30
     assert req.allow_write is False
     assert req.acknowledged_permissions == []
@@ -156,10 +154,15 @@ def test_debug_introspect_run_request_minimal() -> None:
 
 
 def test_debug_introspect_run_request_acknowledged_permissions() -> None:
-    req = DebugIntrospectRunRequest(run_id="r1", target_ref="local-qemu", script="pass", acknowledged_permissions=["x"])
+    req = DebugIntrospectRunRequest(
+        run_id="r1",
+        manifest_target_profile="local-qemu",
+        script="pass",
+        acknowledged_permissions=["x"],
+    )
     assert req.acknowledged_permissions == ["x"]
 
 
 def test_debug_introspect_run_request_rejects_extra_fields() -> None:
     with pytest.raises(ValidationError):
-        DebugIntrospectRunRequest(run_id="r1", target_ref="t", script="s", unknown=1)
+        DebugIntrospectRunRequest(run_id="r1", manifest_target_profile="t", script="s", unknown=1)

@@ -52,7 +52,7 @@ def _booted_run(tmp_path) -> str:
 def test_list_dumps_rejects_out_of_band_timeout(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_postmortem_list_dumps_handler(
-        DebugPostmortemListDumpsRequest(run_id=run_id, target_ref="local-qemu", timeout_seconds=120),
+        DebugPostmortemListDumpsRequest(run_id=run_id, manifest_target_profile="local-qemu", timeout_seconds=120),
         artifact_root=tmp_path,
         rootfs_profiles=_rootfs(),
     )
@@ -82,7 +82,7 @@ def _list_runner(stdout: str, exit_status: int = 0):
 def test_list_dumps_empty_is_success(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_postmortem_list_dumps_handler(
-        DebugPostmortemListDumpsRequest(run_id=run_id, target_ref="local-qemu"),
+        DebugPostmortemListDumpsRequest(run_id=run_id, manifest_target_profile="local-qemu"),
         artifact_root=tmp_path,
         rootfs_profiles=_rootfs(),
         ssh_runner=_list_runner('{"dump_dir": "/var/crash", "exists": false, "dumps": []}'),
@@ -100,7 +100,7 @@ def test_list_dumps_one_entry(tmp_path) -> None:
         ' "present": ["vmcore-dmesg.txt"], "file_sizes": {"vmcore": 2048, "vmcore-dmesg.txt": 16}}]}'
     )
     resp = debug_postmortem_list_dumps_handler(
-        DebugPostmortemListDumpsRequest(run_id=run_id, target_ref="local-qemu"),
+        DebugPostmortemListDumpsRequest(run_id=run_id, manifest_target_profile="local-qemu"),
         artifact_root=tmp_path,
         rootfs_profiles=_rootfs(),
         ssh_runner=_list_runner(stdout),
@@ -116,7 +116,7 @@ def test_list_dumps_returns_typed_failure_for_malformed_record(tmp_path) -> None
     stdout = '{"dump_dir": "/var/crash", "exists": true, "dumps": [{"kernel": "missing dir"}]}'
 
     resp = debug_postmortem_list_dumps_handler(
-        DebugPostmortemListDumpsRequest(run_id=run_id, target_ref="local-qemu"),
+        DebugPostmortemListDumpsRequest(run_id=run_id, manifest_target_profile="local-qemu"),
         artifact_root=tmp_path,
         rootfs_profiles=_rootfs(),
         ssh_runner=_list_runner(stdout),
@@ -134,7 +134,7 @@ def test_list_dumps_reports_target_enumeration_errors(tmp_path) -> None:
     )
 
     resp = debug_postmortem_list_dumps_handler(
-        DebugPostmortemListDumpsRequest(run_id=run_id, target_ref="local-qemu"),
+        DebugPostmortemListDumpsRequest(run_id=run_id, manifest_target_profile="local-qemu"),
         artifact_root=tmp_path,
         rootfs_profiles=_rootfs(),
         ssh_runner=_list_runner(stdout),
@@ -149,7 +149,7 @@ def test_list_dumps_reports_target_enumeration_errors(tmp_path) -> None:
 def test_list_dumps_bad_dump_dir(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_postmortem_list_dumps_handler(
-        DebugPostmortemListDumpsRequest(run_id=run_id, target_ref="local-qemu", dump_dir="relative/path"),
+        DebugPostmortemListDumpsRequest(run_id=run_id, manifest_target_profile="local-qemu", dump_dir="relative/path"),
         artifact_root=tmp_path,
         rootfs_profiles=_rootfs(),
         ssh_runner=_list_runner("{}"),
@@ -161,7 +161,7 @@ def test_list_dumps_bad_dump_dir(tmp_path) -> None:
 def test_list_dumps_no_python(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_postmortem_list_dumps_handler(
-        DebugPostmortemListDumpsRequest(run_id=run_id, target_ref="local-qemu"),
+        DebugPostmortemListDumpsRequest(run_id=run_id, manifest_target_profile="local-qemu"),
         artifact_root=tmp_path,
         rootfs_profiles=_rootfs(),
         ssh_runner=_list_runner("", exit_status=127),

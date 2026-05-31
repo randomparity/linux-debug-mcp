@@ -121,7 +121,7 @@ class _FakeRegistry:
 
 
 def _fetch(tmp_path, runner, **over):
-    base = {"run_id": "r1", "target_ref": "local-qemu", "dump_ref": "/var/crash/d1"}
+    base = {"run_id": "r1", "manifest_target_profile": "local-qemu", "dump_ref": "/var/crash/d1"}
     base.update(over)
     return debug_postmortem_fetch_handler(
         DebugPostmortemFetchRequest(**base),
@@ -264,7 +264,7 @@ def test_fetch_redacts_ssh_key(tmp_path) -> None:
 def test_fetch_halted_target_rejected(tmp_path) -> None:
     _booted(tmp_path)
     resp = debug_postmortem_fetch_handler(
-        DebugPostmortemFetchRequest(run_id="r1", target_ref="local-qemu", dump_ref="/var/crash/d1"),
+        DebugPostmortemFetchRequest(run_id="r1", manifest_target_profile="local-qemu", dump_ref="/var/crash/d1"),
         artifact_root=tmp_path,
         rootfs_profiles=_rootfs(),
         ssh_runner=_FetchRunner(),

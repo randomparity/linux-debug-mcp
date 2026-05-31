@@ -217,7 +217,7 @@ def test_schema_snapshots_match_models() -> None:
 def test_helper_request_defaults() -> None:
     from kdive.domain import DebugIntrospectHelperRequest
 
-    r = DebugIntrospectHelperRequest(run_id="r", target_ref="t", name="sysinfo")
+    r = DebugIntrospectHelperRequest(run_id="r", manifest_target_profile="t", name="sysinfo")
     assert r.args == {}
     assert r.timeout_seconds == 30
 
@@ -228,7 +228,7 @@ def test_helper_request_forbids_extra() -> None:
     from kdive.domain import DebugIntrospectHelperRequest
 
     with pytest.raises(ValidationError):
-        DebugIntrospectHelperRequest(run_id="r", target_ref="t", name="sysinfo", bogus=1)
+        DebugIntrospectHelperRequest(run_id="r", manifest_target_profile="t", name="sysinfo", bogus=1)
 
 
 def test_helper_op_in_allowlist() -> None:

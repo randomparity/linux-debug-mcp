@@ -23,14 +23,14 @@ from kdive.transport.base import ExecutionState
 
 
 def test_request_defaults_and_fields() -> None:
-    req = DebugPostmortemCheckPrereqsRequest(run_id="r1", target_ref="x86_64-default")
+    req = DebugPostmortemCheckPrereqsRequest(run_id="r1", manifest_target_profile="x86_64-default")
     assert req.timeout_seconds == 20
     assert req.debug_profile is None
 
 
 def test_request_rejects_extra_fields() -> None:
     with pytest.raises(ValidationError):
-        DebugPostmortemCheckPrereqsRequest(run_id="r1", target_ref="x", bogus=1)
+        DebugPostmortemCheckPrereqsRequest(run_id="r1", manifest_target_profile="x", bogus=1)
 
 
 class _FakeSnapshot:
@@ -127,7 +127,7 @@ def _booted_run(tmp_path, *, booted: bool = True) -> str:
 
 
 def _req(run_id: str, **over) -> DebugPostmortemCheckPrereqsRequest:
-    base = {"run_id": run_id, "target_ref": "local-qemu"}
+    base = {"run_id": run_id, "manifest_target_profile": "local-qemu"}
     base.update(over)
     return DebugPostmortemCheckPrereqsRequest(**base)
 

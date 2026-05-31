@@ -68,17 +68,17 @@ def _booted_run(tmp_path: Path, *, with_build_id: bool = True, booted: bool = Tr
 
 
 def _req(run_id: str, **over):
-    base = {"run_id": run_id, "target_ref": "local-qemu"}
+    base = {"run_id": run_id, "manifest_target_profile": "local-qemu"}
     base.update(over)
     return DebugIntrospectCheckPrerequisitesRequest(**base)
 
 
 def test_request_defaults_and_extra_forbidden() -> None:
-    req = DebugIntrospectCheckPrerequisitesRequest(run_id="r1", target_ref="local-qemu")
+    req = DebugIntrospectCheckPrerequisitesRequest(run_id="r1", manifest_target_profile="local-qemu")
     assert req.timeout_seconds == 20
     assert req.debug_profile is None
     with pytest.raises(ValidationError):
-        DebugIntrospectCheckPrerequisitesRequest(run_id="r1", target_ref="t", bogus=1)
+        DebugIntrospectCheckPrerequisitesRequest(run_id="r1", manifest_target_profile="t", bogus=1)
 
 
 def test_run_not_found_is_configuration_error(tmp_path: Path) -> None:

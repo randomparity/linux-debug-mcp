@@ -27,7 +27,7 @@ def test_real_target_list_then_fetch(tmp_path: Path) -> None:
     ctx = _bootstrap_booted_run(tmp_path)
 
     listed = debug_postmortem_list_dumps_handler(
-        DebugPostmortemListDumpsRequest(run_id=ctx.run_id, target_ref="pilot-libvirt"),
+        DebugPostmortemListDumpsRequest(run_id=ctx.run_id, manifest_target_profile="pilot-libvirt"),
         artifact_root=tmp_path / "runs",
         rootfs_profiles=ctx.rootfs_profiles,
         ssh_runner=SubprocessSshRunner(),
@@ -40,7 +40,7 @@ def test_real_target_list_then_fetch(tmp_path: Path) -> None:
 
     dump_ref = listed.data["dumps"][0]["path"]
     fetched = debug_postmortem_fetch_handler(
-        DebugPostmortemFetchRequest(run_id=ctx.run_id, target_ref="pilot-libvirt", dump_ref=dump_ref),
+        DebugPostmortemFetchRequest(run_id=ctx.run_id, manifest_target_profile="pilot-libvirt", dump_ref=dump_ref),
         artifact_root=tmp_path / "runs",
         rootfs_profiles=ctx.rootfs_profiles,
         ssh_runner=SubprocessSshRunner(),

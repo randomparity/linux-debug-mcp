@@ -200,7 +200,7 @@ def _profiles():
 def _make_request(run_id: str, **overrides) -> DebugIntrospectRunRequest:
     base = {
         "run_id": run_id,
-        "target_ref": "local-qemu",
+        "manifest_target_profile": "local-qemu",
         "script": "emit({'pid': 1})",
         "timeout_seconds": 30,
         "allow_write": False,
@@ -1298,14 +1298,13 @@ def test_debug_profile_mismatch_returns_configuration_error(tmp_path: Path) -> N
     assert response.error.details["requested_profile"] == "other"
 
 
-def test_target_ref_mismatch_returns_configuration_error(tmp_path: Path) -> None:
-    # Iter-1 finding 3: target_ref previously was silently ignored. Per spec
-    # §3.1 it names the target profile, so a divergent value is a contract
-    # violation.
+def test_manifest_target_profile_mismatch_returns_configuration_error(tmp_path: Path) -> None:
+    # The request's manifest_target_profile names the target profile. A divergent value is a
+    # contract violation.
     _, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
     response = debug_introspect_run_handler(
-        _make_request(run_id, target_ref="some-other-target"),
+        _make_request(run_id, manifest_target_profile="some-other-target"),
         artifact_root=tmp_path,
         target_profiles=targets,
         rootfs_profiles=rootfs,
@@ -1624,7 +1623,7 @@ def test_helper_success_returns_typed_result(tmp_path: Path) -> None:
         "mem_total_pages": 100,
     }
     resp = debug_introspect_helper_handler(
-        DebugIntrospectHelperRequest(run_id=run_id, target_ref="local-qemu", name="sysinfo"),
+        DebugIntrospectHelperRequest(run_id=run_id, manifest_target_profile="local-qemu", name="sysinfo"),
         artifact_root=tmp_path,
         target_profiles=targets,
         rootfs_profiles=rootfs,
@@ -1648,7 +1647,7 @@ def test_helper_malformed_emit_records_failed_step(tmp_path: Path) -> None:
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
     resp = debug_introspect_helper_handler(
-        DebugIntrospectHelperRequest(run_id=run_id, target_ref="local-qemu", name="sysinfo"),
+        DebugIntrospectHelperRequest(run_id=run_id, manifest_target_profile="local-qemu", name="sysinfo"),
         artifact_root=tmp_path,
         target_profiles=targets,
         rootfs_profiles=rootfs,
@@ -1670,7 +1669,7 @@ def test_helper_script_error_records_failed_step(tmp_path: Path) -> None:
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
     resp = debug_introspect_helper_handler(
-        DebugIntrospectHelperRequest(run_id=run_id, target_ref="local-qemu", name="sysinfo"),
+        DebugIntrospectHelperRequest(run_id=run_id, manifest_target_profile="local-qemu", name="sysinfo"),
         artifact_root=tmp_path,
         target_profiles=targets,
         rootfs_profiles=rootfs,
@@ -1693,7 +1692,7 @@ def test_helper_gating_enforced(tmp_path: Path) -> None:
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, _ = _profiles()
     resp = debug_introspect_helper_handler(
-        DebugIntrospectHelperRequest(run_id=run_id, target_ref="local-qemu", name="sysinfo"),
+        DebugIntrospectHelperRequest(run_id=run_id, manifest_target_profile="local-qemu", name="sysinfo"),
         artifact_root=tmp_path,
         target_profiles=targets,
         rootfs_profiles=rootfs,
@@ -1711,7 +1710,7 @@ def test_helper_unknown_name(tmp_path: Path) -> None:
     from kdive.server import debug_introspect_helper_handler
 
     resp = debug_introspect_helper_handler(
-        DebugIntrospectHelperRequest(run_id="missing", target_ref="t", name="nope"),
+        DebugIntrospectHelperRequest(run_id="missing", manifest_target_profile="t", name="nope"),
         artifact_root=tmp_path,
     )
     assert resp.ok is False
@@ -1723,7 +1722,12 @@ def test_helper_args_invalid(tmp_path: Path) -> None:
     from kdive.server import debug_introspect_helper_handler
 
     resp = debug_introspect_helper_handler(
-        DebugIntrospectHelperRequest(run_id="missing", target_ref="t", name="tasks", args={"limit": "lots"}),
+        DebugIntrospectHelperRequest(
+            run_id="missing",
+            manifest_target_profile="t",
+            name="tasks",
+            args={"limit": "lots"},
+        ),
         artifact_root=tmp_path,
     )
     assert resp.ok is False
@@ -1755,7 +1759,7 @@ def test_helper_passes_cap_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         "mem_total_pages": 100,
     }
     resp = debug_introspect_helper_handler(
-        DebugIntrospectHelperRequest(run_id=run_id, target_ref="local-qemu", name="sysinfo"),
+        DebugIntrospectHelperRequest(run_id=run_id, manifest_target_profile="local-qemu", name="sysinfo"),
         artifact_root=tmp_path,
         target_profiles=targets,
         rootfs_profiles=rootfs,
@@ -1798,7 +1802,7 @@ def test_helper_redacts_secret_in_emit(tmp_path: Path) -> None:
     }
     ssh = FakeSshRunner(results=[_helper_ssh_result(emit)])
     resp = debug_introspect_helper_handler(
-        DebugIntrospectHelperRequest(run_id=run_id, target_ref="local-qemu", name="sysinfo"),
+        DebugIntrospectHelperRequest(run_id=run_id, manifest_target_profile="local-qemu", name="sysinfo"),
         artifact_root=tmp_path,
         target_profiles=targets,
         rootfs_profiles=rootfs_with_secret,

@@ -23,7 +23,7 @@ def test_real_target_reports_consistent_kdump_readiness(tmp_path: Path) -> None:
     ctx = _bootstrap_booted_run(tmp_path)
 
     resp = debug_postmortem_check_prereqs_handler(
-        DebugPostmortemCheckPrereqsRequest(run_id=ctx.run_id, target_ref="pilot-libvirt"),
+        DebugPostmortemCheckPrereqsRequest(run_id=ctx.run_id, manifest_target_profile="pilot-libvirt"),
         artifact_root=tmp_path / "runs",
         rootfs_profiles=ctx.rootfs_profiles,
         ssh_runner=SubprocessSshRunner(),

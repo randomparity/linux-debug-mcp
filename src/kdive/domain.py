@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import Field, model_validator
 
 from kdive.config import BootOverrides, BuildOverrides
 from kdive.model import Model
@@ -103,7 +103,7 @@ class DebugIntrospectRunRequest(Model):
     """
 
     run_id: str
-    manifest_target_profile: str = Field(validation_alias=AliasChoices("manifest_target_profile", "target_ref"))
+    manifest_target_profile: str
     script: str
     timeout_seconds: int = 30
     allow_write: bool = False
@@ -123,7 +123,7 @@ class DebugIntrospectCheckPrerequisitesRequest(Model):
     """
 
     run_id: str
-    manifest_target_profile: str = Field(validation_alias=AliasChoices("manifest_target_profile", "target_ref"))
+    manifest_target_profile: str
     timeout_seconds: int = 20
     debug_profile: str | None = None
     target_profile: str | None = None
@@ -140,7 +140,7 @@ class DebugIntrospectHelperRequest(Model):
     """
 
     run_id: str
-    manifest_target_profile: str = Field(validation_alias=AliasChoices("manifest_target_profile", "target_ref"))
+    manifest_target_profile: str
     name: str
     args: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = 30

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import AliasChoices, Field
+from pydantic import Field
 
 from kdive.model import Model
 
@@ -11,7 +11,7 @@ class DebugPostmortemCheckPrereqsRequest(Model):
     """Request payload for ``debug.postmortem.check_prereqs``. #94 / ADR 0028."""
 
     run_id: str
-    manifest_target_profile: str = Field(validation_alias=AliasChoices("manifest_target_profile", "target_ref"))
+    manifest_target_profile: str
     timeout_seconds: int = 20
     debug_profile: str | None = None
     target_profile: str | None = None
@@ -43,7 +43,7 @@ class DebugPostmortemListDumpsRequest(Model):
     """Request payload for ``debug.postmortem.list_dumps``. #95 / ADR 0029."""
 
     run_id: str
-    manifest_target_profile: str = Field(validation_alias=AliasChoices("manifest_target_profile", "target_ref"))
+    manifest_target_profile: str
     dump_dir: str | None = None
     timeout_seconds: int = 20
     debug_profile: str | None = None
@@ -55,7 +55,7 @@ class DebugPostmortemFetchRequest(Model):
     """Request payload for ``debug.postmortem.fetch``. #95 / ADR 0029."""
 
     run_id: str
-    manifest_target_profile: str = Field(validation_alias=AliasChoices("manifest_target_profile", "target_ref"))
+    manifest_target_profile: str
     dump_ref: str
     force: bool = False
     dump_dir: str | None = None

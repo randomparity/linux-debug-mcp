@@ -12,14 +12,14 @@ from kdive.postmortem.models import (
 
 
 def test_list_request_defaults() -> None:
-    req = DebugPostmortemListDumpsRequest(run_id="r1", target_ref="local-qemu")
+    req = DebugPostmortemListDumpsRequest(run_id="r1", manifest_target_profile="local-qemu")
     assert req.timeout_seconds == 20
     assert req.dump_dir is None
     assert req.manifest_target_profile == "local-qemu"
 
 
 def test_fetch_request_defaults() -> None:
-    req = DebugPostmortemFetchRequest(run_id="r1", target_ref="local-qemu", dump_ref="/var/crash/d1")
+    req = DebugPostmortemFetchRequest(run_id="r1", manifest_target_profile="local-qemu", dump_ref="/var/crash/d1")
     assert req.timeout_seconds == 300
     assert req.force is False
     assert req.max_bytes is None
@@ -27,7 +27,7 @@ def test_fetch_request_defaults() -> None:
 
 def test_models_forbid_extra() -> None:
     with pytest.raises(ValidationError):
-        DebugPostmortemListDumpsRequest(run_id="r1", target_ref="x", bogus=1)
+        DebugPostmortemListDumpsRequest(run_id="r1", manifest_target_profile="x", bogus=1)
     with pytest.raises(ValidationError):
         DumpEntry(path="/d", kernel=None, capture_time=None, size_bytes=1, incomplete=False, bogus=1)
 
