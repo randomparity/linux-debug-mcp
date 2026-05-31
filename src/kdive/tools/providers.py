@@ -24,13 +24,13 @@ from kdive.providers.contracts.models import (
     ReserveProvisionBootRequest,
 )
 from kdive.providers.handlers import (
-    FUTURE_PROVIDER_OPERATIONS,
-    future_request_validation_failure_response,
+    STUB_PROVIDER_OPERATIONS,
     list_providers_handler,
+    stub_request_validation_failure_response,
 )
 
 
-class _FutureProviderRequestFactory(Protocol):
+class _StubProviderRequestFactory(Protocol):
     __name__: str
     __doc__: str | None
     __annotations__: dict[str, Any]
@@ -86,62 +86,62 @@ class WorkflowReserveProvisionBootOptions(Model):
 
 
 @dataclass(frozen=True)
-class FutureProviderToolRequestSpec:
+class StubProviderToolRequestSpec:
     request_type: type[ProviderRequest]
     operation_fields: tuple[str, ...]
     options_model: type[Model] | None = None
     common_fields: tuple[str, ...] = ("architecture", "provider_context", "execution_options")
 
 
-FUTURE_PROVIDER_TOOL_REQUEST_SPECS: dict[str, FutureProviderToolRequestSpec] = {
-    "remote.build_kernel": FutureProviderToolRequestSpec(
+STUB_PROVIDER_TOOL_REQUEST_SPECS: dict[str, StubProviderToolRequestSpec] = {
+    "remote.build_kernel": StubProviderToolRequestSpec(
         request_type=RemoteBuildRequest,
         operation_fields=("source_ref", "build_profile"),
         options_model=RemoteBuildArtifactOptions,
     ),
-    "remote.sync_artifacts": FutureProviderToolRequestSpec(
+    "remote.sync_artifacts": StubProviderToolRequestSpec(
         request_type=RemoteArtifactSyncRequest,
         operation_fields=("external_artifact_ref",),
         options_model=RemoteSyncArtifactOptions,
     ),
-    "reservation.request_host": FutureProviderToolRequestSpec(
+    "reservation.request_host": StubProviderToolRequestSpec(
         request_type=ReservationRequest,
         operation_fields=("reservation_pool",),
         options_model=ReservationRequestOptions,
     ),
-    "reservation.release_host": FutureProviderToolRequestSpec(
+    "reservation.release_host": StubProviderToolRequestSpec(
         request_type=ReservationReleaseRequest,
         operation_fields=("reservation_id",),
     ),
-    "provision.prepare_target": FutureProviderToolRequestSpec(
+    "provision.prepare_target": StubProviderToolRequestSpec(
         request_type=ProvisioningRequest,
         operation_fields=("target_name", "provisioning_profile"),
         options_model=ProvisioningOptions,
     ),
-    "hardware.power_control": FutureProviderToolRequestSpec(
+    "hardware.power_control": StubProviderToolRequestSpec(
         request_type=HardwareControlRequest,
         operation_fields=("target_name", "action"),
         options_model=HardwarePowerOptions,
     ),
-    "hardware.boot_kernel": FutureProviderToolRequestSpec(
+    "hardware.boot_kernel": StubProviderToolRequestSpec(
         request_type=RealBootRequest,
         operation_fields=("target_name", "kernel_artifact_ref"),
         options_model=HardwareBootOptions,
     ),
-    "console.open_session": FutureProviderToolRequestSpec(
+    "console.open_session": StubProviderToolRequestSpec(
         request_type=ConsoleSessionRequest,
         operation_fields=("target_name", "access_method"),
         options_model=ConsoleOpenOptions,
     ),
-    "console.read": FutureProviderToolRequestSpec(
+    "console.read": StubProviderToolRequestSpec(
         request_type=ConsoleReadRequest,
         operation_fields=("console_session_id", "max_bytes"),
     ),
-    "console.write": FutureProviderToolRequestSpec(
+    "console.write": StubProviderToolRequestSpec(
         request_type=ConsoleWriteRequest,
         operation_fields=("console_session_id", "data"),
     ),
-    "workflow.reserve_provision_boot": FutureProviderToolRequestSpec(
+    "workflow.reserve_provision_boot": StubProviderToolRequestSpec(
         request_type=ReserveProvisionBootRequest,
         operation_fields=("reservation_pool", "target_name", "provisioning_profile", "kernel_artifact_ref"),
         options_model=WorkflowReserveProvisionBootOptions,
@@ -169,7 +169,7 @@ def _provider_fields(
     }
 
 
-def _future_provider_request(
+def _stub_provider_request(
     tool_name: str,
     *,
     architecture: str,
@@ -178,7 +178,7 @@ def _future_provider_request(
     operation_values: Mapping[str, Any],
     options: Model | dict[str, Any] | None = None,
 ) -> ProviderRequest:
-    spec = FUTURE_PROVIDER_TOOL_REQUEST_SPECS[tool_name]
+    spec = STUB_PROVIDER_TOOL_REQUEST_SPECS[tool_name]
     payload = {
         **_provider_fields(
             architecture=architecture,
@@ -192,7 +192,7 @@ def _future_provider_request(
     return spec.request_type(**payload)
 
 
-def _evaluated_signature(request_factory: _FutureProviderRequestFactory) -> inspect.Signature:
+def _evaluated_signature(request_factory: _StubProviderRequestFactory) -> inspect.Signature:
     hints = get_type_hints(request_factory)
     signature = inspect.signature(request_factory)
     parameters = [
@@ -205,19 +205,19 @@ def _evaluated_signature(request_factory: _FutureProviderRequestFactory) -> insp
     )
 
 
-def _register_future_provider_tool(
+def _register_stub_provider_tool(
     app: FastMCP,
     *,
     tool_name: str,
-) -> Callable[[_FutureProviderRequestFactory], Callable[..., dict[str, Any]]]:
-    provider_operation = FUTURE_PROVIDER_OPERATIONS[tool_name]
+) -> Callable[[_StubProviderRequestFactory], Callable[..., dict[str, Any]]]:
+    provider_operation = STUB_PROVIDER_OPERATIONS[tool_name]
 
-    def decorate(request_factory: _FutureProviderRequestFactory) -> Callable[..., dict[str, Any]]:
+    def decorate(request_factory: _StubProviderRequestFactory) -> Callable[..., dict[str, Any]]:
         def tool_wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
             try:
                 request = request_factory(*args, **kwargs)
             except ValidationError as exc:
-                return future_request_validation_failure_response(exc)
+                return stub_request_validation_failure_response(exc)
             return provider_operation.handler(request=request).model_dump(mode="json")
 
         tool_wrapper.__name__ = request_factory.__name__
@@ -236,7 +236,7 @@ def register_provider_tools(app: FastMCP) -> None:
     def providers_list() -> dict[str, Any]:
         return list_providers_handler().model_dump(mode="json")
 
-    @_register_future_provider_tool(
+    @_register_stub_provider_tool(
         app,
         tool_name="remote.build_kernel",
     )
@@ -250,7 +250,7 @@ def register_provider_tools(app: FastMCP) -> None:
     ) -> RemoteBuildRequest:
         return cast(
             RemoteBuildRequest,
-            _future_provider_request(
+            _stub_provider_request(
                 "remote.build_kernel",
                 architecture=architecture,
                 provider_context=provider_context,
@@ -260,7 +260,7 @@ def register_provider_tools(app: FastMCP) -> None:
             ),
         )
 
-    @_register_future_provider_tool(
+    @_register_stub_provider_tool(
         app,
         tool_name="remote.sync_artifacts",
     )
@@ -273,7 +273,7 @@ def register_provider_tools(app: FastMCP) -> None:
     ) -> RemoteArtifactSyncRequest:
         return cast(
             RemoteArtifactSyncRequest,
-            _future_provider_request(
+            _stub_provider_request(
                 "remote.sync_artifacts",
                 architecture=architecture,
                 provider_context=provider_context,
@@ -283,7 +283,7 @@ def register_provider_tools(app: FastMCP) -> None:
             ),
         )
 
-    @_register_future_provider_tool(
+    @_register_stub_provider_tool(
         app,
         tool_name="reservation.request_host",
     )
@@ -296,7 +296,7 @@ def register_provider_tools(app: FastMCP) -> None:
     ) -> ReservationRequest:
         return cast(
             ReservationRequest,
-            _future_provider_request(
+            _stub_provider_request(
                 "reservation.request_host",
                 architecture=architecture,
                 provider_context=provider_context,
@@ -306,7 +306,7 @@ def register_provider_tools(app: FastMCP) -> None:
             ),
         )
 
-    @_register_future_provider_tool(
+    @_register_stub_provider_tool(
         app,
         tool_name="reservation.release_host",
     )
@@ -318,7 +318,7 @@ def register_provider_tools(app: FastMCP) -> None:
     ) -> ReservationReleaseRequest:
         return cast(
             ReservationReleaseRequest,
-            _future_provider_request(
+            _stub_provider_request(
                 "reservation.release_host",
                 architecture=architecture,
                 provider_context=provider_context,
@@ -327,7 +327,7 @@ def register_provider_tools(app: FastMCP) -> None:
             ),
         )
 
-    @_register_future_provider_tool(
+    @_register_stub_provider_tool(
         app,
         tool_name="provision.prepare_target",
     )
@@ -341,7 +341,7 @@ def register_provider_tools(app: FastMCP) -> None:
     ) -> ProvisioningRequest:
         return cast(
             ProvisioningRequest,
-            _future_provider_request(
+            _stub_provider_request(
                 "provision.prepare_target",
                 architecture=architecture,
                 provider_context=provider_context,
@@ -351,7 +351,7 @@ def register_provider_tools(app: FastMCP) -> None:
             ),
         )
 
-    @_register_future_provider_tool(
+    @_register_stub_provider_tool(
         app,
         tool_name="hardware.power_control",
     )
@@ -365,7 +365,7 @@ def register_provider_tools(app: FastMCP) -> None:
     ) -> HardwareControlRequest:
         return cast(
             HardwareControlRequest,
-            _future_provider_request(
+            _stub_provider_request(
                 "hardware.power_control",
                 architecture=architecture,
                 provider_context=provider_context,
@@ -375,7 +375,7 @@ def register_provider_tools(app: FastMCP) -> None:
             ),
         )
 
-    @_register_future_provider_tool(
+    @_register_stub_provider_tool(
         app,
         tool_name="hardware.boot_kernel",
     )
@@ -389,7 +389,7 @@ def register_provider_tools(app: FastMCP) -> None:
     ) -> RealBootRequest:
         return cast(
             RealBootRequest,
-            _future_provider_request(
+            _stub_provider_request(
                 "hardware.boot_kernel",
                 architecture=architecture,
                 provider_context=provider_context,
@@ -399,7 +399,7 @@ def register_provider_tools(app: FastMCP) -> None:
             ),
         )
 
-    @_register_future_provider_tool(
+    @_register_stub_provider_tool(
         app,
         tool_name="console.open_session",
     )
@@ -413,7 +413,7 @@ def register_provider_tools(app: FastMCP) -> None:
     ) -> ConsoleSessionRequest:
         return cast(
             ConsoleSessionRequest,
-            _future_provider_request(
+            _stub_provider_request(
                 "console.open_session",
                 architecture=architecture,
                 provider_context=provider_context,
@@ -423,7 +423,7 @@ def register_provider_tools(app: FastMCP) -> None:
             ),
         )
 
-    @_register_future_provider_tool(
+    @_register_stub_provider_tool(
         app,
         tool_name="console.read",
     )
@@ -436,7 +436,7 @@ def register_provider_tools(app: FastMCP) -> None:
     ) -> ConsoleReadRequest:
         return cast(
             ConsoleReadRequest,
-            _future_provider_request(
+            _stub_provider_request(
                 "console.read",
                 architecture=architecture,
                 provider_context=provider_context,
@@ -445,7 +445,7 @@ def register_provider_tools(app: FastMCP) -> None:
             ),
         )
 
-    @_register_future_provider_tool(
+    @_register_stub_provider_tool(
         app,
         tool_name="console.write",
     )
@@ -458,7 +458,7 @@ def register_provider_tools(app: FastMCP) -> None:
     ) -> ConsoleWriteRequest:
         return cast(
             ConsoleWriteRequest,
-            _future_provider_request(
+            _stub_provider_request(
                 "console.write",
                 architecture=architecture,
                 provider_context=provider_context,
@@ -467,7 +467,7 @@ def register_provider_tools(app: FastMCP) -> None:
             ),
         )
 
-    @_register_future_provider_tool(
+    @_register_stub_provider_tool(
         app,
         tool_name="workflow.reserve_provision_boot",
     )
@@ -483,7 +483,7 @@ def register_provider_tools(app: FastMCP) -> None:
     ) -> ReserveProvisionBootRequest:
         return cast(
             ReserveProvisionBootRequest,
-            _future_provider_request(
+            _stub_provider_request(
                 "workflow.reserve_provision_boot",
                 architecture=architecture,
                 provider_context=provider_context,

@@ -395,7 +395,7 @@ def test_workflow_tool_malformed_grouped_input_returns_configuration_error() -> 
     assert response["error"]["category"] == "configuration_error"
 
 
-def test_create_app_registers_future_provider_tools() -> None:
+def test_create_app_registers_stub_provider_tools() -> None:
     app = create_app()
     tools = app._tool_manager._tools
     expected_fields = {

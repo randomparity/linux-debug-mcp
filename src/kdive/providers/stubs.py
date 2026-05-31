@@ -215,7 +215,7 @@ def real_boot_stub_capability() -> ProviderCapability:
     )
 
 
-def future_stub_capability_factories() -> list[Callable[[], ProviderCapability]]:
+def stub_provider_capability_factories() -> list[Callable[[], ProviderCapability]]:
     return [
         remote_build_stub_capability,
         remote_artifact_sync_stub_capability,
@@ -227,7 +227,7 @@ def future_stub_capability_factories() -> list[Callable[[], ProviderCapability]]
     ]
 
 
-def future_configuration_error_response(message: str, details: dict[str, object] | None = None) -> ToolResponse:
+def stub_configuration_error_response(message: str, details: dict[str, object] | None = None) -> ToolResponse:
     return ToolResponse.failure(
         category=ErrorCategory.CONFIGURATION_ERROR,
         message=message,
@@ -236,7 +236,7 @@ def future_configuration_error_response(message: str, details: dict[str, object]
     )
 
 
-def select_future_provider(
+def select_stub_provider(
     registry: Any,
     *,
     operation: str,
@@ -247,17 +247,17 @@ def select_future_provider(
         try:
             provider = registry.get(provider_name)
         except KeyError:
-            return future_configuration_error_response(
+            return stub_configuration_error_response(
                 "unknown provider",
                 {"provider_name": provider_name, "operation": operation, "architecture": architecture},
             )
         if operation not in provider.operations:
-            return future_configuration_error_response(
+            return stub_configuration_error_response(
                 "provider does not advertise requested operation",
                 {"provider_name": provider_name, "operation": operation, "architecture": architecture},
             )
         if architecture not in provider.architectures:
-            return future_configuration_error_response(
+            return stub_configuration_error_response(
                 "provider does not advertise requested architecture",
                 {"provider_name": provider_name, "operation": operation, "architecture": architecture},
             )
@@ -265,12 +265,12 @@ def select_future_provider(
 
     candidates = registry.find_by_operation_and_architecture(operation=operation, architecture=architecture)
     if not candidates:
-        return future_configuration_error_response(
+        return stub_configuration_error_response(
             "no provider advertises requested operation and architecture",
             {"operation": operation, "architecture": architecture},
         )
     if len(candidates) > 1:
-        return future_configuration_error_response(
+        return stub_configuration_error_response(
             "multiple providers advertise requested operation and architecture",
             {
                 "operation": operation,
@@ -281,7 +281,7 @@ def select_future_provider(
     return candidates[0]
 
 
-def future_not_implemented_response(
+def stub_not_implemented_response(
     *,
     provider: ProviderCapability,
     operation: str,
@@ -290,7 +290,7 @@ def future_not_implemented_response(
 ) -> ToolResponse:
     return ToolResponse.failure(
         category=ErrorCategory.NOT_IMPLEMENTED,
-        message=f"{provider.provider_name} advertises future operation {operation} but is not implemented",
+        message=f"{provider.provider_name} advertises stub operation {operation} but is not implemented",
         details={
             "provider_name": provider.provider_name,
             "operation": operation,

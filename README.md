@@ -27,8 +27,8 @@ the tool:
   The discovery tool `providers.list` is the exception among implemented tools: it
   materializes the provider registry on demand and returns its catalog (it backs no
   provider operation, so it belongs to no provider row).
-- **Future-stub tools** validate a typed request contract, then resolve an
-  advertised provider through the registry (`select_future_provider`). A
+- **Stub-provider tools** validate a typed request contract, then resolve an
+  advertised provider through the registry (`select_stub_provider`). A
   contract-valid request that resolves to exactly one provider returns
   `not_implemented`; contract or provider-selection failures — unknown provider,
   an unadvertised operation or architecture, zero matches, or multiple matches —
@@ -37,10 +37,10 @@ the tool:
 
 The **provider registry** is a discovery catalog, not a request hop for
 implemented tools. It is materialized on demand from **provider plugins**
-(`builtins.local`, `builtins.future-stubs`) whenever `providers.list` or a
-future-stub tool needs it — there is no persistent registry built at startup.
+(`builtins.local`, `builtins.stub-providers`) whenever `providers.list` or a
+stub-provider tool needs it — there is no persistent registry built at startup.
 The registry, the typed contracts, and registry-mediated selection are the
-forward-looking machinery for the future provider surface; today they back
+forward-looking machinery for the stub provider surface; today they back
 discovery and the stub tools while implemented tools dispatch directly. This is
 the current proof-of-concept to functioning-design boundary.
 
@@ -56,12 +56,12 @@ flowchart TD
     tool -->|implemented: server handler| orch[Server handler, no provider class]
     orch --> store[Artifact store / host]
 
-    tool -->|future stub| contract[Typed contract]
-    contract --> registry[Provider registry: select_future_provider]
+    tool -->|stub provider| contract[Typed contract]
+    contract --> registry[Provider registry: select_stub_provider]
     registry --> ni[not_implemented]
 
     list[providers.list] --> registry
-    plugins[Plugins: builtins.local, builtins.future-stubs] -.->|per-call registration| registry
+    plugins[Plugins: builtins.local, builtins.stub-providers] -.->|per-call registration| registry
 ```
 
 ## Providers
@@ -117,7 +117,7 @@ the three orchestration tools belong to no provider row.
 ### Architecture support
 
 x86_64 is the only architecture with working implemented providers. `ppc64le` is
-recognized by the contract layer and advertised by the future-provider stubs,
+recognized by the contract layer and advertised by the stub-provider stubs,
 but has no functioning implementation yet — see the
 [ppc64le Provider Spike](docs/ppc64le-provider-spike.md) for design notes and
 current boundaries.
@@ -127,7 +127,7 @@ current boundaries.
 Two local x86_64 workflows: build-boot-test (build, boot, run smoke tests, collect
 artifacts) and build-boot-debug (build, boot, start a gdbstub debug session), plus
 live introspection, transport recovery tools, postmortem vmcore/crash triage,
-artifact manifests, and discovery-only future-provider stubs. The runtime-checked
+artifact manifests, and discovery-only stub-provider stubs. The runtime-checked
 tool inventory and expanded debug/postmortem/transport sections live in
 [Tool Reference](docs/tool-reference.md).
 

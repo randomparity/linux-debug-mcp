@@ -1,7 +1,7 @@
 # Tool Reference
 
 KDIVE exposes local kernel build, boot, smoke-test, artifact, transport, live
-debug, introspection, postmortem, and future-provider planning tools over stdio
+debug, introspection, postmortem, and stub-provider planning tools over stdio
 MCP. The default artifact root is `.kdive/runs`.
 
 Use `providers.list` and `host.check_prerequisites` before choosing a workflow.
@@ -73,7 +73,7 @@ with the runtime MCP surface.
 ### `providers.list`
 
 Returns provider capability declarations for implemented local providers and
-future-provider stubs. Use it to check provider families, implementation state,
+stub-provider stubs. Use it to check provider families, implementation state,
 advertised operations, limitations, and documentation paths.
 
 ### `host.check_prerequisites`
@@ -285,9 +285,9 @@ Use `artifacts.collect` after a run to refresh the artifact bundle index:
 }
 ```
 
-## Future-Provider Stubs
+## Stub-Provider Stubs
 
-Future-provider tools are discoverable for planning and contract validation
+Stub-provider tools are discoverable for planning and contract validation
 only:
 
 - `remote.build_kernel`
@@ -302,11 +302,11 @@ only:
 - `console.write`
 - `workflow.reserve_provision_boot`
 
-Valid future-provider requests return `not_implemented`. Malformed requests
+Valid stub-provider requests return `not_implemented`. Malformed requests
 return `configuration_error`. These stubs do not contact remote hosts, open
 consoles, provision targets, control hardware, or create real-boot side
 effects.
 
-ppc64le appears only in future-provider metadata and contracts today. See the
+ppc64le appears only in stub-provider metadata and contracts today. See the
 [ppc64le Provider Spike](ppc64le-provider-spike.md) for design notes and
 current boundaries.

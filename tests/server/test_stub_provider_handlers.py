@@ -25,7 +25,7 @@ from kdive.providers.contracts.models import (
     ReserveProvisionBootRequest,
 )
 from kdive.providers.handlers import (
-    FUTURE_PROVIDER_OPERATIONS,
+    STUB_PROVIDER_OPERATIONS,
     console_open_session_handler,
     console_read_handler,
     console_write_handler,
@@ -182,14 +182,14 @@ def _tool_response(tool_name: str, **payload) -> ToolResponse:
     return ToolResponse.model_validate(raw)
 
 
-def test_future_provider_handlers_take_typed_request_models() -> None:
+def test_stub_provider_handlers_take_typed_request_models() -> None:
     signature = inspect.signature(remote_build_kernel_handler)
     assert "kwargs" not in signature.parameters
     assert get_type_hints(remote_build_kernel_handler)["request"] is RemoteBuildRequest
     assert remote_build_kernel_handler.__module__ == "kdive.providers.handlers"
 
 
-def test_future_provider_handlers_are_real_static_functions() -> None:
+def test_stub_provider_handlers_are_real_static_functions() -> None:
     from kdive.providers import handlers
 
     source = inspect.getsource(handlers)
@@ -198,13 +198,23 @@ def test_future_provider_handlers_are_real_static_functions() -> None:
     assert ".__annotations__" not in source
 
 
-def test_future_provider_handler_validates_direct_call_request_type() -> None:
+def test_stub_provider_runtime_vocabulary_does_not_use_future_terms() -> None:
+    from kdive.providers import handlers
+
+    provider_handler_names = {name for name in vars(handlers) if "future" in name.lower() or "Future" in name}
+    provider_tool_names = {name for name in vars(provider_tools) if "future" in name.lower() or "Future" in name}
+
+    assert provider_handler_names == set()
+    assert provider_tool_names == set()
+
+
+def test_stub_provider_handler_validates_direct_call_request_type() -> None:
     response = remote_build_kernel_handler(request=ProviderRequest(architecture="ppc64le"))
 
     assert response.ok is False
     assert response.error is not None
     assert response.error.category == "configuration_error"
-    assert response.error.message == "future provider request failed validation"
+    assert response.error.message == "stub provider request failed validation"
     assert response.error.details == {
         "validation_errors": [
             {"field": "source_ref", "type": "missing"},
@@ -213,17 +223,17 @@ def test_future_provider_handler_validates_direct_call_request_type() -> None:
     }
 
 
-def test_future_provider_handlers_are_generated_from_operation_table() -> None:
+def test_stub_provider_handlers_are_generated_from_operation_table() -> None:
     for handler, _, _, operation in VALID_CALLS:
-        spec = FUTURE_PROVIDER_OPERATIONS[operation]
+        spec = STUB_PROVIDER_OPERATIONS[operation]
         assert spec.handler is handler
         assert spec.request_type is REQUEST_BY_HANDLER[handler]
 
 
-def test_create_app_registers_future_tools_through_shared_helper() -> None:
+def test_create_app_registers_stub_provider_tools_through_shared_helper() -> None:
     app = create_app()
 
-    assert not hasattr(provider_tools, "_FutureProviderPayloadAdapter")
+    assert not hasattr(provider_tools, "_StubProviderPayloadAdapter")
     assert not hasattr(provider_tools, "_provider_payload")
 
     for _, _, _, operation in VALID_CALLS:
@@ -231,14 +241,14 @@ def test_create_app_registers_future_tools_through_shared_helper() -> None:
         assert tool.fn.__module__ == "kdive.tools.providers"
 
 
-def test_provider_tools_registration_uses_future_operation_table() -> None:
+def test_provider_tools_registration_uses_stub_operation_table() -> None:
     for handler, _, _, operation in VALID_CALLS:
-        spec = FUTURE_PROVIDER_OPERATIONS[operation]
+        spec = STUB_PROVIDER_OPERATIONS[operation]
         assert spec.handler is handler
         assert spec.request_type is REQUEST_BY_HANDLER[handler]
 
 
-def test_future_provider_tool_schema_groups_repeated_provider_metadata() -> None:
+def test_stub_provider_tool_schema_groups_repeated_provider_metadata() -> None:
     signature = inspect.signature(create_app()._tool_manager._tools["remote.build_kernel"].fn)
     assert "architecture" in signature.parameters
     assert "source_ref" in signature.parameters
@@ -250,8 +260,8 @@ def test_future_provider_tool_schema_groups_repeated_provider_metadata() -> None
         assert repeated not in signature.parameters
 
 
-def test_future_provider_tool_request_variation_is_table_driven() -> None:
-    specs = provider_tools.FUTURE_PROVIDER_TOOL_REQUEST_SPECS
+def test_stub_provider_tool_request_variation_is_table_driven() -> None:
+    specs = provider_tools.STUB_PROVIDER_TOOL_REQUEST_SPECS
 
     assert set(specs) == {operation for _, _, _, operation in VALID_CALLS}
     assert specs["remote.build_kernel"].request_type is RemoteBuildRequest
@@ -265,7 +275,7 @@ def test_future_provider_tool_request_variation_is_table_driven() -> None:
     )
 
 
-def test_future_provider_tool_grouped_metadata_reaches_request_validation() -> None:
+def test_stub_provider_tool_grouped_metadata_reaches_request_validation() -> None:
     response = _tool_response(
         "remote.build_kernel",
         architecture="ppc64le",
@@ -282,7 +292,7 @@ def test_future_provider_tool_grouped_metadata_reaches_request_validation() -> N
 
 
 @pytest.mark.parametrize(("handler", "payload", "provider_name", "operation"), VALID_CALLS)
-def test_future_stub_handlers_return_not_implemented(handler, payload, provider_name: str, operation: str) -> None:
+def test_stub_provider_handlers_return_not_implemented(handler, payload, provider_name: str, operation: str) -> None:
     response = handler(request=_request_for(handler, payload))
 
     assert response.ok is False
@@ -296,7 +306,7 @@ def test_future_stub_handlers_return_not_implemented(handler, payload, provider_
     assert response.suggested_next_actions == ["providers.list"]
 
 
-def test_future_stub_handler_maps_malformed_requests_to_configuration_error() -> None:
+def test_stub_provider_handler_maps_malformed_requests_to_configuration_error() -> None:
     response = _tool_response(
         "hardware.power_control",
         architecture="ppc64le",
@@ -408,7 +418,7 @@ def test_console_write_validation_does_not_accept_credential_ref_or_echo_payload
 
 
 @pytest.mark.parametrize(("handler", "payload", "provider_name", "operation"), VALID_CALLS)
-def test_future_stub_handlers_do_not_create_run_workspace_or_touch_forbidden_dependencies(
+def test_stub_provider_handlers_do_not_create_run_workspace_or_touch_forbidden_dependencies(
     handler,
     payload,
     provider_name: str,
@@ -417,7 +427,7 @@ def test_future_stub_handlers_do_not_create_run_workspace_or_touch_forbidden_dep
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail_forbidden_dependency(*args: object, **kwargs: object) -> object:
-        raise AssertionError("future stubs must not touch forbidden dependencies")
+        raise AssertionError("stub providers must not touch forbidden dependencies")
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(subprocess, "run", fail_forbidden_dependency)

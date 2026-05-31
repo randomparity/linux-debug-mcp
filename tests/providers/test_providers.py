@@ -310,7 +310,7 @@ def test_default_registry_loads_from_static_local_plugin_specs() -> None:
 def test_registry_rejects_plugin_capability_state_mismatch() -> None:
     registry = ProviderRegistry()
     plugin_spec = ProviderPluginSpec(
-        plugin_name="builtins.future-stubs",
+        plugin_name="builtins.stub-providers",
         plugin_version="0.1.0",
         implementation_state=ImplementationState.STUB,
         provider_capability_factories=[lambda: capability("bad-stub")],
@@ -320,7 +320,7 @@ def test_registry_rejects_plugin_capability_state_mismatch() -> None:
         registry.register(capability("bad-stub"), plugin_spec=plugin_spec)
 
 
-def test_default_registry_includes_future_stub_providers() -> None:
+def test_default_registry_includes_stub_providers() -> None:
     registry = ProviderRegistry.with_defaults()
     providers = {provider.provider_name: provider for provider in registry.list_capabilities()}
     expected_stubs = {

@@ -13,7 +13,7 @@ from kdive.providers.local.local_ssh_tests import local_ssh_tests_capability
 from kdive.providers.local.postmortem.local_crash_postmortem import local_crash_postmortem_capability
 from kdive.providers.local.postmortem.local_vmcore_retrieval import local_vmcore_retrieval_capability
 from kdive.providers.local.target.libvirt_qemu import local_libvirt_qemu_capability
-from kdive.providers.stubs import future_stub_capability_factories
+from kdive.providers.stubs import stub_provider_capability_factories
 
 
 class ProviderPluginSpec(Model):
@@ -71,10 +71,10 @@ def local_provider_plugin_specs() -> list[ProviderPluginSpec]:
 def stub_provider_plugin_specs() -> list[ProviderPluginSpec]:
     return [
         ProviderPluginSpec(
-            plugin_name="builtins.future-stubs",
+            plugin_name="builtins.stub-providers",
             plugin_version="0.1.0",
             implementation_state=ImplementationState.STUB,
-            provider_capability_factories=future_stub_capability_factories(),
+            provider_capability_factories=stub_provider_capability_factories(),
             documentation_paths=["docs/ppc64le-provider-spike.md"],
             limitations=[
                 "Stub providers are discoverability-only and do not open network, serial, or power-control resources."
