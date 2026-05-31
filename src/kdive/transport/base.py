@@ -402,7 +402,7 @@ class Transport(ABC):
         the kill so it never signals a recycled PID, and MAY raise; the caller suppresses so a reap
         failure never masks the original teardown error.
         """
-        return None
+        return
 
 
 class TransportRegistry:
