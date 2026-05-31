@@ -6,9 +6,13 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from kdive.domain import DebugIntrospectRunRequest, ToolResponse
-from kdive.introspect.tools import register_introspect_tools
+from kdive.introspect.tools import IntrospectRunOptions, IntrospectTargetContext, register_introspect_tools
 from kdive.postmortem.models import DebugPostmortemFetchRequest
-from kdive.postmortem.tools import register_postmortem_tools
+from kdive.postmortem.tools import (
+    PostmortemFetchOptions,
+    PostmortemTargetContext,
+    register_postmortem_tools,
+)
 from kdive.transport.tools import TransportToolContext, TransportToolHandlers, register_transport_tools
 from kdive.workflow.tools import (
     WorkflowBuildBootDebugOptions,
@@ -97,13 +101,17 @@ def test_introspect_adapter_builds_run_request_and_forwards_gate_collaborators(t
 
     raw = _tool_fn(app, "debug.introspect.run")(
         run_id="run-1",
-        target_ref="local-qemu",
+        target=IntrospectTargetContext(
+            target_ref="local-qemu",
+            artifact_root=str(tmp_path / "runs"),
+        ),
         script="print('x')",
-        artifact_root=str(tmp_path / "runs"),
-        timeout_seconds=9,
-        allow_write=True,
-        acknowledged_permissions=["read/write target memory"],
-        args={"limit": 1},
+        options=IntrospectRunOptions(
+            timeout_seconds=9,
+            allow_write=True,
+            acknowledged_permissions=["read/write target memory"],
+            args={"limit": 1},
+        ),
     )
 
     assert raw["ok"] is True
@@ -148,13 +156,17 @@ def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators
 
     raw = _tool_fn(app, "debug.postmortem.fetch")(
         run_id="run-1",
-        target_ref="local-qemu",
+        target=PostmortemTargetContext(
+            target_ref="local-qemu",
+            artifact_root=str(tmp_path / "runs"),
+        ),
         dump_ref="/var/crash/d1",
-        artifact_root=str(tmp_path / "runs"),
-        force=True,
-        dump_dir="/var/crash",
-        max_bytes=123,
-        timeout_seconds=17,
+        options=PostmortemFetchOptions(
+            force=True,
+            dump_dir="/var/crash",
+            max_bytes=123,
+            timeout_seconds=17,
+        ),
     )
 
     assert raw["ok"] is True

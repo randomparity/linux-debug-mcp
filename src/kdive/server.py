@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol, TypeVar, cast
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
@@ -277,7 +277,7 @@ def _require_value(value: _RequiredT | None, message: str) -> _RequiredT:
 def _require_dict(value: object, message: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RuntimeError(message)
-    return value
+    return cast(dict[str, Any], value)
 
 
 DEFAULT_ARTIFACT_ROOT = Path(".kdive/runs")

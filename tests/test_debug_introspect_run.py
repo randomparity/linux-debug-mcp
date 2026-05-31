@@ -29,6 +29,7 @@ from kdive.domain import (
     StepStatus,
     ToolResponse,
 )
+from kdive.introspect.tools import IntrospectRunOptions, IntrospectTargetContext
 from kdive.providers.local.local_ssh_tests import SshCommandResult
 from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetState
 from kdive.server import RUN_STDOUT_CAP, debug_introspect_run_handler
@@ -308,7 +309,8 @@ def test_run_tool_exposes_acknowledged_permissions() -> None:
     app = create_app()
     tool = app._tool_manager._tools["debug.introspect.run"]
     params = inspect.signature(tool.fn).parameters
-    assert "acknowledged_permissions" in params
+    assert params["options"].annotation == "IntrospectRunOptions | None"
+    assert "acknowledged_permissions" in IntrospectRunOptions.model_fields
 
 
 def test_run_tool_forwards_args_to_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -323,9 +325,9 @@ def test_run_tool_forwards_args_to_request(monkeypatch: pytest.MonkeyPatch) -> N
 
     raw = app._tool_manager._tools["debug.introspect.run"].fn(
         run_id="r1",
-        target_ref="local-qemu",
+        target=IntrospectTargetContext(target_ref="local-qemu"),
         script="print(1)",
-        args={"limit": 3},
+        options=IntrospectRunOptions(args={"limit": 3}),
     )
 
     assert raw["ok"] is True
