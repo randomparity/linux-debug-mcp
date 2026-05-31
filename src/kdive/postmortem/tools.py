@@ -16,6 +16,7 @@ from kdive.postmortem.models import (
     DebugPostmortemListDumpsRequest,
     DebugPostmortemTriageRequest,
 )
+from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, optional_model_arg
 
 
 class PostmortemTargetContext(Model):
@@ -124,61 +125,73 @@ def register_postmortem_tools(
     @app.tool(name="debug.postmortem.crash")
     def debug_postmortem_crash(
         run_id: str,
-        vmcore: PostmortemVmcoreInputs,
+        vmcore: PostmortemVmcoreInputs | dict[str, Any],
         commands: list[str],
-        options: PostmortemCrashOptions | None = None,
+        options: PostmortemCrashOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        options = options or PostmortemCrashOptions()
-        request = DebugPostmortemCrashRequest(
-            run_id=run_id,
-            vmcore_ref=vmcore.vmcore_ref,
-            vmlinux_ref=vmcore.vmlinux_ref,
-            commands=commands,
-            modules_ref=vmcore.modules_ref,
-            timeout_seconds=options.timeout_seconds,
-        )
+        try:
+            vmcore_model = model_arg(vmcore, PostmortemVmcoreInputs)
+            options_model = optional_model_arg(options, PostmortemCrashOptions)
+            request = DebugPostmortemCrashRequest(
+                run_id=run_id,
+                vmcore_ref=vmcore_model.vmcore_ref,
+                vmlinux_ref=vmcore_model.vmlinux_ref,
+                commands=commands,
+                modules_ref=vmcore_model.modules_ref,
+                timeout_seconds=options_model.timeout_seconds,
+            )
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return crash_handler(
             request,
-            artifact_root=artifact_root_path(vmcore.artifact_root),
+            artifact_root=artifact_root_path(vmcore_model.artifact_root),
         ).model_dump(mode="json")
 
     @app.tool(name="debug.postmortem.triage")
     def debug_postmortem_triage(
         run_id: str,
-        vmcore: PostmortemVmcoreInputs,
-        options: PostmortemCrashOptions | None = None,
+        vmcore: PostmortemVmcoreInputs | dict[str, Any],
+        options: PostmortemCrashOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        options = options or PostmortemCrashOptions()
-        request = DebugPostmortemTriageRequest(
-            run_id=run_id,
-            vmcore_ref=vmcore.vmcore_ref,
-            vmlinux_ref=vmcore.vmlinux_ref,
-            modules_ref=vmcore.modules_ref,
-            timeout_seconds=options.timeout_seconds,
-        )
+        try:
+            vmcore_model = model_arg(vmcore, PostmortemVmcoreInputs)
+            options_model = optional_model_arg(options, PostmortemCrashOptions)
+            request = DebugPostmortemTriageRequest(
+                run_id=run_id,
+                vmcore_ref=vmcore_model.vmcore_ref,
+                vmlinux_ref=vmcore_model.vmlinux_ref,
+                modules_ref=vmcore_model.modules_ref,
+                timeout_seconds=options_model.timeout_seconds,
+            )
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return triage_handler(
             request,
-            artifact_root=artifact_root_path(vmcore.artifact_root),
+            artifact_root=artifact_root_path(vmcore_model.artifact_root),
         ).model_dump(mode="json")
 
     @app.tool(name="debug.postmortem.check_prereqs")
     def debug_postmortem_check_prereqs(
         run_id: str,
-        target: PostmortemTargetContext,
-        options: PostmortemProbeOptions | None = None,
+        target: PostmortemTargetContext | dict[str, Any],
+        options: PostmortemProbeOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        options = options or PostmortemProbeOptions()
-        request = DebugPostmortemCheckPrereqsRequest(
-            run_id=run_id,
-            manifest_target_profile=target.target_ref,
-            timeout_seconds=options.timeout_seconds,
-            debug_profile=target.debug_profile,
-            target_profile=target.target_profile,
-            rootfs_profile=target.rootfs_profile,
-        )
+        try:
+            target_model = model_arg(target, PostmortemTargetContext)
+            options_model = optional_model_arg(options, PostmortemProbeOptions)
+            request = DebugPostmortemCheckPrereqsRequest(
+                run_id=run_id,
+                manifest_target_profile=target_model.target_ref,
+                timeout_seconds=options_model.timeout_seconds,
+                debug_profile=target_model.debug_profile,
+                target_profile=target_model.target_profile,
+                rootfs_profile=target_model.rootfs_profile,
+            )
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return check_prereqs_handler(
             request,
-            artifact_root=artifact_root_path(target.artifact_root),
+            artifact_root=artifact_root_path(target_model.artifact_root),
             admission=admission,
             session_registry=session_registry,
         ).model_dump(mode="json")
@@ -186,22 +199,26 @@ def register_postmortem_tools(
     @app.tool(name="debug.postmortem.list_dumps")
     def debug_postmortem_list_dumps(
         run_id: str,
-        target: PostmortemTargetContext,
-        options: PostmortemListDumpsOptions | None = None,
+        target: PostmortemTargetContext | dict[str, Any],
+        options: PostmortemListDumpsOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        options = options or PostmortemListDumpsOptions()
-        request = DebugPostmortemListDumpsRequest(
-            run_id=run_id,
-            manifest_target_profile=target.target_ref,
-            dump_dir=options.dump_dir,
-            timeout_seconds=options.timeout_seconds,
-            debug_profile=target.debug_profile,
-            target_profile=target.target_profile,
-            rootfs_profile=target.rootfs_profile,
-        )
+        try:
+            target_model = model_arg(target, PostmortemTargetContext)
+            options_model = optional_model_arg(options, PostmortemListDumpsOptions)
+            request = DebugPostmortemListDumpsRequest(
+                run_id=run_id,
+                manifest_target_profile=target_model.target_ref,
+                dump_dir=options_model.dump_dir,
+                timeout_seconds=options_model.timeout_seconds,
+                debug_profile=target_model.debug_profile,
+                target_profile=target_model.target_profile,
+                rootfs_profile=target_model.rootfs_profile,
+            )
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return list_dumps_handler(
             request,
-            artifact_root=artifact_root_path(target.artifact_root),
+            artifact_root=artifact_root_path(target_model.artifact_root),
             admission=admission,
             session_registry=session_registry,
         ).model_dump(mode="json")
@@ -209,26 +226,30 @@ def register_postmortem_tools(
     @app.tool(name="debug.postmortem.fetch")
     def debug_postmortem_fetch(
         run_id: str,
-        target: PostmortemTargetContext,
+        target: PostmortemTargetContext | dict[str, Any],
         dump_ref: str,
-        options: PostmortemFetchOptions | None = None,
+        options: PostmortemFetchOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        options = options or PostmortemFetchOptions()
-        request = DebugPostmortemFetchRequest(
-            run_id=run_id,
-            manifest_target_profile=target.target_ref,
-            dump_ref=dump_ref,
-            force=options.force,
-            dump_dir=options.dump_dir,
-            max_bytes=options.max_bytes,
-            timeout_seconds=options.timeout_seconds,
-            debug_profile=target.debug_profile,
-            target_profile=target.target_profile,
-            rootfs_profile=target.rootfs_profile,
-        )
+        try:
+            target_model = model_arg(target, PostmortemTargetContext)
+            options_model = optional_model_arg(options, PostmortemFetchOptions)
+            request = DebugPostmortemFetchRequest(
+                run_id=run_id,
+                manifest_target_profile=target_model.target_ref,
+                dump_ref=dump_ref,
+                force=options_model.force,
+                dump_dir=options_model.dump_dir,
+                max_bytes=options_model.max_bytes,
+                timeout_seconds=options_model.timeout_seconds,
+                debug_profile=target_model.debug_profile,
+                target_profile=target_model.target_profile,
+                rootfs_profile=target_model.rootfs_profile,
+            )
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return fetch_handler(
             request,
-            artifact_root=artifact_root_path(target.artifact_root),
+            artifact_root=artifact_root_path(target_model.artifact_root),
             admission=admission,
             session_registry=session_registry,
         ).model_dump(mode="json")

@@ -132,6 +132,30 @@ def test_introspect_adapter_builds_run_request_and_forwards_gate_collaborators(t
     }
 
 
+def test_introspect_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    register_introspect_tools(
+        app,
+        default_artifact_root=tmp_path / "default",
+        admission=object(),
+        session_registry=object(),
+        run_handler=lambda *_args, **_kwargs: _success(),
+        helper_handler=lambda *_args, **_kwargs: _success(),
+        check_prereqs_handler=lambda *_args, **_kwargs: _success(),
+        from_vmcore_handler=lambda *_args, **_kwargs: _success(),
+        from_vmcore_helper_handler=lambda *_args, **_kwargs: _success(),
+    )
+
+    raw = _tool_fn(app, "debug.introspect.run")(
+        run_id="run-1",
+        target={},
+        script="print('x')",
+    )
+
+    assert raw["ok"] is False
+    assert raw["error"]["category"] == "configuration_error"
+
+
 def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators(tmp_path: Path) -> None:
     app = FastMCP("adapter-test")
     admission = object()
@@ -185,6 +209,30 @@ def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators
         "admission": admission,
         "session_registry": registry,
     }
+
+
+def test_postmortem_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    register_postmortem_tools(
+        app,
+        default_artifact_root=tmp_path / "default",
+        admission=object(),
+        session_registry=object(),
+        crash_handler=lambda *_args, **_kwargs: _success(),
+        triage_handler=lambda *_args, **_kwargs: _success(),
+        check_prereqs_handler=lambda *_args, **_kwargs: _success(),
+        list_dumps_handler=lambda *_args, **_kwargs: _success(),
+        fetch_handler=lambda *_args, **_kwargs: _success(),
+    )
+
+    raw = _tool_fn(app, "debug.postmortem.fetch")(
+        run_id="run-1",
+        target={},
+        dump_ref="/var/crash/d1",
+    )
+
+    assert raw["ok"] is False
+    assert raw["error"]["category"] == "configuration_error"
 
 
 def test_workflow_adapter_forwards_debug_collaborators_and_converts_artifact_root(tmp_path: Path) -> None:

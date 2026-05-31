@@ -309,7 +309,7 @@ def test_run_tool_exposes_acknowledged_permissions() -> None:
     app = create_app()
     tool = app._tool_manager._tools["debug.introspect.run"]
     params = inspect.signature(tool.fn).parameters
-    assert params["options"].annotation == "IntrospectRunOptions | None"
+    assert "IntrospectRunOptions" in params["options"].annotation
     assert "acknowledged_permissions" in IntrospectRunOptions.model_fields
 
 

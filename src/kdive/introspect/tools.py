@@ -16,6 +16,7 @@ from kdive.domain import (
     ToolResponse,
 )
 from kdive.model import Model
+from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, optional_model_arg
 
 
 class IntrospectTargetContext(Model):
@@ -131,26 +132,30 @@ def register_introspect_tools(
     @app.tool(name="debug.introspect.run")
     def debug_introspect_run(
         run_id: str,
-        target: IntrospectTargetContext,
+        target: IntrospectTargetContext | dict[str, Any],
         script: str,
-        options: IntrospectRunOptions | None = None,
+        options: IntrospectRunOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        options = options or IntrospectRunOptions()
-        request = DebugIntrospectRunRequest(
-            run_id=run_id,
-            manifest_target_profile=target.target_ref,
-            script=script,
-            timeout_seconds=options.timeout_seconds,
-            allow_write=options.allow_write,
-            acknowledged_permissions=options.acknowledged_permissions or [],
-            debug_profile=target.debug_profile,
-            target_profile=target.target_profile,
-            rootfs_profile=target.rootfs_profile,
-            args=options.args or {},
-        )
+        try:
+            target_model = model_arg(target, IntrospectTargetContext)
+            options_model = optional_model_arg(options, IntrospectRunOptions)
+            request = DebugIntrospectRunRequest(
+                run_id=run_id,
+                manifest_target_profile=target_model.target_ref,
+                script=script,
+                timeout_seconds=options_model.timeout_seconds,
+                allow_write=options_model.allow_write,
+                acknowledged_permissions=options_model.acknowledged_permissions or [],
+                debug_profile=target_model.debug_profile,
+                target_profile=target_model.target_profile,
+                rootfs_profile=target_model.rootfs_profile,
+                args=options_model.args or {},
+            )
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return run_handler(
             request,
-            artifact_root=artifact_root_path(target.artifact_root),
+            artifact_root=artifact_root_path(target_model.artifact_root),
             admission=admission,
             session_registry=session_registry,
         ).model_dump(mode="json")
@@ -158,24 +163,28 @@ def register_introspect_tools(
     @app.tool(name="debug.introspect.helper")
     def debug_introspect_helper(
         run_id: str,
-        target: IntrospectTargetContext,
+        target: IntrospectTargetContext | dict[str, Any],
         name: str,
-        options: IntrospectHelperOptions | None = None,
+        options: IntrospectHelperOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        options = options or IntrospectHelperOptions()
-        request = DebugIntrospectHelperRequest(
-            run_id=run_id,
-            manifest_target_profile=target.target_ref,
-            name=name,
-            args=options.args or {},
-            timeout_seconds=options.timeout_seconds,
-            debug_profile=target.debug_profile,
-            target_profile=target.target_profile,
-            rootfs_profile=target.rootfs_profile,
-        )
+        try:
+            target_model = model_arg(target, IntrospectTargetContext)
+            options_model = optional_model_arg(options, IntrospectHelperOptions)
+            request = DebugIntrospectHelperRequest(
+                run_id=run_id,
+                manifest_target_profile=target_model.target_ref,
+                name=name,
+                args=options_model.args or {},
+                timeout_seconds=options_model.timeout_seconds,
+                debug_profile=target_model.debug_profile,
+                target_profile=target_model.target_profile,
+                rootfs_profile=target_model.rootfs_profile,
+            )
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return helper_handler(
             request,
-            artifact_root=artifact_root_path(target.artifact_root),
+            artifact_root=artifact_root_path(target_model.artifact_root),
             admission=admission,
             session_registry=session_registry,
         ).model_dump(mode="json")
@@ -183,21 +192,25 @@ def register_introspect_tools(
     @app.tool(name="debug.introspect.check_prerequisites")
     def debug_introspect_check_prerequisites(
         run_id: str,
-        target: IntrospectTargetContext,
-        options: IntrospectProbeOptions | None = None,
+        target: IntrospectTargetContext | dict[str, Any],
+        options: IntrospectProbeOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        options = options or IntrospectProbeOptions()
-        request = DebugIntrospectCheckPrerequisitesRequest(
-            run_id=run_id,
-            manifest_target_profile=target.target_ref,
-            timeout_seconds=options.timeout_seconds,
-            debug_profile=target.debug_profile,
-            target_profile=target.target_profile,
-            rootfs_profile=target.rootfs_profile,
-        )
+        try:
+            target_model = model_arg(target, IntrospectTargetContext)
+            options_model = optional_model_arg(options, IntrospectProbeOptions)
+            request = DebugIntrospectCheckPrerequisitesRequest(
+                run_id=run_id,
+                manifest_target_profile=target_model.target_ref,
+                timeout_seconds=options_model.timeout_seconds,
+                debug_profile=target_model.debug_profile,
+                target_profile=target_model.target_profile,
+                rootfs_profile=target_model.rootfs_profile,
+            )
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return check_prereqs_handler(
             request,
-            artifact_root=artifact_root_path(target.artifact_root),
+            artifact_root=artifact_root_path(target_model.artifact_root),
             admission=admission,
             session_registry=session_registry,
         ).model_dump(mode="json")
@@ -205,44 +218,52 @@ def register_introspect_tools(
     @app.tool(name="debug.introspect.from_vmcore")
     def debug_introspect_from_vmcore(
         run_id: str,
-        vmcore: VmcoreIntrospectInputs,
+        vmcore: VmcoreIntrospectInputs | dict[str, Any],
         script: str,
-        options: VmcoreIntrospectRunOptions | None = None,
+        options: VmcoreIntrospectRunOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        options = options or VmcoreIntrospectRunOptions()
-        request = DebugIntrospectFromVmcoreRequest(
-            run_id=run_id,
-            vmcore_ref=vmcore.vmcore_ref,
-            vmlinux_ref=vmcore.vmlinux_ref,
-            script=script,
-            modules_ref=vmcore.modules_ref,
-            timeout_seconds=options.timeout_seconds,
-            allow_write=options.allow_write,
-            args=options.args or {},
-        )
+        try:
+            vmcore_model = model_arg(vmcore, VmcoreIntrospectInputs)
+            options_model = optional_model_arg(options, VmcoreIntrospectRunOptions)
+            request = DebugIntrospectFromVmcoreRequest(
+                run_id=run_id,
+                vmcore_ref=vmcore_model.vmcore_ref,
+                vmlinux_ref=vmcore_model.vmlinux_ref,
+                script=script,
+                modules_ref=vmcore_model.modules_ref,
+                timeout_seconds=options_model.timeout_seconds,
+                allow_write=options_model.allow_write,
+                args=options_model.args or {},
+            )
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return from_vmcore_handler(
             request,
-            artifact_root=artifact_root_path(vmcore.artifact_root),
+            artifact_root=artifact_root_path(vmcore_model.artifact_root),
         ).model_dump(mode="json")
 
     @app.tool(name="debug.introspect.from_vmcore_helper")
     def debug_introspect_from_vmcore_helper(
         run_id: str,
-        vmcore: VmcoreIntrospectInputs,
+        vmcore: VmcoreIntrospectInputs | dict[str, Any],
         name: str,
-        options: VmcoreIntrospectHelperOptions | None = None,
+        options: VmcoreIntrospectHelperOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        options = options or VmcoreIntrospectHelperOptions()
-        request = DebugIntrospectFromVmcoreHelperRequest(
-            run_id=run_id,
-            vmcore_ref=vmcore.vmcore_ref,
-            vmlinux_ref=vmcore.vmlinux_ref,
-            name=name,
-            modules_ref=vmcore.modules_ref,
-            args=options.args or {},
-            timeout_seconds=options.timeout_seconds,
-        )
+        try:
+            vmcore_model = model_arg(vmcore, VmcoreIntrospectInputs)
+            options_model = optional_model_arg(options, VmcoreIntrospectHelperOptions)
+            request = DebugIntrospectFromVmcoreHelperRequest(
+                run_id=run_id,
+                vmcore_ref=vmcore_model.vmcore_ref,
+                vmlinux_ref=vmcore_model.vmlinux_ref,
+                name=name,
+                modules_ref=vmcore_model.modules_ref,
+                args=options_model.args or {},
+                timeout_seconds=options_model.timeout_seconds,
+            )
+        except (TypeError, ValueError) as exc:
+            return adapter_validation_failure(exc)
         return from_vmcore_helper_handler(
             request,
-            artifact_root=artifact_root_path(vmcore.artifact_root),
+            artifact_root=artifact_root_path(vmcore_model.artifact_root),
         ).model_dump(mode="json")
