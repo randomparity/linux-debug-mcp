@@ -78,7 +78,15 @@ def _python_version_check() -> PrerequisiteCheck:
     )
 
 
-def _tool_check(tool: str, runner: PrerequisiteRunner) -> PrerequisiteCheck:
+def _which_check(
+    tool: str,
+    runner: PrerequisiteRunner,
+    *,
+    missing_status: PrerequisiteStatus,
+    missing_fix: str,
+) -> PrerequisiteCheck:
+    """Shared `tool.<name>` presence check: PASSED with the resolved path, or `missing_status`
+    (FAILED for required tools, WARNING for optional ones) with `missing_fix` when not on PATH."""
     path = runner.which(tool)
     if path:
         return PrerequisiteCheck(
@@ -89,9 +97,18 @@ def _tool_check(tool: str, runner: PrerequisiteRunner) -> PrerequisiteCheck:
         )
     return PrerequisiteCheck(
         check_id=f"tool.{tool}",
-        status=PrerequisiteStatus.FAILED,
+        status=missing_status,
         message=f"{tool} was not found",
-        suggested_fix=f"Install {tool} with your distribution package manager.",
+        suggested_fix=missing_fix,
+    )
+
+
+def _tool_check(tool: str, runner: PrerequisiteRunner) -> PrerequisiteCheck:
+    return _which_check(
+        tool,
+        runner,
+        missing_status=PrerequisiteStatus.FAILED,
+        missing_fix=f"Install {tool} with your distribution package manager.",
     )
 
 
@@ -266,19 +283,11 @@ AGENT_PROXY_REMEDIATION = (
 
 
 def _agent_proxy_check(runner: PrerequisiteRunner) -> PrerequisiteCheck:
-    path = runner.which("agent-proxy")
-    if path:
-        return PrerequisiteCheck(
-            check_id="tool.agent-proxy",
-            status=PrerequisiteStatus.PASSED,
-            message="agent-proxy found",
-            details={"path": path},
-        )
-    return PrerequisiteCheck(
-        check_id="tool.agent-proxy",
-        status=PrerequisiteStatus.WARNING,
-        message="agent-proxy was not found",
-        suggested_fix=AGENT_PROXY_REMEDIATION,
+    return _which_check(
+        "agent-proxy",
+        runner,
+        missing_status=PrerequisiteStatus.WARNING,
+        missing_fix=AGENT_PROXY_REMEDIATION,
     )
 
 

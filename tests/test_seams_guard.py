@@ -1,3 +1,4 @@
+import contextlib
 import threading
 
 import pytest
@@ -79,6 +80,57 @@ def test_reacquire_after_revoke_has_a_higher_fence():
     guard.revoke(_key())
     second = guard.acquire(_key())
     assert second.fence > first.fence
+
+
+def test_stale_token_cannot_clear_a_newer_holder_after_revoke_reacquire():
+    # TD-36: the "stale clears newer" hazard the revoke() docstring warns about. After
+    # revoke -> reacquire, a release keyed with the PRE-revoke token must be a fenced no-op and must
+    # NOT free the newer holder. This is what makes revoke safe even if a tokenless invalidator
+    # races a re-acquire: the old token can never act on the new session.
+    guard = InProcessStopCapableGuard()
+    stale = guard.acquire(_key())
+    guard.revoke(_key())
+    fresh = guard.acquire(_key())
+    assert guard.release(_key(), stale) is False  # stale token does not free the new holder
+    with pytest.raises(GuardConflict):
+        guard.acquire(_key())  # the newer holder is intact — not cleared by the stale release
+    assert guard.release(_key(), fresh) is True  # only the new holder's own token frees it
+
+
+def _revoke_at(guard: InProcessStopCapableGuard, barrier: threading.Barrier) -> None:
+    barrier.wait()
+    guard.revoke(_key())
+
+
+def _reacquire_at(guard: InProcessStopCapableGuard, barrier: threading.Barrier) -> None:
+    barrier.wait()
+    with contextlib.suppress(GuardConflict):
+        guard.acquire(_key())
+
+
+def test_concurrent_revoke_and_reacquire_never_leaves_stale_holder():
+    # Run revoke and a re-acquire concurrently many times; whatever wins, the lock serializes them so
+    # the pre-revoke token is always fenced out and can never free the post-race holder. Proves the
+    # race cannot produce a "stale clears newer" violation.
+    guard = InProcessStopCapableGuard()
+    for _ in range(200):
+        old = guard.acquire(_key())
+        barrier = threading.Barrier(2)
+        threads = [
+            threading.Thread(target=_revoke_at, args=(guard, barrier)),
+            threading.Thread(target=_reacquire_at, args=(guard, barrier)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        # The old token can never free whatever holds now (it is fenced, or nothing holds).
+        assert guard.release(_key(), old) is False
+        # Normalize back to a free guard for the next iteration without relying on token identity.
+        guard.revoke(_key())
+        assert guard.acquire(_key()) is not None
+        guard.revoke(_key())
 
 
 def test_concurrent_acquire_yields_exactly_one_holder():
