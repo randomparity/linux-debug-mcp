@@ -254,3 +254,20 @@ def test_rootfs_builder_fails_when_qemu_img_missing() -> None:
 
     check = check_rootfs_builder(runner=FakeRunner({"virt-builder"}))
     assert check.status == "failed"
+
+
+def test_kvm_access_passes_when_device_usable() -> None:
+    from kdive.prereqs.checks import check_kvm_access
+
+    check = check_kvm_access(kvm_probe=lambda: True)
+    assert check.check_id == "kvm.access"
+    assert check.status == "passed"
+
+
+def test_kvm_access_warns_when_device_unusable() -> None:
+    from kdive.prereqs.checks import check_kvm_access
+
+    check = check_kvm_access(kvm_probe=lambda: False)
+    assert check.status == "warning"
+    assert "kvm" in (check.suggested_fix or "").lower()
+    assert "TCG" in (check.message or "")

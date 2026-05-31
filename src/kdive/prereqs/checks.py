@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import os
 import re
 import shutil
 import socket
@@ -523,4 +524,34 @@ def check_rootfs_builder(*, runner: PrerequisiteRunner | None = None) -> Prerequ
         check_id="rootfs.builder",
         status=PrerequisiteStatus.PASSED,
         message="virt-builder and qemu-img are present",
+    )
+
+
+def _default_kvm_probe() -> bool:
+    return os.access("/dev/kvm", os.R_OK | os.W_OK)
+
+
+def check_kvm_access(*, kvm_probe: Callable[[], bool] | None = None) -> PrerequisiteCheck:
+    """Report whether ``/dev/kvm`` is usable by the running user.
+
+    Tests the real capability with ``os.access`` rather than ``kvm`` group membership. WARNING (not
+    FAILED) when unusable: the workflow still runs under TCG (slow). The ``suggested_fix`` recommends
+    ``kvm`` group membership because the stock-Fedora ``uaccess`` seat ACL is interactive-login-only
+    and does not follow into the server's service/cron/non-login-SSH context.
+    """
+    usable = (kvm_probe or _default_kvm_probe)()
+    if usable:
+        return PrerequisiteCheck(
+            check_id="kvm.access",
+            status=PrerequisiteStatus.PASSED,
+            message="/dev/kvm is readable and writable",
+        )
+    return PrerequisiteCheck(
+        check_id="kvm.access",
+        status=PrerequisiteStatus.WARNING,
+        message="/dev/kvm is not usable; libguestfs/qemu fall back to TCG (functional but slow)",
+        suggested_fix=(
+            "Add your user to the 'kvm' group for durable access across login/service/cron contexts "
+            "(the interactive uaccess seat ACL does not follow into non-login contexts)."
+        ),
     )
