@@ -6,6 +6,7 @@ from conftest import make_source_tree
 from kdive import server
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import BootOverrides, BuildOverrides, RootfsProfile, TargetProfile
+from kdive.debug import operations as debug_operations
 from kdive.domain import ArtifactRef, StepResult, StepStatus
 from kdive.prereqs.checks import PortProbeResult
 from kdive.providers.handlers import list_providers_handler
@@ -209,7 +210,7 @@ def test_debug_operation_handlers_live_outside_server_catch_all() -> None:
     ):
         assert isinstance(handler, partial)
         assert handler.func.__module__ == "kdive.debug.handlers"
-        assert handler.keywords == {"operation_core": server._debug_operation_response}
+        assert handler.keywords == {"operation_core": debug_operations._debug_operation_response}
 
 
 def test_live_introspect_handlers_live_outside_server_catch_all() -> None:

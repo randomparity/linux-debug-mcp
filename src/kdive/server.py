@@ -9,7 +9,6 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from functools import partial
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -39,7 +38,7 @@ from kdive.coordination.admission import (
 from kdive.coordination.lease import ConsoleLeaseManager
 from kdive.coordination.registry import OrphanReap, SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
-from kdive.debug.handlers import (
+from kdive.debug.bound_handlers import (
     debug_backtrace_handler,
     debug_clear_breakpoint_handler,
     debug_clear_watchpoint_handler,
@@ -61,7 +60,6 @@ from kdive.debug.operations import (
     _break_entry_method as _break_entry_method,
 )
 from kdive.debug.operations import (
-    _debug_operation_response,
     _debug_session_manifest_details,
     _enforce_debug_ownership_fence,
     _is_legacy_debug_session,
@@ -780,24 +778,6 @@ def _workflow_handler_dependencies() -> WorkflowHandlerDependencies:
         debug_start_session_handler=debug_start_session_handler,
         artifacts_collect_handler=artifacts_collect_handler,
     )
-
-
-debug_read_registers_handler = partial(debug_read_registers_handler, operation_core=_debug_operation_response)
-debug_read_symbol_handler = partial(debug_read_symbol_handler, operation_core=_debug_operation_response)
-debug_read_memory_handler = partial(debug_read_memory_handler, operation_core=_debug_operation_response)
-debug_evaluate_handler = partial(debug_evaluate_handler, operation_core=_debug_operation_response)
-debug_set_breakpoint_handler = partial(debug_set_breakpoint_handler, operation_core=_debug_operation_response)
-debug_set_watchpoint_handler = partial(debug_set_watchpoint_handler, operation_core=_debug_operation_response)
-debug_clear_breakpoint_handler = partial(debug_clear_breakpoint_handler, operation_core=_debug_operation_response)
-debug_clear_watchpoint_handler = partial(debug_clear_watchpoint_handler, operation_core=_debug_operation_response)
-debug_list_breakpoints_handler = partial(debug_list_breakpoints_handler, operation_core=_debug_operation_response)
-debug_backtrace_handler = partial(debug_backtrace_handler, operation_core=_debug_operation_response)
-debug_list_variables_handler = partial(debug_list_variables_handler, operation_core=_debug_operation_response)
-debug_continue_handler = partial(debug_continue_handler, operation_core=_debug_operation_response)
-debug_step_handler = partial(debug_step_handler, operation_core=_debug_operation_response)
-debug_next_handler = partial(debug_next_handler, operation_core=_debug_operation_response)
-debug_finish_handler = partial(debug_finish_handler, operation_core=_debug_operation_response)
-debug_interrupt_handler = partial(debug_interrupt_handler, operation_core=_debug_operation_response)
 
 
 def not_implemented_handler(tool_name: str, *, run_id: str | None = None) -> ToolResponse:
