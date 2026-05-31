@@ -6,7 +6,7 @@ import pytest
 from kdive import server
 from kdive.config import RootfsProfile, TargetProfile
 from kdive.providers.local.debug.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
-from kdive.server import workflow_build_boot_debug_handler
+from kdive.server import _workflow_handler_dependencies, workflow_build_boot_debug_handler
 
 MANAGED_DOMAIN_PREFIX = "kdive-"
 REQUIRED_ENV = [
@@ -103,6 +103,7 @@ def test_live_build_boot_debug_workflow(tmp_path: Path, monkeypatch: pytest.Monk
         session_guard=machinery.session_guard,
         gdb_mi_engine=GdbMiEngine(),
         gdb_mi_sessions=GdbMiSessionRegistry(),
+        dependencies=_workflow_handler_dependencies(),
     )
 
     assert response.ok is True, response.model_dump(mode="json")

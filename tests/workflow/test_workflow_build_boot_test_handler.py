@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
 from conftest import NoopBuildRunner as _NoopBuildRunner
 from conftest import make_source_tree
 
@@ -42,8 +43,22 @@ def failure(category: ErrorCategory, message: str, *, run_id: str = "run-abc123"
     return ToolResponse.failure(category=category, message=message, run_id=run_id)
 
 
+def test_workflow_handlers_require_explicit_dependencies(tmp_path: Path) -> None:
+    assert not hasattr(workflow_handlers, "configure_workflow_dependencies")
+    assert not hasattr(workflow_handlers, "configure_workflow_handlers")
+    assert not hasattr(workflow_handlers, "_WORKFLOW_DEPENDENCIES")
+
+    with pytest.raises(TypeError, match="dependencies"):
+        workflow_build_boot_test_handler(
+            artifact_root=tmp_path / "runs",
+            source_path=str(tmp_path),
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+        )
+
+
 def _install_workflow_dependencies(
-    monkeypatch,
     *,
     create_run=create_run_handler,
     kernel_build=server_module.kernel_build_handler,
@@ -59,19 +74,13 @@ def _install_workflow_dependencies(
         debug_start_session_handler=server_module.debug_start_session_handler,
         artifacts_collect_handler=artifacts_collect,
     )
-    monkeypatch.setattr(
-        workflow_handlers,
-        "_WORKFLOW_DEPENDENCIES",
-        dependencies,
-    )
     return dependencies
 
 
 def test_workflow_runs_build_boot_tests_and_collects(tmp_path: Path, monkeypatch) -> None:
     calls: list[str] = []
 
-    _install_workflow_dependencies(
-        monkeypatch,
+    dependencies = _install_workflow_dependencies(
         create_run=lambda **kwargs: success("created"),
         kernel_build=lambda **kwargs: calls.append("build") or success("built"),
         target_boot=lambda **kwargs: calls.append("boot") or success("booted"),
@@ -85,6 +94,7 @@ def test_workflow_runs_build_boot_tests_and_collects(tmp_path: Path, monkeypatch
         build_profile="x86_64-default",
         target_profile="local-qemu",
         rootfs_profile="minimal",
+        dependencies=dependencies,
     )
 
     assert response.ok is True
@@ -92,8 +102,7 @@ def test_workflow_runs_build_boot_tests_and_collects(tmp_path: Path, monkeypatch
     assert response.data["latest_successful_step"] == "collect_artifacts"
 
 
-def test_workflow_accepts_explicit_dependencies_without_global_configuration(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workflow_handlers, "_WORKFLOW_DEPENDENCIES", None)
+def test_workflow_accepts_explicit_dependencies_without_global_configuration(tmp_path: Path) -> None:
     calls: list[str] = []
     dependencies = WorkflowHandlerDependencies(
         create_run_handler=lambda **kwargs: success("created"),
@@ -120,8 +129,7 @@ def test_workflow_accepts_explicit_dependencies_without_global_configuration(tmp
 def test_workflow_collects_and_returns_build_failure(tmp_path: Path, monkeypatch) -> None:
     calls: list[str] = []
 
-    _install_workflow_dependencies(
-        monkeypatch,
+    dependencies = _install_workflow_dependencies(
         create_run=lambda **kwargs: success("created"),
         kernel_build=lambda **kwargs: calls.append("build") or failure(ErrorCategory.BUILD_FAILURE, "build failed"),
         artifacts_collect=lambda **kwargs: calls.append("collect") or success("collected"),
@@ -133,6 +141,7 @@ def test_workflow_collects_and_returns_build_failure(tmp_path: Path, monkeypatch
         build_profile="x86_64-default",
         target_profile="local-qemu",
         rootfs_profile="minimal",
+        dependencies=dependencies,
     )
 
     assert response.ok is False
@@ -145,8 +154,7 @@ def test_workflow_collects_and_returns_build_failure(tmp_path: Path, monkeypatch
 def test_workflow_collects_after_test_failure(tmp_path: Path, monkeypatch) -> None:
     calls: list[str] = []
 
-    _install_workflow_dependencies(
-        monkeypatch,
+    dependencies = _install_workflow_dependencies(
         create_run=lambda **kwargs: success("created"),
         kernel_build=lambda **kwargs: calls.append("build") or success("built"),
         target_boot=lambda **kwargs: calls.append("boot") or success("booted"),
@@ -160,6 +168,7 @@ def test_workflow_collects_after_test_failure(tmp_path: Path, monkeypatch) -> No
         build_profile="x86_64-default",
         target_profile="local-qemu",
         rootfs_profile="minimal",
+        dependencies=dependencies,
     )
 
     assert response.ok is False
@@ -232,8 +241,7 @@ def test_workflow_existing_run_uses_manifest_test_suite_when_omitted(tmp_path: P
         captured_tests.update(kwargs)
         return success("tested")
 
-    _install_workflow_dependencies(
-        monkeypatch,
+    dependencies = _install_workflow_dependencies(
         kernel_build=lambda **kwargs: success("built"),
         target_boot=lambda **kwargs: success("booted"),
         target_run_tests=fake_run_tests,
@@ -247,6 +255,7 @@ def test_workflow_existing_run_uses_manifest_test_suite_when_omitted(tmp_path: P
         target_profile="local-qemu",
         rootfs_profile="minimal",
         run_id="run-abc123",
+        dependencies=dependencies,
     )
 
     assert response.ok is True
@@ -261,8 +270,7 @@ def test_workflow_creates_missing_supplied_run_id_exactly(tmp_path: Path, monkey
         captured.update(kwargs)
         return success("created", run_id=str(kwargs["run_id"]))
 
-    _install_workflow_dependencies(
-        monkeypatch,
+    dependencies = _install_workflow_dependencies(
         create_run=fake_create_run,
         kernel_build=lambda **kwargs: calls.append("build") or success("built", run_id="run-explicit"),
         target_boot=lambda **kwargs: calls.append("boot") or success("booted", run_id="run-explicit"),
@@ -277,6 +285,7 @@ def test_workflow_creates_missing_supplied_run_id_exactly(tmp_path: Path, monkey
         target_profile="local-qemu",
         rootfs_profile="minimal",
         run_id="run-explicit",
+        dependencies=dependencies,
     )
 
     assert response.ok is True

@@ -120,41 +120,6 @@ class _BuildBootWorkflowResult:
     boot_response: ToolResponse
 
 
-_WORKFLOW_DEPENDENCIES: WorkflowHandlerDependencies | None = None
-
-
-def configure_workflow_dependencies(dependencies: WorkflowHandlerDependencies) -> None:
-    global _WORKFLOW_DEPENDENCIES
-    _WORKFLOW_DEPENDENCIES = dependencies
-
-
-def configure_workflow_handlers(
-    *,
-    create_run_handler: CreateRunHandler,
-    kernel_build_handler: KernelBuildHandler,
-    target_boot_handler: TargetBootHandler,
-    target_run_tests_handler: TargetRunTestsHandler,
-    debug_start_session_handler: DebugStartSessionHandler,
-    artifacts_collect_handler: ArtifactsCollectHandler,
-) -> None:
-    configure_workflow_dependencies(
-        WorkflowHandlerDependencies(
-            create_run_handler=create_run_handler,
-            kernel_build_handler=kernel_build_handler,
-            target_boot_handler=target_boot_handler,
-            target_run_tests_handler=target_run_tests_handler,
-            debug_start_session_handler=debug_start_session_handler,
-            artifacts_collect_handler=artifacts_collect_handler,
-        )
-    )
-
-
-def _workflow_dependencies() -> WorkflowHandlerDependencies:
-    if _WORKFLOW_DEPENDENCIES is None:
-        raise RuntimeError("workflow handler dependencies have not been configured")
-    return _WORKFLOW_DEPENDENCIES
-
-
 def _validate_existing_workflow_run_request(
     *,
     artifact_root: Path,
@@ -405,9 +370,8 @@ def workflow_build_boot_test_handler(
     acknowledged_permissions: list[str] | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
-    dependencies: WorkflowHandlerDependencies | None = None,
+    dependencies: WorkflowHandlerDependencies,
 ) -> ToolResponse:
-    dependencies = dependencies or _workflow_dependencies()
     pipeline, pipeline_failure = _run_build_boot_workflow(
         workflow_name="workflow.build_boot_test",
         artifact_root=artifact_root,
@@ -509,9 +473,8 @@ def workflow_build_boot_debug_handler(
     session_guard: SessionGuard | None = None,
     gdb_mi_engine: GdbMiEngine | None = None,
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-    dependencies: WorkflowHandlerDependencies | None = None,
+    dependencies: WorkflowHandlerDependencies,
 ) -> ToolResponse:
-    dependencies = dependencies or _workflow_dependencies()
     pipeline, pipeline_failure = _run_build_boot_workflow(
         workflow_name="workflow.build_boot_debug",
         artifact_root=artifact_root,

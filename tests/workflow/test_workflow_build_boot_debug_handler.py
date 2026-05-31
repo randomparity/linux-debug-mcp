@@ -7,7 +7,6 @@ from kdive.server import (
     create_run_handler,
     workflow_build_boot_debug_handler,
 )
-from kdive.workflow import handlers as workflow_handlers
 from kdive.workflow.handlers import WorkflowHandlerDependencies
 
 
@@ -20,33 +19,27 @@ def failure(category: ErrorCategory, message: str, *, run_id: str = "run-abc123"
 
 
 def _install_workflow_dependencies(
-    monkeypatch,
     *,
     create_run=create_run_handler,
     kernel_build=server_module.kernel_build_handler,
     target_boot=server_module.target_boot_handler,
     debug_start=server_module.debug_start_session_handler,
-) -> None:
-    monkeypatch.setattr(
-        workflow_handlers,
-        "_WORKFLOW_DEPENDENCIES",
-        WorkflowHandlerDependencies(
-            create_run_handler=create_run,
-            kernel_build_handler=kernel_build,
-            target_boot_handler=target_boot,
-            target_run_tests_handler=server_module.target_run_tests_handler,
-            debug_start_session_handler=debug_start,
-            artifacts_collect_handler=server_module.artifacts_collect_handler,
-        ),
+) -> WorkflowHandlerDependencies:
+    return WorkflowHandlerDependencies(
+        create_run_handler=create_run,
+        kernel_build_handler=kernel_build,
+        target_boot_handler=target_boot,
+        target_run_tests_handler=server_module.target_run_tests_handler,
+        debug_start_session_handler=debug_start,
+        artifacts_collect_handler=server_module.artifacts_collect_handler,
     )
 
 
-def test_workflow_build_boot_debug_success(tmp_path: Path, monkeypatch) -> None:
+def test_workflow_build_boot_debug_success(tmp_path: Path) -> None:
     calls: list[str] = []
     captured: dict[str, dict[str, object]] = {}
 
-    _install_workflow_dependencies(
-        monkeypatch,
+    dependencies = _install_workflow_dependencies(
         create_run=lambda **kwargs: (
             captured.setdefault("create", kwargs) and calls.append("create") or success("created")
         ),
@@ -70,6 +63,7 @@ def test_workflow_build_boot_debug_success(tmp_path: Path, monkeypatch) -> None:
         force_rebuild=True,
         force_reboot=True,
         new_session=True,
+        dependencies=dependencies,
     )
 
     assert calls == ["create", "build", "boot", "debug"]
@@ -85,12 +79,10 @@ def test_workflow_build_boot_debug_success(tmp_path: Path, monkeypatch) -> None:
 
 def test_workflow_build_boot_debug_stops_before_debug_when_boot_fails(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     calls: list[str] = []
 
-    _install_workflow_dependencies(
-        monkeypatch,
+    dependencies = _install_workflow_dependencies(
         create_run=lambda **kwargs: calls.append("create") or success("created"),
         kernel_build=lambda **kwargs: calls.append("build") or success("built"),
         target_boot=lambda **kwargs: calls.append("boot") or failure(ErrorCategory.BOOT_TIMEOUT, "boot timed out"),
@@ -104,6 +96,7 @@ def test_workflow_build_boot_debug_stops_before_debug_when_boot_fails(
         target_profile="local-qemu-debug",
         rootfs_profile="minimal",
         debug_profile="qemu-gdbstub-default",
+        dependencies=dependencies,
     )
 
     assert response.ok is False
@@ -113,11 +106,10 @@ def test_workflow_build_boot_debug_stops_before_debug_when_boot_fails(
     assert calls == ["create", "build", "boot"]
 
 
-def test_workflow_build_boot_debug_stops_when_debug_start_fails(tmp_path: Path, monkeypatch) -> None:
+def test_workflow_build_boot_debug_stops_when_debug_start_fails(tmp_path: Path) -> None:
     calls: list[str] = []
 
-    _install_workflow_dependencies(
-        monkeypatch,
+    dependencies = _install_workflow_dependencies(
         create_run=lambda **kwargs: calls.append("create") or success("created"),
         kernel_build=lambda **kwargs: calls.append("build") or success("built"),
         target_boot=lambda **kwargs: calls.append("boot") or success("booted"),
@@ -133,6 +125,7 @@ def test_workflow_build_boot_debug_stops_when_debug_start_fails(tmp_path: Path, 
         target_profile="local-qemu-debug",
         rootfs_profile="minimal",
         debug_profile="qemu-gdbstub-default",
+        dependencies=dependencies,
     )
 
     assert response.ok is False
@@ -144,7 +137,6 @@ def test_workflow_build_boot_debug_stops_when_debug_start_fails(tmp_path: Path, 
 
 def test_workflow_build_boot_debug_allows_explicit_profile_when_manifest_did_not_pin_one(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     source = tmp_path / "linux"
     source.mkdir()
@@ -166,8 +158,7 @@ def test_workflow_build_boot_debug_allows_explicit_profile_when_manifest_did_not
         captured_debug.update(kwargs)
         return success("debug session started", run_id="run-debug")
 
-    _install_workflow_dependencies(
-        monkeypatch,
+    dependencies = _install_workflow_dependencies(
         kernel_build=lambda **kwargs: success("built", run_id="run-debug"),
         target_boot=lambda **kwargs: success("booted", run_id="run-debug"),
         debug_start=fake_debug,
@@ -181,6 +172,7 @@ def test_workflow_build_boot_debug_allows_explicit_profile_when_manifest_did_not
         rootfs_profile="minimal",
         run_id="run-debug",
         debug_profile="qemu-gdbstub-default",
+        dependencies=dependencies,
     )
 
     assert response.ok is True
@@ -189,7 +181,6 @@ def test_workflow_build_boot_debug_allows_explicit_profile_when_manifest_did_not
 
 def test_workflow_build_boot_debug_uses_manifest_debug_profile_when_omitted(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     source = tmp_path / "linux"
     source.mkdir()
@@ -212,8 +203,7 @@ def test_workflow_build_boot_debug_uses_manifest_debug_profile_when_omitted(
         captured_debug.update(kwargs)
         return success("debug session started", run_id="run-debug")
 
-    _install_workflow_dependencies(
-        monkeypatch,
+    dependencies = _install_workflow_dependencies(
         kernel_build=lambda **kwargs: success("built", run_id="run-debug"),
         target_boot=lambda **kwargs: success("booted", run_id="run-debug"),
         debug_start=fake_debug,
@@ -226,6 +216,7 @@ def test_workflow_build_boot_debug_uses_manifest_debug_profile_when_omitted(
         target_profile="local-qemu-debug",
         rootfs_profile="minimal",
         run_id="run-debug",
+        dependencies=dependencies,
     )
 
     assert response.ok is True
