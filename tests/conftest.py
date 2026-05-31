@@ -319,10 +319,12 @@ class CancelAwareTestProvider(FakeTestProvider):
 
     def __init__(self, *, result: TestExecutionResult | None = None) -> None:
         super().__init__(result=result)
+        self.started = threading.Event()
         self.cancel_observed = threading.Event()
 
     def execute_tests(self, plan: object, *, cancel: object = None) -> TestExecutionResult:
         self.executions += 1
+        self.started.set()
         if cancel is not None and cancel.wait(5) and cancel.is_set():
             self.cancel_observed.set()
             return TestExecutionResult(

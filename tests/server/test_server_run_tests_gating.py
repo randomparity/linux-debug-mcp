@@ -1,5 +1,4 @@
 import threading
-import time
 from datetime import UTC, datetime
 
 from conftest import FakeTestProvider, create_booted_run, rootfs
@@ -118,10 +117,12 @@ def test_admitted_then_halted_run_is_cancelled(tmp_path):
     class CancelAwareProvider(FakeTestProvider):
         def __init__(self):
             super().__init__()
+            self.started = threading.Event()
             self.cancel_observed = threading.Event()
 
         def execute_tests(self, plan, *, cancel=None):
             self.executions += 1
+            self.started.set()
             if cancel is not None and cancel.wait(5) and cancel.is_set():
                 self.cancel_observed.set()
                 return TestExecutionResult(
@@ -132,14 +133,13 @@ def test_admitted_then_halted_run_is_cancelled(tmp_path):
     provider = CancelAwareProvider()
 
     def _halt():
-        time.sleep(0.2)
+        assert provider.started.wait(timeout=2)
         halt_epoch = admission.note_execution_transition(KEY, 1)
         admission.cancel_ssh_tier(KEY, 1, halt_epoch=halt_epoch)
 
     live_before = set(threading.enumerate())
     timer = threading.Thread(target=_halt, daemon=True)
     timer.start()
-    start = time.monotonic()
     response = target_run_tests_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,
@@ -148,11 +148,9 @@ def test_admitted_then_halted_run_is_cancelled(tmp_path):
         admission=admission,
         session_registry=reg,
     )
-    elapsed = time.monotonic() - start
     timer.join(timeout=2)
     assert provider.cancel_observed.is_set()
     assert response.ok is False
-    assert elapsed < 5
     leftover = [t for t in threading.enumerate() if t.is_alive() and t not in live_before and t is not timer]
     assert leftover == []
     step = ArtifactStore(artifact_root, create_root=False).load_manifest(RUN_ID).step_results.get("run_tests")

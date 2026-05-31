@@ -24,7 +24,6 @@ These tests assert the three correctness fixes that close gaps surfaced by the w
 from __future__ import annotations
 
 import threading
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -187,7 +186,7 @@ def test_run_tests_halt_during_execute_deregisters_ssh_tier_handle(tmp_path: Pat
     provider = CancelAwareTestProvider()
 
     def _halt() -> None:
-        time.sleep(0.2)
+        assert provider.started.wait(timeout=2)
         record = next(r for r in reg.list_records() if r.target_key == test_key)
         _halt_debug_transport(session=record, admission=admission, session_registry=reg)
 
