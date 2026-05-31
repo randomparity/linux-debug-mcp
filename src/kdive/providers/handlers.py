@@ -113,6 +113,11 @@ def _make_future_provider_handler(
     handler_name: str,
 ) -> FutureProviderHandler:
     def handler(*, request: ProviderRequest, registry: ProviderRegistry | None = None) -> ToolResponse:
+        if not isinstance(request, request_type):
+            try:
+                request = request_type.model_validate(request.model_dump(mode="python"))
+            except ValidationError as exc:
+                return _future_request_validation_failure(exc)
         return _future_stub_handler(
             request=request,
             operation=operation,

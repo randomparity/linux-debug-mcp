@@ -15,6 +15,7 @@ from kdive.providers.contracts.models import (
     ConsoleSessionRequest,
     ConsoleWriteRequest,
     HardwareControlRequest,
+    ProviderRequest,
     ProvisioningRequest,
     RealBootRequest,
     RemoteArtifactSyncRequest,
@@ -186,6 +187,21 @@ def test_future_provider_handlers_take_typed_request_models() -> None:
     assert "kwargs" not in signature.parameters
     assert get_type_hints(remote_build_kernel_handler)["request"] is RemoteBuildRequest
     assert remote_build_kernel_handler.__module__ == "kdive.providers.handlers"
+
+
+def test_future_provider_handler_validates_direct_call_request_type() -> None:
+    response = remote_build_kernel_handler(request=ProviderRequest(architecture="ppc64le"))
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert response.error.message == "future provider request failed validation"
+    assert response.error.details == {
+        "validation_errors": [
+            {"field": "source_ref", "type": "missing"},
+            {"field": "build_profile", "type": "missing"},
+        ]
+    }
 
 
 def test_future_provider_handlers_are_generated_from_operation_table() -> None:
