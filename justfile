@@ -53,6 +53,12 @@ check-ipmi:
     # -C 3 / -C 30 are not flagged. Default ripgrep engine (no PCRE2).
     ! rg -n -e '-I lan\b|-C *0\b' src -g '!src/kdive/safety/ipmi.py'
 
+check-no-sudo:
+    # Host-side no-escalation guard (ADR 0037): no sudo/pkexec/doas command invocation in
+    # scripts/ or justfile. Scoped to host-side tools only — src/ has in-guest SSH privilege
+    # prefixes (ADR 0011/0028) and is deliberately not scanned. \s-delimited like check-ipmi.
+    ! rg -n '(^|\s)(sudo|pkexec|doas)\s' scripts justfile
+
 audit:
     uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > /tmp/runtime-reqs.txt
     uv run --with 'pip-audit==2.10.0' pip-audit --strict -r /tmp/runtime-reqs.txt

@@ -29,6 +29,18 @@ class TimeoutRunner(FakeRunner):
         raise subprocess.TimeoutExpired(command, timeout)
 
 
+class LibvirtCapabilitiesRunner(FakeRunner):
+    def __init__(self, available: set[str], *, code: int, stderr: str = "") -> None:
+        super().__init__(available)
+        self._code = code
+        self._stderr = stderr
+        self.last_command: list[str] | None = None
+
+    def run(self, command: list[str], timeout: int) -> tuple[int, str, str]:
+        self.last_command = command
+        return (self._code, "<capabilities/>" if self._code == 0 else "", self._stderr)
+
+
 def test_prereq_checks_report_missing_tools(tmp_path: Path) -> None:
     checks = check_prerequisites(
         artifact_root=tmp_path,
@@ -231,3 +243,182 @@ def test_gdbstub_port_fails_on_unparseable_endpoint() -> None:
     assert check.status == "failed"
     assert "could not parse" in check.message
     assert probed == []
+
+
+def test_rootfs_builder_passes_when_toolchain_present() -> None:
+    from kdive.prereqs.checks import check_rootfs_builder
+
+    check = check_rootfs_builder(
+        runner=FakeRunner({"virt-builder", "virt-tar-out", "virt-make-fs", "guestfish", "qemu-img"})
+    )
+    assert check.check_id == "rootfs.builder"
+    assert check.status == "passed"
+
+
+def test_rootfs_builder_fails_naming_libguestfs_tools_when_virt_builder_missing() -> None:
+    from kdive.prereqs.checks import check_rootfs_builder
+
+    check = check_rootfs_builder(runner=FakeRunner({"qemu-img"}))
+    assert check.status == "failed"
+    assert "libguestfs-tools" in (check.suggested_fix or "")
+
+
+def test_rootfs_builder_fails_when_qemu_img_missing() -> None:
+    from kdive.prereqs.checks import check_rootfs_builder
+
+    check = check_rootfs_builder(runner=FakeRunner({"virt-builder"}))
+    assert check.status == "failed"
+
+
+def test_rootfs_builder_fails_when_repack_tool_missing() -> None:
+    from kdive.prereqs.checks import check_rootfs_builder
+
+    # All present except virt-make-fs (a Stage-2 repack tool the old 2-tool probe ignored).
+    check = check_rootfs_builder(runner=FakeRunner({"virt-builder", "virt-tar-out", "guestfish", "qemu-img"}))
+    assert check.status == "failed"
+    assert "virt-make-fs" in (check.message or "")
+
+
+def test_kvm_access_passes_when_device_usable() -> None:
+    from kdive.prereqs.checks import check_kvm_access
+
+    check = check_kvm_access(kvm_probe=lambda: True)
+    assert check.check_id == "kvm.access"
+    assert check.status == "passed"
+
+
+def test_kvm_access_warns_when_device_unusable() -> None:
+    from kdive.prereqs.checks import check_kvm_access
+
+    check = check_kvm_access(kvm_probe=lambda: False)
+    assert check.status == "warning"
+    assert "kvm" in (check.suggested_fix or "").lower()
+    assert "TCG" in (check.message or "")
+
+
+def test_libvirt_connect_skipped_when_not_enabled() -> None:
+    from kdive.prereqs.checks import check_libvirt_connect
+
+    target = TargetProfile(name="t", architecture="x86_64", libvirt_uri="qemu:///system")
+    check = check_libvirt_connect(target, runner=LibvirtCapabilitiesRunner({"virsh"}, code=0))
+    assert check.check_id == "libvirt.connect"
+    assert check.status == "skipped"
+
+
+def test_libvirt_connect_skipped_without_profile() -> None:
+    from kdive.prereqs.checks import check_libvirt_connect
+
+    check = check_libvirt_connect(None, enable_libvirt_check=True)
+    assert check.check_id == "libvirt.connect"
+    assert check.status == "skipped"
+
+
+def test_libvirt_connect_passes_and_uses_profile_uri() -> None:
+    from kdive.prereqs.checks import check_libvirt_connect
+
+    target = TargetProfile(name="t", architecture="x86_64", libvirt_uri="qemu:///session")
+    runner = LibvirtCapabilitiesRunner({"virsh"}, code=0)
+    check = check_libvirt_connect(target, runner=runner, enable_libvirt_check=True)
+    assert check.status == "passed"
+    assert runner.last_command == ["virsh", "-c", "qemu:///session", "capabilities"]
+
+
+def test_libvirt_connect_defaults_uri_when_profile_unset() -> None:
+    from kdive.prereqs.checks import check_libvirt_connect
+
+    target = TargetProfile(name="t", architecture="x86_64", libvirt_uri=None)
+    runner = LibvirtCapabilitiesRunner({"virsh"}, code=0)
+    check_libvirt_connect(target, runner=runner, enable_libvirt_check=True)
+    assert runner.last_command == ["virsh", "-c", "qemu:///system", "capabilities"]
+
+
+def test_libvirt_connect_fails_distinguishes_system_and_session() -> None:
+    from kdive.prereqs.checks import check_libvirt_connect
+
+    system_target = TargetProfile(name="t", architecture="x86_64", libvirt_uri="qemu:///system")
+    system = check_libvirt_connect(
+        system_target,
+        runner=LibvirtCapabilitiesRunner({"virsh"}, code=1, stderr="polkit denied"),
+        enable_libvirt_check=True,
+    )
+    assert system.status == "failed"
+    assert "polkit" in (system.suggested_fix or "").lower()
+
+    session_target = TargetProfile(name="t", architecture="x86_64", libvirt_uri="qemu:///session")
+    session = check_libvirt_connect(
+        session_target,
+        runner=LibvirtCapabilitiesRunner({"virsh"}, code=1, stderr="failed to connect"),
+        enable_libvirt_check=True,
+    )
+    assert session.status == "failed"
+    assert "virtqemud" in (session.suggested_fix or "")
+
+
+def test_libvirt_connect_fails_when_virsh_missing() -> None:
+    from kdive.prereqs.checks import check_libvirt_connect
+
+    target = TargetProfile(name="t", architecture="x86_64", libvirt_uri="qemu:///system")
+    check = check_libvirt_connect(target, runner=LibvirtCapabilitiesRunner(set(), code=0), enable_libvirt_check=True)
+    assert check.status == "failed"
+
+
+def test_handler_includes_new_capability_checks() -> None:
+    from kdive.server import prerequisites_handler
+
+    response = prerequisites_handler(
+        artifact_root=Path("/tmp/does-not-matter"),
+        source_path=None,
+        target_profile=None,
+        runner=FakeRunner({"virt-builder", "virt-tar-out", "virt-make-fs", "guestfish", "qemu-img", "virsh"}),
+        kvm_probe=lambda: True,
+    )
+    ids = {check["check_id"] for check in response.data["checks"]}
+    assert {"kvm.access", "rootfs.builder", "libvirt.connect"} <= ids
+    by_id = {check["check_id"]: check for check in response.data["checks"]}
+    assert by_id["kvm.access"]["status"] == "passed"
+    assert by_id["rootfs.builder"]["status"] == "passed"
+    # No target profile selected -> libvirt.connect is SKIPPED, not FAILED.
+    assert by_id["libvirt.connect"]["status"] == "skipped"
+
+
+def test_handler_libvirt_connect_gated_by_enable_flag() -> None:
+    from kdive.server import prerequisites_handler
+
+    runner = LibvirtCapabilitiesRunner(
+        {
+            "make",
+            "gcc",
+            "bash",
+            "git",
+            "virt-builder",
+            "virt-tar-out",
+            "virt-make-fs",
+            "guestfish",
+            "qemu-img",
+            "virsh",
+        },
+        code=0,
+    )
+
+    # A resolvable target profile is selected, but the connectivity check is opt-in: SKIPPED by default.
+    default_off = prerequisites_handler(
+        artifact_root=Path("/tmp/does-not-matter"),
+        source_path=None,
+        target_profile="local-qemu",
+        runner=runner,
+        kvm_probe=lambda: True,
+    )
+    off_by_id = {check["check_id"]: check for check in default_off.data["checks"]}
+    assert off_by_id["libvirt.connect"]["status"] == "skipped"
+
+    # With the flag enabled it runs the probe (PASSED via the injected capabilities runner).
+    enabled = prerequisites_handler(
+        artifact_root=Path("/tmp/does-not-matter"),
+        source_path=None,
+        target_profile="local-qemu",
+        enable_libvirt_check=True,
+        runner=runner,
+        kvm_probe=lambda: True,
+    )
+    on_by_id = {check["check_id"]: check for check in enabled.data["checks"]}
+    assert on_by_id["libvirt.connect"]["status"] == "passed"

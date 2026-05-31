@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import os
 import re
 import shutil
 import socket
@@ -501,4 +502,134 @@ def check_gdbstub_port(
         status=PrerequisiteStatus.PASSED,
         message=f"gdbstub endpoint {endpoint} is free",
         details={"host": host, "port": port},
+    )
+
+
+def check_rootfs_builder(*, runner: PrerequisiteRunner | None = None) -> PrerequisiteCheck:
+    """Report whether the unprivileged rootfs build toolchain is present.
+
+    The rewritten ``scripts/build-rootfs.sh`` builds entirely inside libguestfs, so it needs the
+    full set of tools it hard-requires — ``virt-builder``, ``virt-tar-out``, ``virt-make-fs``,
+    ``guestfish`` and ``qemu-img`` — and explicitly does not need ``dnf`` or ``sudo``.
+    """
+    runner = runner or SubprocessPrerequisiteRunner()
+    required = ("virt-builder", "virt-tar-out", "virt-make-fs", "guestfish", "qemu-img")
+    missing = [tool for tool in required if runner.which(tool) is None]
+    if missing:
+        return PrerequisiteCheck(
+            check_id="rootfs.builder",
+            status=PrerequisiteStatus.FAILED,
+            message=f"unprivileged build toolchain incomplete: missing {', '.join(missing)}",
+            suggested_fix=(
+                "Install libguestfs-tools (provides virt-builder, virt-tar-out, virt-make-fs, guestfish, qemu-img)."
+            ),
+        )
+    return PrerequisiteCheck(
+        check_id="rootfs.builder",
+        status=PrerequisiteStatus.PASSED,
+        message="unprivileged build toolchain present",
+    )
+
+
+def _default_kvm_probe() -> bool:
+    return os.access("/dev/kvm", os.R_OK | os.W_OK)
+
+
+def check_kvm_access(*, kvm_probe: Callable[[], bool] | None = None) -> PrerequisiteCheck:
+    """Report whether ``/dev/kvm`` is usable by the running user.
+
+    Tests the real capability with ``os.access`` rather than ``kvm`` group membership. WARNING (not
+    FAILED) when unusable: the workflow still runs under TCG (slow). The ``suggested_fix`` recommends
+    ``kvm`` group membership because the stock-Fedora ``uaccess`` seat ACL is interactive-login-only
+    and does not follow into the server's service/cron/non-login-SSH context.
+    """
+    usable = (kvm_probe or _default_kvm_probe)()
+    if usable:
+        return PrerequisiteCheck(
+            check_id="kvm.access",
+            status=PrerequisiteStatus.PASSED,
+            message="/dev/kvm is readable and writable",
+        )
+    return PrerequisiteCheck(
+        check_id="kvm.access",
+        status=PrerequisiteStatus.WARNING,
+        message="/dev/kvm is not usable; libguestfs/qemu fall back to TCG (functional but slow)",
+        suggested_fix=(
+            "Add your user to the 'kvm' group for durable access across login/service/cron contexts "
+            "(the interactive uaccess seat ACL does not follow into non-login contexts)."
+        ),
+    )
+
+
+# Matches the build-time default URI baked into DEFAULT_TARGET_PROFILES (server.py); used when a
+# target profile leaves libvirt_uri unset.
+DEFAULT_LIBVIRT_URI = "qemu:///system"
+
+
+def check_libvirt_connect(
+    target_profile: TargetProfile | None,
+    *,
+    runner: PrerequisiteRunner | None = None,
+    enable_libvirt_check: bool = False,
+) -> PrerequisiteCheck:
+    """Report whether an authenticated *read* connection to the profile's libvirt URI succeeds.
+
+    Runs ``virsh -c <uri> capabilities`` — strictly more than ``virsh uri``, which only reads local
+    config. Advisory only (like ``check_gdbstub_port``): it does **not** prove ``org.libvirt.unix.manage``
+    (define/start), so a PASS can still be followed by a polkit denial at ``target.boot``.
+
+    Opt-in via ``enable_libvirt_check`` (SKIPPED otherwise), mirroring the legacy ``libvirt.uri`` check.
+    """
+    if not enable_libvirt_check:
+        return PrerequisiteCheck(
+            check_id="libvirt.connect",
+            status=PrerequisiteStatus.SKIPPED,
+            message="libvirt connectivity check not enabled",
+        )
+    if target_profile is None:
+        return PrerequisiteCheck(
+            check_id="libvirt.connect", status=PrerequisiteStatus.SKIPPED, message="no target profile selected"
+        )
+    runner = runner or SubprocessPrerequisiteRunner()
+    uri = target_profile.libvirt_uri or DEFAULT_LIBVIRT_URI
+    if runner.which("virsh") is None:
+        return PrerequisiteCheck(
+            check_id="libvirt.connect",
+            status=PrerequisiteStatus.FAILED,
+            message="virsh was not found",
+            suggested_fix="Install libvirt client tools.",
+        )
+    try:
+        code, _stdout, stderr = runner.run(["virsh", "-c", uri, "capabilities"], timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        return PrerequisiteCheck(
+            check_id="libvirt.connect",
+            status=PrerequisiteStatus.FAILED,
+            message=f"virsh capabilities timed out after {exc.timeout} seconds against {uri}",
+            suggested_fix="Confirm the libvirt daemon for this URI is running and responsive.",
+        )
+    except OSError as exc:
+        return PrerequisiteCheck(
+            check_id="libvirt.connect",
+            status=PrerequisiteStatus.FAILED,
+            message=f"virsh capabilities could not run: {exc}",
+            suggested_fix="Confirm libvirt client tools are installed and runnable.",
+        )
+    if code == 0:
+        return PrerequisiteCheck(
+            check_id="libvirt.connect",
+            status=PrerequisiteStatus.PASSED,
+            message=f"authenticated read connection to {uri} (advisory: does not prove define/start)",
+            details={"uri": uri},
+        )
+    if uri.startswith("qemu:///session"):
+        fix = "Start the per-user daemon: systemctl --user start virtqemud.socket."
+    else:
+        fix = "Join the 'libvirt' group or install the libvirt polkit rule for org.libvirt.unix.manage."
+    return PrerequisiteCheck(
+        check_id="libvirt.connect",
+        status=PrerequisiteStatus.FAILED,
+        message=f"could not connect to {uri}",
+        details={"uri": uri, "stderr": stderr.strip()},
+        suggested_fix=fix,
     )
