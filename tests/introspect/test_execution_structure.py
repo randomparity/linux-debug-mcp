@@ -1,6 +1,6 @@
 import inspect
 
-from kdive.introspect import context, execution, result, runner
+from kdive.introspect import context, execution, handlers, result, runner, vmcore_execution
 
 
 def test_introspect_execution_delegates_stable_pipeline_stages() -> None:
@@ -36,3 +36,8 @@ def test_introspect_finalizer_accepts_workspace_and_run_bundles() -> None:
         "allow_write",
         "acknowledged_permissions",
     }.isdisjoint(params)
+
+
+def test_vmcore_execution_lives_outside_public_handler_adapters() -> None:
+    assert handlers._execute_vmcore_introspect_call is vmcore_execution._execute_vmcore_introspect_call
+    assert not hasattr(handlers, "VmcoreIntrospectRun")
