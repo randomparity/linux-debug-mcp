@@ -33,6 +33,29 @@ def _normalize_break_request_method(method: BreakRequestMethod) -> BreakMethod |
     return None if method == "auto" else BreakMethod(method)
 
 
+def _sysrq_g_failed(result: object) -> bool:
+    return (
+        getattr(result, "exit_status", -1) != 0
+        or bool(getattr(result, "timed_out", False))
+        or bool(getattr(result, "cancelled", False))
+        or bool(getattr(result, "stdin_failed", False))
+        or bool(getattr(result, "oversized_output", False))
+    )
+
+
+def _sysrq_g_failure_details(result: object) -> dict[str, object]:
+    return {
+        "code": "sysrq_g_write_failed",
+        "exit_status": getattr(result, "exit_status", None),
+        "timed_out": bool(getattr(result, "timed_out", False)),
+        "cancelled": bool(getattr(result, "cancelled", False)),
+        "stdin_failed": bool(getattr(result, "stdin_failed", False)),
+        "oversized_output": bool(getattr(result, "oversized_output", False)),
+        "stdout_snippet": getattr(result, "stdout_snippet", ""),
+        "stderr_snippet": getattr(result, "stderr_snippet", ""),
+    }
+
+
 def inject_break(
     *,
     method: BreakRequestMethod,
@@ -84,7 +107,11 @@ def inject_break(
         # script string, so the trigger char is never shell-interpolated. $0 is just a label.
         argv = [*ssh_argv_prefix, "sh", "-c", 'echo "$1" > /proc/sysrq-trigger', "sysrq-g", "g"]
         result = ssh_runner.run(argv, timeout=10, stdout_path=base / "sysrq.out", stderr_path=base / "sysrq.err")
-        if getattr(result, "returncode", 0) != 0:
-            raise InjectBreakError("sysrq-g write failed", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
+        if _sysrq_g_failed(result):
+            raise InjectBreakError(
+                "sysrq-g write failed",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details=_sysrq_g_failure_details(result),
+            )
         return
     raise InjectBreakError(f"unsupported method {resolved.value}", category=ErrorCategory.CONFIGURATION_ERROR)

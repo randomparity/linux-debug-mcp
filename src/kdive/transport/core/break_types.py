@@ -12,7 +12,13 @@ class BreakProxy(Protocol):
 
 
 class BreakSshResult(Protocol):
-    returncode: int
+    exit_status: int
+    timed_out: bool
+    cancelled: bool
+    stdin_failed: bool
+    oversized_output: bool
+    stdout_snippet: str
+    stderr_snippet: str
 
 
 class BreakSshRunner(Protocol):

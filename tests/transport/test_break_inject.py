@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from kdive.domain import ErrorCategory
+from kdive.providers.ssh import SshCommandResult
 from kdive.transport.core.base import BreakMethod, BreakPlan
 from kdive.transport.core.break_inject import InjectBreakError, inject_break
 
@@ -19,11 +20,12 @@ class _RecordingProxy:
 
 
 class _RecordingSsh:
-    def __init__(self) -> None:
+    def __init__(self, result: SshCommandResult | None = None) -> None:
         self.argv: Sequence[str] | None = None
         self.timeout: int | None = None
         self.stdout_path: Path | None = None
         self.stderr_path: Path | None = None
+        self.result = result or SshCommandResult(exit_status=0)
 
     def run(
         self,
@@ -37,11 +39,7 @@ class _RecordingSsh:
         self.timeout = timeout
         self.stdout_path = stdout_path
         self.stderr_path = stderr_path
-
-        class _R:
-            returncode = 0
-
-        return _R()
+        return self.result
 
 
 def _plan(method):
@@ -126,6 +124,65 @@ def test_sysrq_g_without_ssh_runner_raises_unavailable_not_attributeerror():
         )
     assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details.get("code") == "break_inject_unavailable"
+
+
+def test_sysrq_g_nonzero_ssh_exit_raises_debug_attach_failure_with_snippets(tmp_path):
+    ssh = _RecordingSsh(
+        SshCommandResult(
+            exit_status=255,
+            stdout_snippet="partial stdout",
+            stderr_snippet="permission denied",
+        )
+    )
+
+    with pytest.raises(InjectBreakError) as exc:
+        inject_break(
+            method=BreakMethod.SYSRQ_G,
+            break_plan=_plan(BreakMethod.SYSRQ_G),
+            proxy=None,
+            proxy_handle=None,
+            ssh_runner=ssh,
+            ssh_argv_prefix=("ssh", "vm1"),
+            work_dir=tmp_path,
+        )
+
+    assert exc.value.category == ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details == {
+        "code": "sysrq_g_write_failed",
+        "exit_status": 255,
+        "timed_out": False,
+        "cancelled": False,
+        "stdin_failed": False,
+        "oversized_output": False,
+        "stdout_snippet": "partial stdout",
+        "stderr_snippet": "permission denied",
+    }
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        SshCommandResult(exit_status=0, timed_out=True),
+        SshCommandResult(exit_status=0, cancelled=True),
+        SshCommandResult(exit_status=0, stdin_failed=True),
+        SshCommandResult(exit_status=0, oversized_output=True),
+    ],
+)
+def test_sysrq_g_terminal_ssh_flags_raise_debug_attach_failure(tmp_path, result):
+    with pytest.raises(InjectBreakError) as exc:
+        inject_break(
+            method=BreakMethod.SYSRQ_G,
+            break_plan=_plan(BreakMethod.SYSRQ_G),
+            proxy=None,
+            proxy_handle=None,
+            ssh_runner=_RecordingSsh(result),
+            ssh_argv_prefix=("ssh", "vm1"),
+            work_dir=tmp_path,
+        )
+
+    assert exc.value.category == ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "sysrq_g_write_failed"
+    assert exc.value.details["exit_status"] == 0
 
 
 def test_requested_method_not_in_admitted_plan_is_rejected():
