@@ -36,7 +36,7 @@ from kdive.domain import (
 )
 from kdive.handlers.shared import _require_value
 from kdive.introspect.handlers import debug_introspect_from_vmcore_helper_handler
-from kdive.postmortem.crash_handler import (
+from kdive.postmortem.crash.handler import (
     debug_postmortem_crash_handler,
     resolve_postmortem_vmcore_context,
 )

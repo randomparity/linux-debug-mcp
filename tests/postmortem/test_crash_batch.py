@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kdive.postmortem.crash_batch import (
+from kdive.postmortem.crash.batch import (
     build_command_script,
     collect_command_outputs,
     redirect_filename,
@@ -54,7 +54,7 @@ def test_collect_does_not_read_whole_oversize_file(tmp_path, monkeypatch) -> Non
     big = tmp_path / redirect_filename(0)
     big.write_bytes(b"z" * (1 << 20))  # 1 MiB on disk
 
-    import kdive.postmortem.crash_batch as mod
+    import kdive.postmortem.crash.batch as mod
 
     real_read_bytes = mod.Path.read_bytes
 

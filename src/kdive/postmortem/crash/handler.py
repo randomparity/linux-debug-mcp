@@ -23,9 +23,9 @@ from kdive.config import (
     MAX_POSTMORTEM_CRASH_CALLS_PER_RUN,
 )
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
-from kdive.postmortem.crash_batch import build_command_script, collect_command_outputs
-from kdive.postmortem.crash_commands import crash_command_rejection_reason, validate_modules_path
-from kdive.postmortem.crash_parsers import parse_command
+from kdive.postmortem.crash.batch import build_command_script, collect_command_outputs
+from kdive.postmortem.crash.commands import crash_command_rejection_reason, validate_modules_path
+from kdive.postmortem.crash.parsers import parse_command
 from kdive.postmortem.models import DebugPostmortemCrashRequest
 from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner
 from kdive.safety.paths import PathSafetyError, confine_run_relative

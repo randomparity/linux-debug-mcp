@@ -6,7 +6,7 @@ outputs into a DebugPostmortemTriageReport.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -31,7 +31,7 @@ _PANIC_SIGNATURES: tuple[str, ...] = (
 )
 
 
-def select_panic_reason(log_lines: list[Mapping[str, Any]]) -> str | None:
+def select_panic_reason(log_lines: Sequence[Mapping[str, Any]]) -> str | None:
     """Return the first log line matching the highest-priority panic signature.
 
     Selection over the crash ``log`` parser's already-redacted structured lines — not a

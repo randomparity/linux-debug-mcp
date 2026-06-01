@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from kdive.postmortem.crash_commands import (
+from kdive.postmortem.crash.commands import (
     crash_command_rejection_reason,
     validate_modules_path,
 )

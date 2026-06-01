@@ -10,7 +10,7 @@ from kdive.domain import (
     RunRequest,
     StepStatus,
 )
-from kdive.postmortem.crash_handler import debug_postmortem_crash_handler
+from kdive.postmortem.crash.handler import debug_postmortem_crash_handler
 from kdive.postmortem.models import DebugPostmortemCrashRequest
 from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 
@@ -18,7 +18,7 @@ GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
 
 def test_postmortem_vmcore_context_resolver_is_shared() -> None:
-    import kdive.postmortem.crash_handler as crash_handler
+    import kdive.postmortem.crash.handler as crash_handler
     import kdive.postmortem.handlers as postmortem_handlers
 
     assert hasattr(crash_handler, "PostmortemVmcoreContext")
@@ -29,7 +29,7 @@ def test_postmortem_vmcore_context_resolver_is_shared() -> None:
 def test_postmortem_vmcore_resolver_has_concrete_request_and_manifest_types() -> None:
     from typing import get_type_hints
 
-    import kdive.postmortem.crash_handler as crash_handler
+    import kdive.postmortem.crash.handler as crash_handler
     from kdive.artifacts.manifest import RunManifest
 
     context_hints = get_type_hints(crash_handler.PostmortemVmcoreContext)
@@ -47,7 +47,7 @@ def test_postmortem_vmcore_resolver_has_concrete_request_and_manifest_types() ->
 
 
 def test_postmortem_crash_handler_uses_named_execution_phases() -> None:
-    source = (Path(__file__).parents[2] / "src" / "kdive" / "postmortem" / "crash_handler.py").read_text(
+    source = (Path(__file__).parents[2] / "src" / "kdive" / "postmortem" / "crash" / "handler.py").read_text(
         encoding="utf-8"
     )
     handler_source = source.split("def debug_postmortem_crash_handler(", 1)[1].split("\ndef _finalize_crash_call(", 1)[
@@ -441,7 +441,7 @@ def test_argv_carries_prlimit_disk_bound(tmp_path) -> None:
 
 
 def test_modules_path_unsafe_rejected_no_run(tmp_path, monkeypatch) -> None:
-    import kdive.postmortem.crash_handler as crash_handler_module
+    import kdive.postmortem.crash.handler as crash_handler_module
     from kdive.symbols.resolve import ResolvedSymbols
 
     store = _run(tmp_path)
@@ -476,7 +476,7 @@ def test_modules_path_unsafe_rejected_no_run(tmp_path, monkeypatch) -> None:
 
 
 def test_module_symbols_status_reported(tmp_path, monkeypatch) -> None:
-    import kdive.postmortem.crash_handler as crash_handler_module
+    import kdive.postmortem.crash.handler as crash_handler_module
     from kdive.symbols.resolve import ResolvedSymbols
 
     store = _run(tmp_path)
@@ -521,7 +521,7 @@ def test_module_symbols_status_reported(tmp_path, monkeypatch) -> None:
 
 
 def test_module_symbols_load_failed(tmp_path, monkeypatch) -> None:
-    import kdive.postmortem.crash_handler as crash_handler_module
+    import kdive.postmortem.crash.handler as crash_handler_module
     from kdive.symbols.resolve import ResolvedSymbols
 
     store = _run(tmp_path)

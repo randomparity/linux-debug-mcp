@@ -54,7 +54,7 @@ from kdive.introspect.handlers import (
 from kdive.introspect.tools import register_introspect_tools
 from kdive.kernel import tools as kernel_tools
 from kdive.kernel.handlers import kernel_build_handler
-from kdive.postmortem.crash_handler import (
+from kdive.postmortem.crash.handler import (
     debug_postmortem_crash_handler,
 )
 from kdive.postmortem.handlers import (

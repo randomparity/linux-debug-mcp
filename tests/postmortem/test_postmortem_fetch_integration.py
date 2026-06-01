@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from introspect.test_drgn_introspect_integration import _bootstrap_booted_run, _require_integration_env
 
 from kdive.postmortem.handlers import (
     debug_postmortem_fetch_handler,
@@ -19,7 +20,6 @@ from kdive.postmortem.handlers import (
 )
 from kdive.postmortem.models import DebugPostmortemFetchRequest, DebugPostmortemListDumpsRequest
 from kdive.providers.local.test.local_ssh_tests import SubprocessSshRunner
-from tests.introspect.test_drgn_introspect_integration import _bootstrap_booted_run, _require_integration_env
 
 
 def test_real_target_list_then_fetch(tmp_path: Path) -> None:
