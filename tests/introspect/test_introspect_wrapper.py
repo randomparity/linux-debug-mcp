@@ -40,7 +40,7 @@ def _install_stub_drgn(
     monkeypatch: pytest.MonkeyPatch,
     *,
     helpers: dict[str, Any] | None = None,
-    main_module_build_id: bytes | None = None,
+    main_module_build_id: object | None = None,
     open_raises: BaseException | None = None,
     main_module_raises: BaseException | None = None,
 ) -> None:
@@ -197,6 +197,18 @@ def test_wrapper_drgn_api_incompatible_exits_3(monkeypatch: pytest.MonkeyPatch) 
     assert payload["outcome"]["status"] == "drgn_api_incompatible"
     assert payload["outcome"]["error_type"] == "LookupError"
     assert payload["outcome"]["drgn_version"] == "0.0.0-stub"
+
+
+def test_wrapper_malformed_build_id_is_version_skew(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ADR 0039: a truthy build-id that is not bytes (drgn shaped it wrong) raises
+    # AttributeError on .hex() inside the guard -> drgn_version_skew, not a wrapper
+    # crash. Regression guard for keeping .hex() inside the try.
+    _install_stub_drgn(monkeypatch, main_module_build_id=12345)
+    stdout, exit_code = _exec_wrapper("pass")
+    assert exit_code == 3
+    payload = json.loads(stdout)
+    assert payload["outcome"]["status"] == "drgn_version_skew"
+    assert payload["outcome"]["error_type"] == "AttributeError"
 
 
 def test_wrapper_provenance_unverifiable_exits_4(monkeypatch: pytest.MonkeyPatch) -> None:

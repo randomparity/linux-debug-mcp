@@ -73,6 +73,7 @@ _li_result["prelude_ms"] = int((_li_time.monotonic() - _li_t_prelude_start) * 10
 # AttributeError misreported as version skew.
 try:
     _li_build_id = prog.main_module().build_id
+    _li_result["build_id"] = _li_build_id.hex() if _li_build_id else None
 except AttributeError as exc:
     msg, msg_trunc = _li_truncate(str(exc), _li_caps["error_message"])
     etype, _ = _li_truncate(type(exc).__name__, _li_caps["error_message"])
@@ -97,8 +98,6 @@ except Exception as exc:
         _li_json.dump(_li_result, _li_sys.stdout)
     finally:
         _li_sys.exit(3)
-else:
-    _li_result["build_id"] = _li_build_id.hex() if _li_build_id else None
 
 if _li_result["build_id"] is None:
     _li_result["outcome"] = {"status": "provenance_unverifiable",
