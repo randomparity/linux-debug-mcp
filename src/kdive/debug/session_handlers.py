@@ -472,7 +472,13 @@ def _cleanup_debug_start_session_attach(
         category=category,
         message=redactor.redact_text(str(exc)),
         run_id=run_id,
-        details={"code": "debug_session_persist_failed"},
+        details=redactor.redact_value(
+            {
+                "code": "debug_session_persist_failed",
+                "exception_type": type(exc).__name__,
+                "error": str(exc),
+            }
+        ),
         suggested_next_actions=["host.check_prerequisites", "artifacts.get_manifest"],
     )
 

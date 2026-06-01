@@ -284,6 +284,8 @@ def test_start_session_persist_failure_reaps_and_resumes(tmp_path: Path, monkeyp
     assert response.ok is False
     assert response.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert response.error.details["code"] == "debug_session_persist_failed"
+    assert response.error.details["exception_type"] == "OSError"
+    assert response.error.details["error"] == "disk full while persisting the debug session"
     # The live attachment was reaped (force_resume un-halted the kernel) ...
     assert fx.engine.forced is True
     assert not fx.sessions._sessions  # the live-session registry was emptied
