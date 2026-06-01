@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -31,13 +32,22 @@ from kdive.introspect.context import VmcoreIntrospectRuntime
 from kdive.introspect.handlers import debug_introspect_from_vmcore_handler
 from kdive.introspect.models import DebugIntrospectFromVmcoreRequest
 
-pytest.importorskip("drgn")
+
+def _subprocess_python_has_drgn() -> bool:
+    # The vmcore path spawns a ``python3`` subprocess (vmcore_execution.py), so the
+    # right gate is whether *that* interpreter can import drgn — not the pytest venv.
+    try:
+        return subprocess.run(["python3", "-c", "import drgn"], capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
 VMCORE = os.environ.get("KDIVE_VMCORE")
 VMLINUX = os.environ.get("KDIVE_VMLINUX")
 
 pytestmark = pytest.mark.skipif(
-    not (VMCORE and VMLINUX),
-    reason="set KDIVE_VMCORE and KDIVE_VMLINUX (and install host drgn) to run the vmcore integration test",
+    not (VMCORE and VMLINUX and _subprocess_python_has_drgn()),
+    reason="set KDIVE_VMCORE and KDIVE_VMLINUX and ensure the subprocess `python3` can import drgn",
 )
 
 

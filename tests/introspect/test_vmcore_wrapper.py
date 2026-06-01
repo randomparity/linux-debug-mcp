@@ -261,3 +261,16 @@ def test_vmcore_modules_empty_warning(monkeypatch: pytest.MonkeyPatch, tmp_path:
     mods.mkdir()
     payload = _exec_vmcore_with_modules(str(mods), build_id=bytes.fromhex(EXPECTED_BUILD_ID))
     assert any(w["code"] == "modules_debuginfo_empty" for w in payload["warnings"])
+
+
+def test_vmcore_wrapper_discovers_modules_before_build_id() -> None:
+    # Regression: drgn >= 0.2 does not create the main module at set_core_dump();
+    # main_module() raises LookupError until module discovery runs. The wrapper must
+    # drive loaded_modules() (which populates the main module's build-id from
+    # VMCOREINFO) before reading main_module().build_id, or every real vmcore
+    # introspection fails as "drgn_version_skew".
+    tmpl = VMCORE_WRAPPER_TEMPLATE.template
+    assert "loaded_modules(" in tmpl, "wrapper must trigger module discovery"
+    assert tmpl.index("loaded_modules(") < tmpl.index("main_module().build_id"), (
+        "module discovery must precede the main_module().build_id read"
+    )
