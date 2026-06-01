@@ -439,26 +439,11 @@ def _validate_transport_registry(registry: TransportRegistry) -> None:
             )
 
 
-def _build_transport_machinery(
+def _bind_transport_lifecycle(
     *,
+    admission: AdmissionService,
     session_registry: SessionRegistry | None,
-    transport_registry: TransportRegistry | None,
-) -> _TransportMachinery:
-    """Construct the Layer-4 machinery, acquire the single-instance flock, and run crash
-    reconciliation BEFORE returning — so no tool can admit before reconcile has reaped orphan
-    backends and re-asserted recovery tombstones (ADR 0005, spec §10.2).
-
-    A default (uninjected) `session_registry` is rooted at a fresh per-process temp dir, NOT the
-    host-global `private_runtime_registry_dir()`: many tests construct create_app() repeatedly in one
-    process, and the production single-instance flock is host-global, so production wires the real
-    registry explicitly in main(); the default stays test-safe (no cross-test flock contention).
-    """
-    transports = _default_local_transports()
-    transport_registry = transport_registry if transport_registry is not None else _build_transport_registry(transports)
-    _validate_transport_registry(transport_registry)
-
-    snapshot_store = SnapshotStore()
-    admission = AdmissionService(snapshot_store)
+) -> tuple[SessionRegistry, LifecycleDispatcher]:
     # Bind the §4.5 lifecycle dispatcher so each opened session subscribes its
     # _SessionSubscriber; the reap callback below routes `LifecycleEvent`s through it so the
     # transaction's force_drop teardown (FENCED guard/lease release + backend reap + record
@@ -496,25 +481,25 @@ def _build_transport_machinery(
         # Bind explicitly before the instance lock/reconcile lifecycle starts.
         session_registry.bind_orphan_reap_callback(_on_orphan_reaped)
 
+    return session_registry, lifecycle_dispatcher
+
+
+def _build_transport_secrets() -> SecretsStore:
     secrets_backends: dict[SecretReferenceKind, SecretsBackend] = {SecretReferenceKind.ENV: EnvSecretsBackend()}
     # keyring extra not installed -> the kind stays unavailable until configured
     with contextlib.suppress(SecretsResolutionError):
         secrets_backends[SecretReferenceKind.KEYRING] = KeyringSecretsBackend()
-    _external_cmd = os.environ.get("KDIVE_SECRETS_EXTERNAL_CMD")
-    if _external_cmd:
-        secrets_backends[SecretReferenceKind.EXTERNAL] = ExternalSecretsBackend(command=shlex.split(_external_cmd))
+    external_cmd = os.environ.get("KDIVE_SECRETS_EXTERNAL_CMD")
+    if external_cmd:
+        secrets_backends[SecretReferenceKind.EXTERNAL] = ExternalSecretsBackend(command=shlex.split(external_cmd))
+    return SecretsStore(definitions=[], backends=secrets_backends, registry=SECRET_REGISTRY)
 
-    transaction = TransportTransaction(
-        admission=admission,
-        registry=session_registry,
-        guard=InProcessStopCapableGuard(),
-        leases=ConsoleLeaseManager(),
-        secrets=SecretsStore(definitions=[], backends=secrets_backends, registry=SECRET_REGISTRY),
-        break_policy=ReferenceBreakPolicy(),
-        transports=transports,
-    )
-    transaction.bind_lifecycle(lifecycle_dispatcher)
 
+def _reconcile_transport_before_serve(
+    *,
+    session_registry: SessionRegistry,
+    admission: AdmissionService,
+) -> None:
     # Single-instance flock + reconcile-before-serve: acquire the host-global lock, then reap orphan
     # backends / re-assert durable tombstones BEFORE any tool can admit. acquire_instance_lock()
     # raises InstanceLockError on a 2nd live instance; it propagates out of create_app unchanged so
@@ -535,6 +520,45 @@ def _build_transport_machinery(
             record.target_key,
             exc,
         )
+
+
+def _build_transport_machinery(
+    *,
+    session_registry: SessionRegistry | None,
+    transport_registry: TransportRegistry | None,
+) -> _TransportMachinery:
+    """Construct the Layer-4 machinery, acquire the single-instance flock, and run crash
+    reconciliation BEFORE returning — so no tool can admit before reconcile has reaped orphan
+    backends and re-asserted recovery tombstones (ADR 0005, spec §10.2).
+
+    A default (uninjected) `session_registry` is rooted at a fresh per-process temp dir, NOT the
+    host-global `private_runtime_registry_dir()`: many tests construct create_app() repeatedly in one
+    process, and the production single-instance flock is host-global, so production wires the real
+    registry explicitly in main(); the default stays test-safe (no cross-test flock contention).
+    """
+    transports = _default_local_transports()
+    transport_registry = transport_registry if transport_registry is not None else _build_transport_registry(transports)
+    _validate_transport_registry(transport_registry)
+
+    snapshot_store = SnapshotStore()
+    admission = AdmissionService(snapshot_store)
+    session_registry, lifecycle_dispatcher = _bind_transport_lifecycle(
+        admission=admission,
+        session_registry=session_registry,
+    )
+
+    transaction = TransportTransaction(
+        admission=admission,
+        registry=session_registry,
+        guard=InProcessStopCapableGuard(),
+        leases=ConsoleLeaseManager(),
+        secrets=_build_transport_secrets(),
+        break_policy=ReferenceBreakPolicy(),
+        transports=transports,
+    )
+    transaction.bind_lifecycle(lifecycle_dispatcher)
+
+    _reconcile_transport_before_serve(session_registry=session_registry, admission=admission)
     return _TransportMachinery(
         session_registry=session_registry,
         admission=admission,

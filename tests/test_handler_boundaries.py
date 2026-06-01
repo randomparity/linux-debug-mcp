@@ -143,6 +143,22 @@ def test_server_public_api_is_explicit_and_composition_scoped() -> None:
     assert not any(name.endswith(("Context", "Options", "Profiles")) for name in server.__all__)
 
 
+def test_transport_machinery_startup_uses_named_phase_helpers() -> None:
+    server_source = SERVER_SOURCE.read_text(encoding="utf-8")
+    builder_source = server_source.split("def _build_transport_machinery(", 1)[1].split("\ndef create_app(", 1)[0]
+
+    for helper in (
+        "_bind_transport_lifecycle",
+        "_build_transport_secrets",
+        "_reconcile_transport_before_serve",
+    ):
+        assert f"def {helper}(" in server_source
+        assert f"{helper}(" in builder_source
+
+    assert "SecretsStore(" not in builder_source
+    assert "session_registry.reconcile(" not in builder_source
+
+
 def test_server_does_not_expose_capability_model_or_helper_aliases() -> None:
     import kdive.server as server
 
