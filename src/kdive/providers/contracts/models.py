@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from enum import StrEnum
 from typing import Any, ClassVar
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from kdive.domain import Model
 from kdive.safety.ipmi import check_ipmi_cipher_value, validate_ipmi_cipher_suite
+from kdive.seams.target import Arch
 
-KNOWN_ARCHITECTURES = {"x86_64", "ppc64le"}
+KNOWN_ARCHITECTURES = {Arch.X86_64, Arch.PPC64LE}
 MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 MAX_CONSOLE_READ_BYTES = 1024 * 1024
 MAX_CONSOLE_WRITE_BYTES = 4096
@@ -22,8 +24,19 @@ _ALLOWED_SECRET_REFERENCE_FIELDS = {
     "bmc_credential_ref",
     "reservation_token_ref",
 }
-_POWER_ACTIONS = {"on", "off", "cycle", "reset"}
-_CONSOLE_ACCESS_METHODS = {"serial", "ssh", "ipmi-sol"}
+
+
+class PowerAction(StrEnum):
+    ON = "on"
+    OFF = "off"
+    CYCLE = "cycle"
+    RESET = "reset"
+
+
+class ConsoleAccessMethod(StrEnum):
+    SERIAL = "serial"
+    SSH = "ssh"
+    IPMI_SOL = "ipmi-sol"
 
 
 def _has_control_character(value: str) -> bool:
@@ -73,7 +86,7 @@ class ProviderContractModel(Model):
 
     @field_validator("architecture", check_fields=False)
     @classmethod
-    def validate_architecture(cls, value: str) -> str:
+    def validate_architecture(cls, value: Arch) -> Arch:
         if value not in KNOWN_ARCHITECTURES:
             raise ValueError("architecture is not supported")
         return value
@@ -88,7 +101,7 @@ class ProviderContractModel(Model):
 
 class ProviderRequest(ProviderContractModel):
     provider_name: str | None = None
-    architecture: str
+    architecture: Arch
     timeout_seconds: int = Field(default=300)
     operation_label: str | None = None
     run_id: str | None = None
@@ -100,7 +113,7 @@ class ProviderRequest(ProviderContractModel):
 
 class ProviderResult(ProviderContractModel):
     provider_name: str
-    architecture: str
+    architecture: Arch
     operation_label: str | None = None
     run_id: str | None = None
     status: str = "not_implemented"
@@ -219,7 +232,7 @@ class ProvisioningResult(ProviderResult):
 
 class HardwareControlRequest(ProviderRequest):
     target_name: str
-    action: str
+    action: PowerAction
     bmc_credential_ref: str | None = None
 
     _safe_label_fields: ClassVar[frozenset[str]] = _safe_fields(
@@ -228,17 +241,10 @@ class HardwareControlRequest(ProviderRequest):
         "bmc_credential_ref",
     )
 
-    @field_validator("action")
-    @classmethod
-    def validate_action(cls, value: str) -> str:
-        if value not in _POWER_ACTIONS:
-            raise ValueError("power action is not supported")
-        return value
-
 
 class HardwareControlResult(ProviderResult):
     target_name: str | None = None
-    action: str | None = None
+    action: PowerAction | None = None
     power_state: str | None = None
     external_task_id: str | None = None
 
@@ -253,7 +259,7 @@ class HardwareControlResult(ProviderResult):
 
 class ConsoleSessionRequest(ProviderRequest):
     target_name: str
-    access_method: str
+    access_method: ConsoleAccessMethod
     credential_ref: str | None = None
     ipmi_cipher_suite: int | None = None
 
@@ -264,13 +270,6 @@ class ConsoleSessionRequest(ProviderRequest):
         "credential_ref",
     )
 
-    @field_validator("access_method")
-    @classmethod
-    def validate_access_method(cls, value: str) -> str:
-        if value not in _CONSOLE_ACCESS_METHODS:
-            raise ValueError("console access method is not supported")
-        return value
-
     @field_validator("ipmi_cipher_suite")
     @classmethod
     def validate_cipher_value(cls, value: int | None) -> int | None:
@@ -280,7 +279,7 @@ class ConsoleSessionRequest(ProviderRequest):
 
     @model_validator(mode="after")
     def enforce_ipmi_cipher_policy(self) -> ConsoleSessionRequest:
-        if self.access_method == "ipmi-sol":
+        if self.access_method is ConsoleAccessMethod.IPMI_SOL:
             normalized = validate_ipmi_cipher_suite(self.ipmi_cipher_suite)
             if normalized != self.ipmi_cipher_suite:
                 object.__setattr__(self, "ipmi_cipher_suite", normalized)

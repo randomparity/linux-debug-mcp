@@ -9,10 +9,12 @@ from pydantic import ValidationError
 
 from kdive.domain import Model
 from kdive.providers.contracts.models import (
+    ConsoleAccessMethod,
     ConsoleReadRequest,
     ConsoleSessionRequest,
     ConsoleWriteRequest,
     HardwareControlRequest,
+    PowerAction,
     ProviderRequest,
     ProvisioningRequest,
     RealBootRequest,
@@ -239,7 +241,7 @@ def provision_prepare_target(
 def hardware_power_control(
     architecture: str,
     target_name: str,
-    action: str,
+    action: PowerAction,
     provider_context: ProviderToolContext | None = None,
     execution_options: ProviderExecutionOptions | None = None,
     power_options: HardwarePowerOptions | None = None,
@@ -279,7 +281,7 @@ def hardware_boot_kernel(
 def console_open_session(
     architecture: str,
     target_name: str,
-    access_method: str,
+    access_method: ConsoleAccessMethod,
     provider_context: ProviderToolContext | None = None,
     execution_options: ProviderExecutionOptions | None = None,
     console_options: ConsoleOpenOptions | None = None,

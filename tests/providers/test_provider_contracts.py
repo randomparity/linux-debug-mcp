@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from typing import get_type_hints
+
 import pytest
 from pydantic import ValidationError
 
 from kdive.providers.contracts.models import (
+    ConsoleAccessMethod,
     ConsoleReadRequest,
     ConsoleReadResult,
     ConsoleSessionRequest,
@@ -11,6 +14,7 @@ from kdive.providers.contracts.models import (
     ConsoleWriteResult,
     HardwareControlRequest,
     HardwareControlResult,
+    PowerAction,
     ProvisioningRequest,
     ProvisioningResult,
     RealBootRequest,
@@ -24,6 +28,7 @@ from kdive.providers.contracts.models import (
     ReservationResult,
     ReserveProvisionBootRequest,
 )
+from kdive.seams.target import Arch
 
 
 def assert_rejects(model: type, payload: dict, *, hidden: str | None = None) -> None:
@@ -31,6 +36,26 @@ def assert_rejects(model: type, payload: dict, *, hidden: str | None = None) -> 
         model(**payload)
     if hidden:
         assert hidden not in str(exc_info.value)
+
+
+def test_provider_request_closed_sets_are_typed() -> None:
+    provider_hints = get_type_hints(RemoteBuildRequest)
+    hardware_hints = get_type_hints(HardwareControlRequest)
+    console_hints = get_type_hints(ConsoleSessionRequest)
+
+    request = RemoteBuildRequest(architecture="x86_64", source_ref="linux-src", build_profile="defconfig")
+    control = HardwareControlRequest(architecture="ppc64le", target_name="host-01", action="cycle")
+    console = ConsoleSessionRequest(architecture="x86_64", target_name="vm-01", access_method="serial")
+
+    assert provider_hints["architecture"] is Arch
+    assert hardware_hints["action"] is PowerAction
+    assert console_hints["access_method"] is ConsoleAccessMethod
+    assert request.architecture is Arch.X86_64
+    assert control.action is PowerAction.CYCLE
+    assert console.access_method is ConsoleAccessMethod.SERIAL
+    assert request.model_dump(mode="json")["architecture"] == "x86_64"
+    assert control.model_dump(mode="json")["action"] == "cycle"
+    assert console.model_dump(mode="json")["access_method"] == "serial"
 
 
 @pytest.mark.parametrize(
