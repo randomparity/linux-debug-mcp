@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from functools import partial
-from typing import cast
+from pathlib import Path
+from typing import TypeVar
 
 from kdive.debug.handlers import (
     debug_backtrace_handler as _debug_backtrace_handler,
@@ -51,70 +51,475 @@ from kdive.debug.handlers import (
 from kdive.debug.handlers import (
     debug_step_handler as _debug_step_handler,
 )
-from kdive.debug.module_symbols import debug_load_module_symbols_handler
+from kdive.debug.module_symbols import debug_load_module_symbols_handler as _debug_load_module_symbols_handler
 from kdive.debug.operations import _debug_operation_response
-from kdive.debug.session_end import debug_end_session_handler
-from kdive.debug.session_handlers import debug_start_session_handler
+from kdive.debug.session_end import debug_end_session_handler as _debug_end_session_handler
+from kdive.debug.session_handlers import debug_start_session_handler as _debug_start_session_handler
 from kdive.debug.tools import (
-    DebugBreakpointIdControlHandler,
-    DebugEvaluateHandler,
-    DebugExecutionControlHandler,
-    DebugReadMemoryHandler,
-    DebugReadRegistersHandler,
-    DebugReadSymbolHandler,
-    DebugSessionQueryHandler,
-    DebugSymbolControlHandler,
+    DebugBreakpointIdRequest,
+    DebugEvaluateRequest,
+    DebugExecutionRequest,
+    DebugLoadModuleSymbolsRequest,
+    DebugMemoryRequest,
+    DebugRegistersRequest,
+    DebugRuntime,
+    DebugSessionRequest,
+    DebugStartSessionRequest,
+    DebugSymbolRequest,
+    DebugToolContext,
     DebugToolHandlers,
 )
 
-debug_read_registers_handler = cast(
-    DebugReadRegistersHandler, partial(_debug_read_registers_handler, operation_core=_debug_operation_response)
-)
-debug_read_symbol_handler = cast(
-    DebugReadSymbolHandler, partial(_debug_read_symbol_handler, operation_core=_debug_operation_response)
-)
-debug_read_memory_handler = cast(
-    DebugReadMemoryHandler, partial(_debug_read_memory_handler, operation_core=_debug_operation_response)
-)
-debug_evaluate_handler = cast(
-    DebugEvaluateHandler, partial(_debug_evaluate_handler, operation_core=_debug_operation_response)
-)
-debug_set_breakpoint_handler = cast(
-    DebugSymbolControlHandler, partial(_debug_set_breakpoint_handler, operation_core=_debug_operation_response)
-)
-debug_set_watchpoint_handler = cast(
-    DebugSymbolControlHandler, partial(_debug_set_watchpoint_handler, operation_core=_debug_operation_response)
-)
-debug_clear_breakpoint_handler = cast(
-    DebugBreakpointIdControlHandler, partial(_debug_clear_breakpoint_handler, operation_core=_debug_operation_response)
-)
-debug_clear_watchpoint_handler = cast(
-    DebugBreakpointIdControlHandler, partial(_debug_clear_watchpoint_handler, operation_core=_debug_operation_response)
-)
-debug_list_breakpoints_handler = cast(
-    DebugSessionQueryHandler, partial(_debug_list_breakpoints_handler, operation_core=_debug_operation_response)
-)
-debug_backtrace_handler = cast(
-    DebugSessionQueryHandler, partial(_debug_backtrace_handler, operation_core=_debug_operation_response)
-)
-debug_list_variables_handler = cast(
-    DebugSessionQueryHandler, partial(_debug_list_variables_handler, operation_core=_debug_operation_response)
-)
-debug_continue_handler = cast(
-    DebugExecutionControlHandler, partial(_debug_continue_handler, operation_core=_debug_operation_response)
-)
-debug_step_handler = cast(
-    DebugExecutionControlHandler, partial(_debug_step_handler, operation_core=_debug_operation_response)
-)
-debug_next_handler = cast(
-    DebugExecutionControlHandler, partial(_debug_next_handler, operation_core=_debug_operation_response)
-)
-debug_finish_handler = cast(
-    DebugExecutionControlHandler, partial(_debug_finish_handler, operation_core=_debug_operation_response)
-)
-debug_interrupt_handler = cast(
-    DebugExecutionControlHandler, partial(_debug_interrupt_handler, operation_core=_debug_operation_response)
-)
+_RequiredT = TypeVar("_RequiredT")
+
+
+def _required(value: _RequiredT | None, name: str) -> _RequiredT:
+    if value is None:
+        raise TypeError(f"{name} is required")
+    return value
+
+
+def debug_start_session_handler(*, request: DebugStartSessionRequest, runtime: DebugToolContext):
+    return _debug_start_session_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_profile=request.debug_profile,
+        new_session=request.new_session,
+        admission=runtime.admission,
+        transaction=runtime.transaction,
+        session_registry=runtime.session_registry,
+        session_guard=runtime.session_guard,
+        gdb_mi_engine=runtime.gdb_mi_engine,
+        gdb_mi_sessions=runtime.gdb_mi_sessions,
+    )
+
+
+def debug_read_registers_handler(
+    *,
+    request: DebugRegistersRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    registers: list[str] | None = None,
+    debug_session_id: str | None = None,
+):
+    request = request or DebugRegistersRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        registers=_required(registers, "registers"),
+        debug_session_id=debug_session_id,
+    )
+    return _debug_read_registers_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        registers=request.registers,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_read_symbol_handler(
+    *,
+    request: DebugSymbolRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    symbol: str | None = None,
+    debug_session_id: str | None = None,
+):
+    request = request or DebugSymbolRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        symbol=_required(symbol, "symbol"),
+        debug_session_id=debug_session_id,
+    )
+    return _debug_read_symbol_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        symbol=request.symbol,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_read_memory_handler(
+    *,
+    request: DebugMemoryRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    address: int | None = None,
+    byte_count: int | None = None,
+    debug_session_id: str | None = None,
+):
+    request = request or DebugMemoryRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        address=_required(address, "address"),
+        byte_count=_required(byte_count, "byte_count"),
+        debug_session_id=debug_session_id,
+    )
+    return _debug_read_memory_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        address=request.address,
+        byte_count=request.byte_count,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_evaluate_handler(
+    *,
+    request: DebugEvaluateRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    inspector: str | None = None,
+    arguments: dict[str, object] | None = None,
+    debug_session_id: str | None = None,
+):
+    request = request or DebugEvaluateRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        inspector=_required(inspector, "inspector"),
+        arguments=arguments,
+        debug_session_id=debug_session_id,
+    )
+    return _debug_evaluate_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        inspector=request.inspector,
+        arguments=request.arguments,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_load_module_symbols_handler(*, request: DebugLoadModuleSymbolsRequest, runtime: DebugToolContext):
+    return _debug_load_module_symbols_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        module=request.module,
+        sections=request.sections,
+        ko_path=request.ko_path,
+        debug_session_id=request.debug_session_id,
+        admission=runtime.admission,
+        transaction=runtime.transaction,
+        session_registry=runtime.session_registry,
+        session_guard=runtime.session_guard,
+        gdb_mi_engine=runtime.gdb_mi_engine,
+        gdb_mi_sessions=runtime.gdb_mi_sessions,
+    )
+
+
+def debug_set_breakpoint_handler(
+    *,
+    request: DebugSymbolRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    symbol: str | None = None,
+    debug_session_id: str | None = None,
+):
+    request = request or DebugSymbolRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        symbol=_required(symbol, "symbol"),
+        debug_session_id=debug_session_id,
+    )
+    return _debug_set_breakpoint_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        symbol=request.symbol,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_set_watchpoint_handler(
+    *,
+    request: DebugSymbolRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    symbol: str | None = None,
+    debug_session_id: str | None = None,
+):
+    request = request or DebugSymbolRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        symbol=_required(symbol, "symbol"),
+        debug_session_id=debug_session_id,
+    )
+    return _debug_set_watchpoint_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        symbol=request.symbol,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_clear_breakpoint_handler(
+    *,
+    request: DebugBreakpointIdRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    breakpoint_id: str | None = None,
+    debug_session_id: str | None = None,
+):
+    request = request or DebugBreakpointIdRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        breakpoint_id=_required(breakpoint_id, "breakpoint_id"),
+        debug_session_id=debug_session_id,
+    )
+    return _debug_clear_breakpoint_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        breakpoint_id=request.breakpoint_id,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_clear_watchpoint_handler(
+    *,
+    request: DebugBreakpointIdRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    breakpoint_id: str | None = None,
+    debug_session_id: str | None = None,
+):
+    request = request or DebugBreakpointIdRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        breakpoint_id=_required(breakpoint_id, "breakpoint_id"),
+        debug_session_id=debug_session_id,
+    )
+    return _debug_clear_watchpoint_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        breakpoint_id=request.breakpoint_id,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_list_breakpoints_handler(
+    *,
+    request: DebugSessionRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    debug_session_id: str | None = None,
+):
+    request = request or DebugSessionRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        debug_session_id=debug_session_id,
+    )
+    return _debug_list_breakpoints_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_backtrace_handler(
+    *,
+    request: DebugSessionRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    debug_session_id: str | None = None,
+):
+    request = request or DebugSessionRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        debug_session_id=debug_session_id,
+    )
+    return _debug_backtrace_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_list_variables_handler(
+    *,
+    request: DebugSessionRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    debug_session_id: str | None = None,
+):
+    request = request or DebugSessionRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        debug_session_id=debug_session_id,
+    )
+    return _debug_list_variables_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_continue_handler(
+    *,
+    request: DebugExecutionRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    debug_session_id: str | None = None,
+    timeout_seconds: int | None = None,
+):
+    request = request or DebugExecutionRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        debug_session_id=debug_session_id,
+        timeout_seconds=timeout_seconds,
+    )
+    return _debug_continue_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_session_id=request.debug_session_id,
+        timeout_seconds=request.timeout_seconds,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_step_handler(
+    *,
+    request: DebugExecutionRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    debug_session_id: str | None = None,
+    timeout_seconds: int | None = None,
+):
+    request = request or DebugExecutionRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        debug_session_id=debug_session_id,
+        timeout_seconds=timeout_seconds,
+    )
+    return _debug_step_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_session_id=request.debug_session_id,
+        timeout_seconds=request.timeout_seconds,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_next_handler(
+    *,
+    request: DebugExecutionRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    debug_session_id: str | None = None,
+    timeout_seconds: int | None = None,
+):
+    request = request or DebugExecutionRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        debug_session_id=debug_session_id,
+        timeout_seconds=timeout_seconds,
+    )
+    return _debug_next_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_session_id=request.debug_session_id,
+        timeout_seconds=request.timeout_seconds,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_finish_handler(
+    *,
+    request: DebugExecutionRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    debug_session_id: str | None = None,
+    timeout_seconds: int | None = None,
+):
+    request = request or DebugExecutionRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        debug_session_id=debug_session_id,
+        timeout_seconds=timeout_seconds,
+    )
+    return _debug_finish_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_session_id=request.debug_session_id,
+        timeout_seconds=request.timeout_seconds,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_interrupt_handler(
+    *,
+    request: DebugExecutionRequest | None = None,
+    runtime: DebugRuntime,
+    artifact_root: Path | None = None,
+    run_id: str | None = None,
+    debug_session_id: str | None = None,
+    timeout_seconds: int | None = None,
+):
+    request = request or DebugExecutionRequest(
+        artifact_root=_required(artifact_root, "artifact_root"),
+        run_id=_required(run_id, "run_id"),
+        debug_session_id=debug_session_id,
+        timeout_seconds=timeout_seconds,
+    )
+    return _debug_interrupt_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_session_id=request.debug_session_id,
+        timeout_seconds=request.timeout_seconds,
+        runtime=runtime,
+        operation_core=_debug_operation_response,
+    )
+
+
+def debug_end_session_handler(*, request: DebugSessionRequest, runtime: DebugToolContext):
+    return _debug_end_session_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_session_id=request.debug_session_id,
+        admission=runtime.admission,
+        transaction=runtime.transaction,
+        session_registry=runtime.session_registry,
+        session_guard=runtime.session_guard,
+        gdb_mi_engine=runtime.gdb_mi_engine,
+        gdb_mi_sessions=runtime.gdb_mi_sessions,
+    )
 
 
 def debug_tool_handlers() -> DebugToolHandlers:

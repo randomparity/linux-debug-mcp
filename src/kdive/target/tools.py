@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -15,35 +16,40 @@ from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, 
 
 
 class TargetBootHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        target_profile: str | None,
-        rootfs_profile: str | None,
-        force_reboot: bool,
-        boot_overrides: BootOverrides | None,
-        acknowledged_permissions: list[str] | None,
-        sensitive_paths: list[Path] | None,
-        admission: AdmissionService | None,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: TargetBootHandlerRequest, runtime: TargetToolRuntime) -> ToolResponse: ...
 
 
 class TargetRunTestsHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        test_suite: str | None,
-        commands: list[list[str]] | None,
-        force_rerun: bool,
-        attempt: int | None,
-        acknowledged_permissions: list[str] | None,
-        admission: AdmissionService | None,
-        session_registry: SessionRegistry | None,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: TargetRunTestsHandlerRequest, runtime: TargetToolRuntime) -> ToolResponse: ...
+
+
+@dataclass(frozen=True)
+class TargetToolRuntime:
+    sensitive_paths: list[Path]
+    admission: AdmissionService
+    session_registry: SessionRegistry
+
+
+@dataclass(frozen=True)
+class TargetBootHandlerRequest:
+    artifact_root: Path
+    run_id: str
+    target_profile: str | None
+    rootfs_profile: str | None
+    force_reboot: bool
+    boot_overrides: BootOverrides | None
+    acknowledged_permissions: list[str] | None
+
+
+@dataclass(frozen=True)
+class TargetRunTestsHandlerRequest:
+    artifact_root: Path
+    run_id: str
+    test_suite: str | None
+    commands: list[list[str]] | None
+    force_rerun: bool
+    attempt: int | None
+    acknowledged_permissions: list[str] | None
 
 
 class TargetBootContext(Model):
@@ -86,6 +92,11 @@ def register_target_tools(
     target_run_tests_handler: TargetRunTestsHandler,
 ) -> None:
     default_artifact_root_text = str(default_artifact_root)
+    runtime = TargetToolRuntime(
+        sensitive_paths=sensitive_paths,
+        admission=admission,
+        session_registry=session_registry,
+    )
 
     @app.tool(name="target.boot")
     def target_boot(
@@ -103,15 +114,16 @@ def register_target_tools(
         except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
         return target_boot_handler(
-            artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
-            run_id=context_model.run_id,
-            target_profile=profiles_model.target_profile,
-            rootfs_profile=profiles_model.rootfs_profile,
-            force_reboot=options_model.force_reboot,
-            boot_overrides=resolved_boot_overrides,
-            acknowledged_permissions=options_model.acknowledged_permissions,
-            sensitive_paths=sensitive_paths,
-            admission=admission,
+            request=TargetBootHandlerRequest(
+                artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
+                run_id=context_model.run_id,
+                target_profile=profiles_model.target_profile,
+                rootfs_profile=profiles_model.rootfs_profile,
+                force_reboot=options_model.force_reboot,
+                boot_overrides=resolved_boot_overrides,
+                acknowledged_permissions=options_model.acknowledged_permissions,
+            ),
+            runtime=runtime,
         ).model_dump(mode="json")
 
     @app.tool(name="target.run_tests")
@@ -125,13 +137,14 @@ def register_target_tools(
         except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
         return target_run_tests_handler(
-            artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
-            run_id=context_model.run_id,
-            test_suite=options_model.test_suite,
-            commands=options_model.commands,
-            force_rerun=options_model.force_rerun,
-            attempt=options_model.attempt,
-            acknowledged_permissions=options_model.acknowledged_permissions,
-            admission=admission,
-            session_registry=session_registry,
+            request=TargetRunTestsHandlerRequest(
+                artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
+                run_id=context_model.run_id,
+                test_suite=options_model.test_suite,
+                commands=options_model.commands,
+                force_rerun=options_model.force_rerun,
+                attempt=options_model.attempt,
+                acknowledged_permissions=options_model.acknowledged_permissions,
+            ),
+            runtime=runtime,
         ).model_dump(mode="json")

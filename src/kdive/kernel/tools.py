@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -13,35 +14,41 @@ from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, 
 
 
 class CreateRunHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        source_path: str,
-        build_profile: str | None,
-        target_profile: str | None,
-        rootfs_profile: str | None,
-        run_id: str | None,
-        debug_profile: str | None,
-        test_suite: str | None,
-        build_overrides: BuildOverrides | None,
-        boot_overrides: BootOverrides | None,
-        sensitive_paths: list[Path] | None,
-        build_profile_spec: dict[str, Any] | None,
-        target_profile_spec: dict[str, Any] | None,
-        rootfs_profile_spec: dict[str, Any] | None,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: CreateRunHandlerRequest, runtime: KernelToolRuntime) -> ToolResponse: ...
 
 
 class KernelBuildHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        build_profile: str | None,
-        force_rebuild: bool,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: KernelBuildHandlerRequest, runtime: KernelToolRuntime) -> ToolResponse: ...
+
+
+@dataclass(frozen=True)
+class KernelToolRuntime:
+    sensitive_paths: list[Path]
+
+
+@dataclass(frozen=True)
+class CreateRunHandlerRequest:
+    artifact_root: Path
+    source_path: str
+    build_profile: str | None
+    target_profile: str | None
+    rootfs_profile: str | None
+    run_id: str | None
+    debug_profile: str | None
+    test_suite: str | None
+    build_overrides: BuildOverrides | None
+    boot_overrides: BootOverrides | None
+    build_profile_spec: dict[str, Any] | None
+    target_profile_spec: dict[str, Any] | None
+    rootfs_profile_spec: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class KernelBuildHandlerRequest:
+    artifact_root: Path
+    run_id: str
+    build_profile: str | None
+    force_rebuild: bool
 
 
 class CreateRunProfiles(Model):
@@ -111,6 +118,7 @@ def register_kernel_tools(
     kernel_build_handler: KernelBuildHandler,
 ) -> None:
     default_artifact_root_text = str(default_artifact_root)
+    runtime = KernelToolRuntime(sensitive_paths=sensitive_paths)
 
     @app.tool(name="kernel.create_run")
     def kernel_create_run(
@@ -132,20 +140,22 @@ def register_kernel_tools(
         except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
         return create_run_handler(
-            artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
-            source_path=profiles_model.source_path,
-            build_profile=profiles_model.build_profile,
-            target_profile=profiles_model.target_profile,
-            rootfs_profile=profiles_model.rootfs_profile,
-            run_id=context_model.run_id,
-            debug_profile=options_model.debug_profile,
-            test_suite=options_model.test_suite,
-            build_overrides=resolved_build_overrides,
-            boot_overrides=resolved_boot_overrides,
-            sensitive_paths=sensitive_paths,
-            build_profile_spec=build_spec,
-            target_profile_spec=target_spec,
-            rootfs_profile_spec=rootfs_spec,
+            request=CreateRunHandlerRequest(
+                artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
+                source_path=profiles_model.source_path,
+                build_profile=profiles_model.build_profile,
+                target_profile=profiles_model.target_profile,
+                rootfs_profile=profiles_model.rootfs_profile,
+                run_id=context_model.run_id,
+                debug_profile=options_model.debug_profile,
+                test_suite=options_model.test_suite,
+                build_overrides=resolved_build_overrides,
+                boot_overrides=resolved_boot_overrides,
+                build_profile_spec=build_spec,
+                target_profile_spec=target_spec,
+                rootfs_profile_spec=rootfs_spec,
+            ),
+            runtime=runtime,
         ).model_dump(mode="json")
 
     @app.tool(name="kernel.build")
@@ -159,8 +169,11 @@ def register_kernel_tools(
         except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
         return kernel_build_handler(
-            artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
-            run_id=context_model.run_id,
-            build_profile=options_model.build_profile,
-            force_rebuild=options_model.force_rebuild,
+            request=KernelBuildHandlerRequest(
+                artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
+                run_id=context_model.run_id,
+                build_profile=options_model.build_profile,
+                force_rebuild=options_model.force_rebuild,
+            ),
+            runtime=runtime,
         ).model_dump(mode="json")

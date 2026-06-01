@@ -17,152 +17,47 @@ from kdive.tools.adapter_boundary import adapter_validation_failure, optional_mo
 
 
 class DebugStartSessionHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        debug_profile: str | None,
-        new_session: bool,
-        admission: AdmissionService,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: DebugStartSessionRequest, runtime: DebugToolContext) -> ToolResponse: ...
 
 
 class DebugReadRegistersHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        registers: list[str],
-        debug_session_id: str | None,
-        runtime: DebugRuntime,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: DebugRegistersRequest, runtime: DebugRuntime) -> ToolResponse: ...
 
 
 class DebugReadSymbolHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        symbol: str,
-        debug_session_id: str | None,
-        runtime: DebugRuntime,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: DebugSymbolRequest, runtime: DebugRuntime) -> ToolResponse: ...
 
 
 class DebugReadMemoryHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        address: int,
-        byte_count: int,
-        debug_session_id: str | None,
-        runtime: DebugRuntime,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: DebugMemoryRequest, runtime: DebugRuntime) -> ToolResponse: ...
 
 
 class DebugEvaluateHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        inspector: str,
-        arguments: dict[str, object] | None,
-        debug_session_id: str | None,
-        runtime: DebugRuntime,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: DebugEvaluateRequest, runtime: DebugRuntime) -> ToolResponse: ...
 
 
 class DebugLoadModuleSymbolsHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        module: str,
-        sections: dict[str, str] | None,
-        ko_path: str | None,
-        debug_session_id: str | None,
-        admission: AdmissionService,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: DebugLoadModuleSymbolsRequest, runtime: DebugToolContext) -> ToolResponse: ...
 
 
 class DebugSymbolControlHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        symbol: str,
-        debug_session_id: str | None,
-        runtime: DebugRuntime,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: DebugSymbolRequest, runtime: DebugRuntime) -> ToolResponse: ...
 
 
 class DebugBreakpointIdControlHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        breakpoint_id: str,
-        debug_session_id: str | None,
-        runtime: DebugRuntime,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: DebugBreakpointIdRequest, runtime: DebugRuntime) -> ToolResponse: ...
 
 
 class DebugSessionQueryHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        debug_session_id: str | None,
-        runtime: DebugRuntime,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: DebugSessionRequest, runtime: DebugRuntime) -> ToolResponse: ...
 
 
 class DebugExecutionControlHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        debug_session_id: str | None,
-        timeout_seconds: int | None,
-        runtime: DebugRuntime,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: DebugExecutionRequest, runtime: DebugRuntime) -> ToolResponse: ...
 
 
 class DebugEndSessionHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        debug_session_id: str | None,
-        admission: AdmissionService,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-        session_guard: SessionGuard,
-        gdb_mi_engine: GdbMiEngine,
-        gdb_mi_sessions: GdbMiSessionRegistry,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: DebugSessionRequest, runtime: DebugToolContext) -> ToolResponse: ...
 
 
 @dataclass(frozen=True)
@@ -197,6 +92,82 @@ class DebugToolContext:
     session_guard: SessionGuard
     gdb_mi_engine: GdbMiEngine
     gdb_mi_sessions: GdbMiSessionRegistry
+
+
+@dataclass(frozen=True)
+class DebugSessionRequest:
+    artifact_root: Path
+    run_id: str
+    debug_session_id: str | None
+
+
+@dataclass(frozen=True)
+class DebugStartSessionRequest:
+    artifact_root: Path
+    run_id: str
+    debug_session_id: str | None
+    debug_profile: str | None
+    new_session: bool
+
+
+@dataclass(frozen=True)
+class DebugRegistersRequest:
+    artifact_root: Path
+    run_id: str
+    debug_session_id: str | None
+    registers: list[str]
+
+
+@dataclass(frozen=True)
+class DebugSymbolRequest:
+    artifact_root: Path
+    run_id: str
+    debug_session_id: str | None
+    symbol: str
+
+
+@dataclass(frozen=True)
+class DebugMemoryRequest:
+    artifact_root: Path
+    run_id: str
+    debug_session_id: str | None
+    address: int
+    byte_count: int
+
+
+@dataclass(frozen=True)
+class DebugEvaluateRequest:
+    artifact_root: Path
+    run_id: str
+    debug_session_id: str | None
+    inspector: str
+    arguments: dict[str, object] | None
+
+
+@dataclass(frozen=True)
+class DebugLoadModuleSymbolsRequest:
+    artifact_root: Path
+    run_id: str
+    debug_session_id: str | None
+    module: str
+    sections: dict[str, str] | None
+    ko_path: str | None
+
+
+@dataclass(frozen=True)
+class DebugBreakpointIdRequest:
+    artifact_root: Path
+    run_id: str
+    debug_session_id: str | None
+    breakpoint_id: str
+
+
+@dataclass(frozen=True)
+class DebugExecutionRequest:
+    artifact_root: Path
+    run_id: str
+    debug_session_id: str | None
+    timeout_seconds: int | None
 
 
 class DebugSessionContext(Model):
@@ -274,16 +245,14 @@ def _register_debug_session_lifecycle_tools(
             return adapter_validation_failure(exc)
         return _dump(
             handlers.start_session(
-                artifact_root=artifact_root,
-                run_id=run_id,
-                debug_profile=start_options.debug_profile,
-                new_session=start_options.new_session,
-                admission=tool_context.admission,
-                transaction=tool_context.transaction,
-                session_registry=tool_context.session_registry,
-                session_guard=tool_context.session_guard,
-                gdb_mi_engine=tool_context.gdb_mi_engine,
-                gdb_mi_sessions=tool_context.gdb_mi_sessions,
+                request=DebugStartSessionRequest(
+                    artifact_root=artifact_root,
+                    run_id=run_id,
+                    debug_session_id=None,
+                    debug_profile=start_options.debug_profile,
+                    new_session=start_options.new_session,
+                ),
+                runtime=tool_context,
             )
         )
 
@@ -300,15 +269,12 @@ def _register_debug_session_lifecycle_tools(
             return adapter_validation_failure(exc)
         return _dump(
             handlers.end_session(
-                artifact_root=artifact_root,
-                run_id=run_id,
-                debug_session_id=debug_session_id,
-                admission=tool_context.admission,
-                transaction=tool_context.transaction,
-                session_registry=tool_context.session_registry,
-                session_guard=tool_context.session_guard,
-                gdb_mi_engine=tool_context.gdb_mi_engine,
-                gdb_mi_sessions=tool_context.gdb_mi_sessions,
+                request=DebugSessionRequest(
+                    artifact_root=artifact_root,
+                    run_id=run_id,
+                    debug_session_id=debug_session_id,
+                ),
+                runtime=tool_context,
             )
         )
 
@@ -334,10 +300,12 @@ def _register_registers_query(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                artifact_root=artifact_root,
-                run_id=run_id,
-                registers=registers,
-                debug_session_id=debug_session_id,
+                request=DebugRegistersRequest(
+                    artifact_root=artifact_root,
+                    run_id=run_id,
+                    debug_session_id=debug_session_id,
+                    registers=registers,
+                ),
                 runtime=_debug_runtime(tool_context, include_admission=False),
             )
         )
@@ -367,10 +335,12 @@ def _register_symbol_query(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                artifact_root=artifact_root,
-                run_id=run_id,
-                symbol=symbol,
-                debug_session_id=debug_session_id,
+                request=DebugSymbolRequest(
+                    artifact_root=artifact_root,
+                    run_id=run_id,
+                    debug_session_id=debug_session_id,
+                    symbol=symbol,
+                ),
                 runtime=_debug_runtime(tool_context, include_admission=False),
             )
         )
@@ -412,11 +382,13 @@ def _register_debug_read_tools(
             return adapter_validation_failure(exc)
         return _dump(
             handlers.read_memory(
-                artifact_root=artifact_root,
-                run_id=run_id,
-                address=address,
-                byte_count=byte_count,
-                debug_session_id=debug_session_id,
+                request=DebugMemoryRequest(
+                    artifact_root=artifact_root,
+                    run_id=run_id,
+                    debug_session_id=debug_session_id,
+                    address=address,
+                    byte_count=byte_count,
+                ),
                 runtime=_debug_runtime(tool_context, include_admission=False),
             )
         )
@@ -437,11 +409,13 @@ def _register_debug_read_tools(
             return adapter_validation_failure(exc)
         return _dump(
             handlers.evaluate(
-                artifact_root=artifact_root,
-                run_id=run_id,
-                inspector=inspector,
-                arguments=evaluate_options.arguments,
-                debug_session_id=debug_session_id,
+                request=DebugEvaluateRequest(
+                    artifact_root=artifact_root,
+                    run_id=run_id,
+                    debug_session_id=debug_session_id,
+                    inspector=inspector,
+                    arguments=evaluate_options.arguments,
+                ),
                 runtime=_debug_runtime(tool_context, include_admission=False),
             )
         )
@@ -466,18 +440,15 @@ def _register_debug_module_symbol_tools(
             return adapter_validation_failure(exc)
         return _dump(
             handlers.load_module_symbols(
-                artifact_root=artifact_root,
-                run_id=run_id,
-                module=module,
-                sections=load_options.sections,
-                ko_path=load_options.ko_path,
-                debug_session_id=debug_session_id,
-                admission=tool_context.admission,
-                transaction=tool_context.transaction,
-                session_registry=tool_context.session_registry,
-                session_guard=tool_context.session_guard,
-                gdb_mi_engine=tool_context.gdb_mi_engine,
-                gdb_mi_sessions=tool_context.gdb_mi_sessions,
+                request=DebugLoadModuleSymbolsRequest(
+                    artifact_root=artifact_root,
+                    run_id=run_id,
+                    debug_session_id=debug_session_id,
+                    module=module,
+                    sections=load_options.sections,
+                    ko_path=load_options.ko_path,
+                ),
+                runtime=tool_context,
             )
         )
 
@@ -503,10 +474,12 @@ def _register_symbol_control(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                artifact_root=artifact_root,
-                run_id=run_id,
-                symbol=symbol,
-                debug_session_id=debug_session_id,
+                request=DebugSymbolRequest(
+                    artifact_root=artifact_root,
+                    run_id=run_id,
+                    debug_session_id=debug_session_id,
+                    symbol=symbol,
+                ),
                 runtime=_debug_runtime(tool_context, include_admission=True),
             )
         )
@@ -536,10 +509,12 @@ def _register_breakpoint_id_control(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                artifact_root=artifact_root,
-                run_id=run_id,
-                breakpoint_id=breakpoint_id,
-                debug_session_id=debug_session_id,
+                request=DebugBreakpointIdRequest(
+                    artifact_root=artifact_root,
+                    run_id=run_id,
+                    debug_session_id=debug_session_id,
+                    breakpoint_id=breakpoint_id,
+                ),
                 runtime=_debug_runtime(tool_context, include_admission=True),
             )
         )
@@ -568,9 +543,11 @@ def _register_gated_query(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                artifact_root=artifact_root,
-                run_id=run_id,
-                debug_session_id=debug_session_id,
+                request=DebugSessionRequest(
+                    artifact_root=artifact_root,
+                    run_id=run_id,
+                    debug_session_id=debug_session_id,
+                ),
                 runtime=_debug_runtime(tool_context, include_admission=True),
             )
         )
@@ -642,10 +619,12 @@ def _register_execution_control(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                artifact_root=artifact_root,
-                run_id=run_id,
-                debug_session_id=debug_session_id,
-                timeout_seconds=execution_options.timeout_seconds,
+                request=DebugExecutionRequest(
+                    artifact_root=artifact_root,
+                    run_id=run_id,
+                    debug_session_id=debug_session_id,
+                    timeout_seconds=execution_options.timeout_seconds,
+                ),
                 runtime=_debug_runtime(tool_context, include_admission=True),
             )
         )

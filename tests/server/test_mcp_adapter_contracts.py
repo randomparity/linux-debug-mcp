@@ -11,10 +11,13 @@ from kdive.introspect.execution import LiveIntrospectRuntime
 from kdive.introspect.tools import IntrospectRunOptions, IntrospectTargetContext, register_introspect_tools
 from kdive.kernel.tools import (
     CreateRunContext,
+    CreateRunHandlerRequest,
     CreateRunOptions,
     CreateRunProfiles,
     KernelBuildContext,
+    KernelBuildHandlerRequest,
     KernelBuildOptions,
+    KernelToolRuntime,
     register_kernel_tools,
 )
 from kdive.postmortem.models import DebugPostmortemFetchRequest
@@ -31,10 +34,13 @@ from kdive.prereqs.tools import (
 )
 from kdive.target.tools import (
     TargetBootContext,
+    TargetBootHandlerRequest,
     TargetBootOptions,
     TargetBootProfiles,
     TargetRunContext,
     TargetRunOptions,
+    TargetRunTestsHandlerRequest,
+    TargetToolRuntime,
     register_target_tools,
 )
 from kdive.tools.artifacts import (
@@ -51,9 +57,11 @@ from kdive.transport.tools import (
 )
 from kdive.workflow.handlers import WorkflowHandlerDependencies
 from kdive.workflow.tools import (
+    WorkflowBuildBootDebugHandlerRequest,
     WorkflowBuildBootDebugOptions,
     WorkflowProfileInputs,
     WorkflowRunContext,
+    WorkflowToolRuntime,
     register_workflow_tools,
 )
 
@@ -69,15 +77,15 @@ def _success(**data: Any) -> ToolResponse:
 def test_kernel_adapters_forward_grouped_payloads_and_override_models(tmp_path: Path) -> None:
     app = FastMCP("adapter-test")
     sensitive_paths = [tmp_path / "secret"]
-    calls: list[tuple[str, dict[str, Any]]] = []
+    calls: list[tuple[str, CreateRunHandlerRequest | KernelBuildHandlerRequest, KernelToolRuntime]] = []
 
-    def create_handler(**kwargs: Any) -> ToolResponse:
-        calls.append(("create", kwargs))
-        return _success(run_id=kwargs["run_id"])
+    def create_handler(*, request: CreateRunHandlerRequest, runtime: KernelToolRuntime) -> ToolResponse:
+        calls.append(("create", request, runtime))
+        return _success(run_id=request.run_id)
 
-    def build_handler(**kwargs: Any) -> ToolResponse:
-        calls.append(("build", kwargs))
-        return _success(run_id=kwargs["run_id"])
+    def build_handler(*, request: KernelBuildHandlerRequest, runtime: KernelToolRuntime) -> ToolResponse:
+        calls.append(("build", request, runtime))
+        return _success(run_id=request.run_id)
 
     register_kernel_tools(
         app,
@@ -113,31 +121,32 @@ def test_kernel_adapters_forward_grouped_payloads_and_override_models(tmp_path: 
     assert calls == [
         (
             "create",
-            {
-                "artifact_root": tmp_path / "runs",
-                "source_path": "/src/linux",
-                "build_profile": "x86_64-default",
-                "target_profile": "local-qemu",
-                "rootfs_profile": "minimal",
-                "run_id": "run-1",
-                "debug_profile": "qemu-gdbstub-default",
-                "test_suite": "smoke",
-                "build_overrides": BuildOverrides(make_variables={"LOCALVERSION": "-kdive"}),
-                "boot_overrides": BootOverrides(kernel_args=["panic=1"]),
-                "sensitive_paths": sensitive_paths,
-                "build_profile_spec": {"name": "inline-build"},
-                "target_profile_spec": {"name": "inline-target"},
-                "rootfs_profile_spec": None,
-            },
+            CreateRunHandlerRequest(
+                artifact_root=tmp_path / "runs",
+                source_path="/src/linux",
+                build_profile="x86_64-default",
+                target_profile="local-qemu",
+                rootfs_profile="minimal",
+                run_id="run-1",
+                debug_profile="qemu-gdbstub-default",
+                test_suite="smoke",
+                build_overrides=BuildOverrides(make_variables={"LOCALVERSION": "-kdive"}),
+                boot_overrides=BootOverrides(kernel_args=["panic=1"]),
+                build_profile_spec={"name": "inline-build"},
+                target_profile_spec={"name": "inline-target"},
+                rootfs_profile_spec=None,
+            ),
+            KernelToolRuntime(sensitive_paths=sensitive_paths),
         ),
         (
             "build",
-            {
-                "artifact_root": tmp_path / "runs",
-                "run_id": "run-1",
-                "build_profile": "inline-build",
-                "force_rebuild": True,
-            },
+            KernelBuildHandlerRequest(
+                artifact_root=tmp_path / "runs",
+                run_id="run-1",
+                build_profile="inline-build",
+                force_rebuild=True,
+            ),
+            KernelToolRuntime(sensitive_paths=sensitive_paths),
         ),
     ]
 
@@ -166,15 +175,15 @@ def test_target_adapters_forward_grouped_payloads_and_collaborators(tmp_path: Pa
     admission = object()
     registry = object()
     sensitive_paths = [tmp_path / "secret"]
-    calls: list[tuple[str, dict[str, Any]]] = []
+    calls: list[tuple[str, TargetBootHandlerRequest | TargetRunTestsHandlerRequest, TargetToolRuntime]] = []
 
-    def boot_handler(**kwargs: Any) -> ToolResponse:
-        calls.append(("boot", kwargs))
-        return _success(run_id=kwargs["run_id"])
+    def boot_handler(*, request: TargetBootHandlerRequest, runtime: TargetToolRuntime) -> ToolResponse:
+        calls.append(("boot", request, runtime))
+        return _success(run_id=request.run_id)
 
-    def run_tests_handler(**kwargs: Any) -> ToolResponse:
-        calls.append(("run_tests", kwargs))
-        return _success(run_id=kwargs["run_id"])
+    def run_tests_handler(*, request: TargetRunTestsHandlerRequest, runtime: TargetToolRuntime) -> ToolResponse:
+        calls.append(("run_tests", request, runtime))
+        return _success(run_id=request.run_id)
 
     register_target_tools(
         app,
@@ -211,31 +220,29 @@ def test_target_adapters_forward_grouped_payloads_and_collaborators(tmp_path: Pa
     assert calls == [
         (
             "boot",
-            {
-                "artifact_root": tmp_path / "runs",
-                "run_id": "run-1",
-                "target_profile": "local-qemu",
-                "rootfs_profile": "minimal",
-                "force_reboot": True,
-                "boot_overrides": BootOverrides(kernel_args=["console=ttyS0"]),
-                "acknowledged_permissions": ["start MCP-owned libvirt domains"],
-                "sensitive_paths": sensitive_paths,
-                "admission": admission,
-            },
+            TargetBootHandlerRequest(
+                artifact_root=tmp_path / "runs",
+                run_id="run-1",
+                target_profile="local-qemu",
+                rootfs_profile="minimal",
+                force_reboot=True,
+                boot_overrides=BootOverrides(kernel_args=["console=ttyS0"]),
+                acknowledged_permissions=["start MCP-owned libvirt domains"],
+            ),
+            TargetToolRuntime(sensitive_paths=sensitive_paths, admission=admission, session_registry=registry),
         ),
         (
             "run_tests",
-            {
-                "artifact_root": tmp_path / "runs",
-                "run_id": "run-1",
-                "test_suite": "smoke",
-                "commands": [["uname", "-a"]],
-                "force_rerun": True,
-                "attempt": 2,
-                "acknowledged_permissions": ["execute caller-supplied commands over target SSH"],
-                "admission": admission,
-                "session_registry": registry,
-            },
+            TargetRunTestsHandlerRequest(
+                artifact_root=tmp_path / "runs",
+                run_id="run-1",
+                test_suite="smoke",
+                commands=[["uname", "-a"]],
+                force_rerun=True,
+                attempt=2,
+                acknowledged_permissions=["execute caller-supplied commands over target SSH"],
+            ),
+            TargetToolRuntime(sensitive_paths=sensitive_paths, admission=admission, session_registry=registry),
         ),
     ]
 
@@ -554,11 +561,13 @@ def test_workflow_adapter_forwards_debug_collaborators_and_converts_artifact_roo
     session_guard = object()
     gdb_mi_engine = object()
     gdb_mi_sessions = object()
-    calls: list[dict[str, Any]] = []
+    calls: list[tuple[WorkflowBuildBootDebugHandlerRequest, WorkflowToolRuntime]] = []
 
-    def build_boot_debug_handler(**kwargs: Any) -> ToolResponse:
-        calls.append(kwargs)
-        return _success(run_id=kwargs["run_id"])
+    def build_boot_debug_handler(
+        *, request: WorkflowBuildBootDebugHandlerRequest, runtime: WorkflowToolRuntime
+    ) -> ToolResponse:
+        calls.append((request, runtime))
+        return _success(run_id=request.run_id)
 
     dependencies = WorkflowHandlerDependencies(
         create_run_handler=lambda **_kwargs: _success(),
@@ -601,24 +610,28 @@ def test_workflow_adapter_forwards_debug_collaborators_and_converts_artifact_roo
 
     assert raw["ok"] is True
     assert calls == [
-        {
-            "artifact_root": tmp_path / "runs",
-            "source_path": "/src",
-            "build_profile": "x86_64-default",
-            "target_profile": "local-qemu",
-            "rootfs_profile": "minimal",
-            "run_id": "run-1",
-            "debug_profile": "qemu-gdbstub-default",
-            "force_rebuild": True,
-            "force_reboot": True,
-            "new_session": True,
-            "acknowledged_permissions": ["start MCP-owned libvirt domains"],
-            "admission": admission,
-            "session_registry": registry,
-            "transaction": transaction,
-            "session_guard": session_guard,
-            "gdb_mi_engine": gdb_mi_engine,
-            "gdb_mi_sessions": gdb_mi_sessions,
-            "dependencies": dependencies,
-        }
+        (
+            WorkflowBuildBootDebugHandlerRequest(
+                artifact_root=tmp_path / "runs",
+                source_path="/src",
+                build_profile="x86_64-default",
+                target_profile="local-qemu",
+                rootfs_profile="minimal",
+                run_id="run-1",
+                debug_profile="qemu-gdbstub-default",
+                force_rebuild=True,
+                force_reboot=True,
+                new_session=True,
+                acknowledged_permissions=["start MCP-owned libvirt domains"],
+            ),
+            WorkflowToolRuntime(
+                admission=admission,
+                session_registry=registry,
+                transaction=transaction,
+                session_guard=session_guard,
+                gdb_mi_engine=gdb_mi_engine,
+                gdb_mi_sessions=gdb_mi_sessions,
+                dependencies=dependencies,
+            ),
+        )
     ]

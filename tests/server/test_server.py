@@ -1,3 +1,4 @@
+import inspect
 from pathlib import Path
 
 from conftest import make_source_tree
@@ -9,7 +10,6 @@ from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, BootOverrides, BuildOve
 from kdive.coordination.admission import AdmissionService, SnapshotStore
 from kdive.coordination.registry import SessionRegistry
 from kdive.debug import bound_handlers as debug_bound_handlers
-from kdive.debug import operations as debug_operations
 from kdive.domain import ArtifactRef, StepResult, StepStatus, ToolResponse
 from kdive.kernel import handlers as kernel_handlers
 from kdive.kernel import tools as kernel_tools
@@ -216,8 +216,9 @@ def test_debug_operation_handlers_live_outside_server_catch_all() -> None:
         debug_bound_handlers.debug_set_breakpoint_handler,
         debug_bound_handlers.debug_continue_handler,
     ):
-        assert handler.func.__module__ == "kdive.debug.handlers"
-        assert handler.keywords == {"operation_core": debug_operations._debug_operation_response}
+        assert handler.__module__ == "kdive.debug.bound_handlers"
+        assert "_debug_operation_response" in inspect.getsource(handler)
+        assert "operation_core" in inspect.getsource(handler)
     assert not hasattr(server, "debug_read_registers_handler")
 
 
@@ -469,8 +470,9 @@ def test_target_run_tests_tool_options_forward_acknowledged_permissions(tmp_path
     )
 
     assert response["status"] == "succeeded"
-    assert captured["commands"] == [["uname", "-a"]]
-    assert captured["acknowledged_permissions"] == TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"]
+    request = captured["request"]
+    assert request.commands == [["uname", "-a"]]
+    assert request.acknowledged_permissions == TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"]
 
 
 def test_target_run_tests_tool_and_handler_are_target_owned() -> None:

@@ -112,12 +112,12 @@ from kdive.transport.handlers import (
     transport_open_handler,
 )
 from kdive.transport.tools import TransportToolContext, TransportToolHandlers, register_transport_tools
+from kdive.workflow import tools as workflow_tools
 from kdive.workflow.handlers import (
     WorkflowHandlerDependencies,
     workflow_build_boot_debug_handler,
     workflow_build_boot_test_handler,
 )
-from kdive.workflow.tools import register_workflow_tools
 
 logger = logging.getLogger(__name__)
 DEFAULT_BUILD_PROFILES = _DEFAULT_BUILD_PROFILES
@@ -127,6 +127,119 @@ DEFAULT_TARGET_PROFILES = _DEFAULT_TARGET_PROFILES
 DEFAULT_TEST_SUITES = _DEFAULT_TEST_SUITES
 
 _RequiredT = TypeVar("_RequiredT")
+
+
+def _kernel_create_run_tool_handler(
+    *, request: kernel_tools.CreateRunHandlerRequest, runtime: kernel_tools.KernelToolRuntime
+) -> ToolResponse:
+    return create_run_handler(
+        artifact_root=request.artifact_root,
+        source_path=request.source_path,
+        build_profile=request.build_profile,
+        target_profile=request.target_profile,
+        rootfs_profile=request.rootfs_profile,
+        run_id=request.run_id,
+        debug_profile=request.debug_profile,
+        test_suite=request.test_suite,
+        build_overrides=request.build_overrides,
+        boot_overrides=request.boot_overrides,
+        sensitive_paths=runtime.sensitive_paths,
+        build_profile_spec=request.build_profile_spec,
+        target_profile_spec=request.target_profile_spec,
+        rootfs_profile_spec=request.rootfs_profile_spec,
+    )
+
+
+def _kernel_build_tool_handler(
+    *, request: kernel_tools.KernelBuildHandlerRequest, runtime: kernel_tools.KernelToolRuntime
+) -> ToolResponse:
+    _ = runtime
+    return kernel_build_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        build_profile=request.build_profile,
+        force_rebuild=request.force_rebuild,
+    )
+
+
+def _target_boot_tool_handler(
+    *, request: target_tools.TargetBootHandlerRequest, runtime: target_tools.TargetToolRuntime
+) -> ToolResponse:
+    return target_boot_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        target_profile=request.target_profile,
+        rootfs_profile=request.rootfs_profile,
+        force_reboot=request.force_reboot,
+        boot_overrides=request.boot_overrides,
+        acknowledged_permissions=request.acknowledged_permissions,
+        sensitive_paths=runtime.sensitive_paths,
+        admission=runtime.admission,
+    )
+
+
+def _target_run_tests_tool_handler(
+    *, request: target_tools.TargetRunTestsHandlerRequest, runtime: target_tools.TargetToolRuntime
+) -> ToolResponse:
+    return target_run_tests_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        test_suite=request.test_suite,
+        commands=request.commands,
+        force_rerun=request.force_rerun,
+        attempt=request.attempt,
+        acknowledged_permissions=request.acknowledged_permissions,
+        admission=runtime.admission,
+        session_registry=runtime.session_registry,
+    )
+
+
+def _workflow_build_boot_test_tool_handler(
+    *, request: workflow_tools.WorkflowBuildBootTestHandlerRequest, runtime: workflow_tools.WorkflowToolRuntime
+) -> ToolResponse:
+    return workflow_build_boot_test_handler(
+        artifact_root=request.artifact_root,
+        source_path=request.source_path,
+        build_profile=request.build_profile,
+        target_profile=request.target_profile,
+        rootfs_profile=request.rootfs_profile,
+        run_id=request.run_id,
+        test_suite=request.test_suite,
+        commands=request.commands,
+        force_rebuild=request.force_rebuild,
+        force_reboot=request.force_reboot,
+        force_rerun_tests=request.force_rerun_tests,
+        force_recollect=request.force_recollect,
+        acknowledged_permissions=request.acknowledged_permissions,
+        admission=runtime.admission,
+        session_registry=runtime.session_registry,
+        dependencies=runtime.dependencies,
+    )
+
+
+def _workflow_build_boot_debug_tool_handler(
+    *, request: workflow_tools.WorkflowBuildBootDebugHandlerRequest, runtime: workflow_tools.WorkflowToolRuntime
+) -> ToolResponse:
+    return workflow_build_boot_debug_handler(
+        artifact_root=request.artifact_root,
+        source_path=request.source_path,
+        build_profile=request.build_profile,
+        target_profile=request.target_profile,
+        rootfs_profile=request.rootfs_profile,
+        run_id=request.run_id,
+        debug_profile=request.debug_profile,
+        force_rebuild=request.force_rebuild,
+        force_reboot=request.force_reboot,
+        new_session=request.new_session,
+        acknowledged_permissions=request.acknowledged_permissions,
+        admission=runtime.admission,
+        session_registry=runtime.session_registry,
+        transaction=runtime.transaction,
+        session_guard=runtime.session_guard,
+        gdb_mi_engine=runtime.gdb_mi_engine,
+        gdb_mi_sessions=runtime.gdb_mi_sessions,
+        dependencies=runtime.dependencies,
+    )
 
 
 def _require_value(value: _RequiredT | None, message: str) -> _RequiredT:
@@ -480,8 +593,8 @@ def create_app(
         app,
         default_artifact_root=DEFAULT_ARTIFACT_ROOT,
         sensitive_paths=sensitive_paths,
-        create_run_handler=create_run_handler,
-        kernel_build_handler=kernel_build_handler,
+        create_run_handler=_kernel_create_run_tool_handler,
+        kernel_build_handler=_kernel_build_tool_handler,
     )
 
     register_provider_tools(app)
@@ -496,8 +609,8 @@ def create_app(
         sensitive_paths=sensitive_paths,
         admission=admission_service,
         session_registry=durable_registry,
-        target_boot_handler=target_boot_handler,
-        target_run_tests_handler=target_run_tests_handler,
+        target_boot_handler=_target_boot_tool_handler,
+        target_run_tests_handler=_target_run_tests_tool_handler,
     )
 
     register_introspect_tools(
@@ -559,7 +672,7 @@ def create_app(
         ),
     )
 
-    register_workflow_tools(
+    workflow_tools.register_workflow_tools(
         app,
         default_artifact_root=DEFAULT_ARTIFACT_ROOT,
         admission=admission_service,
@@ -569,8 +682,8 @@ def create_app(
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
         dependencies=_workflow_handler_dependencies(),
-        build_boot_test_handler=workflow_build_boot_test_handler,
-        build_boot_debug_handler=workflow_build_boot_debug_handler,
+        build_boot_test_handler=_workflow_build_boot_test_tool_handler,
+        build_boot_debug_handler=_workflow_build_boot_debug_tool_handler,
     )
 
     return app
