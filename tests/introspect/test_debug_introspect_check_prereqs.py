@@ -297,6 +297,26 @@ def test_oversized_stdout_is_infrastructure_failure(tmp_path: Path) -> None:
     assert resp.error.details["code"] == "oversized_output"
 
 
+def test_unreadable_stdout_is_tool_response_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_id = _booted_run(tmp_path)
+    runner = FakeSshRunner(results=[SshCommandResult(exit_status=0, stdout=_probe_json())])
+
+    def unreadable_stdout(_path: Path, _cap: int) -> str | None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr("kdive.seams.probes.read_capped", unreadable_stdout)
+
+    resp = debug_introspect_check_prerequisites_handler(
+        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=runner
+    )
+
+    assert resp.ok is False
+    assert resp.error is not None
+    assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert resp.error.details["code"] == "probe_stdout_unreadable"
+    assert resp.error.details["exception_message"] == "permission denied"
+
+
 def test_ssh_timeout_is_infrastructure_failure(tmp_path: Path) -> None:
     run_id = _booted_run(tmp_path)
     runner = FakeSshRunner(results=[SshCommandResult(exit_status=-1, stdout="", timed_out=True)])
