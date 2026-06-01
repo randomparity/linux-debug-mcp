@@ -758,6 +758,9 @@ class FakeLibvirtRunner:
     def which(self, command: str) -> str | None:
         return self.tools.get(command)
 
+    def is_tcp_port_available(self, host: str, port: int) -> bool:
+        return True
+
     def run(self, argv: list[str], *, timeout: int, log_path: Path | None = None) -> CommandResult:
         self.commands.append(argv)
         if log_path is not None:
@@ -1012,6 +1015,73 @@ def test_execute_boot_command_failure_maps_to_infrastructure_failure(tmp_path: P
     assert result.status == StepStatus.FAILED
     assert result.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert runner.commands == [plan.dumpxml_argv, plan.define_argv]
+
+
+@pytest.mark.parametrize(
+    ("path_attr", "expected_code", "expected_commands"),
+    [
+        ("boot_plan_path", "boot_plan_write_failed", []),
+        ("domain_xml_path", "domain_xml_write_failed", "after-dumpxml"),
+        ("console_log_path", "console_log_write_failed", "after-frozen-start"),
+        ("boot_summary_path", "boot_summary_write_failed", "after-success"),
+    ],
+)
+def test_execute_boot_artifact_write_failure_maps_to_infrastructure_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path_attr: str,
+    expected_code: str,
+    expected_commands: list[list[str]] | str,
+) -> None:
+    runner = FakeLibvirtRunner()
+    if path_attr == "console_log_path":
+        kernel, rootfs, run_dir = make_inputs(tmp_path)
+        plan = LibvirtQemuProvider(runner=runner).plan_boot(
+            run_id="run-debug",
+            run_dir=run_dir,
+            kernel_image_path=kernel,
+            target_profile=target_profile(
+                debug_gdbstub=True,
+                gdbstub_endpoint="127.0.0.1:1234",
+                wait_for_debugger=True,
+            ),
+            rootfs_profile=rootfs_profile(rootfs),
+        )
+    else:
+        plan = make_plan(tmp_path)
+    failed_path = getattr(plan, path_attr)
+    original_write_text = Path.write_text
+
+    def fail_selected_write(
+        path: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        if path == failed_path:
+            raise OSError("disk full")
+        return original_write_text(path, data, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "write_text", fail_selected_write)
+
+    result = LibvirtQemuProvider(runner=runner).execute_boot(plan)
+
+    assert result.status == StepStatus.FAILED
+    assert result.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert result.summary == f"failed to write boot artifact: {failed_path}"
+    assert result.details["code"] == expected_code
+    assert result.details["artifact_path"] == str(failed_path)
+    assert result.details["exception_type"] == "OSError"
+    assert result.diagnostic == "disk full"
+    if expected_commands == "after-dumpxml":
+        assert runner.commands == [plan.dumpxml_argv]
+    elif expected_commands == "after-frozen-start":
+        assert runner.commands == [plan.dumpxml_argv, plan.define_argv, plan.start_argv]
+    elif expected_commands == "after-success":
+        assert runner.commands == [plan.dumpxml_argv, plan.define_argv, plan.start_argv, plan.domifaddr_argv]
+    else:
+        assert runner.commands == expected_commands
 
 
 def test_execute_boot_debug_start_failure_preserves_debug_details(tmp_path: Path) -> None:

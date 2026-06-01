@@ -609,13 +609,31 @@ class LibvirtQemuProvider:
         rotated_console_artifact = self._rotate_console_log(plan.console_log_path)
         if rotated_console_artifact is not None:
             artifacts = [*artifacts, rotated_console_artifact]
-        self._write_boot_plan(plan)
+        try:
+            self._write_boot_plan(plan)
+        except OSError as exc:
+            return self._artifact_write_failure_result(
+                plan=plan,
+                operation="boot_plan",
+                path=plan.boot_plan_path,
+                artifacts=artifacts,
+                error=exc,
+            )
 
         existing_domain, failure = self._reconcile_existing_domain(plan, artifacts)
         if failure is not None:
             return failure
 
-        plan.domain_xml_path.write_text(self.render_domain_xml(plan), encoding="utf-8")
+        try:
+            plan.domain_xml_path.write_text(self.render_domain_xml(plan), encoding="utf-8")
+        except OSError as exc:
+            return self._artifact_write_failure_result(
+                plan=plan,
+                operation="domain_xml",
+                path=plan.domain_xml_path,
+                artifacts=artifacts,
+                error=exc,
+            )
 
         failure = self._execute_domain_start_sequence(plan, artifacts, existing_domain=existing_domain)
         if failure is not None:
@@ -695,7 +713,16 @@ class LibvirtQemuProvider:
     def _frozen_debug_boot_result(self, plan: BootPlan, artifacts: list[ArtifactRef]) -> BootExecutionResult:
         # The vCPU is blocked at the gdbstub and prints nothing, but create an empty console
         # log so the frozen success returns the same artifact set as the normal success branch.
-        plan.console_log_path.write_text("", encoding="utf-8")
+        try:
+            plan.console_log_path.write_text("", encoding="utf-8")
+        except OSError as exc:
+            return self._artifact_write_failure_result(
+                plan=plan,
+                operation="console_log",
+                path=plan.console_log_path,
+                artifacts=artifacts,
+                error=exc,
+            )
         frozen_details: dict[str, object] = {
             "domain": plan.domain_name,
             "console_status": "frozen",
@@ -975,7 +1002,16 @@ class LibvirtQemuProvider:
             "artifacts": [artifact.model_dump(mode="json") for artifact in artifact_list],
         }
         plan.boot_summary_path.parent.mkdir(parents=True, exist_ok=True)
-        plan.boot_summary_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        try:
+            plan.boot_summary_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        except OSError as exc:
+            return self._artifact_write_failure_result(
+                plan=plan,
+                operation="boot_summary",
+                path=plan.boot_summary_path,
+                artifacts=[artifact for artifact in artifact_list if artifact.path != str(plan.boot_summary_path)],
+                error=exc,
+            )
         return BootExecutionResult(
             status=status,
             summary=summary,
@@ -983,6 +1019,31 @@ class LibvirtQemuProvider:
             details=result_details,
             error_category=error_category,
             diagnostic=diagnostic,
+        )
+
+    def _artifact_write_failure_result(
+        self,
+        *,
+        plan: BootPlan,
+        operation: str,
+        path: Path,
+        artifacts: list[ArtifactRef],
+        error: OSError,
+    ) -> BootExecutionResult:
+        details: dict[str, object] = {
+            "code": f"{operation}_write_failed",
+            "operation": operation,
+            "artifact_path": str(path),
+            "exception_type": type(error).__name__,
+            "error": str(error),
+        }
+        return BootExecutionResult(
+            status=StepStatus.FAILED,
+            summary=f"failed to write boot artifact: {path}",
+            artifacts=self._existing_artifacts(artifacts),
+            details={**details, **self._debug_details(plan)},
+            error_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            diagnostic=str(error),
         )
 
     def _command_failure_result(
