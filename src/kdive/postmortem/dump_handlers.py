@@ -44,6 +44,7 @@ from kdive.postmortem.models import (
     FetchedFile,
 )
 from kdive.postmortem.probes import assemble_kdump_probe_response, validated_dump_dir
+from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.prereqs.kdump_probe import render_kdump_probe_script
 from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner, build_ssh_argv
 from kdive.seams.probes import (
@@ -60,6 +61,34 @@ from kdive.seams.probes import (
 )
 
 SSH_TIMEOUT_GRACE_SECONDS = 10
+
+
+def _runtime_value(
+    *,
+    runtime: PostmortemToolRuntime | None,
+    artifact_root: Path | None,
+    rootfs_profiles: Mapping[str, RootfsProfile] | None,
+    ssh_runner: SshRunner | None,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+) -> PostmortemToolRuntime:
+    if runtime is None:
+        if artifact_root is None:
+            raise TypeError("artifact_root is required when runtime is not provided")
+        return PostmortemToolRuntime(
+            artifact_root=artifact_root,
+            admission=admission,
+            session_registry=session_registry,
+            rootfs_profiles=rootfs_profiles,
+            ssh_runner=ssh_runner,
+        )
+    return PostmortemToolRuntime(
+        artifact_root=runtime.artifact_root,
+        admission=runtime.admission if admission is None else admission,
+        session_registry=runtime.session_registry if session_registry is None else session_registry,
+        rootfs_profiles=runtime.rootfs_profiles if rootfs_profiles is None else rootfs_profiles,
+        ssh_runner=runtime.ssh_runner if ssh_runner is None else ssh_runner,
+    )
 
 
 def build_scp_argv(
@@ -320,27 +349,44 @@ def _fetch_success_response(run_id: str, details: dict[str, object], *, already_
 def debug_postmortem_check_prereqs_handler(
     request: DebugPostmortemCheckPrereqsRequest,
     *,
-    artifact_root: Path,
+    runtime: PostmortemToolRuntime | None = None,
+    artifact_root: Path | None = None,
     rootfs_profiles: Mapping[str, RootfsProfile] | None = None,
     ssh_runner: SshRunner | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
-    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
-    resolved_ctx, failure = resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
+    runtime = _runtime_value(
+        runtime=runtime,
+        artifact_root=artifact_root,
+        rootfs_profiles=rootfs_profiles,
+        ssh_runner=ssh_runner,
+        admission=admission,
+        session_registry=session_registry,
+    )
+    profiles = runtime.rootfs_profiles if runtime.rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    resolved_ctx, failure = resolve_probe_context(
+        request,
+        artifact_root=runtime.artifact_root,
+        rootfs_profiles=profiles,
+    )
     if failure is not None:
         return failure
     ctx = _require_value(resolved_ctx, "probe context missing after successful resolution")
     run_id = ctx.run_id
 
     try:
-        halted = reject_if_target_halted(run_id=run_id, admission=admission, session_registry=session_registry)
+        halted = reject_if_target_halted(
+            run_id=run_id,
+            admission=runtime.admission,
+            session_registry=runtime.session_registry,
+        )
     except AdmissionError as exc:
         return ToolResponse.failure(category=exc.category, run_id=run_id, message=str(exc), details={"code": exc.code})
     if halted is not None:
         return halted
 
-    runner: SshRunner = ssh_runner or SubprocessSshRunner()
+    runner: SshRunner = runtime.ssh_runner or SubprocessSshRunner()
     probe_id = uuid.uuid4().hex
     agent_dir, sensitive_dir = prepare_probe_dirs(
         ctx.store, run_id, probe_id, category=("debug", "postmortem", "check_prereqs")
@@ -531,14 +577,27 @@ def _fetch_under_lock(
 def debug_postmortem_list_dumps_handler(
     request: DebugPostmortemListDumpsRequest,
     *,
-    artifact_root: Path,
+    runtime: PostmortemToolRuntime | None = None,
+    artifact_root: Path | None = None,
     rootfs_profiles: Mapping[str, RootfsProfile] | None = None,
     ssh_runner: SshRunner | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
-    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
-    resolved_ctx, failure = resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
+    runtime = _runtime_value(
+        runtime=runtime,
+        artifact_root=artifact_root,
+        rootfs_profiles=rootfs_profiles,
+        ssh_runner=ssh_runner,
+        admission=admission,
+        session_registry=session_registry,
+    )
+    profiles = runtime.rootfs_profiles if runtime.rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    resolved_ctx, failure = resolve_probe_context(
+        request,
+        artifact_root=runtime.artifact_root,
+        rootfs_profiles=profiles,
+    )
     if failure is not None:
         return failure
     ctx = _require_value(resolved_ctx, "probe context missing after successful resolution")
@@ -549,8 +608,8 @@ def debug_postmortem_list_dumps_handler(
     try:
         halted = reject_if_target_halted(
             run_id=ctx.run_id,
-            admission=admission,
-            session_registry=session_registry,
+            admission=runtime.admission,
+            session_registry=runtime.session_registry,
             action="enumerating dumps",
         )
     except AdmissionError as exc:
@@ -559,7 +618,7 @@ def debug_postmortem_list_dumps_handler(
         )
     if halted is not None:
         return halted
-    runner: SshRunner = ssh_runner or SubprocessSshRunner()
+    runner: SshRunner = runtime.ssh_runner or SubprocessSshRunner()
     parsed, failure = _run_dump_enumeration(
         ctx,
         runner=runner,
@@ -588,15 +647,24 @@ def debug_postmortem_list_dumps_handler(
 def debug_postmortem_fetch_handler(
     request: DebugPostmortemFetchRequest,
     *,
-    artifact_root: Path,
+    runtime: PostmortemToolRuntime | None = None,
+    artifact_root: Path | None = None,
     rootfs_profiles: Mapping[str, RootfsProfile] | None = None,
     ssh_runner: SshRunner | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
-    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    runtime = _runtime_value(
+        runtime=runtime,
+        artifact_root=artifact_root,
+        rootfs_profiles=rootfs_profiles,
+        ssh_runner=ssh_runner,
+        admission=admission,
+        session_registry=session_registry,
+    )
+    profiles = runtime.rootfs_profiles if runtime.rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
     resolved_ctx, failure = resolve_probe_context(
-        request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles, timeout_band=FETCH_TIMEOUT_BAND
+        request, artifact_root=runtime.artifact_root, rootfs_profiles=profiles, timeout_band=FETCH_TIMEOUT_BAND
     )
     if failure is not None:
         return failure
@@ -608,13 +676,16 @@ def debug_postmortem_fetch_handler(
     dump_dir = _require_value(dump_dir, "dump directory missing after validation")
     try:
         halted = reject_if_target_halted(
-            run_id=run_id, admission=admission, session_registry=session_registry, action="fetching a dump"
+            run_id=run_id,
+            admission=runtime.admission,
+            session_registry=runtime.session_registry,
+            action="fetching a dump",
         )
     except AdmissionError as exc:
         return ToolResponse.failure(category=exc.category, run_id=run_id, message=str(exc), details={"code": exc.code})
     if halted is not None:
         return halted
-    runner: SshRunner = ssh_runner or SubprocessSshRunner()
+    runner: SshRunner = runtime.ssh_runner or SubprocessSshRunner()
     dump_id = derive_dump_id(request.dump_ref)
     dest_dir = ctx.store.run_dir(run_id) / "debug" / "postmortem" / "dumps" / dump_id
     return _fetch_under_lock(ctx, runner=runner, request=request, dump_dir=dump_dir, dump_id=dump_id, dest_dir=dest_dir)

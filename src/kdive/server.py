@@ -57,7 +57,7 @@ from kdive.postmortem.dump_handlers import (
     debug_postmortem_list_dumps_handler,
 )
 from kdive.postmortem.models import DebugPostmortemTriageRequest
-from kdive.postmortem.tools import register_postmortem_tools
+from kdive.postmortem.tools import PostmortemToolRuntime, register_postmortem_tools
 from kdive.postmortem.triage_handlers import (
     debug_postmortem_triage_handler as _debug_postmortem_triage_handler,
 )
@@ -163,10 +163,15 @@ def _workflow_build_boot_debug_tool_handler(
 def debug_postmortem_triage_handler(
     request: DebugPostmortemTriageRequest,
     *,
-    artifact_root: Path,
+    runtime: PostmortemToolRuntime | None = None,
+    artifact_root: Path | None = None,
     **kwargs: Any,
 ) -> ToolResponse:
     kwargs.setdefault("drgn_helper_handler", debug_introspect_from_vmcore_helper_handler)
+    if runtime is not None:
+        return _debug_postmortem_triage_handler(request, runtime=runtime, **kwargs)
+    if artifact_root is None:
+        raise TypeError("artifact_root is required when runtime is not provided")
     return _debug_postmortem_triage_handler(request, artifact_root=artifact_root, **kwargs)
 
 

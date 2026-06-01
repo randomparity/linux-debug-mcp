@@ -26,6 +26,7 @@ from kdive.postmortem.models import (
     DebugPostmortemTriageReport,
     DebugPostmortemTriageRequest,
 )
+from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.postmortem.triage import CrashOutcome, DrgnOutcome, any_section_ok, assemble_report
 from kdive.providers.ssh import SshRunner
 from kdive.safety.redaction import Redactor
@@ -283,7 +284,8 @@ def _persist_successful_triage_report(
 def debug_postmortem_triage_handler(
     request: DebugPostmortemTriageRequest,
     *,
-    artifact_root: Path,
+    runtime: PostmortemToolRuntime | None = None,
+    artifact_root: Path | None = None,
     drgn_helper_handler: Callable[..., ToolResponse],
     runner: SshRunner | None = None,
     vmcore_build_id_reader: Callable[[Path], str] = read_vmcore_build_id,
@@ -292,6 +294,11 @@ def debug_postmortem_triage_handler(
     crash_handler: Callable[..., ToolResponse] = debug_postmortem_crash_handler,
 ) -> ToolResponse:
     """Spec §4 / ADR 0027. Compose the crash + drgn offline tiers into one report; no admission gate."""
+    if runtime is not None:
+        artifact_root = runtime.artifact_root
+        runner = runtime.ssh_runner if runner is None else runner
+    if artifact_root is None:
+        raise TypeError("artifact_root is required when runtime is not provided")
     run_id = request.run_id
     now = clock or _utcnow
     ctx, failure = resolve_postmortem_vmcore_context(

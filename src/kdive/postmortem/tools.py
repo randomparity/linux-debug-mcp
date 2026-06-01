@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 
+from kdive.config import RootfsProfile
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.domain import ToolResponse
@@ -16,6 +19,7 @@ from kdive.postmortem.models import (
     DebugPostmortemListDumpsRequest,
     DebugPostmortemTriageRequest,
 )
+from kdive.providers.ssh import SshRunner
 from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, optional_model_arg
 
 
@@ -56,12 +60,21 @@ class PostmortemFetchOptions(Model):
     timeout_seconds: int = 300
 
 
+@dataclass(frozen=True)
+class PostmortemToolRuntime:
+    artifact_root: Path
+    admission: AdmissionService | None = None
+    session_registry: SessionRegistry | None = None
+    rootfs_profiles: Mapping[str, RootfsProfile] | None = None
+    ssh_runner: SshRunner | None = None
+
+
 class PostmortemCrashHandler(Protocol):
     def __call__(
         self,
         request: DebugPostmortemCrashRequest,
         *,
-        artifact_root: Path,
+        runtime: PostmortemToolRuntime,
     ) -> ToolResponse: ...
 
 
@@ -70,7 +83,7 @@ class PostmortemTriageHandler(Protocol):
         self,
         request: DebugPostmortemTriageRequest,
         *,
-        artifact_root: Path,
+        runtime: PostmortemToolRuntime,
     ) -> ToolResponse: ...
 
 
@@ -79,9 +92,7 @@ class PostmortemCheckPrereqsHandler(Protocol):
         self,
         request: DebugPostmortemCheckPrereqsRequest,
         *,
-        artifact_root: Path,
-        admission: AdmissionService,
-        session_registry: SessionRegistry,
+        runtime: PostmortemToolRuntime,
     ) -> ToolResponse: ...
 
 
@@ -90,9 +101,7 @@ class PostmortemListDumpsHandler(Protocol):
         self,
         request: DebugPostmortemListDumpsRequest,
         *,
-        artifact_root: Path,
-        admission: AdmissionService,
-        session_registry: SessionRegistry,
+        runtime: PostmortemToolRuntime,
     ) -> ToolResponse: ...
 
 
@@ -101,9 +110,7 @@ class PostmortemFetchHandler(Protocol):
         self,
         request: DebugPostmortemFetchRequest,
         *,
-        artifact_root: Path,
-        admission: AdmissionService,
-        session_registry: SessionRegistry,
+        runtime: PostmortemToolRuntime,
     ) -> ToolResponse: ...
 
 
@@ -121,8 +128,12 @@ def register_postmortem_tools(
 ) -> None:
     default_artifact_root_text = str(default_artifact_root)
 
-    def artifact_root_path(value: str | None) -> Path:
-        return Path(value or default_artifact_root_text)
+    def postmortem_runtime(value: str | None) -> PostmortemToolRuntime:
+        return PostmortemToolRuntime(
+            artifact_root=Path(value or default_artifact_root_text),
+            admission=admission,
+            session_registry=session_registry,
+        )
 
     @app.tool(name="debug.postmortem.crash")
     def debug_postmortem_crash(
@@ -145,7 +156,7 @@ def register_postmortem_tools(
             return adapter_validation_failure(exc)
         return crash_handler(
             request,
-            artifact_root=artifact_root_path(vmcore_model.artifact_root),
+            runtime=postmortem_runtime(vmcore_model.artifact_root),
         ).model_dump(mode="json")
 
     @app.tool(name="debug.postmortem.triage")
@@ -167,7 +178,7 @@ def register_postmortem_tools(
             return adapter_validation_failure(exc)
         return triage_handler(
             request,
-            artifact_root=artifact_root_path(vmcore_model.artifact_root),
+            runtime=postmortem_runtime(vmcore_model.artifact_root),
         ).model_dump(mode="json")
 
     @app.tool(name="debug.postmortem.check_prereqs")
@@ -190,9 +201,7 @@ def register_postmortem_tools(
             return adapter_validation_failure(exc)
         return check_prereqs_handler(
             request,
-            artifact_root=artifact_root_path(target_model.artifact_root),
-            admission=admission,
-            session_registry=session_registry,
+            runtime=postmortem_runtime(target_model.artifact_root),
         ).model_dump(mode="json")
 
     @app.tool(name="debug.postmortem.list_dumps")
@@ -216,9 +225,7 @@ def register_postmortem_tools(
             return adapter_validation_failure(exc)
         return list_dumps_handler(
             request,
-            artifact_root=artifact_root_path(target_model.artifact_root),
-            admission=admission,
-            session_registry=session_registry,
+            runtime=postmortem_runtime(target_model.artifact_root),
         ).model_dump(mode="json")
 
     @app.tool(name="debug.postmortem.fetch")
@@ -246,7 +253,5 @@ def register_postmortem_tools(
             return adapter_validation_failure(exc)
         return fetch_handler(
             request,
-            artifact_root=artifact_root_path(target_model.artifact_root),
-            admission=admission,
-            session_registry=session_registry,
+            runtime=postmortem_runtime(target_model.artifact_root),
         ).model_dump(mode="json")

@@ -31,6 +31,7 @@ from kdive.postmortem.models import DebugPostmortemFetchRequest
 from kdive.postmortem.tools import (
     PostmortemFetchOptions,
     PostmortemTargetContext,
+    PostmortemToolRuntime,
     register_postmortem_tools,
 )
 from kdive.prereqs.tools import (
@@ -602,9 +603,11 @@ def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators
         timeout_seconds=17,
     )
     assert kwargs == {
-        "artifact_root": tmp_path / "runs",
-        "admission": admission,
-        "session_registry": registry,
+        "runtime": PostmortemToolRuntime(
+            artifact_root=tmp_path / "runs",
+            admission=admission,
+            session_registry=registry,
+        )
     }
 
 

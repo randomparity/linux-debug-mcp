@@ -27,6 +27,7 @@ from kdive.postmortem.crash.batch import build_command_script, collect_command_o
 from kdive.postmortem.crash.commands import crash_command_rejection_reason, validate_modules_path
 from kdive.postmortem.crash.parsers import parse_command
 from kdive.postmortem.models import DebugPostmortemCrashRequest
+from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner
 from kdive.safety.paths import PathSafetyError, confine_run_relative
 from kdive.safety.redaction import Redactor
@@ -344,13 +345,19 @@ def _record_crash_runner_exception(
 def debug_postmortem_crash_handler(
     request: DebugPostmortemCrashRequest,
     *,
-    artifact_root: Path,
+    runtime: PostmortemToolRuntime | None = None,
+    artifact_root: Path | None = None,
     runner: SshRunner | None = None,
     vmcore_build_id_reader: Callable[[Path], str] = read_vmcore_build_id,
     vmlinux_build_id_reader: Callable[[Path], str] = read_elf_build_id,
     clock: Callable[[], datetime] | None = None,
 ) -> ToolResponse:
     """Spec §6 / ADR 0026. Host-side crash batch runner; no admission gate."""
+    if runtime is not None:
+        artifact_root = runtime.artifact_root
+        runner = runtime.ssh_runner if runner is None else runner
+    if artifact_root is None:
+        raise TypeError("artifact_root is required when runtime is not provided")
     run_id = request.run_id
     now = clock or _utcnow
     ctx, failure = resolve_postmortem_vmcore_context(
