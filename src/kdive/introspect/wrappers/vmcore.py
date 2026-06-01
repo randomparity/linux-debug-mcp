@@ -44,8 +44,10 @@ _li_modules = _li_b64.b64decode("${MODULES_PATH_B64}").decode("utf-8") or None
 import time as _li_time
 _li_t_prelude_start = _li_time.monotonic()
 
+_li_drgn_version = None
 try:
     import drgn  # noqa: E402  -- module attribute, exposed to user namespace
+    _li_drgn_version = getattr(drgn, "__version__", None)
 
     _li_pre_helpers = set(globals().keys()) | {
         "_li_pre_helpers", "_li_drgn_helper_names",
@@ -60,7 +62,8 @@ except Exception as exc:
     etype, _ = _li_truncate(type(exc).__name__, _li_caps["error_message"])
     _li_result["outcome"] = {"status": "drgn_open_failure",
                              "error_type": etype,
-                             "error_message": msg}
+                             "error_message": msg,
+                             "drgn_version": _li_drgn_version}
     _li_result["truncated"]["error_message"] = msg_trunc
     try:
         _li_json.dump(_li_result, _li_sys.stdout)
@@ -69,11 +72,14 @@ except Exception as exc:
 
 _li_result["prelude_ms"] = int((_li_time.monotonic() - _li_t_prelude_start) * 1000)
 
+# ADR 0039: drgn >= 0.2 does not create the main module at set_core_dump();
+# module discovery (driven by VMCOREINFO) must run before main_module() resolves.
+# Best-effort: discovery can warn/raise once it needs kernel debug info, but it
+# populates the main module's build-id from VMCOREINFO first. Resolution failures
+# split: AttributeError is a genuine drgn module-API/version gap
+# (drgn_version_skew); any other exception is drgn raising while resolving the
+# module (drgn_api_incompatible -- e.g. LookupError when discovery cannot run).
 try:
-    # drgn >= 0.2 does not create the main module at set_core_dump(); module
-    # discovery (driven by VMCOREINFO) must run before main_module() resolves.
-    # Best-effort: discovery can warn/raise once it needs kernel debug info, but
-    # it populates the main module's build-id from VMCOREINFO first.
     try:
         for _li_mod in prog.loaded_modules():
             if _li_mod.name == "kernel":
@@ -82,12 +88,25 @@ try:
         pass
     _li_bid = prog.main_module().build_id
     _li_result["build_id"] = _li_bid.hex() if _li_bid else None
-except Exception as exc:
+except AttributeError as exc:
     msg, msg_trunc = _li_truncate(str(exc), _li_caps["error_message"])
     etype, _ = _li_truncate(type(exc).__name__, _li_caps["error_message"])
     _li_result["outcome"] = {"status": "drgn_version_skew",
                              "error_type": etype,
-                             "error_message": msg}
+                             "error_message": msg,
+                             "drgn_version": _li_drgn_version}
+    _li_result["truncated"]["error_message"] = msg_trunc
+    try:
+        _li_json.dump(_li_result, _li_sys.stdout)
+    finally:
+        _li_sys.exit(3)
+except Exception as exc:
+    msg, msg_trunc = _li_truncate(str(exc), _li_caps["error_message"])
+    etype, _ = _li_truncate(type(exc).__name__, _li_caps["error_message"])
+    _li_result["outcome"] = {"status": "drgn_api_incompatible",
+                             "error_type": etype,
+                             "error_message": msg,
+                             "drgn_version": _li_drgn_version}
     _li_result["truncated"]["error_message"] = msg_trunc
     try:
         _li_json.dump(_li_result, _li_sys.stdout)

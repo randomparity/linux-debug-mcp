@@ -116,8 +116,10 @@ def _install_stub_drgn(
     *,
     main_module_build_id: bytes | None,
     open_raises: BaseException | None = None,
+    main_module_raises: BaseException | None = None,
 ) -> None:
     drgn_module = types.ModuleType("drgn")
+    drgn_module.__version__ = "0.0.0-stub"  # type: ignore[attr-defined]
 
     class _StubProg:
         def set_core_dump(self, path: str) -> None:
@@ -126,7 +128,12 @@ def _install_stub_drgn(
 
         def load_debug_info(self, paths) -> None: ...
 
+        def loaded_modules(self):
+            return iter(())
+
         def main_module(self):
+            if main_module_raises is not None:
+                raise main_module_raises
             return SimpleNamespace(build_id=main_module_build_id)
 
     drgn_module.Program = lambda *_a, **_k: _StubProg()  # type: ignore[attr-defined]
@@ -181,6 +188,37 @@ def test_vmcore_exec_no_embedded_build_id_unverifiable(monkeypatch: pytest.Monke
     stdout, exit_code = _exec_vmcore("emit({})", build_id=None)
     assert exit_code == 4
     assert json.loads(stdout)["outcome"]["status"] == "provenance_unverifiable"
+
+
+def test_vmcore_exec_api_incompatible(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ADR 0039 / #139: main_module() raising a non-AttributeError (the drgn >= 0.2
+    # LookupError before discovery) is drgn_api_incompatible, not version skew.
+    _install_stub_drgn(
+        monkeypatch,
+        main_module_build_id=None,
+        main_module_raises=LookupError("module not found"),
+    )
+    stdout, exit_code = _exec_vmcore("emit({})", build_id=None)
+    assert exit_code == 3
+    payload = json.loads(stdout)
+    assert payload["outcome"]["status"] == "drgn_api_incompatible"
+    assert payload["outcome"]["error_type"] == "LookupError"
+    assert payload["outcome"]["drgn_version"] == "0.0.0-stub"
+
+
+def test_vmcore_exec_version_skew(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ADR 0039: an AttributeError resolving the module build-id is a genuine
+    # drgn module-API/version gap -> drgn_version_skew.
+    _install_stub_drgn(
+        monkeypatch,
+        main_module_build_id=None,
+        main_module_raises=AttributeError("'Module' object has no attribute 'build_id'"),
+    )
+    stdout, exit_code = _exec_vmcore("emit({})", build_id=None)
+    assert exit_code == 3
+    payload = json.loads(stdout)
+    assert payload["outcome"]["status"] == "drgn_version_skew"
+    assert payload["outcome"]["error_type"] == "AttributeError"
 
 
 def test_vmcore_exec_open_failure(monkeypatch: pytest.MonkeyPatch) -> None:

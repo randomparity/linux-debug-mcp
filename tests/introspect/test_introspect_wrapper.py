@@ -42,9 +42,18 @@ def _install_stub_drgn(
     helpers: dict[str, Any] | None = None,
     main_module_build_id: bytes | None = None,
     open_raises: BaseException | None = None,
+    main_module_raises: BaseException | None = None,
 ) -> None:
-    """Install a minimal stub ``drgn`` + ``drgn.helpers.linux`` into ``sys.modules``."""
+    """Install a minimal stub ``drgn`` + ``drgn.helpers.linux`` into ``sys.modules``.
+
+    ``main_module_raises`` makes ``main_module()`` raise that exception (drgn
+    raising while resolving the module — ``AttributeError`` is a genuine
+    version-gap, anything else is ``drgn_api_incompatible``). When it is ``None``,
+    ``main_module()`` returns a module whose ``build_id`` is ``main_module_build_id``
+    (so ``main_module_build_id=None`` exercises the ``provenance_unverifiable`` path).
+    """
     drgn_module = types.ModuleType("drgn")
+    drgn_module.__version__ = "0.0.0-stub"  # type: ignore[attr-defined]
 
     class _StubProg:
         def set_kernel(self) -> None: ...
@@ -54,8 +63,8 @@ def _install_stub_drgn(
                 raise open_raises
 
         def main_module(self):
-            if main_module_build_id is None:
-                raise AttributeError("main_module().build_id unavailable")
+            if main_module_raises is not None:
+                raise main_module_raises
             return SimpleNamespace(build_id=main_module_build_id)
 
         def write(self, *_a: Any, **_k: Any) -> None:
@@ -160,13 +169,44 @@ def test_wrapper_drgn_import_failure_exits_3(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_wrapper_drgn_version_skew_exits_3(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Spec §9.2 F8: prog.main_module().build_id raises -> drgn_version_skew.
-    _install_stub_drgn(monkeypatch, main_module_build_id=None)
+    # ADR 0039: main_module().build_id resolution raising AttributeError is a
+    # genuine drgn module-API/version gap -> drgn_version_skew.
+    _install_stub_drgn(
+        monkeypatch,
+        main_module_raises=AttributeError("'Module' object has no attribute 'build_id'"),
+    )
     stdout, exit_code = _exec_wrapper("pass")
     assert exit_code == 3
     payload = json.loads(stdout)
     assert payload["outcome"]["status"] == "drgn_version_skew"
     assert payload["outcome"]["error_type"] == "AttributeError"
+    assert payload["outcome"]["drgn_version"] == "0.0.0-stub"
+
+
+def test_wrapper_drgn_api_incompatible_exits_3(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ADR 0039 / #139: a non-AttributeError raised while resolving the module
+    # (e.g. drgn >= 0.2 LookupError before discovery) is drgn_api_incompatible,
+    # NOT version skew.
+    _install_stub_drgn(
+        monkeypatch,
+        main_module_raises=LookupError("module not found"),
+    )
+    stdout, exit_code = _exec_wrapper("pass")
+    assert exit_code == 3
+    payload = json.loads(stdout)
+    assert payload["outcome"]["status"] == "drgn_api_incompatible"
+    assert payload["outcome"]["error_type"] == "LookupError"
+    assert payload["outcome"]["drgn_version"] == "0.0.0-stub"
+
+
+def test_wrapper_provenance_unverifiable_exits_4(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ADR 0039: a resolved-but-None build-id is provenance_unverifiable, not a
+    # version skew (the old live wrapper misreported this via .hex() on None).
+    _install_stub_drgn(monkeypatch, main_module_build_id=None)
+    stdout, exit_code = _exec_wrapper("pass")
+    assert exit_code == 4
+    payload = json.loads(stdout)
+    assert payload["outcome"]["status"] == "provenance_unverifiable"
 
 
 def test_wrapper_syntax_error_exits_5(monkeypatch: pytest.MonkeyPatch) -> None:
