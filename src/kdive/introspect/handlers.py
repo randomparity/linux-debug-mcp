@@ -14,9 +14,10 @@ from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES
 from kdive.domain import ErrorCategory, ToolResponse
 from kdive.handlers.shared import _require_value
 from kdive.introspect.context import (
+    LiveIntrospectRuntime,
     _configuration_failure,
 )
-from kdive.introspect.execution import LiveIntrospectRuntime, _execute_introspect_call
+from kdive.introspect.execution import _execute_introspect_call
 from kdive.introspect.helpers import get_helper_registry
 from kdive.introspect.models import (
     DebugIntrospectCheckPrerequisitesRequest,

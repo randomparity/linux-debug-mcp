@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from kdive.artifacts.manifest import RunManifest
@@ -21,7 +21,6 @@ from kdive.introspect.context import (
     _configuration_failure,
     _count_introspect_calls,
 )
-from kdive.introspect.execution import _utcnow
 from kdive.introspect.models import DebugIntrospectFromVmcoreRequest
 from kdive.introspect.result import (
     RUN_STDOUT_CAP,
@@ -50,6 +49,10 @@ from kdive.seams.target import KernelProvenance
 from kdive.symbols.build_id import BuildIdReadError, read_elf_build_id
 from kdive.symbols.resolve import SymbolResolutionError, resolve_symbols
 from kdive.symbols.verify import BUILD_ID_RE
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 @dataclass(frozen=True)

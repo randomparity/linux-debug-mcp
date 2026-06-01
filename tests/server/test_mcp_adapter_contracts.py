@@ -14,7 +14,7 @@ from kdive.artifacts.tools import (
 from kdive.config import BootOverrides, BuildOverrides
 from kdive.debug.contracts import DebugRuntime
 from kdive.domain import ToolResponse
-from kdive.introspect.execution import LiveIntrospectRuntime
+from kdive.introspect.context import LiveIntrospectRuntime
 from kdive.introspect.models import DebugIntrospectFromVmcoreHelperRequest, DebugIntrospectRunRequest
 from kdive.introspect.tools import IntrospectRunOptions, IntrospectTargetContext, register_introspect_tools
 from kdive.kernel.tools import (

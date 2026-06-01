@@ -9,7 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.domain import ToolResponse
-from kdive.introspect.execution import LiveIntrospectRuntime
+from kdive.introspect.context import LiveIntrospectRuntime
 from kdive.introspect.models import (
     DebugIntrospectCheckPrerequisitesRequest,
     DebugIntrospectFromVmcoreHelperRequest,

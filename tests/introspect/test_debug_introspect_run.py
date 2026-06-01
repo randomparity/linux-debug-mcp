@@ -22,10 +22,9 @@ from kdive.coordination.admission import (
     TargetSnapshot,
 )
 from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
-from kdive.introspect import execution as introspect_execution
 from kdive.introspect import result as introspect_result
 from kdive.introspect import runner as introspect_runner
-from kdive.introspect.execution import RUN_STDOUT_CAP, LiveIntrospectRuntime
+from kdive.introspect.context import LiveIntrospectRuntime
 from kdive.introspect.handlers import (
     debug_introspect_helper_handler as _debug_introspect_helper_handler,
 )
@@ -36,6 +35,7 @@ from kdive.introspect.models import (
     DebugIntrospectHelperRequest,
     DebugIntrospectRunRequest,
 )
+from kdive.introspect.result import RUN_STDOUT_CAP
 from kdive.introspect.tools import IntrospectRunOptions, IntrospectTargetContext
 from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 from kdive.safety.redaction import Redactor
@@ -1970,7 +1970,7 @@ def test_helper_passes_cap_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         session_registry=FakeSessionRegistry(),
     )
     assert resp.ok is True, resp.error
-    assert captured["caps"] == introspect_execution.HELPER_CAP_PROFILE
+    assert captured["caps"] == introspect_result.HELPER_CAP_PROFILE
 
 
 def test_helper_redacts_secret_in_emit(tmp_path: Path) -> None:

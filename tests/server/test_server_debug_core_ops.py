@@ -40,8 +40,8 @@ from kdive.debug.session_end import _end_mi_debug_session, debug_end_session_han
 from kdive.debug.session_handlers import _start_session as debug_start_session_handler
 from kdive.debug.tools import DebugToolContext, DebugToolHandlers
 from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus
-from kdive.introspect import execution as introspect_execution
 from kdive.introspect import result as introspect_result
+from kdive.introspect import runner as introspect_runner
 from kdive.providers.debug import GdbMiSessionRegistry as GdbMiSessionRegistryContract
 from kdive.providers.local.debug.gdb_mi import (
     CANONICAL_PROBE_SYMBOL,
@@ -502,7 +502,7 @@ def test_server_no_longer_reexports_private_debug_operation_helpers() -> None:
         assert not hasattr(debug_operations, f"_{name}")
         assert not hasattr(server_module, name)
 
-    assert hasattr(introspect_execution, "_target_python_remote_argv")
+    assert hasattr(introspect_runner, "_target_python_remote_argv")
     assert not hasattr(server_module, "_target_python_remote_argv")
     assert hasattr(introspect_result, "_record_introspect_failure")
     assert not hasattr(server_module, "_record_introspect_failure")
