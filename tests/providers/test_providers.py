@@ -14,10 +14,12 @@ from kdive.domain import (
 from kdive.model import Model
 from kdive.providers import debug as debug_contracts
 from kdive.providers.base import sprint0_capability
-from kdive.providers.local.debug.qemu_gdbstub import DebugSession, DebugSessionState
 from kdive.providers.local.introspect import local_drgn_introspect
 from kdive.providers.plugins import ProviderPluginSpec, local_provider_plugin_specs
 from kdive.providers.registry import ProviderRegistry
+
+DebugSession = debug_contracts.DebugSession
+DebugSessionState = debug_contracts.DebugSessionState
 
 
 def test_local_provider_modules_are_grouped_by_capability_family() -> None:
@@ -123,6 +125,12 @@ def test_registry_rejects_duplicate_names() -> None:
 
 
 def test_debug_session_uses_shared_model_base() -> None:
+    from kdive.providers.local.debug import qemu_gdbstub
+
+    assert not hasattr(qemu_gdbstub, "DebugSession")
+    assert not hasattr(qemu_gdbstub, "DebugSessionState")
+    assert not hasattr(qemu_gdbstub, "ProviderDebugError")
+
     assert issubclass(DebugSession, Model)
     assert DebugSession.__bases__ == (Model,)
 

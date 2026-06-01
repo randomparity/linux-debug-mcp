@@ -13,8 +13,8 @@ from kdive.debug.handlers import DebugRuntime
 from kdive.debug.session_end import debug_end_session_handler
 from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
+from kdive.providers.debug import DebugSession
 from kdive.providers.local.debug.gdb_mi import GdbMiError, GdbMiSessionRegistry
-from kdive.providers.local.debug.qemu_gdbstub import DebugSession
 from kdive.seams.target import TargetKey
 
 RUN_ID = "run-debug"

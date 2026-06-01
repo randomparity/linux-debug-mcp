@@ -7,15 +7,6 @@ from kdive.domain import (
     ProviderOperationCapability,
     TargetKind,
 )
-from kdive.providers.debug import (
-    DebugSession as DebugSession,
-)
-from kdive.providers.debug import (
-    DebugSessionState as DebugSessionState,
-)
-from kdive.providers.debug import (
-    ProviderDebugError as ProviderDebugError,
-)
 
 # debug.introspect.run is implemented by local-drgn-introspect, not this provider.
 # ALLOWED_DEBUG_OPERATIONS is the per-DebugProfile gate; the per-provider operations

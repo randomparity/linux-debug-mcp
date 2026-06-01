@@ -15,7 +15,7 @@ from kdive.coordination.admission import AdmissionService, publish_ready_snapsho
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
-from kdive.providers.local.debug.qemu_gdbstub import DebugSession
+from kdive.providers.debug import DebugSession
 from kdive.providers.local.local_ssh_tests import TestExecutionResult
 from kdive.providers.local.target.libvirt_qemu import BootExecutionResult, ProviderBootError
 from kdive.seams.target import (
