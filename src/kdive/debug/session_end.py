@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 
-from kdive.artifacts.handlers import _redacted_artifacts
+from kdive.artifacts.redaction import redacted_artifacts
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import DebugProfile
 from kdive.coordination.admission import AdmissionService
@@ -100,7 +100,7 @@ def _end_mi_debug_session(
         summary="debug.end_session succeeded",
         run_id=run_id,
         data=redactor.redact_value(details),
-        artifacts=_redacted_artifacts(_mi_session_artifacts(store=store, run_id=run_id, session=ended), redactor),
+        artifacts=redacted_artifacts(_mi_session_artifacts(store=store, run_id=run_id, session=ended), redactor),
         suggested_next_actions=["artifacts.get_manifest"],
     )
 

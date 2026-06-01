@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
-from kdive.artifacts.handlers import _redacted_artifacts
 from kdive.artifacts.manifest import BootAttempt, RunManifest
+from kdive.artifacts.redaction import redacted_artifacts
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import (
     TARGET_DESTRUCTIVE_PERMISSIONS,
@@ -1220,7 +1220,7 @@ def _locked_run_tests_execution(
         safe_details = redactor.redact_value(execution.details)
         safe_summary = redactor.redact_text(execution.summary)
         safe_diagnostic = redactor.redact_text(execution.diagnostic or "")
-        safe_artifacts = _redacted_artifacts(execution.artifacts, redactor)
+        safe_artifacts = redacted_artifacts(execution.artifacts, redactor)
         terminal = StepResult(
             step_name="run_tests",
             status=execution.status,

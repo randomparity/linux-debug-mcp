@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from kdive.artifacts.handlers import _redacted_artifacts
+from kdive.artifacts.redaction import redacted_artifacts
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import RecoveryTombstone, SessionRegistry
@@ -671,7 +671,7 @@ def _map_debug_op_exception(
             message=redactor.redact_text(str(exc)),
             run_id=run_id,
             details=redactor.redact_value(exc.details),
-            artifacts=_redacted_artifacts(exc.artifacts, redactor),
+            artifacts=redacted_artifacts(exc.artifacts, redactor),
             suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
         )
     if isinstance(exc, GdbMiError):
@@ -773,7 +773,7 @@ def _debug_operation_response(
         summary=f"debug.{request.summary_name} succeeded",
         run_id=run_id,
         data=redactor.redact_value(details),
-        artifacts=_redacted_artifacts(op_artifacts, redactor),
+        artifacts=redacted_artifacts(op_artifacts, redactor),
         suggested_next_actions=["artifacts.get_manifest"],
     )
 

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from kdive.artifacts.handlers import _redacted_artifacts
+from kdive.artifacts.redaction import redacted_artifacts
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import DebugProfile
 from kdive.coordination.admission import AdmissionError, AdmissionService, require_target_snapshot
@@ -485,7 +485,7 @@ def _debug_start_session_locked_attach(
                     summary=redactor.redact_text(existing.summary),
                     run_id=run_id,
                     data=redactor.redact_value(active_session),
-                    artifacts=_redacted_artifacts(existing.artifacts, redactor),
+                    artifacts=redacted_artifacts(existing.artifacts, redactor),
                     suggested_next_actions=["debug.interrupt", "debug.read_registers", "artifacts.get_manifest"],
                 ),
             )
@@ -670,7 +670,7 @@ def _debug_start_session_success_response(
         summary="gdb/MI debug session started",
         run_id=run_id,
         data=redactor.redact_value(details),
-        artifacts=_redacted_artifacts(artifacts, redactor),
+        artifacts=redacted_artifacts(artifacts, redactor),
         suggested_next_actions=next_actions,
     )
 

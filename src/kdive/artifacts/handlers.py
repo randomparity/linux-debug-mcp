@@ -9,6 +9,7 @@ from typing import Any, TypeVar
 from pydantic import ValidationError
 
 from kdive.artifacts.manifest import RunManifest
+from kdive.artifacts.redaction import redacted_artifacts
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import (
     BootOverrides,
@@ -33,20 +34,13 @@ def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any]
     )
 
 
-def _redacted_artifacts(artifacts: list[ArtifactRef], redactor: Redactor | None = None) -> list[ArtifactRef]:
-    redactor = redactor or Redactor()
-    return [
-        ArtifactRef.model_validate(redactor.redact_value(artifact.model_dump(mode="json"))) for artifact in artifacts
-    ]
-
-
 def _recorded_collect_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
     redactor = Redactor()
     return ToolResponse.success(
         summary=redactor.redact_text(result.summary),
         run_id=run_id,
         data=redactor.redact_value(result.details),
-        artifacts=_redacted_artifacts(result.artifacts, redactor),
+        artifacts=redacted_artifacts(result.artifacts, redactor),
         suggested_next_actions=["artifacts.get_manifest"],
     )
 
@@ -390,7 +384,7 @@ def artifacts_collect_handler(
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
     redactor = Redactor()
     safe_bundle = redactor.redact_value(bundle)
-    safe_artifacts = _redacted_artifacts(artifacts, redactor)
+    safe_artifacts = redacted_artifacts(artifacts, redactor)
     if missing_required:
         return ToolResponse.failure(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
