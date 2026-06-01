@@ -65,6 +65,7 @@ from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner
 from kdive.safety.redaction import Redactor
 from kdive.seams.probes import (
     PROBE_STDOUT_CAP,
+    ProbeContext,
     chmod_best_effort,
     configuration_failure,
     parse_probe_stdout,
@@ -140,7 +141,7 @@ def build_scp_argv(
 
 
 def _parse_enumeration_result(
-    ctx: Any, *, ssh_result: SshCommandResult, stdout_path: Path
+    ctx: ProbeContext, *, ssh_result: SshCommandResult, stdout_path: Path
 ) -> tuple[dict[str, object] | None, ToolResponse | None]:
     return parse_probe_stdout(
         ctx,
@@ -152,7 +153,7 @@ def _parse_enumeration_result(
 
 
 def _run_dump_enumeration(
-    ctx: Any,
+    ctx: ProbeContext,
     *,
     runner: SshRunner,
     dump_dir: str,
@@ -210,7 +211,7 @@ _DUMP_LISTING_SHAPE_ERRORS = (KeyError, TypeError, ValueError, AttributeError, V
 
 
 def _parse_dump_listing_at_boundary(
-    ctx: Any, parsed: dict[str, object]
+    ctx: ProbeContext, parsed: dict[str, object]
 ) -> tuple[list[DumpEntry] | None, ToolResponse | None]:
     enumeration_errors = parsed.get("enumeration_errors") or []
     if enumeration_errors:
@@ -239,7 +240,7 @@ def _parse_dump_listing_at_boundary(
 
 
 def _match_dump_at_boundary(
-    ctx: Any, parsed: dict[str, object], dump_ref: str
+    ctx: ProbeContext, parsed: dict[str, object], dump_ref: str
 ) -> tuple[DumpEntry | None, ToolResponse | None]:
     entries, failure = _parse_dump_listing_at_boundary(ctx, parsed)
     if failure is not None:
@@ -282,7 +283,7 @@ def _record_fetch_result(store: ArtifactStore, run_id: str, result: StepResult, 
 def _stage_one_file(
     *,
     runner: SshRunner,
-    ctx: Any,
+    ctx: ProbeContext,
     spec: FetchSpec,
     dest_dir: Path,
     sensitive_dir: Path,
@@ -433,7 +434,7 @@ def debug_postmortem_check_prereqs_handler(
 
 
 def _admit_fetch_entry(
-    ctx: Any, *, runner: SshRunner, request: DebugPostmortemFetchRequest, dump_dir: str, dest_dir: Path
+    ctx: ProbeContext, *, runner: SshRunner, request: DebugPostmortemFetchRequest, dump_dir: str, dest_dir: Path
 ) -> tuple[DumpEntry | None, ToolResponse | None]:
     run_id = ctx.run_id
     parsed, failure = _run_dump_enumeration(
@@ -500,7 +501,7 @@ def _admit_fetch_entry(
 
 
 def _fetch_under_lock(
-    ctx: Any,
+    ctx: ProbeContext,
     *,
     runner: SshRunner,
     request: DebugPostmortemFetchRequest,
