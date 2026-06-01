@@ -74,6 +74,20 @@ def _introspect_args_json(request: DebugIntrospectRunRequest) -> str:
     return json.dumps(request.args or {})
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temp_fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as temp_file:
+            temp_file.write(text)
+            temp_file.flush()
+        os.replace(temp_path, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            temp_path.unlink()
+        raise
+
+
 @dataclass(frozen=True)
 class _IntrospectSshRun:
     result: SshCommandResult
@@ -159,12 +173,12 @@ def _persist_introspect_workspace_files(
         with contextlib.suppress(FileNotFoundError):
             wrapper_path.unlink()
         raise
-    (agent_dir / "wrapper.skeleton.py").write_text(skeleton, encoding="utf-8")
+    _atomic_write_text(agent_dir / "wrapper.skeleton.py", skeleton)
 
     request_dump = request.model_dump(mode="json")
     request_dump["script"] = f"sha256:{user_script_sha256(request.script)}"
     redacted_request = redactor.redact_value(request_dump)
-    (agent_dir / "request.json").write_text(json.dumps(redacted_request), encoding="utf-8")
+    _atomic_write_text(agent_dir / "request.json", json.dumps(redacted_request))
 
 
 def _prepare_introspect_call_workspace(
