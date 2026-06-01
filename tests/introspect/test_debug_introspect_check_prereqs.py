@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import RootfsProfile
 from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus
+from kdive.introspect.context import LiveIntrospectRuntime
 from kdive.introspect.handlers import debug_introspect_check_prerequisites_handler
 from kdive.introspect.models import DebugIntrospectCheckPrerequisitesRequest
 from kdive.providers.local.test.local_ssh_tests import SshCommandResult
@@ -57,7 +58,12 @@ def _booted_run(tmp_path: Path, *, with_build_id: bool = True, booted: bool = Tr
     if booted:
         store.record_step_result(
             manifest.run_id,
-            StepResult(step_name="boot", status=StepStatus.SUCCEEDED, summary="boot ok", artifacts=[]),
+            StepResult(
+                step_name="boot",
+                status=StepStatus.SUCCEEDED,
+                summary="boot ok",
+                artifacts=[],
+            ),
         )
     return manifest.run_id
 
@@ -68,8 +74,28 @@ def _req(run_id: str, **over):
     return DebugIntrospectCheckPrerequisitesRequest(**base)
 
 
+def _runtime(
+    tmp_path: Path,
+    *,
+    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    ssh_runner: Any | None = None,
+    admission: Any | None = None,
+    session_registry: Any | None = None,
+) -> LiveIntrospectRuntime:
+    return LiveIntrospectRuntime(
+        artifact_root=tmp_path,
+        rootfs_profiles=_rootfs() if rootfs_profiles is None else rootfs_profiles,
+        ssh_runner=ssh_runner,
+        admission=admission,
+        session_registry=session_registry,
+    )
+
+
 def test_request_defaults_and_extra_forbidden() -> None:
-    req = DebugIntrospectCheckPrerequisitesRequest(run_id="r1", manifest_target_profile="local-qemu")
+    req = DebugIntrospectCheckPrerequisitesRequest(
+        run_id="r1",
+        manifest_target_profile="local-qemu",
+    )
     assert req.timeout_seconds == 20
     assert req.debug_profile is None
     with pytest.raises(ValidationError):
@@ -77,13 +103,13 @@ def test_request_defaults_and_extra_forbidden() -> None:
 
 
 def test_run_not_found_is_configuration_error(tmp_path: Path) -> None:
-    resp = debug_introspect_check_prerequisites_handler(_req("nope"), artifact_root=tmp_path, rootfs_profiles=_rootfs())
+    resp = debug_introspect_check_prerequisites_handler(_req("nope"), runtime=_runtime(tmp_path))
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_not_booted_is_readiness_failure(tmp_path: Path) -> None:
     run_id = _booted_run(tmp_path, booted=False)
-    resp = debug_introspect_check_prerequisites_handler(_req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs())
+    resp = debug_introspect_check_prerequisites_handler(_req(run_id), runtime=_runtime(tmp_path))
     assert resp.error.category == ErrorCategory.READINESS_FAILURE
     assert resp.suggested_next_actions == ["target.boot"]
 
@@ -91,7 +117,8 @@ def test_not_booted_is_readiness_failure(tmp_path: Path) -> None:
 def test_timeout_out_of_band_is_configuration_error(tmp_path: Path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_introspect_check_prerequisites_handler(
-        _req(run_id, timeout_seconds=999), artifact_root=tmp_path, rootfs_profiles=_rootfs()
+        _req(run_id, timeout_seconds=999),
+        runtime=_runtime(tmp_path),
     )
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
 
@@ -99,7 +126,8 @@ def test_timeout_out_of_band_is_configuration_error(tmp_path: Path) -> None:
 def test_non_ssh_access_method_is_configuration_error(tmp_path: Path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_introspect_check_prerequisites_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(access_method="serial")
+        _req(run_id),
+        runtime=_runtime(tmp_path, rootfs_profiles=_rootfs(access_method="serial")),
     )
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
 
@@ -107,7 +135,8 @@ def test_non_ssh_access_method_is_configuration_error(tmp_path: Path) -> None:
 def test_missing_ssh_host_is_configuration_error(tmp_path: Path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_introspect_check_prerequisites_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(ssh_host=None)
+        _req(run_id),
+        runtime=_runtime(tmp_path, rootfs_profiles=_rootfs(ssh_host=None)),
     )
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert resp.error.details["field"] == "ssh_host"
@@ -116,7 +145,8 @@ def test_missing_ssh_host_is_configuration_error(tmp_path: Path) -> None:
 def test_rootfs_profile_mismatch_is_configuration_error(tmp_path: Path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_introspect_check_prerequisites_handler(
-        _req(run_id, rootfs_profile="other"), artifact_root=tmp_path, rootfs_profiles=_rootfs()
+        _req(run_id, rootfs_profile="other"),
+        runtime=_runtime(tmp_path),
     )
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert resp.error.details["code"] == "manifest_profile_mismatch"
@@ -154,11 +184,12 @@ def test_halted_target_is_fast_rejected_before_introspect_prereq_probe(tmp_path:
 
     resp = debug_introspect_check_prerequisites_handler(
         _req(run_id),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(),
-        ssh_runner=runner,
-        admission=_FakeAdmission(),
-        session_registry=_FakeRegistry(ExecutionState.HALTED),
+        runtime=_runtime(
+            tmp_path,
+            ssh_runner=runner,
+            admission=_FakeAdmission(),
+            session_registry=_FakeRegistry(ExecutionState.HALTED),
+        ),
     )
 
     assert resp.ok is False
@@ -184,9 +215,21 @@ class FakeSshRunner:
     def which(self, command: str) -> str | None:
         return f"/usr/bin/{command}"
 
-    def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None, max_stdout_bytes=None):
+    def run(
+        self,
+        argv,
+        *,
+        timeout,
+        stdout_path,
+        stderr_path,
+        cancel=None,
+        stdin=None,
+        max_stdout_bytes=None,
+    ):
         self.calls.append({"argv": argv, "stdin": stdin})
-        result = self.results.pop(0) if self.results else SshCommandResult(exit_status=0, stdout="{}")
+        result = SshCommandResult(exit_status=0, stdout="{}")
+        if self.results:
+            result = self.results.pop(0)
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
         stderr_path.parent.mkdir(parents=True, exist_ok=True)
         stdout_path.write_text(result.stdout, encoding="utf-8")
@@ -219,7 +262,8 @@ def test_usable_target(tmp_path: Path) -> None:
     run_id = _booted_run(tmp_path)
     runner = FakeSshRunner(results=[SshCommandResult(exit_status=0, stdout=_probe_json())])
     resp = debug_introspect_check_prerequisites_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=runner
+        _req(run_id),
+        runtime=_runtime(tmp_path, ssh_runner=runner),
     )
     assert resp.ok is True
     assert resp.data["introspect_usable"] == "usable"
@@ -234,9 +278,7 @@ def test_probe_uses_sudo_for_non_root(tmp_path: Path) -> None:
     runner = FakeSshRunner(results=[SshCommandResult(exit_status=0, stdout=_probe_json())])
     debug_introspect_check_prerequisites_handler(
         _req(run_id),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(ssh_user="debug"),
-        ssh_runner=runner,
+        runtime=_runtime(tmp_path, rootfs_profiles=_rootfs(ssh_user="debug"), ssh_runner=runner),
     )
     # build_ssh_argv folds the remote argv into the trailing shell-command
     # string, so the sudo prefix surfaces in the last ssh_argv element.
@@ -245,9 +287,11 @@ def test_probe_uses_sudo_for_non_root(tmp_path: Path) -> None:
     root_runner = FakeSshRunner(results=[SshCommandResult(exit_status=0, stdout=_probe_json())])
     debug_introspect_check_prerequisites_handler(
         _req(run_id),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(ssh_user="root"),
-        ssh_runner=root_runner,
+        runtime=_runtime(
+            tmp_path,
+            rootfs_profiles=_rootfs(ssh_user="root"),
+            ssh_runner=root_runner,
+        ),
     )
     assert "sudo" not in root_runner.calls[0]["argv"][-1]
 
@@ -257,7 +301,8 @@ def test_drgn_missing_reports_unusable(tmp_path: Path) -> None:
     body = _probe_json(drgn_present=False, drgn_version=None)
     runner = FakeSshRunner(results=[SshCommandResult(exit_status=0, stdout=body)])
     resp = debug_introspect_check_prerequisites_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=runner
+        _req(run_id),
+        runtime=_runtime(tmp_path, ssh_runner=runner),
     )
     assert resp.ok is True
     assert resp.data["introspect_usable"] == "unusable"
@@ -266,9 +311,11 @@ def test_drgn_missing_reports_unusable(tmp_path: Path) -> None:
 
 def test_python3_missing_exit_127(tmp_path: Path) -> None:
     run_id = _booted_run(tmp_path)
-    runner = FakeSshRunner(results=[SshCommandResult(exit_status=127, stdout="", stderr="python3: not found")])
+    python_missing = SshCommandResult(exit_status=127, stdout="", stderr="python3: not found")
+    runner = FakeSshRunner(results=[python_missing])
     resp = debug_introspect_check_prerequisites_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=runner
+        _req(run_id),
+        runtime=_runtime(tmp_path, ssh_runner=runner),
     )
     assert resp.ok is True
     by = {c["check_id"]: c for c in resp.data["checks"]}
@@ -279,9 +326,11 @@ def test_python3_missing_exit_127(tmp_path: Path) -> None:
 
 def test_garbage_stdout_is_infrastructure_failure(tmp_path: Path) -> None:
     run_id = _booted_run(tmp_path)
-    runner = FakeSshRunner(results=[SshCommandResult(exit_status=0, stdout="not json", stderr="boom")])
+    invalid_json = SshCommandResult(exit_status=0, stdout="not json", stderr="boom")
+    runner = FakeSshRunner(results=[invalid_json])
     resp = debug_introspect_check_prerequisites_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=runner
+        _req(run_id),
+        runtime=_runtime(tmp_path, ssh_runner=runner),
     )
     assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
 
@@ -291,13 +340,17 @@ def test_oversized_stdout_is_infrastructure_failure(tmp_path: Path) -> None:
     huge = "x" * (PROBE_STDOUT_CAP + 10)
     runner = FakeSshRunner(results=[SshCommandResult(exit_status=0, stdout=huge)])
     resp = debug_introspect_check_prerequisites_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=runner
+        _req(run_id),
+        runtime=_runtime(tmp_path, ssh_runner=runner),
     )
     assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert resp.error.details["code"] == "oversized_output"
 
 
-def test_unreadable_stdout_is_tool_response_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unreadable_stdout_is_tool_response_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     run_id = _booted_run(tmp_path)
     runner = FakeSshRunner(results=[SshCommandResult(exit_status=0, stdout=_probe_json())])
 
@@ -307,7 +360,8 @@ def test_unreadable_stdout_is_tool_response_failure(tmp_path: Path, monkeypatch:
     monkeypatch.setattr("kdive.seams.probes.read_capped", unreadable_stdout)
 
     resp = debug_introspect_check_prerequisites_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=runner
+        _req(run_id),
+        runtime=_runtime(tmp_path, ssh_runner=runner),
     )
 
     assert resp.ok is False
@@ -321,7 +375,8 @@ def test_ssh_timeout_is_infrastructure_failure(tmp_path: Path) -> None:
     run_id = _booted_run(tmp_path)
     runner = FakeSshRunner(results=[SshCommandResult(exit_status=-1, stdout="", timed_out=True)])
     resp = debug_introspect_check_prerequisites_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=runner
+        _req(run_id),
+        runtime=_runtime(tmp_path, ssh_runner=runner),
     )
     assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
 
@@ -331,11 +386,22 @@ def test_runner_raises_is_infrastructure_failure(tmp_path: Path) -> None:
 
     @dataclass
     class RaisingSshRunner(FakeSshRunner):
-        def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None, max_stdout_bytes=None):
+        def run(
+            self,
+            argv,
+            *,
+            timeout,
+            stdout_path,
+            stderr_path,
+            cancel=None,
+            stdin=None,
+            max_stdout_bytes=None,
+        ):
             raise OSError("transport broke")
 
     resp = debug_introspect_check_prerequisites_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=RaisingSshRunner()
+        _req(run_id),
+        runtime=_runtime(tmp_path, ssh_runner=RaisingSshRunner()),
     )
     assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert resp.error.details["code"] == "ssh_failure"
@@ -352,9 +418,7 @@ def test_redaction_hides_ssh_key_ref(tmp_path: Path) -> None:
     runner = FakeSshRunner(results=[SshCommandResult(exit_status=0, stdout=body)])
     resp = debug_introspect_check_prerequisites_handler(
         _req(run_id),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(ssh_key_ref=secret),
-        ssh_runner=runner,
+        runtime=_runtime(tmp_path, rootfs_profiles=_rootfs(ssh_key_ref=secret), ssh_runner=runner),
     )
     assert secret not in json.dumps(resp.model_dump(mode="json"))
     by = {c["check_id"]: c for c in resp.data["checks"]}
@@ -369,7 +433,8 @@ def test_concurrent_probes_get_distinct_dirs(tmp_path: Path) -> None:
     for _ in range(2):
         runner = FakeSshRunner(results=[SshCommandResult(exit_status=0, stdout=_probe_json())])
         resp = debug_introspect_check_prerequisites_handler(
-            _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=runner
+            _req(run_id),
+            runtime=_runtime(tmp_path, ssh_runner=runner),
         )
         ids.add(resp.data["probe_id"])
     assert len(ids) == 2
@@ -389,9 +454,7 @@ def test_ssh_connect_failure_exit_255(tmp_path: Path) -> None:
     )
     resp = debug_introspect_check_prerequisites_handler(
         _req(run_id),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(ssh_key_ref=secret),
-        ssh_runner=runner,
+        runtime=_runtime(tmp_path, rootfs_profiles=_rootfs(ssh_key_ref=secret), ssh_runner=runner),
     )
     assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert resp.error.details["code"] == "ssh_connect_failure"

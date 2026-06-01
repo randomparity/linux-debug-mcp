@@ -88,9 +88,7 @@ class IntrospectCheckPrereqsHandler(Protocol):
         self,
         *,
         request: DebugIntrospectCheckPrerequisitesRequest,
-        artifact_root: Path,
-        admission: AdmissionService,
-        session_registry: SessionRegistry,
+        runtime: LiveIntrospectRuntime,
     ) -> ToolResponse: ...
 
 
@@ -248,9 +246,7 @@ def _register_live_introspect_probe_tool(
         return _dump(
             handler(
                 request=request,
-                artifact_root=context.artifact_root_path(target_model.artifact_root),
-                admission=context.admission,
-                session_registry=context.session_registry,
+                runtime=context.live_runtime(target_model.artifact_root),
             )
         )
 

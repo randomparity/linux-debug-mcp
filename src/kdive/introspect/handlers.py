@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from kdive.config import RootfsProfile
-from kdive.coordination.admission import AdmissionError, AdmissionService
-from kdive.coordination.registry import SessionRegistry
+from kdive.coordination.admission import AdmissionError
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES
 from kdive.domain import ErrorCategory, ToolResponse
 from kdive.handlers.shared import _require_value
@@ -59,15 +57,18 @@ from kdive.symbols.build_id import read_elf_build_id
 def debug_introspect_check_prerequisites_handler(
     request: DebugIntrospectCheckPrerequisitesRequest,
     *,
-    artifact_root: Path,
-    rootfs_profiles: Mapping[str, RootfsProfile] | None = None,
-    ssh_runner: SshRunner | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
+    runtime: LiveIntrospectRuntime,
 ) -> ToolResponse:
     """Target-side drgn prerequisite probe."""
-    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
-    _ctx, failure = resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
+    configured_profiles = runtime.rootfs_profiles
+    rootfs_profiles = DEFAULT_ROOTFS_PROFILES
+    if configured_profiles is not None:
+        rootfs_profiles = configured_profiles
+    _ctx, failure = resolve_probe_context(
+        request,
+        artifact_root=runtime.artifact_root,
+        rootfs_profiles=rootfs_profiles,
+    )
     if failure is not None:
         return failure
     ctx = _require_value(_ctx, "probe context missing after successful resolution")
@@ -76,21 +77,29 @@ def debug_introspect_check_prerequisites_handler(
     try:
         halted = reject_if_target_halted(
             run_id=run_id,
-            admission=admission,
-            session_registry=session_registry,
+            admission=runtime.admission,
+            session_registry=runtime.session_registry,
             action="probing introspect prerequisites",
         )
     except AdmissionError as exc:
-        return ToolResponse.failure(category=exc.category, run_id=run_id, message=str(exc), details={"code": exc.code})
+        return ToolResponse.failure(
+            category=exc.category,
+            run_id=run_id,
+            message=str(exc),
+            details={"code": exc.code},
+        )
     if halted is not None:
         return halted
 
-    runner: SshRunner = ssh_runner or SubprocessSshRunner()
+    runner: SshRunner = runtime.ssh_runner or SubprocessSshRunner()
     probe_id = uuid.uuid4().hex
     agent_dir, sensitive_dir = prepare_probe_dirs(ctx.store, run_id, probe_id)
 
     use_sudo = ctx.rootfs.ssh_user != "root"
-    remote_argv = _target_python_remote_argv(timeout_seconds=request.timeout_seconds, use_sudo=use_sudo)
+    remote_argv = _target_python_remote_argv(
+        timeout_seconds=request.timeout_seconds,
+        use_sudo=use_sudo,
+    )
     try:
         ssh_argv = build_ssh_argv(
             rootfs_profile=ctx.rootfs,
