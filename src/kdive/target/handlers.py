@@ -21,7 +21,13 @@ from kdive.config import (
     merge_kernel_args,
     missing_destructive_permissions,
 )
-from kdive.coordination.admission import AdmissionError, AdmissionHandle, AdmissionService, publish_ready_snapshot
+from kdive.coordination.admission import (
+    AdmissionError,
+    AdmissionHandle,
+    AdmissionService,
+    publish_ready_snapshot,
+    require_target_snapshot,
+)
 from kdive.coordination.exec_probe import probe_execution_state
 from kdive.coordination.registry import SessionRegistry
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES, DEFAULT_TARGET_PROFILES
@@ -34,7 +40,6 @@ from kdive.safety.paths import PathSafetyError, validate_rootfs_source
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import BreakHint, ConsoleKind, KernelProvenance, PlatformMetadata, TargetKey
 from kdive.transport.core.base import ExecutionState, LineRole, TransportRef
-from kdive.transport.handlers import _require_snapshot
 
 logger = logging.getLogger(__name__)
 _RequiredT = TypeVar("_RequiredT")
@@ -895,7 +900,7 @@ def _admit_run_tests_ssh_tier(
     if admission is None or session_registry is None:
         return None
     target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
-    snapshot = _require_snapshot(admission, target_key)
+    snapshot = require_target_snapshot(admission, target_key)
     proof = probe_execution_state(
         registry=session_registry, admission=admission, target_key=target_key, generation=snapshot.generation
     )

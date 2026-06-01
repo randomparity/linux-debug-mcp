@@ -87,6 +87,17 @@ def test_feature_probe_handlers_import_public_target_probe_substrate() -> None:
         assert "    _" not in source.split("from kdive.seams.probes import (", 1)[1].split(")", 1)[0]
 
 
+def test_shared_probe_boundary_does_not_import_private_transport_handlers() -> None:
+    probe_source = PROBE_SEAM_SOURCE.read_text(encoding="utf-8")
+    target_source = (ROOT / "src" / "kdive" / "target" / "handlers.py").read_text(encoding="utf-8")
+    debug_session_source = (ROOT / "src" / "kdive" / "debug" / "session_handlers.py").read_text(encoding="utf-8")
+
+    assert "from kdive.transport.handlers import _require_snapshot" not in probe_source
+    assert "from kdive.transport.handlers import _require_snapshot" not in target_source
+    assert "_require_snapshot" not in debug_session_source
+    assert "require_target_snapshot" in probe_source
+
+
 def test_server_does_not_reexport_private_feature_helpers() -> None:
     import kdive.server as server
 

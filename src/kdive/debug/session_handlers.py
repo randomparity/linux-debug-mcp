@@ -11,7 +11,7 @@ from typing import Any
 from kdive.artifacts.handlers import _redacted_artifacts
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import DebugProfile
-from kdive.coordination.admission import AdmissionError, AdmissionService
+from kdive.coordination.admission import AdmissionError, AdmissionService, require_target_snapshot
 from kdive.coordination.endpoint_safety import EndpointSafetyError
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
@@ -44,7 +44,6 @@ from kdive.transport.core.base import LineRole, OpenRequest, TransportRef, Trans
 from kdive.transport.handlers import (
     _ensure_debug_operation_enabled,
     _halt_debug_transport,
-    _require_snapshot,
     _resolve_debug_profile,
 )
 
@@ -58,7 +57,7 @@ def _debug_open_request(*, run_id: str, gdbstub_endpoint: dict[str, Any], admiss
     `generation`/`platform` from the authoritative snapshot the boot step published (never
     re-deriving them — ADR 0007). The RSP channel mirrors the boot snapshot producer."""
     target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
-    snapshot = _require_snapshot(admission, target_key)
+    snapshot = require_target_snapshot(admission, target_key)
     return OpenRequest(
         target_key=target_key,
         generation=snapshot.generation,

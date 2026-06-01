@@ -86,6 +86,17 @@ class TargetSnapshot:
     lease: LeaseInfo | None = None
 
 
+def require_target_snapshot(admission: AdmissionService, target_key: TargetKey) -> TargetSnapshot:
+    snapshot = admission.current_snapshot(target_key)
+    if snapshot is None:
+        raise AdmissionError(
+            "no authoritative snapshot for target; boot must publish a READY snapshot first",
+            category=ErrorCategory.READINESS_FAILURE,
+            code="snapshot_missing",
+        )
+    return snapshot
+
+
 def publish_ready_snapshot(
     admission: AdmissionService,
     *,

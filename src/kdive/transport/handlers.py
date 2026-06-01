@@ -6,7 +6,7 @@ from typing import Any, Protocol
 
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import ALLOWED_DEBUG_OPERATIONS, DebugProfile, missing_destructive_permissions
-from kdive.coordination.admission import AdmissionError, AdmissionService
+from kdive.coordination.admission import AdmissionError, AdmissionService, require_target_snapshot
 from kdive.coordination.endpoint_safety import EndpointSafetyError
 from kdive.coordination.exec_probe import probe_rsp_halted
 from kdive.coordination.registry import SessionRegistry
@@ -67,17 +67,6 @@ def _resolve_debug_profile(
         ) from exc
 
 
-def _require_snapshot(admission: AdmissionService, target_key: TargetKey):
-    snapshot = admission.current_snapshot(target_key)
-    if snapshot is None:
-        raise AdmissionError(
-            "no authoritative snapshot for target; boot must publish a READY snapshot first",
-            category=ErrorCategory.READINESS_FAILURE,
-            code="snapshot_missing",
-        )
-    return snapshot
-
-
 def _halt_debug_transport(
     *,
     session: TransportSession,
@@ -119,7 +108,7 @@ def _transaction_exception_failure(
 
 def _transport_open_request(*, run_id: str, admission: AdmissionService) -> OpenRequest:
     target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
-    snapshot = _require_snapshot(admission, target_key)
+    snapshot = require_target_snapshot(admission, target_key)
     rsp_channel = next((ref for ref in snapshot.transports if ref.line_role is LineRole.RSP), None)
     if rsp_channel is None:
         raise AdmissionError(

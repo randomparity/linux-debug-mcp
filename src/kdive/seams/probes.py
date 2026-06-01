@@ -9,7 +9,7 @@ from typing import Any, Protocol
 
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import RootfsProfile
-from kdive.coordination.admission import AdmissionService
+from kdive.coordination.admission import AdmissionService, require_target_snapshot
 from kdive.coordination.exec_probe import probe_execution_state
 from kdive.coordination.registry import SessionRegistry
 from kdive.domain import ErrorCategory, StepStatus, ToolResponse
@@ -17,7 +17,6 @@ from kdive.providers.ssh import SshCommandResult
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import TargetKey
 from kdive.transport.core.base import ExecutionState
-from kdive.transport.handlers import _require_snapshot
 
 PROBE_STDOUT_CAP = 256 * 1024
 
@@ -182,7 +181,7 @@ def reject_if_target_halted(
     if admission is None or session_registry is None:
         return None
     target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
-    snapshot = _require_snapshot(admission, target_key)
+    snapshot = require_target_snapshot(admission, target_key)
     proof = probe_execution_state(
         registry=session_registry, admission=admission, target_key=target_key, generation=snapshot.generation
     )
