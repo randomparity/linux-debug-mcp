@@ -70,6 +70,16 @@ except Exception as exc:
 _li_result["prelude_ms"] = int((_li_time.monotonic() - _li_t_prelude_start) * 1000)
 
 try:
+    # drgn >= 0.2 does not create the main module at set_core_dump(); module
+    # discovery (driven by VMCOREINFO) must run before main_module() resolves.
+    # Best-effort: discovery can warn/raise once it needs kernel debug info, but
+    # it populates the main module's build-id from VMCOREINFO first.
+    try:
+        for _li_mod in prog.loaded_modules():
+            if _li_mod.name == "kernel":
+                break
+    except Exception:
+        pass
     _li_bid = prog.main_module().build_id
     _li_result["build_id"] = _li_bid.hex() if _li_bid else None
 except Exception as exc:
