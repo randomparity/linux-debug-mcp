@@ -60,6 +60,11 @@ def test_local_drgn_provider_does_not_reexport_wrapper_internals() -> None:
     assert not (wrapper_surface & set(vars(local_drgn_introspect)))
 
 
+def test_local_drgn_provider_exports_capability_factory_only() -> None:
+    assert not hasattr(local_drgn_introspect, "LocalDrgnIntrospectProvider")
+    assert callable(local_drgn_introspect.local_drgn_introspect_capability)
+
+
 def _annotation_contains_any(annotation: object) -> bool:
     return annotation is Any or any(_annotation_contains_any(arg) for arg in get_args(annotation))
 

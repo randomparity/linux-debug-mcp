@@ -5,8 +5,6 @@ Spec: docs/superpowers/specs/2026-05-28-debug-introspect-run-design.md
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from kdive.domain import (
     ImplementationState,
     OperationSemantics,
@@ -14,21 +12,6 @@ from kdive.domain import (
     ProviderOperationCapability,
     TargetKind,
 )
-
-
-@dataclass(frozen=True)
-class LocalDrgnIntrospectProvider:
-    """Marker for the local drgn-introspect capability.
-
-    The actual SSH invocation, wrapper render, and result parsing live in the
-    handler (``server.debug_introspect_run_handler``) so they can share the
-    ``_record_terminal_build_result``-style manifest-lock retry pattern and
-    the redaction helpers. This provider object exists so the registry can
-    declare ``local-drgn-introspect`` as a capability without bundling logic
-    the handler already owns.
-    """
-
-    name: str = "local-drgn-introspect"
 
 
 def local_drgn_introspect_capability() -> ProviderCapability:
