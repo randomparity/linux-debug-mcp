@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -111,30 +112,33 @@ class VmcoreIntrospectHelperHandler(Protocol):
     ) -> ToolResponse: ...
 
 
-def register_introspect_tools(
-    app: FastMCP,
-    *,
-    default_artifact_root: Path,
-    admission: AdmissionService,
-    session_registry: SessionRegistry,
-    run_handler: IntrospectRunHandler,
-    helper_handler: IntrospectHelperHandler,
-    check_prereqs_handler: IntrospectCheckPrereqsHandler,
-    from_vmcore_handler: VmcoreIntrospectRunHandler,
-    from_vmcore_helper_handler: VmcoreIntrospectHelperHandler,
-) -> None:
-    default_artifact_root_text = str(default_artifact_root)
+@dataclass(frozen=True)
+class _IntrospectRegistrationContext:
+    default_artifact_root: str
+    admission: AdmissionService
+    session_registry: SessionRegistry
 
-    def artifact_root_path(value: str | None) -> Path:
-        return Path(value or default_artifact_root_text)
+    def artifact_root_path(self, value: str | None) -> Path:
+        return Path(value or self.default_artifact_root)
 
-    def live_runtime(value: str | None) -> LiveIntrospectRuntime:
+    def live_runtime(self, value: str | None) -> LiveIntrospectRuntime:
         return LiveIntrospectRuntime(
-            artifact_root=artifact_root_path(value),
-            admission=admission,
-            session_registry=session_registry,
+            artifact_root=self.artifact_root_path(value),
+            admission=self.admission,
+            session_registry=self.session_registry,
         )
 
+
+def _dump(response: ToolResponse) -> dict[str, Any]:
+    return response.model_dump(mode="json")
+
+
+def _register_live_introspect_run_tool(
+    app: FastMCP,
+    *,
+    context: _IntrospectRegistrationContext,
+    handler: IntrospectRunHandler,
+) -> None:
     @app.tool(name="debug.introspect.run")
     def debug_introspect_run(
         target: IntrospectTargetContext | dict[str, Any],
@@ -158,11 +162,20 @@ def register_introspect_tools(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return run_handler(
-            request,
-            runtime=live_runtime(target_model.artifact_root),
-        ).model_dump(mode="json")
+        return _dump(
+            handler(
+                request,
+                runtime=context.live_runtime(target_model.artifact_root),
+            )
+        )
 
+
+def _register_live_introspect_helper_tool(
+    app: FastMCP,
+    *,
+    context: _IntrospectRegistrationContext,
+    handler: IntrospectHelperHandler,
+) -> None:
     @app.tool(name="debug.introspect.helper")
     def debug_introspect_helper(
         target: IntrospectTargetContext | dict[str, Any],
@@ -184,11 +197,20 @@ def register_introspect_tools(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return helper_handler(
-            request,
-            runtime=live_runtime(target_model.artifact_root),
-        ).model_dump(mode="json")
+        return _dump(
+            handler(
+                request,
+                runtime=context.live_runtime(target_model.artifact_root),
+            )
+        )
 
+
+def _register_live_introspect_probe_tool(
+    app: FastMCP,
+    *,
+    context: _IntrospectRegistrationContext,
+    handler: IntrospectCheckPrereqsHandler,
+) -> None:
     @app.tool(name="debug.introspect.check_prerequisites")
     def debug_introspect_check_prerequisites(
         target: IntrospectTargetContext | dict[str, Any],
@@ -207,13 +229,22 @@ def register_introspect_tools(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return check_prereqs_handler(
-            request,
-            artifact_root=artifact_root_path(target_model.artifact_root),
-            admission=admission,
-            session_registry=session_registry,
-        ).model_dump(mode="json")
+        return _dump(
+            handler(
+                request,
+                artifact_root=context.artifact_root_path(target_model.artifact_root),
+                admission=context.admission,
+                session_registry=context.session_registry,
+            )
+        )
 
+
+def _register_vmcore_introspect_run_tool(
+    app: FastMCP,
+    *,
+    context: _IntrospectRegistrationContext,
+    handler: VmcoreIntrospectRunHandler,
+) -> None:
     @app.tool(name="debug.introspect.from_vmcore")
     def debug_introspect_from_vmcore(
         vmcore: VmcoreIntrospectInputs | dict[str, Any],
@@ -235,11 +266,20 @@ def register_introspect_tools(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return from_vmcore_handler(
-            request,
-            artifact_root=artifact_root_path(vmcore_model.artifact_root),
-        ).model_dump(mode="json")
+        return _dump(
+            handler(
+                request,
+                artifact_root=context.artifact_root_path(vmcore_model.artifact_root),
+            )
+        )
 
+
+def _register_vmcore_introspect_helper_tool(
+    app: FastMCP,
+    *,
+    context: _IntrospectRegistrationContext,
+    handler: VmcoreIntrospectHelperHandler,
+) -> None:
     @app.tool(name="debug.introspect.from_vmcore_helper")
     def debug_introspect_from_vmcore_helper(
         vmcore: VmcoreIntrospectInputs | dict[str, Any],
@@ -260,7 +300,53 @@ def register_introspect_tools(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return from_vmcore_helper_handler(
-            request,
-            artifact_root=artifact_root_path(vmcore_model.artifact_root),
-        ).model_dump(mode="json")
+        return _dump(
+            handler(
+                request,
+                artifact_root=context.artifact_root_path(vmcore_model.artifact_root),
+            )
+        )
+
+
+def register_introspect_tools(
+    app: FastMCP,
+    *,
+    default_artifact_root: Path,
+    admission: AdmissionService,
+    session_registry: SessionRegistry,
+    run_handler: IntrospectRunHandler,
+    helper_handler: IntrospectHelperHandler,
+    check_prereqs_handler: IntrospectCheckPrereqsHandler,
+    from_vmcore_handler: VmcoreIntrospectRunHandler,
+    from_vmcore_helper_handler: VmcoreIntrospectHelperHandler,
+) -> None:
+    context = _IntrospectRegistrationContext(
+        default_artifact_root=str(default_artifact_root),
+        admission=admission,
+        session_registry=session_registry,
+    )
+    _register_live_introspect_run_tool(
+        app,
+        context=context,
+        handler=run_handler,
+    )
+    _register_live_introspect_helper_tool(
+        app,
+        context=context,
+        handler=helper_handler,
+    )
+    _register_live_introspect_probe_tool(
+        app,
+        context=context,
+        handler=check_prereqs_handler,
+    )
+    _register_vmcore_introspect_run_tool(
+        app,
+        context=context,
+        handler=from_vmcore_handler,
+    )
+    _register_vmcore_introspect_helper_tool(
+        app,
+        context=context,
+        handler=from_vmcore_helper_handler,
+    )

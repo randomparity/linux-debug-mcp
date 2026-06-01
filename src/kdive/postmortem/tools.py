@@ -114,27 +114,30 @@ class PostmortemFetchHandler(Protocol):
     ) -> ToolResponse: ...
 
 
-def register_postmortem_tools(
-    app: FastMCP,
-    *,
-    default_artifact_root: Path,
-    admission: AdmissionService,
-    session_registry: SessionRegistry,
-    crash_handler: PostmortemCrashHandler,
-    triage_handler: PostmortemTriageHandler,
-    check_prereqs_handler: PostmortemCheckPrereqsHandler,
-    list_dumps_handler: PostmortemListDumpsHandler,
-    fetch_handler: PostmortemFetchHandler,
-) -> None:
-    default_artifact_root_text = str(default_artifact_root)
+@dataclass(frozen=True)
+class _PostmortemRegistrationContext:
+    default_artifact_root: str
+    admission: AdmissionService
+    session_registry: SessionRegistry
 
-    def postmortem_runtime(value: str | None) -> PostmortemToolRuntime:
+    def runtime(self, value: str | None) -> PostmortemToolRuntime:
         return PostmortemToolRuntime(
-            artifact_root=Path(value or default_artifact_root_text),
-            admission=admission,
-            session_registry=session_registry,
+            artifact_root=Path(value or self.default_artifact_root),
+            admission=self.admission,
+            session_registry=self.session_registry,
         )
 
+
+def _dump(response: ToolResponse) -> dict[str, Any]:
+    return response.model_dump(mode="json")
+
+
+def _register_postmortem_crash_tool(
+    app: FastMCP,
+    *,
+    context: _PostmortemRegistrationContext,
+    handler: PostmortemCrashHandler,
+) -> None:
     @app.tool(name="debug.postmortem.crash")
     def debug_postmortem_crash(
         vmcore: PostmortemVmcoreInputs | dict[str, Any],
@@ -154,11 +157,20 @@ def register_postmortem_tools(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return crash_handler(
-            request,
-            runtime=postmortem_runtime(vmcore_model.artifact_root),
-        ).model_dump(mode="json")
+        return _dump(
+            handler(
+                request,
+                runtime=context.runtime(vmcore_model.artifact_root),
+            )
+        )
 
+
+def _register_postmortem_triage_tool(
+    app: FastMCP,
+    *,
+    context: _PostmortemRegistrationContext,
+    handler: PostmortemTriageHandler,
+) -> None:
     @app.tool(name="debug.postmortem.triage")
     def debug_postmortem_triage(
         vmcore: PostmortemVmcoreInputs | dict[str, Any],
@@ -176,11 +188,20 @@ def register_postmortem_tools(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return triage_handler(
-            request,
-            runtime=postmortem_runtime(vmcore_model.artifact_root),
-        ).model_dump(mode="json")
+        return _dump(
+            handler(
+                request,
+                runtime=context.runtime(vmcore_model.artifact_root),
+            )
+        )
 
+
+def _register_postmortem_check_prereqs_tool(
+    app: FastMCP,
+    *,
+    context: _PostmortemRegistrationContext,
+    handler: PostmortemCheckPrereqsHandler,
+) -> None:
     @app.tool(name="debug.postmortem.check_prereqs")
     def debug_postmortem_check_prereqs(
         target: PostmortemTargetContext | dict[str, Any],
@@ -199,11 +220,20 @@ def register_postmortem_tools(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return check_prereqs_handler(
-            request,
-            runtime=postmortem_runtime(target_model.artifact_root),
-        ).model_dump(mode="json")
+        return _dump(
+            handler(
+                request,
+                runtime=context.runtime(target_model.artifact_root),
+            )
+        )
 
+
+def _register_postmortem_list_dumps_tool(
+    app: FastMCP,
+    *,
+    context: _PostmortemRegistrationContext,
+    handler: PostmortemListDumpsHandler,
+) -> None:
     @app.tool(name="debug.postmortem.list_dumps")
     def debug_postmortem_list_dumps(
         target: PostmortemTargetContext | dict[str, Any],
@@ -223,11 +253,20 @@ def register_postmortem_tools(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return list_dumps_handler(
-            request,
-            runtime=postmortem_runtime(target_model.artifact_root),
-        ).model_dump(mode="json")
+        return _dump(
+            handler(
+                request,
+                runtime=context.runtime(target_model.artifact_root),
+            )
+        )
 
+
+def _register_postmortem_fetch_tool(
+    app: FastMCP,
+    *,
+    context: _PostmortemRegistrationContext,
+    handler: PostmortemFetchHandler,
+) -> None:
     @app.tool(name="debug.postmortem.fetch")
     def debug_postmortem_fetch(
         target: PostmortemTargetContext | dict[str, Any],
@@ -251,7 +290,53 @@ def register_postmortem_tools(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return fetch_handler(
-            request,
-            runtime=postmortem_runtime(target_model.artifact_root),
-        ).model_dump(mode="json")
+        return _dump(
+            handler(
+                request,
+                runtime=context.runtime(target_model.artifact_root),
+            )
+        )
+
+
+def register_postmortem_tools(
+    app: FastMCP,
+    *,
+    default_artifact_root: Path,
+    admission: AdmissionService,
+    session_registry: SessionRegistry,
+    crash_handler: PostmortemCrashHandler,
+    triage_handler: PostmortemTriageHandler,
+    check_prereqs_handler: PostmortemCheckPrereqsHandler,
+    list_dumps_handler: PostmortemListDumpsHandler,
+    fetch_handler: PostmortemFetchHandler,
+) -> None:
+    context = _PostmortemRegistrationContext(
+        default_artifact_root=str(default_artifact_root),
+        admission=admission,
+        session_registry=session_registry,
+    )
+    _register_postmortem_crash_tool(
+        app,
+        context=context,
+        handler=crash_handler,
+    )
+    _register_postmortem_triage_tool(
+        app,
+        context=context,
+        handler=triage_handler,
+    )
+    _register_postmortem_check_prereqs_tool(
+        app,
+        context=context,
+        handler=check_prereqs_handler,
+    )
+    _register_postmortem_list_dumps_tool(
+        app,
+        context=context,
+        handler=list_dumps_handler,
+    )
+    _register_postmortem_fetch_tool(
+        app,
+        context=context,
+        handler=fetch_handler,
+    )
