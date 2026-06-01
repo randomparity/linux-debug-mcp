@@ -292,6 +292,14 @@ def test_stub_provider_request_factories_are_module_scoped() -> None:
     assert expected_factories.issubset(module_functions)
 
 
+def test_stub_provider_tool_registration_is_table_driven() -> None:
+    source = Path(provider_tools.__file__).read_text(encoding="utf-8")
+
+    registry = provider_tools.PROVIDER_TOOL_REQUEST_FACTORIES
+    assert tuple(tool_name for tool_name, _factory in registry) == tuple(STUB_PROVIDER_OPERATIONS)
+    assert source.count("_register_stub_provider_tool(app, tool_name=") == 1
+
+
 def test_stub_provider_tool_grouped_metadata_reaches_request_validation() -> None:
     response = _tool_response(
         "remote.build_kernel",

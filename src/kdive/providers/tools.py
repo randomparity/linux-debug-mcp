@@ -372,19 +372,25 @@ def workflow_reserve_provision_boot(
     )
 
 
+PROVIDER_TOOL_REQUEST_FACTORIES: tuple[tuple[str, _StubProviderRequestFactory], ...] = (
+    ("remote.build_kernel", remote_build_kernel),
+    ("remote.sync_artifacts", remote_sync_artifacts),
+    ("reservation.request_host", reservation_request_host),
+    ("reservation.release_host", reservation_release_host),
+    ("provision.prepare_target", provision_prepare_target),
+    ("hardware.power_control", hardware_power_control),
+    ("hardware.boot_kernel", hardware_boot_kernel),
+    ("console.open_session", console_open_session),
+    ("console.read", console_read),
+    ("console.write", console_write),
+    ("workflow.reserve_provision_boot", workflow_reserve_provision_boot),
+)
+
+
 def register_provider_tools(app: FastMCP) -> None:
     @app.tool(name="providers.list")
     def providers_list() -> dict[str, Any]:
         return list_providers_handler().model_dump(mode="json")
 
-    _register_stub_provider_tool(app, tool_name="remote.build_kernel")(remote_build_kernel)
-    _register_stub_provider_tool(app, tool_name="remote.sync_artifacts")(remote_sync_artifacts)
-    _register_stub_provider_tool(app, tool_name="reservation.request_host")(reservation_request_host)
-    _register_stub_provider_tool(app, tool_name="reservation.release_host")(reservation_release_host)
-    _register_stub_provider_tool(app, tool_name="provision.prepare_target")(provision_prepare_target)
-    _register_stub_provider_tool(app, tool_name="hardware.power_control")(hardware_power_control)
-    _register_stub_provider_tool(app, tool_name="hardware.boot_kernel")(hardware_boot_kernel)
-    _register_stub_provider_tool(app, tool_name="console.open_session")(console_open_session)
-    _register_stub_provider_tool(app, tool_name="console.read")(console_read)
-    _register_stub_provider_tool(app, tool_name="console.write")(console_write)
-    _register_stub_provider_tool(app, tool_name="workflow.reserve_provision_boot")(workflow_reserve_provision_boot)
+    for tool_name, request_factory in PROVIDER_TOOL_REQUEST_FACTORIES:
+        _register_stub_provider_tool(app, tool_name=tool_name)(request_factory)
