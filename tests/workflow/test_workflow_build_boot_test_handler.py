@@ -1,9 +1,11 @@
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 from conftest import NoopBuildRunner as _NoopBuildRunner
 from conftest import make_source_tree
+from workflow_helpers import build_boot_test_request, call_workflow_build_boot_test_handler
 
 import kdive.server as server_module
 from kdive.artifacts.store import ArtifactStore
@@ -36,6 +38,14 @@ from kdive.workflow import handlers as workflow_handlers
 from kdive.workflow.handlers import WorkflowHandlerDependencies
 
 
+def test_workflow_handlers_accept_structured_request_and_runtime_only() -> None:
+    for handler in (workflow_build_boot_test_handler, workflow_handlers.workflow_build_boot_debug_handler):
+        signature = inspect.signature(handler)
+        assert list(signature.parameters) == ["request", "runtime"]
+        assert signature.parameters["request"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert signature.parameters["runtime"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
 def success(summary: str, *, run_id: str = "run-abc123") -> ToolResponse:
     return ToolResponse.success(summary=summary, run_id=run_id, data={"summary": summary})
 
@@ -49,13 +59,15 @@ def test_workflow_handlers_require_explicit_dependencies(tmp_path: Path) -> None
     assert not hasattr(workflow_handlers, "configure_workflow_handlers")
     assert not hasattr(workflow_handlers, "_WORKFLOW_DEPENDENCIES")
 
-    with pytest.raises(TypeError, match="dependencies"):
+    with pytest.raises(TypeError, match="runtime"):
         workflow_build_boot_test_handler(
-            artifact_root=tmp_path / "runs",
-            source_path=str(tmp_path),
-            build_profile="x86_64-default",
-            target_profile="local-qemu",
-            rootfs_profile="minimal",
+            request=build_boot_test_request(
+                artifact_root=tmp_path / "runs",
+                source_path=str(tmp_path),
+                build_profile="x86_64-default",
+                target_profile="local-qemu",
+                rootfs_profile="minimal",
+            )
         )
 
 
@@ -89,7 +101,8 @@ def test_workflow_runs_build_boot_tests_and_collects(tmp_path: Path, monkeypatch
         artifacts_collect=lambda **kwargs: calls.append("collect") or success("collected"),
     )
 
-    response = workflow_build_boot_test_handler(
+    response = call_workflow_build_boot_test_handler(
+        workflow_build_boot_test_handler,
         artifact_root=tmp_path / "runs",
         source_path=str(tmp_path),
         build_profile="x86_64-default",
@@ -120,7 +133,8 @@ def test_workflow_threads_safety_overrides_into_create_and_boot(tmp_path: Path) 
         artifacts_collect=lambda **kwargs: success("collected"),
     )
 
-    response = workflow_build_boot_test_handler(
+    response = call_workflow_build_boot_test_handler(
+        workflow_build_boot_test_handler,
         artifact_root=tmp_path / "runs",
         source_path=str(tmp_path),
         build_profile="x86_64-default",
@@ -157,7 +171,8 @@ def test_workflow_accepts_explicit_dependencies_without_global_configuration(tmp
         artifacts_collect_handler=lambda **kwargs: calls.append("collect") or success("collected"),
     )
 
-    response = workflow_build_boot_test_handler(
+    response = call_workflow_build_boot_test_handler(
+        workflow_build_boot_test_handler,
         artifact_root=tmp_path / "runs",
         source_path=str(tmp_path),
         build_profile="x86_64-default",
@@ -179,7 +194,8 @@ def test_workflow_collects_and_returns_build_failure(tmp_path: Path, monkeypatch
         artifacts_collect=lambda **kwargs: calls.append("collect") or success("collected"),
     )
 
-    response = workflow_build_boot_test_handler(
+    response = call_workflow_build_boot_test_handler(
+        workflow_build_boot_test_handler,
         artifact_root=tmp_path / "runs",
         source_path=str(tmp_path),
         build_profile="x86_64-default",
@@ -206,7 +222,8 @@ def test_workflow_collects_after_test_failure(tmp_path: Path, monkeypatch) -> No
         artifacts_collect=lambda **kwargs: calls.append("collect") or success("collected"),
     )
 
-    response = workflow_build_boot_test_handler(
+    response = call_workflow_build_boot_test_handler(
+        workflow_build_boot_test_handler,
         artifact_root=tmp_path / "runs",
         source_path=str(tmp_path),
         build_profile="x86_64-default",
@@ -238,7 +255,8 @@ def test_workflow_rejects_existing_run_request_mismatch(tmp_path: Path) -> None:
     )
     assert created.ok is True
 
-    response = workflow_build_boot_test_handler(
+    response = call_workflow_build_boot_test_handler(
+        workflow_build_boot_test_handler,
         artifact_root=artifact_root,
         source_path=str(source),
         build_profile="other-build-profile",
@@ -292,7 +310,8 @@ def test_workflow_existing_run_uses_manifest_test_suite_when_omitted(tmp_path: P
         artifacts_collect=lambda **kwargs: success("collected"),
     )
 
-    response = workflow_build_boot_test_handler(
+    response = call_workflow_build_boot_test_handler(
+        workflow_build_boot_test_handler,
         artifact_root=artifact_root,
         source_path=str(source),
         build_profile="x86_64-default",
@@ -321,7 +340,8 @@ def test_workflow_forwards_acknowledged_permissions_to_run_tests(tmp_path: Path)
         artifacts_collect=lambda **kwargs: success("collected"),
     )
 
-    response = workflow_build_boot_test_handler(
+    response = call_workflow_build_boot_test_handler(
+        workflow_build_boot_test_handler,
         artifact_root=tmp_path / "runs",
         source_path=str(tmp_path),
         build_profile="x86_64-default",
@@ -352,7 +372,8 @@ def test_workflow_creates_missing_supplied_run_id_exactly(tmp_path: Path, monkey
         artifacts_collect=lambda **kwargs: calls.append("collect") or success("collected", run_id="run-explicit"),
     )
 
-    response = workflow_build_boot_test_handler(
+    response = call_workflow_build_boot_test_handler(
+        workflow_build_boot_test_handler,
         artifact_root=tmp_path / "runs",
         source_path=str(tmp_path),
         build_profile="x86_64-default",

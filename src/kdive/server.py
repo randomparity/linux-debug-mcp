@@ -197,61 +197,13 @@ def _target_run_tests_tool_handler(
 def _workflow_build_boot_test_tool_handler(
     *, request: workflow_tools.WorkflowBuildBootTestHandlerRequest, runtime: workflow_tools.WorkflowToolRuntime
 ) -> ToolResponse:
-    return workflow_build_boot_test_handler(
-        artifact_root=request.artifact_root,
-        source_path=request.source_path,
-        build_profile=request.build_profile,
-        target_profile=request.target_profile,
-        rootfs_profile=request.rootfs_profile,
-        run_id=request.run_id,
-        test_suite=request.test_suite,
-        commands=request.commands,
-        force_rebuild=request.force_rebuild,
-        force_reboot=request.force_reboot,
-        force_rerun_tests=request.force_rerun_tests,
-        force_recollect=request.force_recollect,
-        build_overrides=request.build_overrides,
-        boot_overrides=request.boot_overrides,
-        sensitive_paths=runtime.sensitive_paths,
-        build_profile_spec=request.build_profile_spec,
-        target_profile_spec=request.target_profile_spec,
-        rootfs_profile_spec=request.rootfs_profile_spec,
-        acknowledged_permissions=request.acknowledged_permissions,
-        admission=runtime.admission,
-        session_registry=runtime.session_registry,
-        dependencies=runtime.dependencies,
-    )
+    return workflow_build_boot_test_handler(request=request, runtime=runtime)
 
 
 def _workflow_build_boot_debug_tool_handler(
     *, request: workflow_tools.WorkflowBuildBootDebugHandlerRequest, runtime: workflow_tools.WorkflowToolRuntime
 ) -> ToolResponse:
-    return workflow_build_boot_debug_handler(
-        artifact_root=request.artifact_root,
-        source_path=request.source_path,
-        build_profile=request.build_profile,
-        target_profile=request.target_profile,
-        rootfs_profile=request.rootfs_profile,
-        run_id=request.run_id,
-        debug_profile=request.debug_profile,
-        force_rebuild=request.force_rebuild,
-        force_reboot=request.force_reboot,
-        new_session=request.new_session,
-        build_overrides=request.build_overrides,
-        boot_overrides=request.boot_overrides,
-        sensitive_paths=runtime.sensitive_paths,
-        build_profile_spec=request.build_profile_spec,
-        target_profile_spec=request.target_profile_spec,
-        rootfs_profile_spec=request.rootfs_profile_spec,
-        acknowledged_permissions=request.acknowledged_permissions,
-        admission=runtime.admission,
-        session_registry=runtime.session_registry,
-        transaction=runtime.transaction,
-        session_guard=runtime.session_guard,
-        gdb_mi_engine=runtime.gdb_mi_engine,
-        gdb_mi_sessions=runtime.gdb_mi_sessions,
-        dependencies=runtime.dependencies,
-    )
+    return workflow_build_boot_debug_handler(request=request, runtime=runtime)
 
 
 def _require_value(value: _RequiredT | None, message: str) -> _RequiredT:

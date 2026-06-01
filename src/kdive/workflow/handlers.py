@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from kdive.artifacts.manifest import RunManifest
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
@@ -14,6 +14,13 @@ from kdive.domain import ErrorCategory, ToolResponse
 from kdive.providers.debug import GdbMiEngine, GdbMiSessionRegistry
 from kdive.safety.paths import PathSafetyError, validate_source_path
 from kdive.seams.guard import SessionGuard
+
+if TYPE_CHECKING:
+    from kdive.workflow.tools import (
+        WorkflowBuildBootDebugHandlerRequest,
+        WorkflowBuildBootTestHandlerRequest,
+        WorkflowToolRuntime,
+    )
 
 
 class CreateRunHandler(Protocol):
@@ -384,53 +391,32 @@ def _run_build_boot_workflow(
 
 
 def workflow_build_boot_test_handler(
-    *,
-    artifact_root: Path,
-    source_path: str,
-    build_profile: str,
-    target_profile: str,
-    rootfs_profile: str,
-    run_id: str | None = None,
-    test_suite: str | None = None,
-    commands: list[list[str]] | None = None,
-    force_rebuild: bool = False,
-    force_reboot: bool = False,
-    force_rerun_tests: bool = False,
-    force_recollect: bool = False,
-    build_overrides: BuildOverrides | None = None,
-    boot_overrides: BootOverrides | None = None,
-    sensitive_paths: list[Path] | None = None,
-    build_profile_spec: dict[str, object] | None = None,
-    target_profile_spec: dict[str, object] | None = None,
-    rootfs_profile_spec: dict[str, object] | None = None,
-    acknowledged_permissions: list[str] | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
-    dependencies: WorkflowHandlerDependencies,
+    *, request: WorkflowBuildBootTestHandlerRequest, runtime: WorkflowToolRuntime
 ) -> ToolResponse:
+    dependencies = runtime.dependencies
     pipeline, pipeline_failure = _run_build_boot_workflow(
         workflow_name="workflow.build_boot_test",
         request=BuildBootWorkflowRequest(
-            artifact_root=artifact_root,
-            source_path=source_path,
-            build_profile=build_profile,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
-            run_id=run_id,
-            force_rebuild=force_rebuild,
-            force_reboot=force_reboot,
-            force_recollect=force_recollect,
-            build_overrides=build_overrides,
-            boot_overrides=boot_overrides,
-            sensitive_paths=sensitive_paths,
-            build_profile_spec=build_profile_spec,
-            target_profile_spec=target_profile_spec,
-            rootfs_profile_spec=rootfs_profile_spec,
-            acknowledged_permissions=acknowledged_permissions,
-            admission=admission,
+            artifact_root=request.artifact_root,
+            source_path=request.source_path,
+            build_profile=request.build_profile,
+            target_profile=request.target_profile,
+            rootfs_profile=request.rootfs_profile,
+            run_id=request.run_id,
+            force_rebuild=request.force_rebuild,
+            force_reboot=request.force_reboot,
+            force_recollect=request.force_recollect,
+            build_overrides=request.build_overrides,
+            boot_overrides=request.boot_overrides,
+            sensitive_paths=runtime.sensitive_paths,
+            build_profile_spec=request.build_profile_spec,
+            target_profile_spec=request.target_profile_spec,
+            rootfs_profile_spec=request.rootfs_profile_spec,
+            acknowledged_permissions=request.acknowledged_permissions,
+            admission=runtime.admission,
         ),
         optional_field="test_suite",
-        requested_optional=test_suite,
+        requested_optional=request.test_suite,
         optional_policy="always",
         collect_pipeline_failures=True,
         dependencies=dependencies,
@@ -444,19 +430,19 @@ def workflow_build_boot_test_handler(
     boot_response = pipeline.boot_response
 
     test_response = dependencies.target_run_tests_handler(
-        artifact_root=artifact_root,
+        artifact_root=request.artifact_root,
         run_id=run_id,
         test_suite=test_suite,
-        commands=commands,
-        force_rerun=force_rerun_tests,
-        acknowledged_permissions=acknowledged_permissions,
-        admission=admission,
-        session_registry=session_registry,
+        commands=request.commands,
+        force_rerun=request.force_rerun_tests,
+        acknowledged_permissions=request.acknowledged_permissions,
+        admission=runtime.admission,
+        session_registry=runtime.session_registry,
     )
     collect_response = dependencies.artifacts_collect_handler(
-        artifact_root=artifact_root,
+        artifact_root=request.artifact_root,
         run_id=run_id,
-        force_recollect=force_recollect,
+        force_recollect=request.force_recollect,
     )
     if not test_response.ok:
         return _workflow_failure_response(
@@ -500,54 +486,31 @@ def workflow_build_boot_test_handler(
 
 
 def workflow_build_boot_debug_handler(
-    *,
-    artifact_root: Path,
-    source_path: str,
-    build_profile: str,
-    target_profile: str,
-    rootfs_profile: str,
-    run_id: str | None = None,
-    debug_profile: str | None = None,
-    force_rebuild: bool = False,
-    force_reboot: bool = False,
-    new_session: bool = False,
-    build_overrides: BuildOverrides | None = None,
-    boot_overrides: BootOverrides | None = None,
-    sensitive_paths: list[Path] | None = None,
-    build_profile_spec: dict[str, object] | None = None,
-    target_profile_spec: dict[str, object] | None = None,
-    rootfs_profile_spec: dict[str, object] | None = None,
-    acknowledged_permissions: list[str] | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
-    transaction: TransportTransaction | None = None,
-    session_guard: SessionGuard | None = None,
-    gdb_mi_engine: GdbMiEngine | None = None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-    dependencies: WorkflowHandlerDependencies,
+    *, request: WorkflowBuildBootDebugHandlerRequest, runtime: WorkflowToolRuntime
 ) -> ToolResponse:
+    dependencies = runtime.dependencies
     pipeline, pipeline_failure = _run_build_boot_workflow(
         workflow_name="workflow.build_boot_debug",
         request=BuildBootWorkflowRequest(
-            artifact_root=artifact_root,
-            source_path=source_path,
-            build_profile=build_profile,
-            target_profile=target_profile,
-            rootfs_profile=rootfs_profile,
-            run_id=run_id,
-            force_rebuild=force_rebuild,
-            force_reboot=force_reboot,
-            build_overrides=build_overrides,
-            boot_overrides=boot_overrides,
-            sensitive_paths=sensitive_paths,
-            build_profile_spec=build_profile_spec,
-            target_profile_spec=target_profile_spec,
-            rootfs_profile_spec=rootfs_profile_spec,
-            acknowledged_permissions=acknowledged_permissions,
-            admission=admission,
+            artifact_root=request.artifact_root,
+            source_path=request.source_path,
+            build_profile=request.build_profile,
+            target_profile=request.target_profile,
+            rootfs_profile=request.rootfs_profile,
+            run_id=request.run_id,
+            force_rebuild=request.force_rebuild,
+            force_reboot=request.force_reboot,
+            build_overrides=request.build_overrides,
+            boot_overrides=request.boot_overrides,
+            sensitive_paths=runtime.sensitive_paths,
+            build_profile_spec=request.build_profile_spec,
+            target_profile_spec=request.target_profile_spec,
+            rootfs_profile_spec=request.rootfs_profile_spec,
+            acknowledged_permissions=request.acknowledged_permissions,
+            admission=runtime.admission,
         ),
         optional_field="debug_profile",
-        requested_optional=debug_profile,
+        requested_optional=request.debug_profile,
         optional_policy="when_manifest_set",
         collect_pipeline_failures=False,
         dependencies=dependencies,
@@ -561,16 +524,16 @@ def workflow_build_boot_debug_handler(
     boot_response = pipeline.boot_response
 
     debug_response = dependencies.debug_start_session_handler(
-        artifact_root=artifact_root,
+        artifact_root=request.artifact_root,
         run_id=run_id,
         debug_profile=debug_profile,
-        new_session=new_session,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
+        new_session=request.new_session,
+        transaction=runtime.transaction,
+        admission=runtime.admission,
+        session_registry=runtime.session_registry,
+        session_guard=runtime.session_guard,
+        gdb_mi_engine=runtime.gdb_mi_engine,
+        gdb_mi_sessions=runtime.gdb_mi_sessions,
     )
     if not debug_response.ok:
         return _workflow_failure_response(

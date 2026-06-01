@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import pytest
+from workflow_helpers import call_workflow_build_boot_debug_handler
 
 from kdive import server
 from kdive.config import RootfsProfile, TargetProfile
@@ -90,7 +91,8 @@ def test_live_build_boot_debug_workflow(tmp_path: Path, monkeypatch: pytest.Monk
     # exactly as create_app wires it: build the Layer-4 machinery and a real engine + live-session
     # registry and thread them through the workflow.
     machinery = server._build_transport_machinery(session_registry=None, transport_registry=None)
-    response = workflow_build_boot_debug_handler(
+    response = call_workflow_build_boot_debug_handler(
+        workflow_build_boot_debug_handler,
         artifact_root=tmp_path / "runs",
         source_path=str(source),
         build_profile="x86_64-default",

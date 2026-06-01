@@ -27,6 +27,7 @@ from conftest import (
     rootfs,
     write_vmlinux_with_build_id,
 )
+from workflow_helpers import call_workflow_build_boot_debug_handler, call_workflow_build_boot_test_handler
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile
@@ -171,7 +172,8 @@ def test_workflow_run_tests_rejects_when_target_halted(tmp_path: Path, monkeypat
         lambda: FakeTestProvider(),
     )
 
-    response = workflow_build_boot_test_handler(
+    response = call_workflow_build_boot_test_handler(
+        workflow_build_boot_test_handler,
         artifact_root=artifact_root,
         source_path=str(source),
         build_profile="x86_64-default",
@@ -279,7 +281,8 @@ def test_workflow_debug_acquires_guard_and_writes_halted_record(tmp_path: Path, 
         {"qemu-gdbstub-default": DebugProfile(name="qemu-gdbstub-default")},
     )
 
-    response: ToolResponse = workflow_build_boot_debug_handler(
+    response: ToolResponse = call_workflow_build_boot_debug_handler(
+        workflow_build_boot_debug_handler,
         artifact_root=artifact_root,
         source_path=str(source_path),
         build_profile="x86_64-default",

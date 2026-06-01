@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from workflow_helpers import call_workflow_build_boot_debug_handler
+
 import kdive.server as server_module
 from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.domain import ErrorCategory, ToolResponse
@@ -53,7 +55,8 @@ def test_workflow_build_boot_debug_success(tmp_path: Path) -> None:
         ),
     )
 
-    response = workflow_build_boot_debug_handler(
+    response = call_workflow_build_boot_debug_handler(
+        workflow_build_boot_debug_handler,
         artifact_root=tmp_path / "runs",
         source_path=str(tmp_path),
         build_profile="x86_64-default",
@@ -90,7 +93,8 @@ def test_workflow_build_boot_debug_stops_before_debug_when_boot_fails(
         debug_start=lambda **kwargs: calls.append("debug") or success("debug session started"),
     )
 
-    response = workflow_build_boot_debug_handler(
+    response = call_workflow_build_boot_debug_handler(
+        workflow_build_boot_debug_handler,
         artifact_root=tmp_path / "runs",
         source_path=str(tmp_path),
         build_profile="x86_64-default",
@@ -119,7 +123,8 @@ def test_workflow_build_boot_debug_stops_when_debug_start_fails(tmp_path: Path) 
         ),
     )
 
-    response = workflow_build_boot_debug_handler(
+    response = call_workflow_build_boot_debug_handler(
+        workflow_build_boot_debug_handler,
         artifact_root=tmp_path / "runs",
         source_path=str(tmp_path),
         build_profile="x86_64-default",
@@ -165,7 +170,8 @@ def test_workflow_build_boot_debug_allows_explicit_profile_when_manifest_did_not
         debug_start=fake_debug,
     )
 
-    response = workflow_build_boot_debug_handler(
+    response = call_workflow_build_boot_debug_handler(
+        workflow_build_boot_debug_handler,
         artifact_root=artifact_root,
         source_path=str(source),
         build_profile="x86_64-default",
@@ -210,7 +216,8 @@ def test_workflow_build_boot_debug_uses_manifest_debug_profile_when_omitted(
         debug_start=fake_debug,
     )
 
-    response = workflow_build_boot_debug_handler(
+    response = call_workflow_build_boot_debug_handler(
+        workflow_build_boot_debug_handler,
         artifact_root=artifact_root,
         source_path=str(source),
         build_profile="x86_64-default",
