@@ -97,7 +97,7 @@ def test_adhoc_commands_require_destructive_permission_ack(tmp_path):
     assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert response.error.details == {
         "code": "permission_required",
-        "required_permissions": TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"],
+        "required_permissions": list(TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"]),
     }
     assert provider.executions == 0
 

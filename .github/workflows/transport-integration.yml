@@ -7,8 +7,8 @@ permissions:
   contents: read
 jobs:
   serial-local-integration:
-    # Runs test_serial_local_transport_integration.py + the agent-proxy gate in
-    # test_transport_open_close_integration.py (Test 1: inject_break PTY path).
+    # Runs transport/test_serial_local_transport_integration.py + the agent-proxy gate in
+    # transport/test_transport_open_close_integration.py (Test 1: inject_break PTY path).
     # KDIVE_REQUIRE_AGENT_PROXY=1 makes the skipif condition False so a missing
     # agent-proxy binary fails the job instead of silently skipping the test.
     runs-on: ubuntu-24.04
@@ -36,13 +36,13 @@ jobs:
           uv venv --allow-existing
           uv pip install -e '.[dev,test]'
           uv run python -m pytest \
-            tests/test_serial_local_transport_integration.py \
-            tests/test_transport_open_close_integration.py::test_inject_break_drops_kgdb_target_into_debugger \
+            tests/transport/test_serial_local_transport_integration.py \
+            tests/transport/test_transport_open_close_integration.py::test_inject_break_drops_kgdb_target_into_debugger \
             -q
 
   gdbstub-integration:
-    # Runs test_qemu_gdbstub_integration.py + the gdbstub gate in
-    # test_transport_open_close_integration.py (Test 2: migrated transaction wiring).
+    # Runs providers/local/test_qemu_gdbstub_integration.py + the gdbstub gate in
+    # transport/test_transport_open_close_integration.py (Test 2: migrated transaction wiring).
     # Requires a self-hosted runner with a live kgdb-enabled QEMU guest managed by libvirt.
     # KDIVE_LIVE_GDBSTUB=1 + all companion envs must be set as repository secrets
     # for this job to run the tests rather than skip them.  On a shared GitHub-hosted runner
@@ -68,6 +68,6 @@ jobs:
           uv venv --allow-existing
           uv pip install -e '.[dev,test]'
           uv run python -m pytest \
-            tests/test_qemu_gdbstub_integration.py \
-            tests/test_transport_open_close_integration.py::test_qemu_gdbstub_flow_unchanged \
+            tests/providers/local/test_qemu_gdbstub_integration.py \
+            tests/transport/test_transport_open_close_integration.py::test_qemu_gdbstub_flow_unchanged \
             -q

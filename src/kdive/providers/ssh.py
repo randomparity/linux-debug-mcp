@@ -34,6 +34,8 @@ class SshCommandResult:
 
 @dataclass(frozen=True)
 class TestExecutionResult:
+    __test__ = False
+
     status: StepStatus
     summary: str
     artifacts: list[ArtifactRef] = field(default_factory=list)

@@ -37,10 +37,10 @@ test: sync-dev
     uv run python -m pytest
 
 check-docs:
-    # Enforced on user-facing/authoritative docs only. The superpowers/ planning
-    # and spec artifacts are internal history and legitimately cite code constants
-    # (e.g. SPRINT_4_DEBUG_OPERATIONS), so they are excluded.
-    ! rg -n "sprin[t]|Sprin[t]|SPRIN[T]" README.md docs -g '!docs/superpowers/**'
+    # Enforced on user-facing/authoritative docs only. The archived superpowers
+    # planning and spec artifacts are internal history and legitimately cite code
+    # constants (e.g. SPRINT_4_DEBUG_OPERATIONS), so they are excluded.
+    ! rg -n "sprin[t]|Sprin[t]|SPRIN[T]" README.md docs -g '!docs/archive/superpowers/**'
 
 check-ipmi:
     # IPMI hardening guard (issue #67): no hardcoded cipher-0 / non-lanplus
