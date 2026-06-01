@@ -97,6 +97,28 @@ def test_drgn_missing_is_unusable_with_hint() -> None:
     assert verdict == UNUSABLE
 
 
+def test_probe_error_fields_are_preserved_in_check_details() -> None:
+    drgn_error = {"type": "ImportError", "message": "libkdumpfile.so missing"}
+    os_release_error = {"type": "PermissionError", "message": "permission denied"}
+
+    checks, verdict = build_probe_checks(
+        _probe(
+            drgn_present=False,
+            drgn_version=None,
+            distro_id=None,
+            distro_version=None,
+            drgn_import_error=drgn_error,
+            os_release_error=os_release_error,
+        ),
+        host_build_id=HOST,
+    )
+    by = _ids(checks)
+
+    assert verdict == UNUSABLE
+    assert by["target.drgn"].details["drgn_import_error"] == drgn_error
+    assert by["target.drgn"].details["os_release_error"] == os_release_error
+
+
 def test_proven_provenance_mismatch_is_unusable() -> None:
     probe = _probe(running_build_id=OTHER)
     probe["vmlinux_debuginfo"]["candidates"] = [{"path": "/boot/vmlinux-6.7.0", "file_build_id": OTHER}]
@@ -195,6 +217,8 @@ def test_probe_script_runs_and_emits_valid_json() -> None:
         "python_version",
         "python_executable",
         "drgn_present",
+        "drgn_import_error",
+        "os_release_error",
         "kernel_release",
         "running_build_id",
         "vmlinux_debuginfo",

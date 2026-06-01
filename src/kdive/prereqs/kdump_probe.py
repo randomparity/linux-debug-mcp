@@ -125,7 +125,11 @@ def _dump_path_check(probe: dict[str, Any]) -> PrerequisiteCheck:
             ),
             details={"dump_dir": dump_dir, "dump_target_directive": directive},
         )
-    details = {"dump_dir": dump_dir, "source": "kdump.conf" if probe.get("dump_dir") else "default"}
+    details = {
+        "dump_dir": dump_dir,
+        "source": "kdump.conf" if probe.get("dump_dir") else "default",
+        "kdump_conf_error": probe.get("kdump_conf_error"),
+    }
     if not probe.get("dump_dir_exists"):
         return PrerequisiteCheck(
             check_id="kdump.dump_path_writable",
@@ -182,6 +186,10 @@ UNITS = list($units)
 TARGETS = set($targets)
 
 
+def _error(exc):
+    return {"type": type(exc).__name__, "message": str(exc)[:160]}
+
+
 def _read_int(path):
     try:
         with open(path) as fh:
@@ -230,9 +238,9 @@ def _kdump_conf():
                     directive = kw
                 elif kw == "path" and len(parts) > 1:
                     dump_dir = parts[1].strip()
-    except Exception:
-        pass
-    return directive, dump_dir
+    except Exception as exc:
+        return directive, dump_dir, _error(exc)
+    return directive, dump_dir, None
 
 
 def _writable(d):
@@ -258,7 +266,7 @@ def _writable(d):
                 pass
 
 
-directive, conf_dir = _kdump_conf()
+directive, conf_dir, conf_error = _kdump_conf()
 dump_dir = conf_dir or "/var/crash"
 service_active, service_units = _service_states()
 writable, write_error = _writable(dump_dir)
@@ -277,6 +285,7 @@ result = {
     "service_units": service_units,
     "dump_target_directive": directive,
     "dump_dir": conf_dir,
+    "kdump_conf_error": conf_error,
     "dump_dir_exists": os.path.isdir(dump_dir),
     "dump_dir_writable": writable,
     "dump_dir_write_error": write_error,

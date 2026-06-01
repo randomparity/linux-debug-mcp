@@ -119,11 +119,17 @@ def _python_check(probe: dict[str, Any]) -> PrerequisiteCheck:
 def _drgn_check(probe: dict[str, Any]) -> PrerequisiteCheck:
     present = bool(probe.get("drgn_present"))
     version = probe.get("drgn_version")
+    details = {
+        "version": version,
+        "executable": probe.get("python_executable"),
+        "drgn_import_error": probe.get("drgn_import_error"),
+        "os_release_error": probe.get("os_release_error"),
+    }
     return PrerequisiteCheck(
         check_id="target.drgn",
         status=PrerequisiteStatus.PASSED if present else PrerequisiteStatus.FAILED,
         message=f"drgn {version}" if present else "drgn is not importable under the target interpreter",
-        details={"version": version, "executable": probe.get("python_executable")},
+        details=details,
         suggested_fix=None if present else install_hint(probe.get("distro_id")),
     )
 
@@ -267,6 +273,10 @@ def build_probe_checks(probe: dict[str, Any], *, host_build_id: Any) -> tuple[li
 PROBE_SCRIPT = r"""import json, os, struct, sys
 
 
+def _error(exc):
+    return {"type": type(exc).__name__, "message": str(exc)[:160]}
+
+
 def _safe(fn):
     try:
         return fn()
@@ -282,9 +292,9 @@ def _os_release():
                 if "=" in line:
                     k, _, v = line.partition("=")
                     data[k.strip()] = v.strip().strip('"').strip("'")
-    except Exception:
-        pass
-    return data
+    except Exception as exc:
+        return data, _error(exc)
+    return data, None
 
 
 def _parse_notes(blob):
@@ -371,16 +381,17 @@ def _candidates(rel, rbid):
 
 rel = _safe(lambda: os.uname().release) or ""
 rbid = _running_build_id()
-osr = _os_release()
+osr, os_release_error = _os_release()
 
 drgn_present = False
 drgn_version = None
+drgn_import_error = None
 try:
     import drgn
     drgn_present = True
     drgn_version = _safe(lambda: getattr(drgn, "__version__", None))
-except Exception:
-    pass
+except Exception as exc:
+    drgn_import_error = _error(exc)
 
 module_dir = "/usr/lib/debug/lib/modules/%s/kernel" % rel
 result = {
@@ -388,6 +399,8 @@ result = {
     "python_executable": sys.executable,
     "drgn_present": drgn_present,
     "drgn_version": drgn_version,
+    "drgn_import_error": drgn_import_error,
+    "os_release_error": os_release_error,
     "distro_id": osr.get("ID"),
     "distro_version": osr.get("VERSION_ID"),
     "kernel_release": rel,

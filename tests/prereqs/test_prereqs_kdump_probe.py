@@ -22,6 +22,7 @@ READY = {
     "service_units": {"kdump": "active", "kdump-tools": "inactive"},
     "dump_target_directive": None,
     "dump_dir": None,
+    "kdump_conf_error": None,
     "dump_dir_exists": True,
     "dump_dir_writable": True,
     "dump_dir_write_error": None,
@@ -112,6 +113,16 @@ def test_missing_dump_dir_fails_with_create_fix() -> None:
     assert "create" in (chk.suggested_fix or "").lower()
 
 
+def test_kdump_conf_error_is_preserved_in_dump_path_details() -> None:
+    conf_error = {"type": "PermissionError", "message": "permission denied"}
+    probe = dict(READY, dump_dir=None, kdump_conf_error=conf_error)
+
+    checks, _ = build_kdump_checks(probe)
+    chk = _by_id(checks)["kdump.dump_path_writable"]
+
+    assert chk.details["kdump_conf_error"] == conf_error
+
+
 def test_separate_dump_device_is_warning_not_false_fail() -> None:
     probe = dict(
         READY,
@@ -149,6 +160,7 @@ def test_probe_script_runs_on_host_and_emits_expected_keys() -> None:
         "service_units",
         "dump_target_directive",
         "dump_dir",
+        "kdump_conf_error",
         "dump_dir_exists",
         "dump_dir_writable",
         "dump_dir_write_error",
