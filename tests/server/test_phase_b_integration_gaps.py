@@ -12,7 +12,7 @@ These tests assert the three correctness fixes that close gaps surfaced by the w
 2. target.run_tests must reap its PROMOTED ssh-tier admission handle on the error paths after
    `_execute_tests_under_gate` raises. The halt-cancel path sets the handle's cancel fence; without
    `admission.rollback(handle)` the binding lingers PROMOTED and blocks reopen()/admit. Asserted by
-   running an admitted test through a halt and confirming `admission._bindings[KEY]` is empty.
+   running an admitted test through a halt and confirming no admission binding remains.
 
 3. debug.start_session must `transaction.close()` the transport on a failed gdb attach AFTER the
    transaction.open() committed READY + halt_debug_transport persisted HALTED. Otherwise the
@@ -38,6 +38,7 @@ from conftest import (
     rootfs,
     write_vmlinux_with_build_id,
 )
+from coordination_observers import assert_admission_binding_exists, assert_no_admission_binding
 from handler_call_helpers import target_run_tests_handler
 
 from kdive.artifacts.store import ArtifactStore
@@ -49,7 +50,7 @@ from kdive.debug.policy import halt_debug_transport
 from kdive.debug.session_handlers import _start_session as debug_start_session_handler
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
-from kdive.providers.local.test.local_ssh_tests import TestExecutionResult
+from kdive.providers.local.test.local_ssh_tests import TestExecutionResult as _TestExecutionResult
 from kdive.seams.lifecycle import LifecycleEvent, LifecycleKind
 from kdive.seams.target import (
     TargetKey,
@@ -116,7 +117,7 @@ def test_create_app_binds_lifecycle_dispatcher_and_force_drop_reaches_admission(
     )
     transaction.open(request)
     assert registry.read_record(KEY) is not None
-    assert admission._bindings.get(KEY, []) != []
+    assert_admission_binding_exists(admission, KEY)
 
     # Drive a CRASHED event through the wired dispatcher. invalidate_lifecycle closes admission
     # (step 1) and emits to the dispatcher (step 2); the bound _SessionSubscriber.force_drop()
@@ -124,7 +125,7 @@ def test_create_app_binds_lifecycle_dispatcher_and_force_drop_reaches_admission(
     admission.invalidate_lifecycle(LifecycleEvent(target_key=KEY, kind=LifecycleKind.CRASHED), dispatcher, generation=1)
 
     assert registry.read_record(KEY) is None
-    assert admission._bindings.get(KEY, []) == []
+    assert_no_admission_binding(admission, KEY)
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +207,7 @@ def test_run_tests_halt_during_execute_deregisters_ssh_tier_handle(tmp_path: Pat
     # raised `execution_state_changed`. Either way the run was rolled back rather than completed.
     assert response.error.details["code"] in {"admission_cancelled", "execution_state_changed"}
     # FIX 2: the promoted ssh-tier handle is rolled back; no binding lingers to block reopen/admit.
-    assert admission._bindings.get(test_key, []) == []
+    assert_no_admission_binding(admission, test_key)
 
 
 def test_run_tests_unexpected_provider_failure_deregisters_ssh_tier_handle(tmp_path: Path) -> None:
@@ -219,7 +220,7 @@ def test_run_tests_unexpected_provider_failure_deregisters_ssh_tier_handle(tmp_p
     admission = _seed_run_tests_admission()
 
     class ExplodingProvider(FakeTestProvider):
-        def execute_tests(self, plan: object, *, cancel: Any = None) -> TestExecutionResult:
+        def execute_tests(self, plan: object, *, cancel: Any = None) -> _TestExecutionResult:
             self.executions += 1
             raise RuntimeError("provider blew up")
 
@@ -235,7 +236,7 @@ def test_run_tests_unexpected_provider_failure_deregisters_ssh_tier_handle(tmp_p
     assert response.ok is False
     assert response.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
     # FIX 2 (symmetric path): the promoted handle is rolled back on the generic-exception path too.
-    assert admission._bindings.get(test_key, []) == []
+    assert_no_admission_binding(admission, test_key)
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +348,7 @@ def test_debug_start_session_closes_transport_on_failed_attach(tmp_path: Path) -
     assert tombstone is not None
     assert tombstone.reason == "closed_while_halted"
     # the promoted admission binding was deregistered on close.
-    assert admission._bindings.get(KEY, []) == []
+    assert_no_admission_binding(admission, KEY)
 
     # (c) the guard is free: a subsequent recovery=True debug.start_session on the same target
     # succeeds — no DEBUG_ATTACH_FAILURE / stop_capable_conflict. recovery=True is required because

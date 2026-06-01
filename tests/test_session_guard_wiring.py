@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from _layer4_fakes import KEY, PLATFORM, FakeQemuTransport, build_txn
 from conftest import FakeMiEngine, kernel_provenance_details, write_vmlinux_with_build_id
+from coordination_observers import assert_no_admission_binding, assert_stop_guard_released
 
 from kdive.config import DebugProfile
 from kdive.coordination.admission import AdmissionError, AdmissionService, publish_ready_snapshot
@@ -229,8 +230,8 @@ def test_resume_on_error_reaps_and_tombstones(tmp_path):
     assert registry.read_record(KEY) is None  # record deleted (not left HALTED)
     tombstone = registry.read_tombstone(KEY)
     assert tombstone is not None and tombstone.reason == "closed_while_halted"
-    assert admission._bindings.get(KEY, []) == []  # promoted binding deregistered
-    txn._guard.acquire(KEY)  # guard is free (no GuardConflict)
+    assert_no_admission_binding(admission, KEY)
+    assert_stop_guard_released(txn, KEY)
 
 
 def test_ssh_tier_rejected_while_halted_then_admitted_after_end(tmp_path):

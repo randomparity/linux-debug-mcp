@@ -12,6 +12,12 @@ from _layer4_fakes import (
     make_console_request,
     make_request,
 )
+from coordination_observers import (
+    assert_lifecycle_subscribed,
+    assert_lifecycle_unsubscribed,
+    assert_no_admission_binding,
+    assert_stop_guard_released,
+)
 
 from kdive.coordination.admission import AdmissionError, TargetSnapshot
 from kdive.coordination.endpoint_safety import EndpointSafetyError
@@ -101,7 +107,7 @@ def test_open_rollback_cleanup_error_does_not_mask_open_failure(tmp_path, monkey
     with pytest.raises(RuntimeError, match="attach blew up"):
         txn.open(make_request())
 
-    assert admission._bindings.get(KEY, []) == []
+    assert_no_admission_binding(admission, KEY)
     guard.acquire(KEY)
 
 
@@ -137,7 +143,7 @@ def test_close_reaps_and_clears(tmp_path):
     assert transport.closed == [session.session_id]
     assert reg.read_record(KEY) is None
     # close() unsubscribes from the lifecycle dispatcher — no stale binding accretes.
-    assert dispatcher._subscribers.get(KEY, {}) == {}
+    assert_lifecycle_unsubscribed(dispatcher, KEY)
 
 
 def test_lifecycle_invalidation_revokes_guard_and_reaps(tmp_path):
@@ -151,7 +157,7 @@ def test_lifecycle_invalidation_revokes_guard_and_reaps(tmp_path):
     admission.invalidate_lifecycle(LifecycleEvent(target_key=KEY, kind=LifecycleKind.CRASHED), dispatcher, generation=1)
     assert reg.read_record(KEY) is None
     # force_drop unsubscribes from the lifecycle dispatcher — no stale binding accretes.
-    assert dispatcher._subscribers.get(KEY, {}) == {}
+    assert_lifecycle_unsubscribed(dispatcher, KEY)
     # guard is free → a new incarnation (after a generation bump) could acquire
     assert guard.acquire(KEY) is not None
 
@@ -182,9 +188,9 @@ def test_open_close_open_succeeds(tmp_path):
     first = txn.open(make_request())
     txn.close(first.session_id)
     # close() deregistered the promoted handle → no binding outstanding for the target.
-    assert admission._bindings.get(KEY, []) == []
+    assert_no_admission_binding(admission, KEY)
     # close() unsubscribes from the lifecycle dispatcher → no stale binding accretes across cycles.
-    assert dispatcher._subscribers.get(KEY, {}) == {}
+    assert_lifecycle_unsubscribed(dispatcher, KEY)
     second = txn.open(make_request())
     assert second.record_state is RecordState.READY
 
@@ -202,9 +208,9 @@ def test_lifecycle_invalidation_then_reopen_succeeds(tmp_path):
     txn.open(make_request())
     admission.invalidate_lifecycle(LifecycleEvent(target_key=KEY, kind=LifecycleKind.CRASHED), dispatcher, generation=1)
     # force_drop deregistered the handle → no binding outstanding blocks reopen.
-    assert admission._bindings.get(KEY, []) == []
+    assert_no_admission_binding(admission, KEY)
     # force_drop unsubscribed from the lifecycle dispatcher → no stale binding accretes.
-    assert dispatcher._subscribers.get(KEY, {}) == {}
+    assert_lifecycle_unsubscribed(dispatcher, KEY)
     # §4.5 step 5: bump the authoritative generation, then admission can reopen for the next open.
     _bump_generation(admission, generation=2)
     admission.reopen(KEY)
@@ -238,13 +244,13 @@ def test_lifecycle_invalidation_between_promote_and_subscribe_force_drops_cleanl
         LifecycleEvent(target_key=KEY, kind=LifecycleKind.CRASHED), dispatcher, generation=session.generation
     )
     assert reg.read_record(KEY) is None
-    assert admission._bindings.get(KEY, []) == []
+    assert_no_admission_binding(admission, KEY)
     # force_drop unsubscribed from the lifecycle dispatcher → no stale binding accretes.
-    assert dispatcher._subscribers.get(KEY, {}) == {}
+    assert_lifecycle_unsubscribed(dispatcher, KEY)
     # close() on the long-dead session_id is now a no-op (record is gone) — it must NOT raise,
     # nor leak the cancelled binding back into the table.
     txn.close(session.session_id)
-    assert admission._bindings.get(KEY, []) == []
+    assert_no_admission_binding(admission, KEY)
 
 
 def test_recovery_clear_failure_restores_cache_gate(tmp_path):
@@ -325,7 +331,7 @@ def test_force_drop_keeps_durable_record_when_invalidate_wedged(tmp_path):
         assert reg.read_record(KEY) is not None
         # The in-memory line is dropped: confirm_reaped → abandon ran on the admission handle,
         # so reopen() will not be blocked by `bindings_outstanding`.
-        assert admission._bindings.get(KEY, []) == []
+        assert_no_admission_binding(admission, KEY)
         # The wedged invalidate worker is still tracked by the dispatcher (single-flight).
         assert dispatcher.outstanding_overdue() == 1
     finally:
@@ -351,10 +357,10 @@ def test_close_unsubscribes_from_lifecycle_dispatcher(tmp_path):
     txn.bind_lifecycle(dispatcher)
     session = txn.open(make_request())
     # Baseline: the subscriber is registered.
-    assert session.session_id in dispatcher._subscribers.get(KEY, {})
+    assert_lifecycle_subscribed(dispatcher, KEY, session.session_id)
     txn.close(session.session_id)
     # close() unsubscribed → no stale subscriber remains.
-    assert dispatcher._subscribers.get(KEY, {}) == {}
+    assert_lifecycle_unsubscribed(dispatcher, KEY)
 
 
 def test_force_drop_unsubscribes_after_dispatcher_invocation(tmp_path):
@@ -369,12 +375,12 @@ def test_force_drop_unsubscribes_after_dispatcher_invocation(tmp_path):
     txn, admission = build_txn(transport, guard=guard, leases=leases, registry=reg)
     txn.bind_lifecycle(dispatcher)
     session = txn.open(make_request())
-    assert session.session_id in dispatcher._subscribers.get(KEY, {})
+    assert_lifecycle_subscribed(dispatcher, KEY, session.session_id)
     admission.invalidate_lifecycle(
         LifecycleEvent(target_key=KEY, kind=LifecycleKind.CRASHED), dispatcher, generation=session.generation
     )
     # force_drop unsubscribed → no stale subscriber remains for a future invalidate.
-    assert dispatcher._subscribers.get(KEY, {}) == {}
+    assert_lifecycle_unsubscribed(dispatcher, KEY)
 
 
 def test_delete_record_session_id_fence_skips_on_mismatch(tmp_path):
@@ -434,7 +440,7 @@ def test_force_release_deletes_record_and_releases_guard(tmp_path):
     txn.force_release(session.session_id)
     assert reg.read_record(KEY) is None
     # guard is free again: a fresh acquire succeeds (no GuardConflict)
-    txn._guard.acquire(KEY)
+    assert_stop_guard_released(txn, KEY)
 
 
 def test_force_release_unknown_session_is_noop(tmp_path):
