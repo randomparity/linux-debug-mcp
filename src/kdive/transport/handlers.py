@@ -159,6 +159,77 @@ class _SessionRunMismatch(ValueError):
     pass
 
 
+def _transport_inject_break_profile_gate(
+    *,
+    request: TransportInjectBreakHandlerRequest,
+    runtime: TransportToolContext,
+) -> ToolResponse | None:
+    run_id = request.run_id
+    missing = missing_destructive_permissions("transport.inject_break", request.acknowledged_permissions or [])
+    if missing:
+        return _configuration_failure(
+            run_id=run_id,
+            message="transport.inject_break is destructive; acknowledge its required permissions to proceed",
+            details={"code": "permission_required", "required_permissions": missing},
+        )
+
+    requested_profile = "qemu-gdbstub-default"
+    if request.artifact_root is not None:
+        try:
+            store = ArtifactStore(request.artifact_root, create_root=False)
+            requested_profile = store.load_manifest(run_id).request.debug_profile or "qemu-gdbstub-default"
+        except (ManifestStateError, OSError) as exc:
+            return _configuration_failure(
+                run_id=run_id,
+                message=f"failed to load run manifest for transport.inject_break: {exc}",
+                details={"code": "manifest_load_failed"},
+            )
+    try:
+        resolved_profile = resolve_debug_profile(profile_name=requested_profile, debug_profiles=runtime.debug_profiles)
+        ensure_debug_operation_enabled(resolved_profile, "transport.inject_break")
+    except ProviderDebugError as exc:
+        return _configuration_failure(run_id=run_id, message=str(exc), details=exc.details)
+    return None
+
+
+def _break_unconfirmed_failure(
+    *,
+    run_id: str,
+    category: ErrorCategory,
+    message: str,
+    redactor: Redactor,
+    extra_details: dict[str, object] | None = None,
+) -> ToolResponse:
+    details = {
+        **(extra_details or {}),
+        "code": "break_unconfirmed",
+        "execution_state": ExecutionState.UNKNOWN.value,
+    }
+    return ToolResponse.failure(
+        category=category,
+        message=redactor.redact_text(message),
+        run_id=run_id,
+        details=redactor.redact_value(details),
+        suggested_next_actions=["providers.list"],
+    )
+
+
+def _probe_injected_break(
+    *,
+    runtime: TransportToolContext,
+    record: TransportSession,
+    redactor: Redactor,
+) -> tuple[bool, dict[str, object]]:
+    try:
+        return runtime.probe_halted(record), {}
+    except Exception as exc:
+        return False, {
+            "probe_code": "probe_failed",
+            "exception_type": type(exc).__name__,
+            "exception_message": redactor.redact_text(str(exc)),
+        }
+
+
 def transport_close_handler(
     *,
     request: TransportCloseHandlerRequest,
@@ -222,29 +293,9 @@ def transport_inject_break_handler(
     session_registry = runtime.session_registry
     if transaction is None or admission is None or session_registry is None:
         return _transport_disabled_failure(run_id=run_id)
-    missing = missing_destructive_permissions("transport.inject_break", request.acknowledged_permissions or [])
-    if missing:
-        return _configuration_failure(
-            run_id=run_id,
-            message="transport.inject_break is destructive; acknowledge its required permissions to proceed",
-            details={"code": "permission_required", "required_permissions": missing},
-        )
-    requested_profile = "qemu-gdbstub-default"
-    if request.artifact_root is not None:
-        try:
-            store = ArtifactStore(request.artifact_root, create_root=False)
-            requested_profile = store.load_manifest(run_id).request.debug_profile or "qemu-gdbstub-default"
-        except (ManifestStateError, OSError) as exc:
-            return _configuration_failure(
-                run_id=run_id,
-                message=f"failed to load run manifest for transport.inject_break: {exc}",
-                details={"code": "manifest_load_failed"},
-            )
-    try:
-        resolved_profile = resolve_debug_profile(profile_name=requested_profile, debug_profiles=runtime.debug_profiles)
-        ensure_debug_operation_enabled(resolved_profile, "transport.inject_break")
-    except ProviderDebugError as exc:
-        return _configuration_failure(run_id=run_id, message=str(exc), details=exc.details)
+    profile_failure = _transport_inject_break_profile_gate(request=request, runtime=runtime)
+    if profile_failure is not None:
+        return profile_failure
     try:
         record = _resolve_session_for_run(
             session_registry=session_registry,
@@ -272,57 +323,38 @@ def transport_inject_break_handler(
             runtime.break_mechanism(method="auto", break_plan=record.break_plan)
     except InjectBreakError as exc:
         session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
-        exc_details = dict(getattr(exc, "details", {}) or {})
-        details = redactor.redact_value(
-            {
-                **exc_details,
-                "code": "break_unconfirmed",
-                "execution_state": ExecutionState.UNKNOWN.value,
-            }
-        )
-        return ToolResponse.failure(
-            category=exc.category,
-            message=redactor.redact_text(str(exc)),
+        return _break_unconfirmed_failure(
             run_id=run_id,
-            details=details,
-            suggested_next_actions=["providers.list"],
+            category=exc.category,
+            message=str(exc),
+            redactor=redactor,
+            extra_details=dict(getattr(exc, "details", {}) or {}),
         )
     except Exception as exc:
         session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            message=redactor.redact_text(f"break mechanism failed unexpectedly: {exc}"),
+        return _break_unconfirmed_failure(
             run_id=run_id,
-            details=redactor.redact_value(
-                {"code": "break_unconfirmed", "execution_state": ExecutionState.UNKNOWN.value}
-            ),
-            suggested_next_actions=["providers.list"],
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            message=f"break mechanism failed unexpectedly: {exc}",
+            redactor=redactor,
         )
-    probe_failure_details: dict[str, object] = {}
-    try:
-        halted_observed = runtime.probe_halted(record)
-    except Exception as exc:
-        halted_observed = False
-        probe_failure_details = {
-            "probe_code": "probe_failed",
-            "exception_type": type(exc).__name__,
-            "exception_message": redactor.redact_text(str(exc)),
-        }
+
+    halted_observed, probe_failure_details = _probe_injected_break(
+        runtime=runtime,
+        record=record,
+        redactor=redactor,
+    )
     if not halted_observed:
         session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
-        return ToolResponse.failure(
+        return _break_unconfirmed_failure(
+            run_id=run_id,
             category=ErrorCategory.DEBUG_ATTACH_FAILURE,
             message="inject_break: post-probe did not confirm HALTED",
-            run_id=run_id,
-            details=redactor.redact_value(
-                {
-                    "code": "break_unconfirmed",
-                    "execution_state": ExecutionState.UNKNOWN.value,
-                    "probe_observed": ExecutionState.UNKNOWN.value,
-                    **probe_failure_details,
-                }
-            ),
-            suggested_next_actions=["providers.list"],
+            redactor=redactor,
+            extra_details={
+                "probe_observed": ExecutionState.UNKNOWN.value,
+                **probe_failure_details,
+            },
         )
     return ToolResponse.success(
         summary=f"break injected on transport session {session_id}; target halted",

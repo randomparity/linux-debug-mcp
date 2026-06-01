@@ -8,13 +8,13 @@ from kdive.config import (
 
 
 def test_allowlist_contents():
-    assert TRANSPORT_OPERATIONS == [
+    assert TRANSPORT_OPERATIONS == (
         "transport.open",
         "transport.status",
         "transport.health",
         "transport.inject_break",
         "transport.close",
-    ]
+    )
 
 
 def test_validate_accepts_allowed_operation():
@@ -29,7 +29,7 @@ def test_validate_rejects_unknown_operation():
 
 def test_inject_break_carries_destructive_permission():
     perms = TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"]
-    assert perms == ["drop target kernel into the debugger"]
+    assert perms == ("drop target kernel into the debugger",)
 
 
 def test_only_inject_break_is_destructive():
