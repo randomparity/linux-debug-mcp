@@ -9,13 +9,14 @@ import subprocess  # nosec B404
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from kdive.config import RootfsProfile
 from kdive.domain import ArtifactRef, ErrorCategory, StepStatus
 
 _SNIPPET_LIMIT = 4096
 SSH_TIMEOUT_GRACE_SECONDS = 10
+_SshStopReason = Literal["completed", "cancelled", "timed_out", "oversized"]
 
 
 @dataclass(frozen=True)
@@ -76,9 +77,6 @@ class SubprocessSshRunner:
     ) -> SshCommandResult:
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
         stderr_path.parent.mkdir(parents=True, exist_ok=True)
-        cancelled_flag = False
-        timed_out_flag = False
-        oversized_flag = False
         with (
             stdout_path.open("w", encoding="utf-8") as stdout_file,
             stderr_path.open("w", encoding="utf-8") as stderr_file,
@@ -111,34 +109,37 @@ class SubprocessSshRunner:
 
                 stdin_thread = threading.Thread(target=_write_stdin, daemon=True)
                 stdin_thread.start()
-            ticks = 0
-            while True:
-                try:
-                    proc.wait(timeout=0.1)
-                    break
-                except subprocess.TimeoutExpired:
-                    ticks += 1
+
+            def terminate_and_wait() -> None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+
+            def poll_until_stop() -> _SshStopReason:
+                ticks = 0
+                while True:
+                    try:
+                        proc.wait(timeout=0.1)
+                        return "completed"
+                    except subprocess.TimeoutExpired:
+                        ticks += 1
                     if cancel is not None and cancel.is_set():
-                        with contextlib.suppress(ProcessLookupError):
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        proc.wait()
-                        cancelled_flag = True
-                        break
+                        terminate_and_wait()
+                        return "cancelled"
                     if ticks * 0.1 >= timeout:
-                        with contextlib.suppress(ProcessLookupError):
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        proc.wait()
-                        timed_out_flag = True
-                        break
+                        terminate_and_wait()
+                        return "timed_out"
                     if max_stdout_bytes is not None and self._stdout_size(stdout_path) > max_stdout_bytes:
-                        with contextlib.suppress(ProcessLookupError):
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        proc.wait()
-                        oversized_flag = True
-                        break
+                        terminate_and_wait()
+                        return "oversized"
+
+            stop_reason = poll_until_stop()
             if stdin_thread is not None:
                 stdin_thread.join(timeout=2)
-        exit_status = -1 if (cancelled_flag or timed_out_flag or oversized_flag) else proc.returncode
+        cancelled_flag = stop_reason == "cancelled"
+        timed_out_flag = stop_reason == "timed_out"
+        oversized_flag = stop_reason == "oversized"
+        exit_status = -1 if stop_reason != "completed" else proc.returncode
         return SshCommandResult(
             exit_status=exit_status,
             stdout_snippet=self._read_snippet(stdout_path),

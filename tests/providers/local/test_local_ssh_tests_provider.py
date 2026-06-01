@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from kdive.config import RootfsProfile, TestCommand, TestSuiteProfile
+from kdive import config as kdive_config
+from kdive.config import RootfsProfile
 from kdive.domain import ErrorCategory, StepStatus
 from kdive.providers.local.test.local_ssh_tests import (
     _SNIPPET_LIMIT,
@@ -68,10 +69,10 @@ def rootfs(**kwargs: object) -> RootfsProfile:
     return RootfsProfile(**defaults)
 
 
-def suite(**kwargs: object) -> TestSuiteProfile:
-    return TestSuiteProfile(
+def suite(**kwargs: object) -> kdive_config.TestSuiteProfile:
+    return kdive_config.TestSuiteProfile(
         name="smoke-basic",
-        commands=[TestCommand(name="uname", argv=["uname", "-a"])],
+        commands=[kdive_config.TestCommand(name="uname", argv=["uname", "-a"])],
         **kwargs,
     )
 
@@ -116,7 +117,7 @@ def test_plan_allows_adhoc_only_without_default_suite_commands(tmp_path: Path) -
         run_dir=tmp_path,
         rootfs_profile=rootfs(),
         suite=None,
-        adhoc_commands=[TestCommand(name="adhoc-001", argv=["id"], required=True)],
+        adhoc_commands=[kdive_config.TestCommand(name="adhoc-001", argv=["id"], required=True)],
         attempt=1,
     )
 
@@ -208,11 +209,11 @@ def test_execute_required_failure_stops_when_stop_on_failure_is_true(tmp_path: P
         run_id="run-abc123",
         run_dir=tmp_path,
         rootfs_profile=rootfs(),
-        suite=TestSuiteProfile(
+        suite=kdive_config.TestSuiteProfile(
             name="smoke-basic",
             commands=[
-                TestCommand(name="first", argv=["false"]),
-                TestCommand(name="second", argv=["true"]),
+                kdive_config.TestCommand(name="first", argv=["false"]),
+                kdive_config.TestCommand(name="second", argv=["true"]),
             ],
             stop_on_failure=True,
             collect_dmesg=False,
