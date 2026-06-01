@@ -261,6 +261,7 @@ def test_default_registry_exposes_local_provider_capabilities() -> None:
     assert (
         operation_permissions["transport.inject_break"] == TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"]
     )
+    assert operation_permissions["workflow.build_boot_debug"] == TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"]
 
 
 def test_default_providers_expose_richer_metadata() -> None:
@@ -497,9 +498,13 @@ def test_registry_advertises_local_qemu_gdbstub_without_debug_stubs() -> None:
         operation_capabilities["transport.inject_break"].destructive_permissions
         == TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"]
     )
+    assert (
+        operation_capabilities["workflow.build_boot_debug"].destructive_permissions
+        == TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"]
+    )
     assert all(
         operation_capabilities[operation].destructive_permissions == []
         for operation in debug_provider.operations
-        if operation != "transport.inject_break"
+        if operation not in {"transport.inject_break", "workflow.build_boot_debug"}
     )
     assert "stub-workflows" not in providers or "debug.start_session" not in providers["stub-workflows"].operations

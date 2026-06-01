@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kdive.config import ALLOWED_DEBUG_OPERATIONS, TRANSPORT_DESTRUCTIVE_PERMISSIONS
+from kdive.config import ALLOWED_DEBUG_OPERATIONS, TARGET_DESTRUCTIVE_PERMISSIONS, TRANSPORT_DESTRUCTIVE_PERMISSIONS
 from kdive.domain import (
     OperationSemantics,
     ProviderCapability,
@@ -15,6 +15,10 @@ QEMU_GDBSTUB_OPERATIONS = [
     "workflow.build_boot_debug",
     *[op for op in ALLOWED_DEBUG_OPERATIONS if op not in {"debug.introspect.run", "debug.introspect.write"}],
 ]
+QEMU_GDBSTUB_DESTRUCTIVE_PERMISSIONS = {
+    **TRANSPORT_DESTRUCTIVE_PERMISSIONS,
+    "workflow.build_boot_debug": TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"],
+}
 
 
 def local_qemu_gdbstub_capability() -> ProviderCapability:
@@ -42,7 +46,7 @@ def local_qemu_gdbstub_capability() -> ProviderCapability:
                 operation=operation,
                 semantics=semantics,
                 required_host_tools=["gdb"],
-                destructive_permissions=list(TRANSPORT_DESTRUCTIVE_PERMISSIONS.get(operation, [])),
+                destructive_permissions=list(QEMU_GDBSTUB_DESTRUCTIVE_PERMISSIONS.get(operation, [])),
             )
             for operation in QEMU_GDBSTUB_OPERATIONS
         ],
