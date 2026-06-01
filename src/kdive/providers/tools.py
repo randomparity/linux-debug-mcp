@@ -122,6 +122,10 @@ def _evaluated_signature(request_factory: _StubProviderRequestFactory) -> inspec
     )
 
 
+def _stub_provider_tool_signature(request_factory: _StubProviderRequestFactory) -> inspect.Signature:
+    return _evaluated_signature(request_factory).replace(return_annotation=dict[str, Any])
+
+
 def _register_stub_provider_tool(
     app: FastMCP,
     *,
@@ -151,10 +155,13 @@ def _register_stub_provider_tool(
 
         tool_wrapper.__name__ = request_factory.__name__
         tool_wrapper.__doc__ = request_factory.__doc__
-        tool_wrapper.__annotations__ = get_type_hints(request_factory)
+        tool_wrapper.__annotations__ = {
+            **get_type_hints(request_factory),
+            "return": dict[str, Any],
+        }
         # FastMCP inspects ``__signature__`` on the registered callable; copy the adapter signature
         # so the public tool schema exposes explicit parameters instead of ``*args, **kwargs``.
-        cast(Any, tool_wrapper).__signature__ = _evaluated_signature(request_factory)
+        cast(Any, tool_wrapper).__signature__ = _stub_provider_tool_signature(request_factory)
         return app.tool(name=tool_name)(tool_wrapper)
 
     return decorate

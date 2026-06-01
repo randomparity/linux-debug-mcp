@@ -5,6 +5,7 @@ import inspect
 import socket
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -255,6 +256,16 @@ def test_stub_provider_tool_schema_groups_repeated_provider_metadata() -> None:
     assert "artifact_options" in signature.parameters
     for repeated in ("provider_name", "timeout_seconds", "operation_label", "run_id", "output_artifact_ref"):
         assert repeated not in signature.parameters
+
+
+def test_stub_provider_tool_signature_matches_json_response_contract() -> None:
+    tool_fn = create_app()._tool_manager._tools["remote.build_kernel"].fn
+    signature = inspect.signature(tool_fn)
+
+    assert signature.parameters["provider_context"].annotation == provider_tools.ProviderToolContext | None
+    assert signature.return_annotation == dict[str, Any]
+    assert tool_fn.__annotations__["provider_context"] == provider_tools.ProviderToolContext | None
+    assert tool_fn.__annotations__["return"] == dict[str, Any]
 
 
 def test_stub_provider_tool_requests_are_built_by_explicit_wrappers() -> None:
