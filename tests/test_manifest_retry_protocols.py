@@ -69,10 +69,13 @@ def test_manifest_step_retry_surfaces_non_lock_manifest_errors() -> None:
 
 def test_postmortem_dump_handlers_are_owned_by_postmortem_module() -> None:
     from kdive import server
+    from kdive.postmortem import dump_handlers
 
-    assert postmortem_handlers.debug_postmortem_check_prereqs_handler.__module__ == "kdive.postmortem.handlers"
-    assert postmortem_handlers.debug_postmortem_list_dumps_handler.__module__ == "kdive.postmortem.handlers"
-    assert postmortem_handlers.debug_postmortem_fetch_handler.__module__ == "kdive.postmortem.handlers"
+    assert postmortem_handlers.debug_postmortem_check_prereqs_handler is (
+        dump_handlers.debug_postmortem_check_prereqs_handler
+    )
+    assert postmortem_handlers.debug_postmortem_list_dumps_handler is dump_handlers.debug_postmortem_list_dumps_handler
+    assert postmortem_handlers.debug_postmortem_fetch_handler is dump_handlers.debug_postmortem_fetch_handler
     app = server.create_app()
     assert app._tool_manager._tools["debug.postmortem.check_prereqs"].fn.__module__ == "kdive.postmortem.tools"
     assert app._tool_manager._tools["debug.postmortem.list_dumps"].fn.__module__ == "kdive.postmortem.tools"

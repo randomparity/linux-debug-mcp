@@ -10,7 +10,7 @@ from kdive.domain import (
     RunRequest,
     ToolResponse,
 )
-from kdive.postmortem import handlers as postmortem_handlers
+from kdive.postmortem import triage_handlers
 from kdive.postmortem.handlers import debug_postmortem_triage_handler
 from kdive.postmortem.models import DebugPostmortemTriageRequest
 
@@ -18,14 +18,14 @@ GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
 
 def test_triage_handler_lives_in_postmortem_package() -> None:
-    assert postmortem_handlers.debug_postmortem_triage_handler.__module__ == "kdive.postmortem.handlers"
+    assert debug_postmortem_triage_handler is triage_handlers.debug_postmortem_triage_handler
     assert server_module.create_app()._tool_manager._tools["debug.postmortem.triage"].fn.__module__ == (
         "kdive.postmortem.tools"
     )
 
 
 def test_triage_handler_is_split_into_named_phases() -> None:
-    handler_source = inspect.getsource(postmortem_handlers.debug_postmortem_triage_handler)
+    handler_source = inspect.getsource(triage_handlers.debug_postmortem_triage_handler)
 
     for helper_name in (
         "_run_triage_sources",
@@ -33,15 +33,15 @@ def test_triage_handler_is_split_into_named_phases() -> None:
         "_record_failed_triage",
         "_persist_successful_triage_report",
     ):
-        assert hasattr(postmortem_handlers, helper_name)
+        assert hasattr(triage_handlers, helper_name)
         assert f"{helper_name}(" in handler_source
 
 
 def test_triage_report_state_uses_source_outcome_helpers() -> None:
-    state_source = inspect.getsource(postmortem_handlers._build_triage_report_state)
+    state_source = inspect.getsource(triage_handlers._build_triage_report_state)
 
-    assert hasattr(postmortem_handlers, "_triage_crash_outcome")
-    assert hasattr(postmortem_handlers, "_triage_drgn_outcome")
+    assert hasattr(triage_handlers, "_triage_crash_outcome")
+    assert hasattr(triage_handlers, "_triage_drgn_outcome")
     assert "CrashOutcome(" not in state_source
     assert "DrgnOutcome(" not in state_source
 

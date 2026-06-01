@@ -19,6 +19,8 @@ def test_postmortem_workflows_are_split_into_focused_packages() -> None:
     assert (POSTMORTEM_ROOT / "crash" / "__init__.py").is_file()
     assert (POSTMORTEM_ROOT / "dumps" / "__init__.py").is_file()
     assert (POSTMORTEM_ROOT / "triage" / "__init__.py").is_file()
+    assert (POSTMORTEM_ROOT / "dump_handlers.py").is_file()
+    assert (POSTMORTEM_ROOT / "triage_handlers.py").is_file()
     assert (POSTMORTEM_ROOT / "dumps" / "core.py").is_file()
     assert (POSTMORTEM_ROOT / "triage" / "assemble.py").is_file()
 
@@ -29,6 +31,10 @@ def test_postmortem_workflows_are_split_into_focused_packages() -> None:
         source = init_file.read_text(encoding="utf-8")
         assert "\ndef " not in source
         assert "@dataclass" not in source
+
+    handler_source = (POSTMORTEM_ROOT / "handlers.py").read_text(encoding="utf-8")
+    assert "\ndef " not in handler_source
+    assert "@dataclass" not in handler_source
 
 
 def test_crash_package_exports_only_handler_boundary_symbols() -> None:
