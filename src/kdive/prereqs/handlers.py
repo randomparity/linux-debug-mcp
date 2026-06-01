@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from kdive.config import BuildProfile, RootfsProfile, TargetProfile
 from kdive.default_profiles import DEFAULT_BUILD_PROFILES, DEFAULT_ROOTFS_PROFILES, DEFAULT_TARGET_PROFILES
 from kdive.domain import PrerequisiteCheck, PrerequisiteStatus, ToolResponse
 from kdive.prereqs.checks import (
-    PortProbeResult,
-    PrerequisiteRunner,
     SubprocessPrerequisiteRunner,
     check_gdbstub_port,
     check_kernel_config,
@@ -19,7 +15,7 @@ from kdive.prereqs.checks import (
     check_rootfs_builder,
     check_rootfs_image,
 )
-from kdive.prereqs.tools import HostPrerequisitesHandlerRequest
+from kdive.prereqs.tools import HostPrerequisitesHandlerRequest, HostPrerequisitesRuntime
 
 _READINESS_CHECK_IDS = {"build": "kernel.config", "target": "gdbstub.port", "rootfs": "rootfs.image"}
 
@@ -43,50 +39,31 @@ def _resolve_readiness_profile(
 
 def prerequisites_handler(
     *,
-    request: HostPrerequisitesHandlerRequest | None = None,
-    artifact_root: Path | None = None,
-    source_path: str | None = None,
-    enable_libvirt_check: bool = False,
-    build_profile: str | None = None,
-    target_profile: str | None = None,
-    rootfs_profile: str | None = None,
-    build_profiles: dict[str, BuildProfile] | None = None,
-    target_profiles: dict[str, TargetProfile] | None = None,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
-    port_probe: Callable[[str, int], PortProbeResult] | None = None,
-    runner: PrerequisiteRunner | None = None,
-    kvm_probe: Callable[[], bool] | None = None,
+    request: HostPrerequisitesHandlerRequest,
+    runtime: HostPrerequisitesRuntime,
 ) -> ToolResponse:
-    if request is not None:
-        artifact_root = request.artifact_root
-        source_path = request.source_path
-        enable_libvirt_check = request.enable_libvirt_check
-        build_profile = request.build_profile
-        target_profile = request.target_profile
-        rootfs_profile = request.rootfs_profile
-    if artifact_root is None:
-        raise TypeError("artifact_root is required")
-    build_profiles = build_profiles if build_profiles is not None else DEFAULT_BUILD_PROFILES
-    target_profiles = target_profiles if target_profiles is not None else DEFAULT_TARGET_PROFILES
-    rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
-    source = Path(source_path) if source_path else None
-    runner = runner or SubprocessPrerequisiteRunner()
+    build_profiles = runtime.build_profiles if runtime.build_profiles is not None else DEFAULT_BUILD_PROFILES
+    target_profiles = runtime.target_profiles if runtime.target_profiles is not None else DEFAULT_TARGET_PROFILES
+    rootfs_profiles = runtime.rootfs_profiles if runtime.rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
+    source = Path(request.source_path) if request.source_path else None
+    runner = runtime.runner or SubprocessPrerequisiteRunner()
     checks = check_prerequisites(
-        artifact_root=artifact_root,
+        artifact_root=request.artifact_root,
         source_path=source,
-        enable_libvirt_check=enable_libvirt_check,
+        enable_libvirt_check=request.enable_libvirt_check,
         runner=runner,
     )
-    build_obj, build_err = _resolve_readiness_profile("build", build_profile, build_profiles)
-    rootfs_obj, rootfs_err = _resolve_readiness_profile("rootfs", rootfs_profile, rootfs_profiles)
-    target_obj, target_err = _resolve_readiness_profile("target", target_profile, target_profiles)
+    build_obj, build_err = _resolve_readiness_profile("build", request.build_profile, build_profiles)
+    rootfs_obj, rootfs_err = _resolve_readiness_profile("rootfs", request.rootfs_profile, rootfs_profiles)
+    target_obj, target_err = _resolve_readiness_profile("target", request.target_profile, target_profiles)
     checks.append(build_err or check_kernel_config(source, build_obj))
     checks.append(rootfs_err or check_rootfs_image(rootfs_obj))
-    checks.append(target_err or check_gdbstub_port(target_obj, port_probe=port_probe))
-    checks.append(check_kvm_access(kvm_probe=kvm_probe))
+    checks.append(target_err or check_gdbstub_port(target_obj, port_probe=runtime.port_probe))
+    checks.append(check_kvm_access(kvm_probe=runtime.kvm_probe))
     checks.append(check_rootfs_builder(runner=runner))
     checks.append(
-        target_err or check_libvirt_connect(target_obj, runner=runner, enable_libvirt_check=enable_libvirt_check)
+        target_err
+        or check_libvirt_connect(target_obj, runner=runner, enable_libvirt_check=request.enable_libvirt_check)
     )
     failed = [check for check in checks if check.status is PrerequisiteStatus.FAILED]
     return ToolResponse.success(

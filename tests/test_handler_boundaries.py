@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -166,6 +167,25 @@ def test_debug_features_do_not_import_private_transport_handler_helpers() -> Non
     }
 
     assert offenders == {}
+
+
+def test_transport_and_prereq_handlers_accept_structured_boundaries_only() -> None:
+    from kdive.prereqs.handlers import prerequisites_handler
+    from kdive.transport.handlers import (
+        transport_close_handler,
+        transport_inject_break_handler,
+        transport_open_handler,
+    )
+
+    handlers = [
+        transport_open_handler,
+        transport_close_handler,
+        transport_inject_break_handler,
+        prerequisites_handler,
+    ]
+
+    for handler in handlers:
+        assert list(inspect.signature(handler).parameters) == ["request", "runtime"]
 
 
 def test_server_does_not_reexport_private_feature_helpers() -> None:

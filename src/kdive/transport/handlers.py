@@ -1,24 +1,20 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
-from kdive.config import DebugProfile, missing_destructive_permissions
+from kdive.config import missing_destructive_permissions
 from kdive.coordination.admission import AdmissionError, AdmissionService, require_target_snapshot
 from kdive.coordination.endpoint_safety import EndpointSafetyError
-from kdive.coordination.exec_probe import probe_rsp_halted
 from kdive.coordination.registry import SessionRegistry
-from kdive.coordination.transaction import TransportTransaction
 from kdive.debug.policy import ensure_debug_operation_enabled, halt_debug_transport, resolve_debug_profile
 from kdive.domain import ErrorCategory, ToolResponse
 from kdive.providers.debug import ProviderDebugError
 from kdive.safety.redaction import Redactor
 from kdive.seams.guard import GuardConflict
 from kdive.seams.target import TargetKey
-from kdive.transport.core.base import BreakPlan, ExecutionState, LineRole, OpenRequest, TransportSession
-from kdive.transport.core.break_inject import BreakRequestMethod, InjectBreakError
+from kdive.transport.core.base import ExecutionState, LineRole, OpenRequest, TransportSession
+from kdive.transport.core.break_inject import InjectBreakError
 from kdive.transport.tools import (
     TransportCloseHandlerRequest,
     TransportInjectBreakHandlerRequest,
@@ -85,29 +81,19 @@ def _transport_open_request(*, run_id: str, admission: AdmissionService) -> Open
 
 def transport_open_handler(
     *,
-    request: TransportOpenHandlerRequest | None = None,
-    runtime: TransportToolContext | None = None,
-    run_id: str | None = None,
-    recovery: bool = False,
-    transaction: TransportTransaction | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
+    request: TransportOpenHandlerRequest,
+    runtime: TransportToolContext,
 ) -> ToolResponse:
-    if request is not None:
-        run_id = request.run_id
-        recovery = request.recovery
-    if runtime is not None:
-        transaction = runtime.transaction
-        admission = runtime.admission
-        session_registry = runtime.session_registry
-    if run_id is None:
-        raise TypeError("run_id is required")
+    run_id = request.run_id
+    transaction = runtime.transaction
+    admission = runtime.admission
+    session_registry = runtime.session_registry
     if transaction is None or admission is None or session_registry is None:
         return _transport_disabled_failure(run_id=run_id)
     redactor = Redactor()
     try:
         open_request = _transport_open_request(run_id=run_id, admission=admission)
-        session = transaction.open(open_request, recovery=recovery)
+        session = transaction.open(open_request, recovery=request.recovery)
     except KeyError:
         return _configuration_failure(
             run_id=run_id,
@@ -183,29 +169,15 @@ class _SessionRunMismatch(ValueError):
     pass
 
 
-class BreakMechanism(Protocol):
-    def __call__(self, *, method: BreakRequestMethod, break_plan: BreakPlan | None) -> None: ...
-
-
 def transport_close_handler(
     *,
-    request: TransportCloseHandlerRequest | None = None,
-    runtime: TransportToolContext | None = None,
-    run_id: str | None = None,
-    session_id: str | None = None,
-    transaction: TransportTransaction | None = None,
-    session_registry: SessionRegistry | None = None,
+    request: TransportCloseHandlerRequest,
+    runtime: TransportToolContext,
 ) -> ToolResponse:
-    if request is not None:
-        run_id = request.run_id
-        session_id = request.session_id
-    if runtime is not None:
-        transaction = runtime.transaction
-        session_registry = runtime.session_registry
-    if run_id is None:
-        raise TypeError("run_id is required")
-    if session_id is None:
-        raise TypeError("session_id is required")
+    run_id = request.run_id
+    session_id = request.session_id
+    transaction = runtime.transaction
+    session_registry = runtime.session_registry
     if transaction is None or session_registry is None:
         return _transport_disabled_failure(run_id=run_id)
     try:
@@ -250,35 +222,17 @@ def transport_close_handler(
 
 def transport_inject_break_handler(
     *,
-    request: TransportInjectBreakHandlerRequest | None = None,
-    runtime: TransportToolContext | None = None,
-    run_id: str | None = None,
-    session_id: str | None = None,
-    acknowledged_permissions: list[str] | None = None,
-    artifact_root: Path | None = None,
-    transaction: TransportTransaction | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
-    break_mechanism: BreakMechanism | None = None,
-    probe_halted: Callable[[TransportSession], bool] = probe_rsp_halted,
+    request: TransportInjectBreakHandlerRequest,
+    runtime: TransportToolContext,
 ) -> ToolResponse:
-    if request is not None:
-        run_id = request.run_id
-        session_id = request.session_id
-        acknowledged_permissions = request.acknowledged_permissions
-        artifact_root = request.artifact_root
-    if runtime is not None:
-        transaction = runtime.transaction
-        admission = runtime.admission
-        session_registry = runtime.session_registry
-    if run_id is None:
-        raise TypeError("run_id is required")
-    if session_id is None:
-        raise TypeError("session_id is required")
+    run_id = request.run_id
+    session_id = request.session_id
+    transaction = runtime.transaction
+    admission = runtime.admission
+    session_registry = runtime.session_registry
     if transaction is None or admission is None or session_registry is None:
         return _transport_disabled_failure(run_id=run_id)
-    missing = missing_destructive_permissions("transport.inject_break", acknowledged_permissions or [])
+    missing = missing_destructive_permissions("transport.inject_break", request.acknowledged_permissions or [])
     if missing:
         return _configuration_failure(
             run_id=run_id,
@@ -286,9 +240,9 @@ def transport_inject_break_handler(
             details={"code": "permission_required", "required_permissions": missing},
         )
     requested_profile = "qemu-gdbstub-default"
-    if artifact_root is not None:
+    if request.artifact_root is not None:
         try:
-            store = ArtifactStore(artifact_root, create_root=False)
+            store = ArtifactStore(request.artifact_root, create_root=False)
             requested_profile = store.load_manifest(run_id).request.debug_profile or "qemu-gdbstub-default"
         except (ManifestStateError, OSError) as exc:
             return _configuration_failure(
@@ -297,7 +251,7 @@ def transport_inject_break_handler(
                 details={"code": "manifest_load_failed"},
             )
     try:
-        resolved_profile = resolve_debug_profile(profile_name=requested_profile, debug_profiles=debug_profiles)
+        resolved_profile = resolve_debug_profile(profile_name=requested_profile, debug_profiles=runtime.debug_profiles)
         ensure_debug_operation_enabled(resolved_profile, "transport.inject_break")
     except ProviderDebugError as exc:
         return _configuration_failure(run_id=run_id, message=str(exc), details=exc.details)
@@ -322,10 +276,10 @@ def transport_inject_break_handler(
     halt_debug_transport(session=record, admission=admission, session_registry=session_registry)
     redactor = Redactor()
     try:
-        if break_mechanism is None:
+        if runtime.break_mechanism is None:
             transaction.inject_break_for_session(session_id, "auto")
         else:
-            break_mechanism(method="auto", break_plan=record.break_plan)
+            runtime.break_mechanism(method="auto", break_plan=record.break_plan)
     except InjectBreakError as exc:
         session_registry.write_record(record.model_copy(update={"execution_state": ExecutionState.UNKNOWN}))
         exc_details = dict(getattr(exc, "details", {}) or {})
@@ -356,7 +310,7 @@ def transport_inject_break_handler(
         )
     probe_failure_details: dict[str, object] = {}
     try:
-        halted_observed = probe_halted(record)
+        halted_observed = runtime.probe_halted(record)
     except Exception as exc:
         halted_observed = False
         probe_failure_details = {

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kdive.domain import PrerequisiteCheck, PrerequisiteStatus
 from kdive.prereqs.handlers import prerequisites_handler
+from kdive.prereqs.tools import HostPrerequisitesHandlerRequest, HostPrerequisitesRuntime
 
 USAGE = "Usage: python -m kdive.prereqs.dev_setup check-host"
 
@@ -19,9 +20,15 @@ def format_prerequisite_checks(checks: list[PrerequisiteCheck]) -> list[str]:
 
 def check_host() -> int:
     response = prerequisites_handler(
-        artifact_root=Path(".kdive"),
-        source_path=None,
-        enable_libvirt_check=False,
+        request=HostPrerequisitesHandlerRequest(
+            artifact_root=Path(".kdive"),
+            source_path=None,
+            enable_libvirt_check=False,
+            build_profile=None,
+            target_profile=None,
+            rootfs_profile=None,
+        ),
+        runtime=HostPrerequisitesRuntime(),
     )
     checks = _parse_prerequisite_checks(response.data["checks"])
     failed = [check for check in checks if check.status is PrerequisiteStatus.FAILED]

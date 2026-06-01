@@ -9,6 +9,33 @@ from kdive.prereqs.checks import (
     check_prerequisites,
     check_rootfs_image,
 )
+from kdive.prereqs.tools import HostPrerequisitesHandlerRequest, HostPrerequisitesRuntime
+
+
+def _prerequisites_response(
+    *,
+    artifact_root: Path,
+    source_path: str | None,
+    enable_libvirt_check: bool = False,
+    build_profile: str | None = None,
+    target_profile: str | None = None,
+    rootfs_profile: str | None = None,
+    runner=None,
+    kvm_probe=None,
+):
+    from kdive.server import prerequisites_handler
+
+    return prerequisites_handler(
+        request=HostPrerequisitesHandlerRequest(
+            artifact_root=artifact_root,
+            source_path=source_path,
+            enable_libvirt_check=enable_libvirt_check,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+        ),
+        runtime=HostPrerequisitesRuntime(runner=runner, kvm_probe=kvm_probe),
+    )
 
 
 class FakeRunner:
@@ -363,9 +390,7 @@ def test_libvirt_connect_fails_when_virsh_missing() -> None:
 
 
 def test_handler_includes_new_capability_checks() -> None:
-    from kdive.server import prerequisites_handler
-
-    response = prerequisites_handler(
+    response = _prerequisites_response(
         artifact_root=Path("/tmp/does-not-matter"),
         source_path=None,
         target_profile=None,
@@ -382,8 +407,6 @@ def test_handler_includes_new_capability_checks() -> None:
 
 
 def test_handler_libvirt_connect_gated_by_enable_flag() -> None:
-    from kdive.server import prerequisites_handler
-
     runner = LibvirtCapabilitiesRunner(
         {
             "make",
@@ -401,7 +424,7 @@ def test_handler_libvirt_connect_gated_by_enable_flag() -> None:
     )
 
     # A resolvable target profile is selected, but the connectivity check is opt-in: SKIPPED by default.
-    default_off = prerequisites_handler(
+    default_off = _prerequisites_response(
         artifact_root=Path("/tmp/does-not-matter"),
         source_path=None,
         target_profile="local-qemu",
@@ -412,7 +435,7 @@ def test_handler_libvirt_connect_gated_by_enable_flag() -> None:
     assert off_by_id["libvirt.connect"]["status"] == "skipped"
 
     # With the flag enabled it runs the probe (PASSED via the injected capabilities runner).
-    enabled = prerequisites_handler(
+    enabled = _prerequisites_response(
         artifact_root=Path("/tmp/does-not-matter"),
         source_path=None,
         target_profile="local-qemu",

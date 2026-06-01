@@ -14,6 +14,7 @@ from kdive.domain import ArtifactRef, StepResult, StepStatus, ToolResponse
 from kdive.kernel import handlers as kernel_handlers
 from kdive.kernel import tools as kernel_tools
 from kdive.prereqs.checks import PortProbeResult
+from kdive.prereqs.tools import HostPrerequisitesHandlerRequest, HostPrerequisitesRuntime
 from kdive.providers.handlers import list_providers_handler
 from kdive.server import (
     DEFAULT_TEST_SUITES,
@@ -28,6 +29,41 @@ from kdive.target.tools import register_target_tools
 
 def _get_tool_fn(app, name):
     return app._tool_manager._tools[name].fn
+
+
+def _prerequisites_response(
+    *,
+    artifact_root: Path,
+    source_path: str | None,
+    enable_libvirt_check: bool = False,
+    build_profile: str | None = None,
+    target_profile: str | None = None,
+    rootfs_profile: str | None = None,
+    build_profiles: dict[str, object] | None = None,
+    target_profiles: dict[str, object] | None = None,
+    rootfs_profiles: dict[str, object] | None = None,
+    port_probe=None,
+    runner=None,
+    kvm_probe=None,
+):
+    return prerequisites_handler(
+        request=HostPrerequisitesHandlerRequest(
+            artifact_root=artifact_root,
+            source_path=source_path,
+            enable_libvirt_check=enable_libvirt_check,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+        ),
+        runtime=HostPrerequisitesRuntime(
+            build_profiles=build_profiles,
+            target_profiles=target_profiles,
+            rootfs_profiles=rootfs_profiles,
+            port_probe=port_probe,
+            runner=runner,
+            kvm_probe=kvm_probe,
+        ),
+    )
 
 
 def create_test_run(tmp_path: Path, run_id: str = "run-abc123") -> tuple[Path, Path]:
@@ -195,7 +231,7 @@ def test_get_manifest_handler_does_not_create_missing_artifact_root(tmp_path: Pa
 
 
 def test_prerequisites_handler_returns_checks(tmp_path: Path) -> None:
-    response = prerequisites_handler(
+    response = _prerequisites_response(
         artifact_root=tmp_path / "runs",
         source_path=None,
         enable_libvirt_check=False,
@@ -236,7 +272,7 @@ def test_live_introspect_handlers_live_outside_server_catch_all() -> None:
 
 
 def test_prerequisites_handler_readiness_skipped_without_profiles(tmp_path: Path) -> None:
-    response = prerequisites_handler(artifact_root=tmp_path / "runs", source_path=None)
+    response = _prerequisites_response(artifact_root=tmp_path / "runs", source_path=None)
     by_id = {c["check_id"]: c for c in response.data["checks"]}
     assert by_id["kernel.config"]["status"] == "skipped"
     assert by_id["rootfs.image"]["status"] == "skipped"
@@ -247,7 +283,7 @@ def test_prerequisites_handler_names_missing_rootfs_and_passes_config(tmp_path: 
     # Inject a builder rootfs profile pointing at an absent path so the check is deterministic
     # regardless of whether a real image exists at the default host location.
     missing_image = tmp_path / "rootfs" / "minimal.qcow2"
-    response = prerequisites_handler(
+    response = _prerequisites_response(
         artifact_root=tmp_path / "runs",
         source_path=None,
         build_profile="x86_64-debug",
@@ -264,7 +300,11 @@ def test_prerequisites_handler_names_missing_rootfs_and_passes_config(tmp_path: 
 
 
 def test_prerequisites_handler_unknown_profile_is_failed_check(tmp_path: Path) -> None:
-    response = prerequisites_handler(artifact_root=tmp_path / "runs", source_path=None, build_profile="does-not-exist")
+    response = _prerequisites_response(
+        artifact_root=tmp_path / "runs",
+        source_path=None,
+        build_profile="does-not-exist",
+    )
     by_id = {c["check_id"]: c for c in response.data["checks"]}
     assert by_id["kernel.config"]["status"] == "failed"
     assert "unknown build profile" in by_id["kernel.config"]["message"]
@@ -272,7 +312,7 @@ def test_prerequisites_handler_unknown_profile_is_failed_check(tmp_path: Path) -
 
 
 def test_prerequisites_handler_port_check_uses_injected_target_registry(tmp_path: Path) -> None:
-    response = prerequisites_handler(
+    response = _prerequisites_response(
         artifact_root=tmp_path / "runs",
         source_path=None,
         target_profile="custom",

@@ -6,6 +6,8 @@ harness, never a mock of the transaction itself."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from _layer4_fakes import (
     KEY,
     FakeBreakPolicy,
@@ -30,11 +32,105 @@ from kdive.server import (
 )
 from kdive.transport.core.base import BreakMethod, BreakPlan, ExecutionState, LineRole, TransportRef
 from kdive.transport.core.break_inject import InjectBreakError
+from kdive.transport.tools import (
+    TransportCloseHandlerRequest,
+    TransportInjectBreakHandlerRequest,
+    TransportOpenHandlerRequest,
+    TransportToolContext,
+)
 
 # `KEY` is TargetKey(provisioner="local-qemu", target_id="run-1"); the handlers derive the
 # TargetKey from `run_id`, so every test addresses the seeded snapshot with this run id.
 RUN_ID = "run-1"
 INJECT_PERMS = TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"]
+_real_transport_open_handler = transport_open_handler
+_real_transport_close_handler = transport_close_handler
+_real_transport_inject_break_handler = transport_inject_break_handler
+
+
+def _transport_runtime(
+    tmp_path,
+    *,
+    transaction,
+    admission=None,
+    session_registry,
+    break_mechanism=None,
+    probe_halted=None,
+):
+    kwargs = {
+        "default_artifact_root": tmp_path,
+        "transaction": transaction,
+        "admission": admission or AdmissionService(SnapshotStore()),
+        "session_registry": session_registry,
+        "break_mechanism": break_mechanism,
+    }
+    if probe_halted is not None:
+        kwargs["probe_halted"] = probe_halted
+    return TransportToolContext(**kwargs)
+
+
+def transport_open_handler(*, run_id, transaction, admission, session_registry, recovery=False, **_kwargs):
+    return _real_transport_open_handler(
+        request=TransportOpenHandlerRequest(run_id=run_id, recovery=recovery),
+        runtime=_transport_runtime(
+            Path("."),
+            transaction=transaction,
+            admission=admission,
+            session_registry=session_registry,
+        ),
+    )
+
+
+def transport_close_handler(*, run_id, session_id, transaction, session_registry, **_kwargs):
+    return _real_transport_close_handler(
+        request=TransportCloseHandlerRequest(run_id=run_id, session_id=session_id),
+        runtime=_transport_runtime(Path("."), transaction=transaction, session_registry=session_registry),
+    )
+
+
+def transport_inject_break_handler(
+    *,
+    run_id,
+    session_id,
+    acknowledged_permissions=None,
+    artifact_root=None,
+    transaction,
+    admission,
+    session_registry,
+    break_mechanism=None,
+    probe_halted=None,
+    debug_profiles=None,
+    **_kwargs,
+):
+    runtime = _transport_runtime(
+        artifact_root or Path("."),
+        transaction=transaction,
+        admission=admission,
+        session_registry=session_registry,
+        break_mechanism=break_mechanism,
+        probe_halted=probe_halted,
+    )
+    runtime = TransportToolContext(
+        default_artifact_root=runtime.default_artifact_root,
+        transaction=runtime.transaction,
+        admission=runtime.admission,
+        session_registry=runtime.session_registry,
+        debug_profiles=debug_profiles,
+        break_mechanism=runtime.break_mechanism,
+        probe_halted=runtime.probe_halted,
+    )
+    return _real_transport_inject_break_handler(
+        request=TransportInjectBreakHandlerRequest(
+            run_id=run_id,
+            session_id=session_id,
+            acknowledged_permissions=acknowledged_permissions,
+            artifact_root=artifact_root,
+        ),
+        runtime=runtime,
+    )
+
+
+transport_open_handler.__module__ = "kdive.transport.handlers"
 
 
 def _open(tmp_path, **kwargs):

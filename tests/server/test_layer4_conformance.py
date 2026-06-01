@@ -99,10 +99,62 @@ from kdive.transport.core.base import (
     TransportSession,
     new_session_id,
 )
+from kdive.transport.tools import (
+    TransportInjectBreakHandlerRequest,
+    TransportOpenHandlerRequest,
+    TransportToolContext,
+)
 
 RUN_ID_FRESH = "run-abc123"  # matches conftest.create_booted_run default
 FRESH_KEY = TargetKey(provisioner="local-qemu", target_id=RUN_ID_FRESH)
 INJECT_PERMS = TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"]
+_real_transport_open_handler = transport_open_handler
+_real_transport_inject_break_handler = transport_inject_break_handler
+
+
+def transport_open_handler(*, run_id, transaction, admission, session_registry, recovery=False, **_kwargs):
+    return _real_transport_open_handler(
+        request=TransportOpenHandlerRequest(run_id=run_id, recovery=recovery),
+        runtime=TransportToolContext(
+            default_artifact_root=Path("."),
+            transaction=transaction,
+            admission=admission,
+            session_registry=session_registry,
+        ),
+    )
+
+
+def transport_inject_break_handler(
+    *,
+    run_id,
+    session_id,
+    acknowledged_permissions=None,
+    artifact_root=None,
+    transaction,
+    admission,
+    session_registry,
+    break_mechanism=None,
+    probe_halted=None,
+    **_kwargs,
+):
+    runtime_kwargs = {
+        "default_artifact_root": artifact_root or Path("."),
+        "transaction": transaction,
+        "admission": admission,
+        "session_registry": session_registry,
+        "break_mechanism": break_mechanism,
+    }
+    if probe_halted is not None:
+        runtime_kwargs["probe_halted"] = probe_halted
+    return _real_transport_inject_break_handler(
+        request=TransportInjectBreakHandlerRequest(
+            run_id=run_id,
+            session_id=session_id,
+            acknowledged_permissions=acknowledged_permissions,
+            artifact_root=artifact_root,
+        ),
+        runtime=TransportToolContext(**runtime_kwargs),
+    )
 
 
 # ---------------------------------------------------------------------------

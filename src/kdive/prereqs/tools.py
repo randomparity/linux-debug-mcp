@@ -13,7 +13,9 @@ from kdive.tools.adapter_boundary import adapter_validation_failure, optional_mo
 
 
 class HostPrerequisitesHandler(Protocol):
-    def __call__(self, *, request: HostPrerequisitesHandlerRequest) -> ToolResponse: ...
+    def __call__(
+        self, *, request: HostPrerequisitesHandlerRequest, runtime: HostPrerequisitesRuntime
+    ) -> ToolResponse: ...
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,16 @@ class HostPrerequisitesHandlerRequest:
     build_profile: str | None
     target_profile: str | None
     rootfs_profile: str | None
+
+
+@dataclass(frozen=True)
+class HostPrerequisitesRuntime:
+    build_profiles: dict[str, Any] | None = None
+    target_profiles: dict[str, Any] | None = None
+    rootfs_profiles: dict[str, Any] | None = None
+    port_probe: Any | None = None
+    runner: Any | None = None
+    kvm_probe: Any | None = None
 
 
 class HostPrerequisitesContext(Model):
@@ -69,4 +81,4 @@ def register_prereq_tools(
             target_profile=profiles_model.target_profile,
             rootfs_profile=profiles_model.rootfs_profile,
         )
-        return prerequisites_handler(request=request).model_dump(mode="json")
+        return prerequisites_handler(request=request, runtime=HostPrerequisitesRuntime()).model_dump(mode="json")
