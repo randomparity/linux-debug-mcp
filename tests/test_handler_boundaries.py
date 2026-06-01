@@ -11,6 +11,8 @@ TARGET_TEST_HANDLER_SOURCE = ROOT / "src" / "kdive" / "target" / "test_handler.p
 INTROSPECT_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "introspect" / "handlers.py"
 INTROSPECT_EXECUTION_SOURCE = ROOT / "src" / "kdive" / "introspect" / "execution.py"
 DEBUG_OPERATIONS_SOURCE = ROOT / "src" / "kdive" / "debug" / "operations.py"
+DEBUG_POLICY_SOURCE = ROOT / "src" / "kdive" / "debug" / "policy.py"
+DEBUG_SESSION_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "debug" / "session_handlers.py"
 POSTMORTEM_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "handlers.py"
 POSTMORTEM_DUMP_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "dumps" / "handlers.py"
 SHARED_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "handlers" / "shared.py"
@@ -290,11 +292,23 @@ def test_generic_tools_package_only_contains_shared_adapter_boundary() -> None:
     assert module_names == {"__init__", "adapter_boundary"}
 
 
-def test_coordination_session_state_imports_use_neutral_seam() -> None:
-    coordination_sources = list((ROOT / "src" / "kdive" / "coordination").glob("*.py"))
+def test_non_transport_session_state_imports_use_neutral_seam() -> None:
+    checked_sources = [
+        *list((ROOT / "src" / "kdive" / "coordination").glob("*.py")),
+        DEBUG_OPERATIONS_SOURCE,
+        DEBUG_POLICY_SOURCE,
+        DEBUG_SESSION_HANDLERS_SOURCE,
+        TARGET_BOOT_HANDLER_SOURCE,
+        TARGET_TEST_HANDLER_SOURCE,
+    ]
     forbidden_state_names = {
+        "BreakMethod",
+        "BreakPlan",
         "DEFAULT_MIN_LEASE_TTL_SECONDS",
+        "Endpoint",
+        "EndpointExposure",
         "ExecutionState",
+        "LineRole",
         "OpenRequest",
         "RecordState",
         "TransportRef",
@@ -305,7 +319,7 @@ def test_coordination_session_state_imports_use_neutral_seam() -> None:
         str(source.relative_to(ROOT)): sorted(
             forbidden_state_names & _imported_names(source, "kdive.transport.core.base")
         )
-        for source in coordination_sources
+        for source in checked_sources
         if forbidden_state_names & _imported_names(source, "kdive.transport.core.base")
     }
 
