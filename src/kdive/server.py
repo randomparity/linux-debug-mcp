@@ -146,18 +146,6 @@ def _kernel_create_run_tool_handler(
     )
 
 
-def _workflow_build_boot_test_tool_handler(
-    *, request: workflow_tools.WorkflowBuildBootTestHandlerRequest, runtime: workflow_tools.WorkflowToolRuntime
-) -> ToolResponse:
-    return workflow_build_boot_test_handler(request=request, runtime=runtime)
-
-
-def _workflow_build_boot_debug_tool_handler(
-    *, request: workflow_tools.WorkflowBuildBootDebugHandlerRequest, runtime: workflow_tools.WorkflowToolRuntime
-) -> ToolResponse:
-    return workflow_build_boot_debug_handler(request=request, runtime=runtime)
-
-
 def _require_value(value: _RequiredT | None, message: str) -> _RequiredT:
     if value is None:
         raise RuntimeError(message)
@@ -571,8 +559,8 @@ def create_app(
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
         dependencies=_workflow_handler_dependencies(),
-        build_boot_test_handler=_workflow_build_boot_test_tool_handler,
-        build_boot_debug_handler=_workflow_build_boot_debug_tool_handler,
+        build_boot_test_handler=workflow_build_boot_test_handler,
+        build_boot_debug_handler=workflow_build_boot_debug_handler,
     )
 
     return app
