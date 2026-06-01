@@ -599,10 +599,6 @@ def create_app(
 
     register_provider_tools(app)
 
-    @app.tool(name="artifacts.get_manifest")
-    def artifacts_get_manifest(run_id: str, artifact_root: str = str(DEFAULT_ARTIFACT_ROOT)) -> dict[str, Any]:
-        return get_manifest_handler(artifact_root=Path(artifact_root), run_id=run_id).model_dump(mode="json")
-
     target_tools.register_target_tools(
         app,
         default_artifact_root=DEFAULT_ARTIFACT_ROOT,
@@ -641,6 +637,7 @@ def create_app(
         app,
         default_artifact_root=DEFAULT_ARTIFACT_ROOT,
         collect_handler=artifacts_collect_handler,
+        manifest_handler=get_manifest_handler,
     )
 
     register_debug_tools(

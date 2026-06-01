@@ -21,7 +21,21 @@ class ArtifactCollectHandler(Protocol):
     ) -> ToolResponse: ...
 
 
+class ArtifactManifestHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        artifact_root: Path,
+        run_id: str,
+    ) -> ToolResponse: ...
+
+
 class ArtifactCollectContext(Model):
+    run_id: str
+    artifact_root: str | None = None
+
+
+class ArtifactManifestContext(Model):
     run_id: str
     artifact_root: str | None = None
 
@@ -35,6 +49,7 @@ def register_artifact_tools(
     *,
     default_artifact_root: Path,
     collect_handler: ArtifactCollectHandler,
+    manifest_handler: ArtifactManifestHandler,
 ) -> None:
     default_artifact_root_text = str(default_artifact_root)
 
@@ -52,4 +67,15 @@ def register_artifact_tools(
             artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
             run_id=context_model.run_id,
             force_recollect=options_model.force_recollect,
+        ).model_dump(mode="json")
+
+    @app.tool(name="artifacts.get_manifest")
+    def artifacts_get_manifest(context: ArtifactManifestContext | dict[str, Any]) -> dict[str, Any]:
+        try:
+            context_model = model_arg(context, ArtifactManifestContext)
+        except (TypeError, ValueError, ValidationError) as exc:
+            return adapter_validation_failure(exc)
+        return manifest_handler(
+            artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
+            run_id=context_model.run_id,
         ).model_dump(mode="json")

@@ -46,6 +46,7 @@ from kdive.target.tools import (
 from kdive.tools.artifacts import (
     ArtifactCollectContext,
     ArtifactCollectOptions,
+    ArtifactManifestContext,
     register_artifact_tools,
 )
 from kdive.transport.tools import (
@@ -324,24 +325,37 @@ def test_artifact_adapter_uses_grouped_context_and_options(tmp_path: Path) -> No
         calls.append(kwargs)
         return _success(run_id=kwargs["run_id"])
 
+    def manifest_handler(**kwargs: Any) -> ToolResponse:
+        calls.append(kwargs)
+        return _success(run_id=kwargs["run_id"])
+
     register_artifact_tools(
         app,
         default_artifact_root=tmp_path / "default",
         collect_handler=collect_handler,
+        manifest_handler=manifest_handler,
     )
 
     raw = _tool_fn(app, "artifacts.collect")(
         context=ArtifactCollectContext(run_id="run-1", artifact_root=str(tmp_path / "runs")),
         options=ArtifactCollectOptions(force_recollect=True),
     )
+    manifest_raw = _tool_fn(app, "artifacts.get_manifest")(
+        context=ArtifactManifestContext(run_id="run-2", artifact_root=str(tmp_path / "runs")),
+    )
 
     assert raw["ok"] is True
+    assert manifest_raw["ok"] is True
     assert calls == [
         {
             "artifact_root": tmp_path / "runs",
             "run_id": "run-1",
             "force_recollect": True,
-        }
+        },
+        {
+            "artifact_root": tmp_path / "runs",
+            "run_id": "run-2",
+        },
     ]
 
 

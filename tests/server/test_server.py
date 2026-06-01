@@ -532,10 +532,17 @@ def test_transport_tools_use_grouped_context_and_options() -> None:
     assert {"run_id", "artifact_root", "acknowledged_permissions"}.isdisjoint(inject_properties)
 
 
-def test_create_app_registers_artifact_tools_through_package_module() -> None:
-    tool = create_app()._tool_manager._tools["artifacts.collect"]
+def test_artifact_tools_use_grouped_context_and_package_module() -> None:
+    app = create_app()
+    collect_tool = app._tool_manager._tools["artifacts.collect"]
+    manifest_tool = app._tool_manager._tools["artifacts.get_manifest"]
 
-    assert tool.fn.__module__ == "kdive.tools.artifacts"
+    manifest_properties = manifest_tool.parameters["properties"]
+    assert {"context"}.issubset(manifest_properties)
+    assert {"run_id", "artifact_root"}.isdisjoint(manifest_properties)
+
+    assert collect_tool.fn.__module__ == "kdive.tools.artifacts"
+    assert manifest_tool.fn.__module__ == "kdive.tools.artifacts"
 
 
 def test_workflow_build_boot_test_tool_uses_grouped_options() -> None:
@@ -554,6 +561,7 @@ def test_root_kernel_and_host_tools_use_grouped_inputs() -> None:
     app = create_app()
 
     expected_properties = {
+        "artifacts.get_manifest": {"context"},
         "host.check_prerequisites": {"context", "profiles", "options"},
         "kernel.create_run": {"profiles", "context", "options"},
         "kernel.build": {"context", "options"},
