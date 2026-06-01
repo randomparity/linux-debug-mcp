@@ -53,6 +53,7 @@ from kdive.target.tools import (
 from kdive.transport.tools import (
     TransportBreakOptions,
     TransportCloseHandlerRequest,
+    TransportCloseOptions,
     TransportInjectBreakHandlerRequest,
     TransportOpenHandlerRequest,
     TransportTargetContext,
@@ -398,8 +399,8 @@ def test_transport_adapter_forwards_inject_break_collaborators_and_path(tmp_path
             run_id="run-1",
             artifact_root=str(tmp_path / "runs"),
         ),
-        session_id="session-1",
         options=TransportBreakOptions(
+            session_id="session-1",
             acknowledged_permissions=["drop target kernel into the debugger"],
         ),
     )
@@ -457,7 +458,7 @@ def test_transport_adapter_forwards_operation_requests(tmp_path: Path) -> None:
     )
     close_raw = _tool_fn(app, "transport.close")(
         context=TransportTargetContext(run_id="run-1"),
-        session_id="session-1",
+        options=TransportCloseOptions(session_id="session-1"),
     )
 
     assert open_raw["ok"] is True

@@ -73,7 +73,12 @@ class TransportOpenOptions(Model):
     recovery: bool = False
 
 
+class TransportCloseOptions(Model):
+    session_id: str
+
+
 class TransportBreakOptions(Model):
+    session_id: str
     acknowledged_permissions: list[str] | None = None
 
 
@@ -102,31 +107,34 @@ def register_transport_tools(
         return handlers.open(request=request, runtime=tool_context).model_dump(mode="json")
 
     @app.tool(name="transport.close")
-    def transport_close(context: TransportTargetContext | dict[str, Any], session_id: str) -> dict[str, Any]:
+    def transport_close(
+        context: TransportTargetContext | dict[str, Any],
+        options: TransportCloseOptions | dict[str, Any],
+    ) -> dict[str, Any]:
         try:
             context_model = model_arg(context, TransportTargetContext)
+            options_model = model_arg(options, TransportCloseOptions)
         except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
         request = TransportCloseHandlerRequest(
             run_id=context_model.run_id,
-            session_id=session_id,
+            session_id=options_model.session_id,
         )
         return handlers.close(request=request, runtime=tool_context).model_dump(mode="json")
 
     @app.tool(name="transport.inject_break")
     def transport_inject_break(
         context: TransportTargetContext | dict[str, Any],
-        session_id: str,
-        options: TransportBreakOptions | dict[str, Any] | None = None,
+        options: TransportBreakOptions | dict[str, Any],
     ) -> dict[str, Any]:
         try:
             context_model = model_arg(context, TransportTargetContext)
-            options_model = optional_model_arg(options, TransportBreakOptions)
+            options_model = model_arg(options, TransportBreakOptions)
         except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
         request = TransportInjectBreakHandlerRequest(
             run_id=context_model.run_id,
-            session_id=session_id,
+            session_id=options_model.session_id,
             acknowledged_permissions=options_model.acknowledged_permissions,
             artifact_root=Path(context_model.artifact_root or str(tool_context.default_artifact_root)),
         )
