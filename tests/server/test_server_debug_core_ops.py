@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import get_type_hints
 
+import pytest
 from _layer4_fakes import FakeQemuTransport, build_txn
 from conftest import kernel_provenance_details, write_vmlinux_with_build_id
 
@@ -364,6 +365,9 @@ def test_debug_operation_handler_builds_runtime_without_pass_through_layers() ->
     assert not hasattr(debug_handlers, "debug_tool_operation_response")
     assert not hasattr(debug_handlers, "_runtime_from_operation_args")
     assert not hasattr(debug_handlers, "_debug_operation_handler")
+    assert not hasattr(debug_handlers, "configure_debug_operation_core")
+    assert not hasattr(debug_handlers, "_DEBUG_OPERATION_CORE")
+    assert not hasattr(debug_handlers, "_default_debug_operation_core")
     assert not hasattr(server_module, "_debug_operation_response")
     server_source = Path(server_module.__file__).read_text(encoding="utf-8")
     assert "operation_core=_debug_operation_response" not in server_source
@@ -415,6 +419,16 @@ def test_debug_operation_handlers_accept_runtime_instead_of_dependency_bundle() 
 
     assert not hasattr(debug_tools, "_debug_runtime_kwargs")
     assert not hasattr(debug_tools, "_gated_debug_runtime_kwargs")
+
+
+def test_debug_operation_leaf_handlers_require_explicit_operation_core(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="operation_core"):
+        debug_handlers.debug_read_registers_handler(
+            artifact_root=tmp_path / "runs",
+            run_id="run-1",
+            registers=["rax"],
+            runtime=debug_handlers.DebugRuntime(),
+        )
 
 
 def test_debug_operation_handlers_accept_explicit_operation_core(tmp_path: Path) -> None:

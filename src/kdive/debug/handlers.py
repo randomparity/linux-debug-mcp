@@ -176,33 +176,6 @@ class DebugOperationCore(Protocol):
     ) -> ToolResponse: ...
 
 
-_DEBUG_OPERATION_CORE: DebugOperationCore | None = None
-
-
-def configure_debug_operation_core(operation_core: DebugOperationCore) -> None:
-    global _DEBUG_OPERATION_CORE
-    _DEBUG_OPERATION_CORE = operation_core
-
-
-def _default_debug_operation_core(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    debug_session_id: str | None,
-    request: DebugOperationRequest,
-    runtime: DebugRuntime,
-) -> ToolResponse:
-    if _DEBUG_OPERATION_CORE is None:
-        raise RuntimeError("debug operation core has not been configured")
-    return _DEBUG_OPERATION_CORE(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        request=request,
-        runtime=runtime,
-    )
-
-
 def debug_read_registers_handler(
     *,
     artifact_root: Path,
@@ -210,7 +183,7 @@ def debug_read_registers_handler(
     registers: list[str],
     runtime: DebugRuntime,
     debug_session_id: str | None = None,
-    operation_core: DebugOperationCore = _default_debug_operation_core,
+    operation_core: DebugOperationCore,
 ) -> ToolResponse:
     return operation_core(
         artifact_root=artifact_root,
@@ -228,7 +201,7 @@ def debug_read_symbol_handler(
     symbol: str,
     runtime: DebugRuntime,
     debug_session_id: str | None = None,
-    operation_core: DebugOperationCore = _default_debug_operation_core,
+    operation_core: DebugOperationCore,
 ) -> ToolResponse:
     return operation_core(
         artifact_root=artifact_root,
@@ -247,7 +220,7 @@ def debug_read_memory_handler(
     byte_count: int,
     runtime: DebugRuntime,
     debug_session_id: str | None = None,
-    operation_core: DebugOperationCore = _default_debug_operation_core,
+    operation_core: DebugOperationCore,
 ) -> ToolResponse:
     return operation_core(
         artifact_root=artifact_root,
@@ -266,7 +239,7 @@ def debug_evaluate_handler(
     runtime: DebugRuntime,
     arguments: dict[str, object] | None = None,
     debug_session_id: str | None = None,
-    operation_core: DebugOperationCore = _default_debug_operation_core,
+    operation_core: DebugOperationCore,
 ) -> ToolResponse:
     return operation_core(
         artifact_root=artifact_root,
@@ -288,7 +261,7 @@ def _make_symbol_control_handler(
         symbol: str,
         runtime: DebugRuntime,
         debug_session_id: str | None = None,
-        operation_core: DebugOperationCore = _default_debug_operation_core,
+        operation_core: DebugOperationCore,
     ) -> ToolResponse:
         return operation_core(
             artifact_root=artifact_root,
@@ -313,7 +286,7 @@ def _make_breakpoint_id_control_handler(
         breakpoint_id: str,
         runtime: DebugRuntime,
         debug_session_id: str | None = None,
-        operation_core: DebugOperationCore = _default_debug_operation_core,
+        operation_core: DebugOperationCore,
     ) -> ToolResponse:
         return operation_core(
             artifact_root=artifact_root,
@@ -337,7 +310,7 @@ def _make_debug_session_query_handler(
         run_id: str,
         runtime: DebugRuntime,
         debug_session_id: str | None = None,
-        operation_core: DebugOperationCore = _default_debug_operation_core,
+        operation_core: DebugOperationCore,
     ) -> ToolResponse:
         return operation_core(
             artifact_root=artifact_root,
@@ -362,7 +335,7 @@ def _make_debug_execution_control_handler(
         runtime: DebugRuntime,
         timeout_seconds: int | None = None,
         debug_session_id: str | None = None,
-        operation_core: DebugOperationCore = _default_debug_operation_core,
+        operation_core: DebugOperationCore,
     ) -> ToolResponse:
         return operation_core(
             artifact_root=artifact_root,
