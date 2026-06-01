@@ -113,6 +113,22 @@ class VmcoreIntrospectHelperHandler(Protocol):
 
 
 @dataclass(frozen=True)
+class IntrospectToolHandlers:
+    run: IntrospectRunHandler
+    helper: IntrospectHelperHandler
+    check_prereqs: IntrospectCheckPrereqsHandler
+    from_vmcore: VmcoreIntrospectRunHandler
+    from_vmcore_helper: VmcoreIntrospectHelperHandler
+
+
+@dataclass(frozen=True)
+class IntrospectToolContext:
+    default_artifact_root: Path
+    admission: AdmissionService
+    session_registry: SessionRegistry
+
+
+@dataclass(frozen=True)
 class _IntrospectRegistrationContext:
     default_artifact_root: str
     admission: AdmissionService
@@ -311,42 +327,36 @@ def _register_vmcore_introspect_helper_tool(
 def register_introspect_tools(
     app: FastMCP,
     *,
-    default_artifact_root: Path,
-    admission: AdmissionService,
-    session_registry: SessionRegistry,
-    run_handler: IntrospectRunHandler,
-    helper_handler: IntrospectHelperHandler,
-    check_prereqs_handler: IntrospectCheckPrereqsHandler,
-    from_vmcore_handler: VmcoreIntrospectRunHandler,
-    from_vmcore_helper_handler: VmcoreIntrospectHelperHandler,
+    context: IntrospectToolContext,
+    handlers: IntrospectToolHandlers,
 ) -> None:
-    context = _IntrospectRegistrationContext(
-        default_artifact_root=str(default_artifact_root),
-        admission=admission,
-        session_registry=session_registry,
+    registration_context = _IntrospectRegistrationContext(
+        default_artifact_root=str(context.default_artifact_root),
+        admission=context.admission,
+        session_registry=context.session_registry,
     )
     _register_live_introspect_run_tool(
         app,
-        context=context,
-        handler=run_handler,
+        context=registration_context,
+        handler=handlers.run,
     )
     _register_live_introspect_helper_tool(
         app,
-        context=context,
-        handler=helper_handler,
+        context=registration_context,
+        handler=handlers.helper,
     )
     _register_live_introspect_probe_tool(
         app,
-        context=context,
-        handler=check_prereqs_handler,
+        context=registration_context,
+        handler=handlers.check_prereqs,
     )
     _register_vmcore_introspect_run_tool(
         app,
-        context=context,
-        handler=from_vmcore_handler,
+        context=registration_context,
+        handler=handlers.from_vmcore,
     )
     _register_vmcore_introspect_helper_tool(
         app,
-        context=context,
-        handler=from_vmcore_helper_handler,
+        context=registration_context,
+        handler=handlers.from_vmcore_helper,
     )

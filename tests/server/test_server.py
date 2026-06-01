@@ -24,7 +24,7 @@ from kdive.server import (
     not_implemented_handler,
     prerequisites_handler,
 )
-from kdive.target.tools import register_target_tools
+from kdive.target.tools import TargetToolContext, TargetToolHandlers, register_target_tools
 
 
 def _get_tool_fn(app, name):
@@ -491,13 +491,17 @@ def test_target_run_tests_tool_options_forward_acknowledged_permissions(tmp_path
     app = FastMCP("test")
     register_target_tools(
         app,
-        default_artifact_root=tmp_path / "default-runs",
-        sensitive_paths=[],
-        admission=AdmissionService(SnapshotStore()),
-        session_registry=SessionRegistry(directory=tmp_path / "sessions"),
-        target_boot_handler=lambda **kwargs: ToolResponse.success(summary="booted"),
-        target_run_tests_handler=lambda **kwargs: (
-            captured.update(kwargs) or ToolResponse.success(summary="tested", run_id="run-abc123")
+        context=TargetToolContext(
+            default_artifact_root=tmp_path / "default-runs",
+            sensitive_paths=[],
+            admission=AdmissionService(SnapshotStore()),
+            session_registry=SessionRegistry(directory=tmp_path / "sessions"),
+        ),
+        handlers=TargetToolHandlers(
+            boot=lambda **kwargs: ToolResponse.success(summary="booted"),
+            run_tests=lambda **kwargs: (
+                captured.update(kwargs) or ToolResponse.success(summary="tested", run_id="run-abc123")
+            ),
         ),
     )
     tool = app._tool_manager._tools["target.run_tests"]
@@ -513,7 +517,7 @@ def test_target_run_tests_tool_options_forward_acknowledged_permissions(tmp_path
     assert response["status"] == "succeeded"
     request = captured["request"]
     assert request.commands == [["uname", "-a"]]
-    assert request.acknowledged_permissions == TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"]
+    assert request.acknowledged_permissions == list(TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"])
 
 
 def test_target_run_tests_tool_and_handler_are_target_owned() -> None:
@@ -567,10 +571,10 @@ def test_transport_tools_use_grouped_context_and_options() -> None:
 
     assert {"context", "options"}.issubset(open_properties)
     assert {"run_id", "recovery"}.isdisjoint(open_properties)
-    assert {"context", "session_id"}.issubset(close_properties)
-    assert {"run_id"}.isdisjoint(close_properties)
-    assert {"context", "session_id", "options"}.issubset(inject_properties)
-    assert {"run_id", "artifact_root", "acknowledged_permissions"}.isdisjoint(inject_properties)
+    assert {"context", "options"}.issubset(close_properties)
+    assert {"run_id", "session_id"}.isdisjoint(close_properties)
+    assert {"context", "options"}.issubset(inject_properties)
+    assert {"run_id", "session_id", "artifact_root", "acknowledged_permissions"}.isdisjoint(inject_properties)
 
 
 def test_artifact_tools_use_grouped_context_and_package_module() -> None:
@@ -697,7 +701,7 @@ def test_create_run_freezes_merged_profiles(tmp_path):
     )
     assert response.ok
     run_id = response.run_id
-    store = server.ArtifactStore(tmp_path / "runs", create_root=False)
+    store = ArtifactStore(tmp_path / "runs", create_root=False)
     manifest = store.load_manifest(run_id)
     assert manifest.resolved_build_profile.make_variables == {"CC": "clang"}
     assert manifest.boot_attempts == []  # attempt 1 not yet booted
@@ -762,7 +766,7 @@ def test_create_run_freezes_merged_config_lines(tmp_path):
     )
     assert response.ok
     run_id = response.run_id
-    store = server.ArtifactStore(tmp_path / "runs", create_root=False)
+    store = ArtifactStore(tmp_path / "runs", create_root=False)
     manifest = store.load_manifest(run_id)
     assert manifest.resolved_build_profile is not None
     assert manifest.resolved_build_profile.config_lines == ["CONFIG_DEBUG_INFO=y"]
@@ -780,7 +784,7 @@ def test_build_reads_resolved_profile_not_global(tmp_path):
     )
     assert created.ok
     run_id = created.run_id
-    store = server.ArtifactStore(tmp_path / "runs", create_root=False)
+    store = ArtifactStore(tmp_path / "runs", create_root=False)
     manifest = store.load_manifest(run_id)
     resolved = kernel_handlers._build_profile_from_manifest(manifest)
     assert resolved.make_variables == {"CC": "clang"}

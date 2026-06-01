@@ -45,7 +45,7 @@ from kdive.introspect.handlers import (
     debug_introspect_helper_handler,
     debug_introspect_run_handler,
 )
-from kdive.introspect.tools import register_introspect_tools
+from kdive.introspect.tools import IntrospectToolContext, IntrospectToolHandlers, register_introspect_tools
 from kdive.kernel import tools as kernel_tools
 from kdive.kernel.handlers import kernel_build_handler
 from kdive.postmortem.crash.handler import (
@@ -56,7 +56,7 @@ from kdive.postmortem.dumps.handlers import (
     debug_postmortem_fetch_handler,
     debug_postmortem_list_dumps_handler,
 )
-from kdive.postmortem.tools import register_postmortem_tools
+from kdive.postmortem.tools import PostmortemToolContext, PostmortemToolHandlers, register_postmortem_tools
 from kdive.postmortem.triage.handlers import (
     debug_postmortem_triage_handler,
 )
@@ -474,37 +474,49 @@ def create_app(
 
     target_tools.register_target_tools(
         app,
-        default_artifact_root=DEFAULT_ARTIFACT_ROOT,
-        sensitive_paths=sensitive_paths,
-        admission=admission_service,
-        session_registry=durable_registry,
-        target_boot_handler=target_boot_handler,
-        target_run_tests_handler=target_run_tests_handler,
+        context=target_tools.TargetToolContext(
+            default_artifact_root=DEFAULT_ARTIFACT_ROOT,
+            sensitive_paths=sensitive_paths,
+            admission=admission_service,
+            session_registry=durable_registry,
+        ),
+        handlers=target_tools.TargetToolHandlers(
+            boot=target_boot_handler,
+            run_tests=target_run_tests_handler,
+        ),
     )
 
     register_introspect_tools(
         app,
-        default_artifact_root=DEFAULT_ARTIFACT_ROOT,
-        admission=admission_service,
-        session_registry=durable_registry,
-        run_handler=debug_introspect_run_handler,
-        helper_handler=debug_introspect_helper_handler,
-        check_prereqs_handler=debug_introspect_check_prerequisites_handler,
-        from_vmcore_handler=debug_introspect_from_vmcore_handler,
-        from_vmcore_helper_handler=debug_introspect_from_vmcore_helper_handler,
+        context=IntrospectToolContext(
+            default_artifact_root=DEFAULT_ARTIFACT_ROOT,
+            admission=admission_service,
+            session_registry=durable_registry,
+        ),
+        handlers=IntrospectToolHandlers(
+            run=debug_introspect_run_handler,
+            helper=debug_introspect_helper_handler,
+            check_prereqs=debug_introspect_check_prerequisites_handler,
+            from_vmcore=debug_introspect_from_vmcore_handler,
+            from_vmcore_helper=debug_introspect_from_vmcore_helper_handler,
+        ),
     )
 
     register_postmortem_tools(
         app,
-        default_artifact_root=DEFAULT_ARTIFACT_ROOT,
-        admission=admission_service,
-        session_registry=durable_registry,
-        crash_handler=debug_postmortem_crash_handler,
-        triage_handler=debug_postmortem_triage_handler,
-        triage_drgn_helper_handler=debug_introspect_from_vmcore_helper_handler,
-        check_prereqs_handler=debug_postmortem_check_prereqs_handler,
-        list_dumps_handler=debug_postmortem_list_dumps_handler,
-        fetch_handler=debug_postmortem_fetch_handler,
+        context=PostmortemToolContext(
+            default_artifact_root=DEFAULT_ARTIFACT_ROOT,
+            admission=admission_service,
+            session_registry=durable_registry,
+        ),
+        handlers=PostmortemToolHandlers(
+            crash=debug_postmortem_crash_handler,
+            triage=debug_postmortem_triage_handler,
+            triage_drgn_helper=debug_introspect_from_vmcore_helper_handler,
+            check_prereqs=debug_postmortem_check_prereqs_handler,
+            list_dumps=debug_postmortem_list_dumps_handler,
+            fetch=debug_postmortem_fetch_handler,
+        ),
     )
 
     register_artifact_tools(
@@ -550,17 +562,21 @@ def create_app(
 
     workflow_tools.register_workflow_tools(
         app,
-        default_artifact_root=DEFAULT_ARTIFACT_ROOT,
-        sensitive_paths=sensitive_paths,
-        admission=admission_service,
-        session_registry=durable_registry,
-        transaction=transport_transaction,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-        dependencies=_workflow_handler_dependencies(),
-        build_boot_test_handler=workflow_build_boot_test_handler,
-        build_boot_debug_handler=workflow_build_boot_debug_handler,
+        context=workflow_tools.WorkflowToolContext(
+            default_artifact_root=DEFAULT_ARTIFACT_ROOT,
+            sensitive_paths=sensitive_paths,
+            admission=admission_service,
+            session_registry=durable_registry,
+            transaction=transport_transaction,
+            session_guard=session_guard,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+            dependencies=_workflow_handler_dependencies(),
+        ),
+        handlers=workflow_tools.WorkflowToolHandlers(
+            build_boot_test=workflow_build_boot_test_handler,
+            build_boot_debug=workflow_build_boot_debug_handler,
+        ),
     )
 
     return app

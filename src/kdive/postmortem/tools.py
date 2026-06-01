@@ -144,6 +144,23 @@ class PostmortemFetchHandler(Protocol):
 
 
 @dataclass(frozen=True)
+class PostmortemToolHandlers:
+    crash: PostmortemCrashHandler
+    triage: PostmortemTriageHandler
+    triage_drgn_helper: TriageDrgnSourceHandler
+    check_prereqs: PostmortemCheckPrereqsHandler
+    list_dumps: PostmortemListDumpsHandler
+    fetch: PostmortemFetchHandler
+
+
+@dataclass(frozen=True)
+class PostmortemToolContext:
+    default_artifact_root: Path
+    admission: AdmissionService
+    session_registry: SessionRegistry
+
+
+@dataclass(frozen=True)
 class _PostmortemRegistrationContext:
     default_artifact_root: str
     admission: AdmissionService
@@ -352,45 +369,38 @@ def _register_postmortem_fetch_tool(
 def register_postmortem_tools(
     app: FastMCP,
     *,
-    default_artifact_root: Path,
-    admission: AdmissionService,
-    session_registry: SessionRegistry,
-    crash_handler: PostmortemCrashHandler,
-    triage_handler: PostmortemTriageHandler,
-    triage_drgn_helper_handler: TriageDrgnSourceHandler,
-    check_prereqs_handler: PostmortemCheckPrereqsHandler,
-    list_dumps_handler: PostmortemListDumpsHandler,
-    fetch_handler: PostmortemFetchHandler,
+    context: PostmortemToolContext,
+    handlers: PostmortemToolHandlers,
 ) -> None:
-    context = _PostmortemRegistrationContext(
-        default_artifact_root=str(default_artifact_root),
-        admission=admission,
-        session_registry=session_registry,
-        crash_handler=crash_handler,
-        drgn_helper_handler=_adapt_triage_drgn_helper(triage_drgn_helper_handler),
+    registration_context = _PostmortemRegistrationContext(
+        default_artifact_root=str(context.default_artifact_root),
+        admission=context.admission,
+        session_registry=context.session_registry,
+        crash_handler=handlers.crash,
+        drgn_helper_handler=_adapt_triage_drgn_helper(handlers.triage_drgn_helper),
     )
     _register_postmortem_crash_tool(
         app,
-        context=context,
-        handler=crash_handler,
+        context=registration_context,
+        handler=handlers.crash,
     )
     _register_postmortem_triage_tool(
         app,
-        context=context,
-        handler=triage_handler,
+        context=registration_context,
+        handler=handlers.triage,
     )
     _register_postmortem_check_prereqs_tool(
         app,
-        context=context,
-        handler=check_prereqs_handler,
+        context=registration_context,
+        handler=handlers.check_prereqs,
     )
     _register_postmortem_list_dumps_tool(
         app,
-        context=context,
-        handler=list_dumps_handler,
+        context=registration_context,
+        handler=handlers.list_dumps,
     )
     _register_postmortem_fetch_tool(
         app,
-        context=context,
-        handler=fetch_handler,
+        context=registration_context,
+        handler=handlers.fetch,
     )

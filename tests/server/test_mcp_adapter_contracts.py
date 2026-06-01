@@ -16,7 +16,13 @@ from kdive.debug.contracts import DebugRuntime
 from kdive.domain import ToolResponse
 from kdive.introspect.context import LiveIntrospectRuntime
 from kdive.introspect.models import DebugIntrospectFromVmcoreHelperRequest, DebugIntrospectRunRequest
-from kdive.introspect.tools import IntrospectRunOptions, IntrospectTargetContext, register_introspect_tools
+from kdive.introspect.tools import (
+    IntrospectRunOptions,
+    IntrospectTargetContext,
+    IntrospectToolContext,
+    IntrospectToolHandlers,
+    register_introspect_tools,
+)
 from kdive.kernel.tools import (
     CreateRunContext,
     CreateRunHandlerRequest,
@@ -32,6 +38,8 @@ from kdive.postmortem.models import DebugPostmortemFetchRequest
 from kdive.postmortem.tools import (
     PostmortemFetchOptions,
     PostmortemTargetContext,
+    PostmortemToolContext,
+    PostmortemToolHandlers,
     PostmortemToolRuntime,
     register_postmortem_tools,
 )
@@ -51,6 +59,8 @@ from kdive.target.tools import (
     TargetRunContext,
     TargetRunOptions,
     TargetRunTestsHandlerRequest,
+    TargetToolContext,
+    TargetToolHandlers,
     TargetToolRuntime,
     register_target_tools,
 )
@@ -73,6 +83,8 @@ from kdive.workflow.tools import (
     WorkflowBuildBootTestOptions,
     WorkflowProfileInputs,
     WorkflowRunContext,
+    WorkflowToolContext,
+    WorkflowToolHandlers,
     WorkflowToolRuntime,
     register_workflow_tools,
 )
@@ -212,12 +224,16 @@ def test_target_adapters_forward_grouped_payloads_and_collaborators(tmp_path: Pa
 
     register_target_tools(
         app,
-        default_artifact_root=tmp_path / "default",
-        sensitive_paths=sensitive_paths,
-        admission=admission,
-        session_registry=registry,
-        target_boot_handler=boot_handler,
-        target_run_tests_handler=run_tests_handler,
+        context=TargetToolContext(
+            default_artifact_root=tmp_path / "default",
+            sensitive_paths=sensitive_paths,
+            admission=admission,
+            session_registry=registry,
+        ),
+        handlers=TargetToolHandlers(
+            boot=boot_handler,
+            run_tests=run_tests_handler,
+        ),
     )
 
     raw_boot = _tool_fn(app, "target.boot")(
@@ -276,12 +292,16 @@ def test_target_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_path: 
     app = FastMCP("adapter-test")
     register_target_tools(
         app,
-        default_artifact_root=tmp_path / "default",
-        sensitive_paths=[],
-        admission=object(),
-        session_registry=object(),
-        target_boot_handler=lambda **_kwargs: _success(),
-        target_run_tests_handler=lambda **_kwargs: _success(),
+        context=TargetToolContext(
+            default_artifact_root=tmp_path / "default",
+            sensitive_paths=[],
+            admission=object(),
+            session_registry=object(),
+        ),
+        handlers=TargetToolHandlers(
+            boot=lambda **_kwargs: _success(),
+            run_tests=lambda **_kwargs: _success(),
+        ),
     )
 
     raw = _tool_fn(app, "target.boot")(context={})
@@ -501,14 +521,18 @@ def test_introspect_adapter_builds_run_request_and_forwards_gate_collaborators(t
 
     register_introspect_tools(
         app,
-        default_artifact_root=tmp_path / "default",
-        admission=admission,
-        session_registry=registry,
-        run_handler=run_handler,
-        helper_handler=lambda *_args, **_kwargs: _success(),
-        check_prereqs_handler=lambda *_args, **_kwargs: _success(),
-        from_vmcore_handler=lambda *_args, **_kwargs: _success(),
-        from_vmcore_helper_handler=lambda *_args, **_kwargs: _success(),
+        context=IntrospectToolContext(
+            default_artifact_root=tmp_path / "default",
+            admission=admission,
+            session_registry=registry,
+        ),
+        handlers=IntrospectToolHandlers(
+            run=run_handler,
+            helper=lambda *_args, **_kwargs: _success(),
+            check_prereqs=lambda *_args, **_kwargs: _success(),
+            from_vmcore=lambda *_args, **_kwargs: _success(),
+            from_vmcore_helper=lambda *_args, **_kwargs: _success(),
+        ),
     )
 
     raw = _tool_fn(app, "debug.introspect.run")(
@@ -549,14 +573,18 @@ def test_introspect_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_pa
     app = FastMCP("adapter-test")
     register_introspect_tools(
         app,
-        default_artifact_root=tmp_path / "default",
-        admission=object(),
-        session_registry=object(),
-        run_handler=lambda *_args, **_kwargs: _success(),
-        helper_handler=lambda *_args, **_kwargs: _success(),
-        check_prereqs_handler=lambda *_args, **_kwargs: _success(),
-        from_vmcore_handler=lambda *_args, **_kwargs: _success(),
-        from_vmcore_helper_handler=lambda *_args, **_kwargs: _success(),
+        context=IntrospectToolContext(
+            default_artifact_root=tmp_path / "default",
+            admission=object(),
+            session_registry=object(),
+        ),
+        handlers=IntrospectToolHandlers(
+            run=lambda *_args, **_kwargs: _success(),
+            helper=lambda *_args, **_kwargs: _success(),
+            check_prereqs=lambda *_args, **_kwargs: _success(),
+            from_vmcore=lambda *_args, **_kwargs: _success(),
+            from_vmcore_helper=lambda *_args, **_kwargs: _success(),
+        ),
     )
 
     raw = _tool_fn(app, "debug.introspect.run")(
@@ -588,15 +616,19 @@ def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators
 
     register_postmortem_tools(
         app,
-        default_artifact_root=tmp_path / "default",
-        admission=admission,
-        session_registry=registry,
-        crash_handler=crash_handler,
-        triage_handler=lambda *_args, **_kwargs: _success(),
-        triage_drgn_helper_handler=drgn_helper_handler,
-        check_prereqs_handler=lambda *_args, **_kwargs: _success(),
-        list_dumps_handler=lambda *_args, **_kwargs: _success(),
-        fetch_handler=fetch_handler,
+        context=PostmortemToolContext(
+            default_artifact_root=tmp_path / "default",
+            admission=admission,
+            session_registry=registry,
+        ),
+        handlers=PostmortemToolHandlers(
+            crash=crash_handler,
+            triage=lambda *_args, **_kwargs: _success(),
+            triage_drgn_helper=drgn_helper_handler,
+            check_prereqs=lambda *_args, **_kwargs: _success(),
+            list_dumps=lambda *_args, **_kwargs: _success(),
+            fetch=fetch_handler,
+        ),
     )
 
     raw = _tool_fn(app, "debug.postmortem.fetch")(
@@ -653,15 +685,19 @@ def test_postmortem_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_pa
     app = FastMCP("adapter-test")
     register_postmortem_tools(
         app,
-        default_artifact_root=tmp_path / "default",
-        admission=object(),
-        session_registry=object(),
-        crash_handler=lambda *_args, **_kwargs: _success(),
-        triage_handler=lambda *_args, **_kwargs: _success(),
-        triage_drgn_helper_handler=lambda *_args, **_kwargs: _success(),
-        check_prereqs_handler=lambda *_args, **_kwargs: _success(),
-        list_dumps_handler=lambda *_args, **_kwargs: _success(),
-        fetch_handler=lambda *_args, **_kwargs: _success(),
+        context=PostmortemToolContext(
+            default_artifact_root=tmp_path / "default",
+            admission=object(),
+            session_registry=object(),
+        ),
+        handlers=PostmortemToolHandlers(
+            crash=lambda *_args, **_kwargs: _success(),
+            triage=lambda *_args, **_kwargs: _success(),
+            triage_drgn_helper=lambda *_args, **_kwargs: _success(),
+            check_prereqs=lambda *_args, **_kwargs: _success(),
+            list_dumps=lambda *_args, **_kwargs: _success(),
+            fetch=lambda *_args, **_kwargs: _success(),
+        ),
     )
 
     raw = _tool_fn(app, "debug.postmortem.fetch")(
@@ -706,17 +742,21 @@ def test_workflow_adapter_forwards_debug_collaborators_and_converts_artifact_roo
     )
     register_workflow_tools(
         app,
-        default_artifact_root=tmp_path / "default",
-        sensitive_paths=[],
-        admission=admission,
-        session_registry=registry,
-        transaction=transaction,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-        dependencies=dependencies,
-        build_boot_test_handler=lambda **_kwargs: _success(),
-        build_boot_debug_handler=build_boot_debug_handler,
+        context=WorkflowToolContext(
+            default_artifact_root=tmp_path / "default",
+            sensitive_paths=[],
+            admission=admission,
+            session_registry=registry,
+            transaction=transaction,
+            session_guard=session_guard,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+            dependencies=dependencies,
+        ),
+        handlers=WorkflowToolHandlers(
+            build_boot_test=lambda **_kwargs: _success(),
+            build_boot_debug=build_boot_debug_handler,
+        ),
     )
 
     raw = _tool_fn(app, "workflow.build_boot_debug")(
@@ -792,17 +832,21 @@ def test_workflow_adapter_forwards_safety_override_inputs(tmp_path: Path) -> Non
     )
     register_workflow_tools(
         app,
-        default_artifact_root=tmp_path / "default",
-        sensitive_paths=sensitive_paths,
-        admission=object(),
-        session_registry=object(),
-        transaction=object(),
-        session_guard=object(),
-        gdb_mi_engine=object(),
-        gdb_mi_sessions=object(),
-        dependencies=dependencies,
-        build_boot_test_handler=build_boot_test_handler,
-        build_boot_debug_handler=lambda **_kwargs: _success(),
+        context=WorkflowToolContext(
+            default_artifact_root=tmp_path / "default",
+            sensitive_paths=sensitive_paths,
+            admission=object(),
+            session_registry=object(),
+            transaction=object(),
+            session_guard=object(),
+            gdb_mi_engine=object(),
+            gdb_mi_sessions=object(),
+            dependencies=dependencies,
+        ),
+        handlers=WorkflowToolHandlers(
+            build_boot_test=build_boot_test_handler,
+            build_boot_debug=lambda **_kwargs: _success(),
+        ),
     )
 
     raw = _tool_fn(app, "workflow.build_boot_test")(

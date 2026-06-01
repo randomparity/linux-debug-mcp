@@ -33,6 +33,25 @@ class BuildBootDebugHandler(Protocol):
 
 
 @dataclass(frozen=True)
+class WorkflowToolHandlers:
+    build_boot_test: BuildBootTestHandler
+    build_boot_debug: BuildBootDebugHandler
+
+
+@dataclass(frozen=True)
+class WorkflowToolContext:
+    default_artifact_root: Path
+    sensitive_paths: list[Path]
+    admission: AdmissionService
+    session_registry: SessionRegistry
+    transaction: TransportTransaction
+    session_guard: SessionGuard
+    gdb_mi_engine: GdbMiEngine
+    gdb_mi_sessions: GdbMiSessionRegistry
+    dependencies: WorkflowHandlerDependencies
+
+
+@dataclass(frozen=True)
 class WorkflowToolRuntime:
     sensitive_paths: list[Path]
     admission: AdmissionService
@@ -125,28 +144,19 @@ class WorkflowBuildBootDebugOptions(Model):
 def register_workflow_tools(
     app: FastMCP,
     *,
-    default_artifact_root: Path,
-    sensitive_paths: list[Path],
-    admission: AdmissionService,
-    session_registry: SessionRegistry,
-    transaction: TransportTransaction,
-    session_guard: SessionGuard,
-    gdb_mi_engine: GdbMiEngine,
-    gdb_mi_sessions: GdbMiSessionRegistry,
-    dependencies: WorkflowHandlerDependencies,
-    build_boot_test_handler: BuildBootTestHandler,
-    build_boot_debug_handler: BuildBootDebugHandler,
+    context: WorkflowToolContext,
+    handlers: WorkflowToolHandlers,
 ) -> None:
-    default_artifact_root_text = str(default_artifact_root)
+    default_artifact_root_text = str(context.default_artifact_root)
     runtime = WorkflowToolRuntime(
-        sensitive_paths=sensitive_paths,
-        admission=admission,
-        session_registry=session_registry,
-        transaction=transaction,
-        session_guard=session_guard,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
-        dependencies=dependencies,
+        sensitive_paths=context.sensitive_paths,
+        admission=context.admission,
+        session_registry=context.session_registry,
+        transaction=context.transaction,
+        session_guard=context.session_guard,
+        gdb_mi_engine=context.gdb_mi_engine,
+        gdb_mi_sessions=context.gdb_mi_sessions,
+        dependencies=context.dependencies,
     )
 
     @app.tool(name="workflow.build_boot_test")
@@ -168,7 +178,7 @@ def register_workflow_tools(
             )
         except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
-        return build_boot_test_handler(
+        return handlers.build_boot_test(
             request=WorkflowBuildBootTestHandlerRequest(
                 artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
                 source_path=profiles_model.source_path,
@@ -211,7 +221,7 @@ def register_workflow_tools(
             )
         except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
-        return build_boot_debug_handler(
+        return handlers.build_boot_debug(
             request=WorkflowBuildBootDebugHandlerRequest(
                 artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
                 source_path=profiles_model.source_path,

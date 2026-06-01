@@ -30,6 +30,20 @@ class TargetRunTestsHandler(Protocol):
 
 
 @dataclass(frozen=True)
+class TargetToolHandlers:
+    boot: TargetBootHandler
+    run_tests: TargetRunTestsHandler
+
+
+@dataclass(frozen=True)
+class TargetToolContext:
+    default_artifact_root: Path
+    sensitive_paths: list[Path]
+    admission: AdmissionService
+    session_registry: SessionRegistry
+
+
+@dataclass(frozen=True)
 class TargetToolRuntime:
     sensitive_paths: list[Path]
     admission: AdmissionService | None
@@ -96,18 +110,14 @@ class TargetRunOptions(Model):
 def register_target_tools(
     app: FastMCP,
     *,
-    default_artifact_root: Path,
-    sensitive_paths: list[Path],
-    admission: AdmissionService,
-    session_registry: SessionRegistry,
-    target_boot_handler: TargetBootHandler,
-    target_run_tests_handler: TargetRunTestsHandler,
+    context: TargetToolContext,
+    handlers: TargetToolHandlers,
 ) -> None:
-    default_artifact_root_text = str(default_artifact_root)
+    default_artifact_root_text = str(context.default_artifact_root)
     runtime = TargetToolRuntime(
-        sensitive_paths=sensitive_paths,
-        admission=admission,
-        session_registry=session_registry,
+        sensitive_paths=context.sensitive_paths,
+        admission=context.admission,
+        session_registry=context.session_registry,
     )
 
     @app.tool(name="target.boot")
@@ -125,7 +135,7 @@ def register_target_tools(
             )
         except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
-        return target_boot_handler(
+        return handlers.boot(
             request=TargetBootHandlerRequest(
                 artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
                 run_id=context_model.run_id,
@@ -148,7 +158,7 @@ def register_target_tools(
             options_model = optional_model_arg(options, TargetRunOptions)
         except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
-        return target_run_tests_handler(
+        return handlers.run_tests(
             request=TargetRunTestsHandlerRequest(
                 artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
                 run_id=context_model.run_id,
