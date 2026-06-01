@@ -5,7 +5,9 @@ import pytest
 
 from kdive import server
 from kdive.config import RootfsProfile, TargetProfile
+from kdive.debug.bound_handlers import debug_continue_handler, debug_read_symbol_handler, debug_set_breakpoint_handler
 from kdive.debug.handlers import DebugRuntime
+from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.providers.local.debug.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
 from kdive.server import _workflow_handler_dependencies, workflow_build_boot_debug_handler
 
@@ -121,15 +123,7 @@ def test_live_frozen_boot_hits_early_breakpoint(tmp_path: Path, monkeypatch: pyt
     in CI. Requires a real QEMU+KVM guest, a built kernel, and a managed debug domain.
     """
     from kdive.config import BootOverrides
-    from kdive.server import (
-        create_run_handler,
-        debug_continue_handler,
-        debug_read_symbol_handler,
-        debug_set_breakpoint_handler,
-        debug_start_session_handler,
-        kernel_build_handler,
-        target_boot_handler,
-    )
+    from kdive.server import create_run_handler, kernel_build_handler, target_boot_handler
 
     env = require_live_gdbstub_env()
     source = Path(env["KDIVE_SOURCE"]).expanduser()

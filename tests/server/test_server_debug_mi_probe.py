@@ -20,6 +20,7 @@ from kdive.config import DebugProfile, RootfsProfile
 from kdive.coordination.admission import AdmissionService, publish_ready_snapshot
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
+from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiSessionRegistry
 from kdive.seams.target import (
@@ -28,7 +29,7 @@ from kdive.seams.target import (
     PlatformMetadata,
     TargetKey,
 )
-from kdive.server import debug_start_session_handler, target_run_tests_handler
+from kdive.server import target_run_tests_handler
 from kdive.transport.core.base import ExecutionState, LineRole, TransportRef
 
 RUN_ID = "run-1"

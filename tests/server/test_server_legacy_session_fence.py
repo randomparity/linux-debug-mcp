@@ -41,10 +41,11 @@ from conftest import (
 )
 
 from kdive.config import RootfsProfile
+from kdive.debug.bound_handlers import debug_continue_handler, debug_read_registers_handler
 from kdive.debug.handlers import DebugRuntime
+from kdive.debug.session_end import debug_end_session_handler
 from kdive.domain import ErrorCategory
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
-from kdive.server import debug_continue_handler, debug_end_session_handler
 
 
 def _debug_runtime(*, admission=None, registry=None, engine=None, sessions=None) -> DebugRuntime:
@@ -196,8 +197,6 @@ def test_legacy_session_refused_in_debug_read_when_session_registry_wired(tmp_pa
     """F8: when `session_registry` is threaded into a `debug.read_*` handler and no durable
     record exists for the run, the handler refuses with `legacy_session_no_ownership` BEFORE the
     live-attachment lookup."""
-    from kdive.server import debug_read_registers_handler
-
     artifact_root = _seed_legacy_debug_session(tmp_path)
     registry = _make_registry(tmp_path)
     # legacy shape: no ownership record for KEY.

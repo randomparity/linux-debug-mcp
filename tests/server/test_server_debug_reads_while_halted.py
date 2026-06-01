@@ -16,10 +16,11 @@ from conftest import FakeMiEngine, build_debug_transport, kernel_provenance_deta
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile
+from kdive.debug.bound_handlers import debug_read_registers_handler
 from kdive.debug.handlers import DebugRuntime
+from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.domain import ArtifactRef, RunRequest, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
-from kdive.server import debug_read_registers_handler, debug_start_session_handler
 
 RUN_ID = "run-halted"
 
@@ -129,10 +130,8 @@ def test_debug_read_not_ssh_gated(tmp_path: Path) -> None:
     admit_ssh_tier is structurally unreachable -- the test exercises the handler successfully
     without any AdmissionService being present, confirming the ssh gate is not in the call chain.
     """
-    from kdive.server import debug_read_registers_handler as _handler
-
     # Structural check: the read handler must not accept an admission parameter.
-    sig = inspect.signature(_handler)
+    sig = inspect.signature(debug_read_registers_handler)
     assert "admission" not in sig.parameters, (
         "debug_read_registers_handler has an 'admission' parameter — "
         "this means ssh gating may have been accidentally introduced on the read path. "

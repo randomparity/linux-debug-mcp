@@ -67,6 +67,7 @@ from kdive.coordination.registry import (
     SessionRegistry,
 )
 from kdive.coordination.transaction import TransportTransaction
+from kdive.debug.bound_handlers import debug_continue_handler, debug_read_registers_handler
 from kdive.debug.handlers import DebugRuntime
 from kdive.domain import ErrorCategory, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
@@ -82,8 +83,6 @@ from kdive.seams.target import (
     TargetState,
 )
 from kdive.server import (
-    debug_continue_handler,
-    debug_read_registers_handler,
     target_boot_handler,
     target_run_tests_handler,
     transport_inject_break_handler,

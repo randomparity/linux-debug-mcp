@@ -20,6 +20,7 @@ from kdive.config import (
 from kdive.config import (
     TestSuiteProfile as _TestSuiteProfile,
 )
+from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.domain import ArtifactRef, ErrorCategory, StepStatus, ToolResponse
 from kdive.providers.local.build.local_kernel_build import LocalKernelBuildProvider
 from kdive.providers.local.local_ssh_tests import TestExecutionResult as _TestExecutionResult
@@ -71,7 +72,7 @@ def _install_workflow_dependencies(
         kernel_build_handler=kernel_build,
         target_boot_handler=target_boot,
         target_run_tests_handler=target_run_tests,
-        debug_start_session_handler=server_module.debug_start_session_handler,
+        debug_start_session_handler=debug_start_session_handler,
         artifacts_collect_handler=artifacts_collect,
     )
     return dependencies
@@ -109,7 +110,7 @@ def test_workflow_accepts_explicit_dependencies_without_global_configuration(tmp
         kernel_build_handler=lambda **kwargs: calls.append("build") or success("built"),
         target_boot_handler=lambda **kwargs: calls.append("boot") or success("booted"),
         target_run_tests_handler=lambda **kwargs: calls.append("tests") or success("tested"),
-        debug_start_session_handler=server_module.debug_start_session_handler,
+        debug_start_session_handler=debug_start_session_handler,
         artifacts_collect_handler=lambda **kwargs: calls.append("collect") or success("collected"),
     )
 
@@ -207,7 +208,7 @@ def test_workflow_rejects_existing_run_request_mismatch(tmp_path: Path) -> None:
             kernel_build_handler=server_module.kernel_build_handler,
             target_boot_handler=server_module.target_boot_handler,
             target_run_tests_handler=server_module.target_run_tests_handler,
-            debug_start_session_handler=server_module.debug_start_session_handler,
+            debug_start_session_handler=debug_start_session_handler,
             artifacts_collect_handler=server_module.artifacts_collect_handler,
         ),
     )

@@ -29,28 +29,9 @@ from kdive.coordination.admission import (
 from kdive.coordination.lease import ConsoleLeaseManager
 from kdive.coordination.registry import OrphanReap, SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
-from kdive.debug.bound_handlers import (
-    debug_backtrace_handler,
-    debug_clear_breakpoint_handler,
-    debug_clear_watchpoint_handler,
-    debug_continue_handler,
-    debug_evaluate_handler,
-    debug_finish_handler,
-    debug_interrupt_handler,
-    debug_list_breakpoints_handler,
-    debug_list_variables_handler,
-    debug_next_handler,
-    debug_read_memory_handler,
-    debug_read_registers_handler,
-    debug_read_symbol_handler,
-    debug_set_breakpoint_handler,
-    debug_set_watchpoint_handler,
-    debug_step_handler,
-)
-from kdive.debug.module_symbols import debug_load_module_symbols_handler
-from kdive.debug.session_end import debug_end_session_handler
-from kdive.debug.session_handlers import debug_start_session_handler
-from kdive.debug.tools import DebugToolContext, DebugToolHandlers, register_debug_tools
+from kdive.debug.bound_handlers import debug_tool_handlers
+from kdive.debug.session_handlers import debug_start_session_handler as _workflow_debug_start_session_handler
+from kdive.debug.tools import DebugToolContext, register_debug_tools
 from kdive.default_profiles import DEFAULT_BUILD_PROFILES as _DEFAULT_BUILD_PROFILES
 from kdive.default_profiles import DEFAULT_DEBUG_PROFILES as _DEFAULT_DEBUG_PROFILES
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES as _DEFAULT_ROOTFS_PROFILES
@@ -244,7 +225,7 @@ def _workflow_handler_dependencies() -> WorkflowHandlerDependencies:
         kernel_build_handler=kernel_build_handler,
         target_boot_handler=target_boot_handler,
         target_run_tests_handler=target_run_tests_handler,
-        debug_start_session_handler=debug_start_session_handler,
+        debug_start_session_handler=_workflow_debug_start_session_handler,
         artifacts_collect_handler=artifacts_collect_handler,
     )
 
@@ -560,27 +541,7 @@ def create_app(
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ),
-        handlers=DebugToolHandlers(
-            start_session=debug_start_session_handler,
-            read_registers=debug_read_registers_handler,
-            read_symbol=debug_read_symbol_handler,
-            read_memory=debug_read_memory_handler,
-            evaluate=debug_evaluate_handler,
-            load_module_symbols=debug_load_module_symbols_handler,
-            set_breakpoint=debug_set_breakpoint_handler,
-            set_watchpoint=debug_set_watchpoint_handler,
-            clear_breakpoint=debug_clear_breakpoint_handler,
-            clear_watchpoint=debug_clear_watchpoint_handler,
-            list_breakpoints=debug_list_breakpoints_handler,
-            backtrace=debug_backtrace_handler,
-            list_variables=debug_list_variables_handler,
-            continue_execution=debug_continue_handler,
-            step=debug_step_handler,
-            next=debug_next_handler,
-            finish=debug_finish_handler,
-            interrupt=debug_interrupt_handler,
-            end_session=debug_end_session_handler,
-        ),
+        handlers=debug_tool_handlers(),
     )
 
     register_transport_tools(

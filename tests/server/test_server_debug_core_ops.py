@@ -27,7 +27,14 @@ from kdive.debug import handlers as debug_handlers
 from kdive.debug import operations as debug_operations
 from kdive.debug import session_end as debug_session_end
 from kdive.debug import tools as debug_tools
-from kdive.debug.session_end import _end_mi_debug_session
+from kdive.debug.bound_handlers import (
+    debug_continue_handler,
+    debug_list_breakpoints_handler,
+    debug_read_registers_handler,
+    debug_set_breakpoint_handler,
+)
+from kdive.debug.session_end import _end_mi_debug_session, debug_end_session_handler
+from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.debug.tools import DebugToolContext, DebugToolHandlers
 from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from kdive.introspect import execution as introspect_execution
@@ -49,13 +56,6 @@ from kdive.seams.target import (
     ConsoleKind,
     PlatformMetadata,
     TargetKey,
-)
-from kdive.server import (
-    debug_continue_handler,
-    debug_end_session_handler,
-    debug_list_breakpoints_handler,
-    debug_set_breakpoint_handler,
-    debug_start_session_handler,
 )
 from kdive.transport.core.base import ExecutionState, LineRole, TransportRef
 
@@ -371,6 +371,21 @@ def test_debug_operation_handler_builds_runtime_without_pass_through_layers() ->
     assert not hasattr(server_module, "_debug_operation_response")
     server_source = Path(server_module.__file__).read_text(encoding="utf-8")
     assert "operation_core=_debug_operation_response" not in server_source
+
+
+def test_server_delegates_debug_handler_set_to_debug_package() -> None:
+    server_source = Path(server_module.__file__).read_text(encoding="utf-8")
+
+    assert "DebugToolHandlers(" not in server_source
+    assert "debug_tool_handlers()" in server_source
+    for handler_name in (
+        "debug_read_registers_handler",
+        "debug_set_breakpoint_handler",
+        "debug_continue_handler",
+        "debug_load_module_symbols_handler",
+        "debug_end_session_handler",
+    ):
+        assert not hasattr(server_module, handler_name)
 
 
 def test_debug_operation_handlers_accept_runtime_instead_of_dependency_bundle() -> None:
@@ -825,8 +840,6 @@ def test_mutator_ledger_rebuild_fault_reaps_and_returns_structured_failure(tmp_p
 
 
 # --- Task 3: per-op transport_stall teardown (ADR 0023) -------------------------------------------
-
-from kdive.server import debug_read_registers_handler  # noqa: E402
 
 
 class _StallEngine(FakeMiEngine):

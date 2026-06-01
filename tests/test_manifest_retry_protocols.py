@@ -37,7 +37,7 @@ def test_postmortem_dump_handlers_are_owned_by_postmortem_module() -> None:
 
 def test_debug_start_session_handler_is_owned_by_debug_module() -> None:
     assert session_handlers.debug_start_session_handler.__module__ == "kdive.debug.session_handlers"
-    assert server.debug_start_session_handler is session_handlers.debug_start_session_handler
+    assert not hasattr(server, "debug_start_session_handler")
 
 
 def test_default_transport_reap_backend_is_bare_noop() -> None:

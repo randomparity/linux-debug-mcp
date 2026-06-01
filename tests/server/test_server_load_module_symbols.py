@@ -18,9 +18,9 @@ from test_server_debug_core_ops import (
 
 from kdive.config import DebugProfile
 from kdive.debug import module_symbols
+from kdive.debug.module_symbols import debug_load_module_symbols_handler
 from kdive.domain import ErrorCategory
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry, LoadedModule
-from kdive.server import debug_load_module_symbols_handler
 
 
 @dataclass

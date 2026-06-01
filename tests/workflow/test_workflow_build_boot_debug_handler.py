@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import kdive.server as server_module
+from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.domain import ErrorCategory, ToolResponse
 from kdive.server import (
     DEFAULT_TARGET_PROFILES,
@@ -23,7 +24,7 @@ def _install_workflow_dependencies(
     create_run=create_run_handler,
     kernel_build=server_module.kernel_build_handler,
     target_boot=server_module.target_boot_handler,
-    debug_start=server_module.debug_start_session_handler,
+    debug_start=debug_start_session_handler,
 ) -> WorkflowHandlerDependencies:
     return WorkflowHandlerDependencies(
         create_run_handler=create_run,

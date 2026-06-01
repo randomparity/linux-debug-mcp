@@ -8,12 +8,14 @@ from conftest import FakeMiEngine, build_debug_transport, kernel_provenance_deta
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile
+from kdive.debug.bound_handlers import debug_evaluate_handler, debug_read_memory_handler
 from kdive.debug.handlers import DebugRuntime
+from kdive.debug.session_end import debug_end_session_handler
+from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import GdbMiError, GdbMiSessionRegistry
 from kdive.providers.local.debug.qemu_gdbstub import DebugSession
 from kdive.seams.target import TargetKey
-from kdive.server import debug_end_session_handler, debug_read_memory_handler, debug_start_session_handler
 
 RUN_ID = "run-debug"
 
@@ -311,7 +313,6 @@ def test_read_memory_over_cap_rejected_through_handler(tmp_path: Path) -> None:
 
 def test_evaluate_unknown_inspector_rejected_through_handler(tmp_path: Path) -> None:
     """debug.evaluate rejects arbitrary expressions with CONFIGURATION_ERROR at the handler boundary."""
-    from kdive.server import debug_evaluate_handler
 
     class _StrictEvalEngine(FakeMiEngine):
         def evaluate_inspector(self, attachment, *, inspector: str, arguments: dict[str, object]):
