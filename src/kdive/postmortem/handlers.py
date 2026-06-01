@@ -33,6 +33,7 @@ from kdive.domain import (
     StepStatus,
     ToolResponse,
 )
+from kdive.handlers.shared import _require_value
 from kdive.introspect.execution import _record_terminal_introspect_result, _utcnow
 from kdive.introspect.handlers import debug_introspect_from_vmcore_helper_handler
 from kdive.postmortem.crash_handler import (
@@ -57,6 +58,7 @@ from kdive.postmortem.models import (
     DumpEntry,
     FetchedFile,
 )
+from kdive.postmortem.probes import assemble_kdump_probe_response, validated_dump_dir
 from kdive.postmortem.triage import CrashOutcome, DrgnOutcome, any_section_ok, assemble_report
 from kdive.prereqs.kdump_probe import render_kdump_probe_script
 from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner, build_ssh_argv
@@ -65,17 +67,14 @@ from kdive.symbols.build_id import read_elf_build_id
 from kdive.symbols.vmcore_build_id import read_vmcore_build_id
 from kdive.target.probes import (
     PROBE_STDOUT_CAP,
-    _assemble_kdump_response,
-    _chmod_best_effort,
-    _configuration_failure,
-    _parse_probe_stdout,
-    _prepare_probe_dirs,
-    _redact_and_truncate,
-    _reject_if_target_halted,
-    _require_value,
-    _resolve_probe_context,
-    _target_python_remote_argv,
-    _validated_dump_dir,
+    chmod_best_effort,
+    configuration_failure,
+    parse_probe_stdout,
+    prepare_probe_dirs,
+    redact_and_truncate,
+    reject_if_target_halted,
+    resolve_probe_context,
+    target_python_remote_argv,
 )
 
 SSH_TIMEOUT_GRACE_SECONDS = 10
@@ -139,7 +138,7 @@ def build_scp_argv(
 def _parse_enumeration_result(
     ctx: Any, *, ssh_result: SshCommandResult, stdout_path: Path
 ) -> tuple[dict[str, object] | None, ToolResponse | None]:
-    return _parse_probe_stdout(
+    return parse_probe_stdout(
         ctx,
         ssh_result=ssh_result,
         stdout_path=stdout_path,
@@ -158,9 +157,9 @@ def _run_dump_enumeration(
 ) -> tuple[dict[str, object] | None, ToolResponse | None]:
     run_id = ctx.run_id
     probe_id = uuid.uuid4().hex
-    agent_dir, sensitive_dir = _prepare_probe_dirs(ctx.store, run_id, probe_id, category=category)
+    agent_dir, sensitive_dir = prepare_probe_dirs(ctx.store, run_id, probe_id, category=category)
     use_sudo = ctx.rootfs.ssh_user != "root"
-    remote_argv = _target_python_remote_argv(timeout_seconds=timeout_seconds, use_sudo=use_sudo)
+    remote_argv = target_python_remote_argv(timeout_seconds=timeout_seconds, use_sudo=use_sudo)
     script = render_dump_list_script(dump_dir=dump_dir)
     try:
         ssh_argv = build_ssh_argv(
@@ -170,9 +169,9 @@ def _run_dump_enumeration(
             command_timeout=timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
         )
     except ValueError as exc:
-        return None, _configuration_failure(
+        return None, configuration_failure(
             run_id=run_id,
-            message=_redact_and_truncate(ctx.redactor, str(exc), cap=256),
+            message=redact_and_truncate(ctx.redactor, str(exc), cap=256),
             details={"code": "invalid_ssh_options"},
         )
     stdout_path = sensitive_dir / "stdout.raw"
@@ -190,11 +189,11 @@ def _run_dump_enumeration(
         return None, ToolResponse.failure(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             run_id=run_id,
-            message=_redact_and_truncate(ctx.redactor, f"ssh probe raised: {exc}", cap=256),
+            message=redact_and_truncate(ctx.redactor, f"ssh probe raised: {exc}", cap=256),
             details={"code": "ssh_failure"},
         )
     for path in (stdout_path, stderr_path):
-        _chmod_best_effort(path, 0o600)
+        chmod_best_effort(path, 0o600)
     parsed, failure = _parse_enumeration_result(ctx, ssh_result=ssh_result, stdout_path=stdout_path)
     if failure is not None:
         return None, failure
@@ -230,7 +229,7 @@ def _parse_dump_listing_at_boundary(
             message="dump enumeration returned malformed listing data",
             details={
                 "code": "malformed_dump_listing",
-                "reason": _redact_and_truncate(ctx.redactor, str(exc), cap=256),
+                "reason": redact_and_truncate(ctx.redactor, str(exc), cap=256),
             },
         )
 
@@ -296,9 +295,9 @@ def _stage_one_file(
             command_timeout=timeout_seconds,
         )
     except ValueError as exc:
-        return None, _configuration_failure(
+        return None, configuration_failure(
             run_id=run_id,
-            message=_redact_and_truncate(ctx.redactor, str(exc), cap=256),
+            message=redact_and_truncate(ctx.redactor, str(exc), cap=256),
             details={"code": "invalid_ssh_options"},
         )
     stdout_path = sensitive_dir / f"{spec.local_name}.scp.out"
@@ -315,11 +314,11 @@ def _stage_one_file(
         return None, ToolResponse.failure(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             run_id=run_id,
-            message=_redact_and_truncate(ctx.redactor, f"scp raised: {exc}", cap=256),
+            message=redact_and_truncate(ctx.redactor, f"scp raised: {exc}", cap=256),
             details={"code": "ssh_failure"},
         )
     if result.exit_status != 0 or result.timed_out or result.cancelled:
-        snippet = _redact_and_truncate(ctx.redactor, result.stderr_snippet or "", cap=256)
+        snippet = redact_and_truncate(ctx.redactor, result.stderr_snippet or "", cap=256)
         return None, ToolResponse.failure(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             run_id=run_id,
@@ -362,16 +361,14 @@ def debug_postmortem_check_prereqs_handler(
     session_registry: Any | None = None,
 ) -> ToolResponse:
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
-    resolved_ctx, failure = _resolve_probe_context(
-        request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles
-    )
+    resolved_ctx, failure = resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
     if failure is not None:
         return failure
     ctx = _require_value(resolved_ctx, "probe context missing after successful resolution")
     run_id = ctx.run_id
 
     try:
-        halted = _reject_if_target_halted(run_id=run_id, admission=admission, session_registry=session_registry)
+        halted = reject_if_target_halted(run_id=run_id, admission=admission, session_registry=session_registry)
     except AdmissionError as exc:
         return ToolResponse.failure(category=exc.category, run_id=run_id, message=str(exc), details={"code": exc.code})
     if halted is not None:
@@ -379,12 +376,12 @@ def debug_postmortem_check_prereqs_handler(
 
     runner: SshRunner = ssh_runner or SubprocessSshRunner()
     probe_id = uuid.uuid4().hex
-    agent_dir, sensitive_dir = _prepare_probe_dirs(
+    agent_dir, sensitive_dir = prepare_probe_dirs(
         ctx.store, run_id, probe_id, category=("debug", "postmortem", "check_prereqs")
     )
 
     use_sudo = ctx.rootfs.ssh_user != "root"
-    remote_argv = _target_python_remote_argv(timeout_seconds=request.timeout_seconds, use_sudo=use_sudo)
+    remote_argv = target_python_remote_argv(timeout_seconds=request.timeout_seconds, use_sudo=use_sudo)
     script = render_kdump_probe_script(systemctl_timeout=max(2, request.timeout_seconds // 2))
     try:
         ssh_argv = build_ssh_argv(
@@ -394,9 +391,9 @@ def debug_postmortem_check_prereqs_handler(
             command_timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
         )
     except ValueError as exc:
-        return _configuration_failure(
+        return configuration_failure(
             run_id=run_id,
-            message=_redact_and_truncate(ctx.redactor, str(exc), cap=256),
+            message=redact_and_truncate(ctx.redactor, str(exc), cap=256),
             details={"code": "invalid_ssh_options"},
         )
 
@@ -415,13 +412,13 @@ def debug_postmortem_check_prereqs_handler(
         return ToolResponse.failure(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             run_id=run_id,
-            message=_redact_and_truncate(ctx.redactor, f"ssh probe raised: {exc}", cap=256),
+            message=redact_and_truncate(ctx.redactor, f"ssh probe raised: {exc}", cap=256),
             details={"code": "ssh_failure"},
         )
     for path in (stdout_path, stderr_path):
-        _chmod_best_effort(path, 0o600)
+        chmod_best_effort(path, 0o600)
 
-    return _assemble_kdump_response(
+    return assemble_kdump_probe_response(
         ctx,
         ssh_result=ssh_result,
         stdout_path=stdout_path,
@@ -449,13 +446,13 @@ def _admit_fetch_entry(
     if failure is not None:
         return None, failure
     if entry is None:
-        return None, _configuration_failure(
+        return None, configuration_failure(
             run_id=run_id,
             message=f"dump_ref not found in current listing: {request.dump_ref!r}",
             details={"code": "dump_not_found"},
         )
     if not is_within_dump_dir(entry.path, dump_dir):
-        return None, _configuration_failure(
+        return None, configuration_failure(
             run_id=run_id,
             message=f"dump path {entry.path!r} is outside the enumerated dump_dir {dump_dir!r}",
             details={"code": "dump_path_outside_dir"},
@@ -482,7 +479,7 @@ def _admit_fetch_entry(
     total = sum(entry.file_sizes.values()) or entry.size_bytes
     ceiling = request.max_bytes if request.max_bytes is not None else DEFAULT_FETCH_MAX_BYTES
     if total > ceiling:
-        return None, _configuration_failure(
+        return None, configuration_failure(
             run_id=run_id,
             message=f"dump total {total} bytes exceeds ceiling {ceiling}",
             details={"code": "dump_too_large"},
@@ -575,18 +572,16 @@ def debug_postmortem_list_dumps_handler(
     session_registry: Any | None = None,
 ) -> ToolResponse:
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
-    resolved_ctx, failure = _resolve_probe_context(
-        request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles
-    )
+    resolved_ctx, failure = resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
     if failure is not None:
         return failure
     ctx = _require_value(resolved_ctx, "probe context missing after successful resolution")
-    dump_dir, dd_failure = _validated_dump_dir(request, ctx.run_id)
+    dump_dir, dd_failure = validated_dump_dir(request, ctx.run_id)
     if dd_failure is not None:
         return dd_failure
     dump_dir = _require_value(dump_dir, "dump directory missing after validation")
     try:
-        halted = _reject_if_target_halted(
+        halted = reject_if_target_halted(
             run_id=ctx.run_id,
             admission=admission,
             session_registry=session_registry,
@@ -634,19 +629,19 @@ def debug_postmortem_fetch_handler(
     session_registry: Any | None = None,
 ) -> ToolResponse:
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
-    resolved_ctx, failure = _resolve_probe_context(
+    resolved_ctx, failure = resolve_probe_context(
         request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles, timeout_band=FETCH_TIMEOUT_BAND
     )
     if failure is not None:
         return failure
     ctx = _require_value(resolved_ctx, "probe context missing after successful resolution")
     run_id = ctx.run_id
-    dump_dir, dd_failure = _validated_dump_dir(request, run_id)
+    dump_dir, dd_failure = validated_dump_dir(request, run_id)
     if dd_failure is not None:
         return dd_failure
     dump_dir = _require_value(dump_dir, "dump directory missing after validation")
     try:
-        halted = _reject_if_target_halted(
+        halted = reject_if_target_halted(
             run_id=run_id, admission=admission, session_registry=session_registry, action="fetching a dump"
         )
     except AdmissionError as exc:

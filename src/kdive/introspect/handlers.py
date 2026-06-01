@@ -32,6 +32,7 @@ from kdive.domain import (
     StepStatus,
     ToolResponse,
 )
+from kdive.handlers.shared import _require_value
 from kdive.introspect.execution import (
     HELPER_CAP_PROFILE,
     RUN_STDOUT_CAP,
@@ -49,6 +50,7 @@ from kdive.introspect.execution import (
     _target_python_remote_argv,
     _utcnow,
 )
+from kdive.introspect.probes import assemble_introspect_probe_response
 from kdive.introspect.wrappers import (
     SCRIPT_BYTE_CAP,
     WrapperRenderError,
@@ -67,11 +69,9 @@ from kdive.symbols.resolve import SymbolResolutionError, resolve_symbols
 from kdive.symbols.verify import BUILD_ID_RE
 from kdive.target.probes import (
     PROBE_STDOUT_CAP,
-    _assemble_probe_response,
-    _prepare_probe_dirs,
-    _reject_if_target_halted,
-    _require_value,
-    _resolve_probe_context,
+    prepare_probe_dirs,
+    reject_if_target_halted,
+    resolve_probe_context,
 )
 
 
@@ -86,14 +86,14 @@ def debug_introspect_check_prerequisites_handler(
 ) -> ToolResponse:
     """Target-side drgn prerequisite probe."""
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
-    _ctx, failure = _resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
+    _ctx, failure = resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
     if failure is not None:
         return failure
     ctx = _require_value(_ctx, "probe context missing after successful resolution")
     run_id = ctx.run_id
 
     try:
-        halted = _reject_if_target_halted(
+        halted = reject_if_target_halted(
             run_id=run_id,
             admission=admission,
             session_registry=session_registry,
@@ -106,7 +106,7 @@ def debug_introspect_check_prerequisites_handler(
 
     runner: SshRunner = ssh_runner or SubprocessSshRunner()
     probe_id = uuid.uuid4().hex
-    agent_dir, sensitive_dir = _prepare_probe_dirs(ctx.store, run_id, probe_id)
+    agent_dir, sensitive_dir = prepare_probe_dirs(ctx.store, run_id, probe_id)
 
     use_sudo = ctx.rootfs.ssh_user != "root"
     remote_argv = _target_python_remote_argv(timeout_seconds=request.timeout_seconds, use_sudo=use_sudo)
@@ -145,7 +145,7 @@ def debug_introspect_check_prerequisites_handler(
     for _path in (stdout_path, stderr_path):
         _chmod_best_effort(_path, 0o600)
 
-    return _assemble_probe_response(
+    return assemble_introspect_probe_response(
         ctx,
         ssh_result=ssh_result,
         stdout_path=stdout_path,

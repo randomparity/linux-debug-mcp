@@ -8,6 +8,7 @@ INTROSPECT_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "introspect" / "handlers.p
 INTROSPECT_EXECUTION_SOURCE = ROOT / "src" / "kdive" / "introspect" / "execution.py"
 POSTMORTEM_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "handlers.py"
 SHARED_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "handlers" / "shared.py"
+TARGET_PROBES_SOURCE = ROOT / "src" / "kdive" / "target" / "probes.py"
 
 
 def test_extracted_handler_modules_do_not_import_server_module() -> None:
@@ -60,6 +61,27 @@ def test_target_probe_helpers_live_in_domain_named_module() -> None:
     assert "def _parse_probe_stdout(" not in shared_source
     assert "from kdive.target.probes import" in introspect_source
     assert "from kdive.target.probes import" in postmortem_source
+
+
+def test_target_probe_substrate_does_not_own_feature_response_assembly() -> None:
+    target_source = TARGET_PROBES_SOURCE.read_text(encoding="utf-8")
+    introspect_source = INTROSPECT_HANDLERS_SOURCE.read_text(encoding="utf-8")
+    postmortem_source = POSTMORTEM_HANDLERS_SOURCE.read_text(encoding="utf-8")
+
+    assert "kdive.prereqs.drgn_probe" not in target_source
+    assert "kdive.prereqs.kdump_probe" not in target_source
+    assert "kdive.postmortem.dumps" not in target_source
+    assert "def assemble_introspect_probe_response(" not in target_source
+    assert "def assemble_kdump_probe_response(" not in target_source
+    assert "from kdive.introspect.probes import assemble_introspect_probe_response" in introspect_source
+    assert "from kdive.postmortem.probes import assemble_kdump_probe_response" in postmortem_source
+
+
+def test_feature_probe_handlers_import_public_target_probe_substrate() -> None:
+    for source_path in (INTROSPECT_HANDLERS_SOURCE, POSTMORTEM_HANDLERS_SOURCE):
+        source = source_path.read_text(encoding="utf-8")
+        assert "from kdive.target.probes import (" in source
+        assert "    _" not in source.split("from kdive.target.probes import (", 1)[1].split(")", 1)[0]
 
 
 def test_server_does_not_reexport_private_feature_helpers() -> None:

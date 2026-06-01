@@ -18,7 +18,7 @@ from kdive.domain import (
 from kdive.postmortem.handlers import debug_postmortem_check_prereqs_handler
 from kdive.postmortem.models import DebugPostmortemCheckPrereqsRequest
 from kdive.providers.local.local_ssh_tests import SshCommandResult
-from kdive.target.probes import _reject_if_target_halted
+from kdive.target.probes import reject_if_target_halted
 from kdive.transport.core.base import ExecutionState
 
 
@@ -65,7 +65,7 @@ class _FakeRegistry:
 
 
 def test_halted_target_is_fast_rejected() -> None:
-    resp = _reject_if_target_halted(
+    resp = reject_if_target_halted(
         run_id="r1",
         admission=_FakeAdmission(),
         session_registry=_FakeRegistry(ExecutionState.HALTED),
@@ -79,7 +79,7 @@ def test_halted_target_is_fast_rejected() -> None:
 
 def test_executing_target_proceeds() -> None:
     assert (
-        _reject_if_target_halted(
+        reject_if_target_halted(
             run_id="r1",
             admission=_FakeAdmission(),
             session_registry=_FakeRegistry(ExecutionState.EXECUTING),
@@ -89,7 +89,7 @@ def test_executing_target_proceeds() -> None:
 
 
 def test_inert_gate_when_admission_absent() -> None:
-    assert _reject_if_target_halted(run_id="r1", admission=None, session_registry=None) is None
+    assert reject_if_target_halted(run_id="r1", admission=None, session_registry=None) is None
 
 
 SECRET_KEY_REF = "s3cr3t-key"  # pragma: allowlist secret
