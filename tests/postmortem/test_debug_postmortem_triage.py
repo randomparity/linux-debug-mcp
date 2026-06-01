@@ -37,6 +37,15 @@ def test_triage_handler_is_split_into_named_phases() -> None:
         assert f"{helper_name}(" in handler_source
 
 
+def test_triage_report_state_uses_source_outcome_helpers() -> None:
+    state_source = inspect.getsource(postmortem_handlers._build_triage_report_state)
+
+    assert hasattr(postmortem_handlers, "_triage_crash_outcome")
+    assert hasattr(postmortem_handlers, "_triage_drgn_outcome")
+    assert "CrashOutcome(" not in state_source
+    assert "DrgnOutcome(" not in state_source
+
+
 def _run(tmp_path: Path) -> ArtifactStore:
     store = ArtifactStore(artifact_root=tmp_path)
     store.create_run(

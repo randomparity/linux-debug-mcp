@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+import inspect
 import json
 from pathlib import Path
 
@@ -57,6 +56,7 @@ def test_vmcore_introspect_handler_uses_explicit_phase_helpers() -> None:
     for helper_name in (
         "VmcoreIntrospectContext",
         "VmcoreIntrospectWorkspace",
+        "VmcoreIntrospectExecutionRuntime",
         "_validate_vmcore_introspect_request",
         "_resolve_vmcore_introspect_context",
         "_resolve_vmcore_introspect_inputs",
@@ -64,6 +64,16 @@ def test_vmcore_introspect_handler_uses_explicit_phase_helpers() -> None:
         "_run_vmcore_introspect_wrapper",
     ):
         assert hasattr(introspect_handlers, helper_name)
+
+
+def test_vmcore_handlers_group_execution_runtime() -> None:
+    direct_source = inspect.getsource(introspect_handlers.debug_introspect_from_vmcore_handler)
+    helper_source = inspect.getsource(introspect_handlers.debug_introspect_from_vmcore_helper_handler)
+
+    assert "runtime=VmcoreIntrospectExecutionRuntime(" in direct_source
+    assert "runtime=VmcoreIntrospectExecutionRuntime(" in helper_source
+    assert "_execute_vmcore_introspect_call(" not in direct_source
+    assert "_execute_vmcore_introspect_call(" not in helper_source
 
 
 # ---------------------------------------------------------------------------

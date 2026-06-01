@@ -742,27 +742,12 @@ def _build_triage_report_state(
     finished_at: datetime,
     duration_ms: int,
 ) -> _TriageReportState:
-    crash_outcome = CrashOutcome(
-        ok=sources.crash.ok,
-        reason=None if sources.crash.ok else _triage_reason(sources.crash),
-        results=sources.crash.data.get("results", {}) if sources.crash.ok else {},
-    )
-    dmesg_outcome = DrgnOutcome(
-        ok=sources.dmesg.ok,
-        reason=None if sources.dmesg.ok else _triage_reason(sources.dmesg),
-        result=sources.dmesg.data.get("result", {}) if sources.dmesg.ok else {},
-    )
-    modules_outcome = DrgnOutcome(
-        ok=sources.modules.ok,
-        reason=None if sources.modules.ok else _triage_reason(sources.modules),
-        result=sources.modules.data.get("result", {}) if sources.modules.ok else {},
-    )
     return _TriageReportState(
         report=assemble_report(
             vmcore_build_id=vmcore_build_id,
-            crash=crash_outcome,
-            dmesg=dmesg_outcome,
-            modules=modules_outcome,
+            crash=_triage_crash_outcome(sources.crash),
+            dmesg=_triage_drgn_outcome(sources.dmesg),
+            modules=_triage_drgn_outcome(sources.modules),
         ),
         sub_call_ids={
             "crash": _triage_subcall_id(sources.crash),
@@ -772,6 +757,22 @@ def _build_triage_report_state(
         started_at=started_at,
         finished_at=finished_at,
         duration_ms=duration_ms,
+    )
+
+
+def _triage_crash_outcome(response: ToolResponse) -> CrashOutcome:
+    return CrashOutcome(
+        ok=response.ok,
+        reason=None if response.ok else _triage_reason(response),
+        results=response.data.get("results", {}) if response.ok else {},
+    )
+
+
+def _triage_drgn_outcome(response: ToolResponse) -> DrgnOutcome:
+    return DrgnOutcome(
+        ok=response.ok,
+        reason=None if response.ok else _triage_reason(response),
+        result=response.data.get("result", {}) if response.ok else {},
     )
 
 

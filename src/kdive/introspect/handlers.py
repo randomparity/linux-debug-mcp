@@ -193,6 +193,14 @@ class VmcoreIntrospectRun:
     duration_ms: int
 
 
+@dataclass(frozen=True)
+class VmcoreIntrospectExecutionRuntime:
+    artifact_root: Path
+    runner: SshRunner | None
+    build_id_reader: Callable[[Path], str]
+    clock: Callable[[], datetime] | None
+
+
 def debug_introspect_run_handler(
     request: DebugIntrospectRunRequest,
     *,
@@ -645,12 +653,14 @@ def debug_introspect_from_vmcore_handler(
     clock: Callable[[], datetime] | None = None,
 ) -> ToolResponse:
     """Spec §6 / ADR 0010. Offline vmcore drgn introspection; no admission gate."""
-    return _execute_vmcore_introspect_call(
+    return _execute_vmcore_introspect_request(
         request,
-        artifact_root=artifact_root,
-        runner=runner,
-        build_id_reader=build_id_reader,
-        clock=clock,
+        runtime=VmcoreIntrospectExecutionRuntime(
+            artifact_root=artifact_root,
+            runner=runner,
+            build_id_reader=build_id_reader,
+            clock=clock,
+        ),
         operation_name="debug.introspect.from_vmcore",
         caps=None,
         post_validator=None,
@@ -697,13 +707,35 @@ def debug_introspect_from_vmcore_helper_handler(
         allow_write=False,
         args=validated_args.model_dump(mode="json"),
     )
-    return _execute_vmcore_introspect_call(
+    return _execute_vmcore_introspect_request(
         run_request,
-        artifact_root=artifact_root,
-        runner=runner,
-        build_id_reader=build_id_reader,
-        clock=clock,
+        runtime=VmcoreIntrospectExecutionRuntime(
+            artifact_root=artifact_root,
+            runner=runner,
+            build_id_reader=build_id_reader,
+            clock=clock,
+        ),
         operation_name="debug.introspect.from_vmcore_helper",
         caps=HELPER_CAP_PROFILE,
         post_validator=_make_helper_post_validator(spec),
+    )
+
+
+def _execute_vmcore_introspect_request(
+    request: DebugIntrospectFromVmcoreRequest,
+    *,
+    runtime: VmcoreIntrospectExecutionRuntime,
+    operation_name: str,
+    caps: dict[str, int] | None,
+    post_validator: IntrospectPostValidator | None,
+) -> ToolResponse:
+    return _execute_vmcore_introspect_call(
+        request,
+        artifact_root=runtime.artifact_root,
+        runner=runtime.runner,
+        build_id_reader=runtime.build_id_reader,
+        clock=runtime.clock,
+        operation_name=operation_name,
+        caps=caps,
+        post_validator=post_validator,
     )
