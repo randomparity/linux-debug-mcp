@@ -1,19 +1,10 @@
-import inspect
-from typing import get_type_hints
+from dataclasses import fields
 
 from kdive.workflow import handlers
 
 
-def test_workflow_handlers_share_build_boot_runner() -> None:
-    assert hasattr(handlers, "_run_build_boot_workflow")
-
-
-def test_build_boot_runner_uses_named_request_boundary() -> None:
-    signature = inspect.signature(handlers._run_build_boot_workflow)
-    hints = get_type_hints(handlers._run_build_boot_workflow)
-
-    assert hints["request"] is handlers.BuildBootWorkflowRequest
-    for shared_input in (
+def test_build_boot_workflow_request_groups_shared_inputs() -> None:
+    assert [field.name for field in fields(handlers.BuildBootWorkflowRequest)] == [
         "artifact_root",
         "source_path",
         "build_profile",
@@ -23,7 +14,12 @@ def test_build_boot_runner_uses_named_request_boundary() -> None:
         "force_rebuild",
         "force_reboot",
         "force_recollect",
+        "build_overrides",
+        "boot_overrides",
+        "sensitive_paths",
+        "build_profile_spec",
+        "target_profile_spec",
+        "rootfs_profile_spec",
         "acknowledged_permissions",
         "admission",
-    ):
-        assert shared_input not in signature.parameters
+    ]

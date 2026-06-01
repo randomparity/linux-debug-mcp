@@ -106,20 +106,16 @@ def make_plan(
     )
 
 
-def test_provider_uses_boot_planner_collaborator() -> None:
-    provider = LibvirtQemuProvider()
-    assert type(provider._boot_planner).__name__ == "_BootPlanner"
+def test_plan_boot_returns_execution_contract(tmp_path: Path) -> None:
+    plan = make_plan(tmp_path, cleanup_policy="stop_on_failure")
 
-
-def test_execute_boot_state_transitions_are_private_steps() -> None:
-    provider = LibvirtQemuProvider()
-    for helper_name in (
-        "_reconcile_existing_domain",
-        "_execute_domain_start_sequence",
-        "_frozen_debug_boot_result",
-        "_console_readiness_result",
-    ):
-        assert hasattr(provider, helper_name)
+    assert plan.run_id == "run-abc123"
+    assert plan.provider_name == LibvirtQemuProvider.name
+    assert plan.domain_name == "debug-vm"
+    assert plan.cleanup_policy == "stop_on_failure"
+    assert plan.define_argv == ["virsh", "-c", "qemu:///system", "define", str(plan.domain_xml_path)]
+    assert plan.start_argv == ["virsh", "-c", "qemu:///system", "start", "debug-vm"]
+    assert plan.dumpxml_argv == ["virsh", "-c", "qemu:///system", "dumpxml", "debug-vm"]
 
 
 @pytest.mark.parametrize("mutability", ["read_only", "mutable"])
