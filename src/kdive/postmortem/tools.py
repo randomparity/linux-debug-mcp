@@ -21,7 +21,7 @@ from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, 
 
 class PostmortemTargetContext(Model):
     run_id: str
-    target_ref: str
+    manifest_target_profile: str
     artifact_root: str | None = None
     debug_profile: str | None = None
     target_profile: str | None = None
@@ -180,7 +180,7 @@ def register_postmortem_tools(
             options_model = optional_model_arg(options, PostmortemProbeOptions)
             request = DebugPostmortemCheckPrereqsRequest(
                 run_id=target_model.run_id,
-                manifest_target_profile=target_model.target_ref,
+                manifest_target_profile=target_model.manifest_target_profile,
                 timeout_seconds=options_model.timeout_seconds,
                 debug_profile=target_model.debug_profile,
                 target_profile=target_model.target_profile,
@@ -205,7 +205,7 @@ def register_postmortem_tools(
             options_model = optional_model_arg(options, PostmortemListDumpsOptions)
             request = DebugPostmortemListDumpsRequest(
                 run_id=target_model.run_id,
-                manifest_target_profile=target_model.target_ref,
+                manifest_target_profile=target_model.manifest_target_profile,
                 dump_dir=options_model.dump_dir,
                 timeout_seconds=options_model.timeout_seconds,
                 debug_profile=target_model.debug_profile,
@@ -232,7 +232,7 @@ def register_postmortem_tools(
             options_model = optional_model_arg(options, PostmortemFetchOptions)
             request = DebugPostmortemFetchRequest(
                 run_id=target_model.run_id,
-                manifest_target_profile=target_model.target_ref,
+                manifest_target_profile=target_model.manifest_target_profile,
                 dump_ref=dump_ref,
                 force=options_model.force,
                 dump_dir=options_model.dump_dir,

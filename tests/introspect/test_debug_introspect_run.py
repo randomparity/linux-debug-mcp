@@ -399,7 +399,7 @@ def test_run_tool_forwards_args_to_request(monkeypatch: pytest.MonkeyPatch) -> N
     app = server_module.create_app()
 
     raw = app._tool_manager._tools["debug.introspect.run"].fn(
-        target=IntrospectTargetContext(run_id="r1", target_ref="local-qemu"),
+        target=IntrospectTargetContext(run_id="r1", manifest_target_profile="local-qemu"),
         script="print(1)",
         options=IntrospectRunOptions(args={"limit": 3}),
     )

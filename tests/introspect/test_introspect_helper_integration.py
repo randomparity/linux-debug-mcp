@@ -60,7 +60,7 @@ def _call_helper(
     """Invoke debug_introspect_helper_handler and return the ToolResponse."""
     request = DebugIntrospectHelperRequest(
         run_id=ctx.run_id,
-        target_ref="pilot-libvirt",
+        manifest_target_profile="pilot-libvirt",
         name=name,
         args=args,
         timeout_seconds=timeout_seconds,

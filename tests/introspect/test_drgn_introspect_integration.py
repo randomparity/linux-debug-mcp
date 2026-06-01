@@ -148,7 +148,7 @@ def _bootstrap_booted_run(tmp_path: Path) -> BootstrapResult:
     pilot_target = TargetProfile(
         name="pilot-libvirt",
         architecture="x86_64",
-        target_ref=env_domain,
+        manifest_target_profile=env_domain,
         managed_domain=True,
         managed_domain_prefix=MANAGED_DOMAIN_PREFIX,
         libvirt_uri=env_libvirt_uri,
@@ -230,7 +230,7 @@ def test_introspect_emit_roundtrip(tmp_path) -> None:
     ctx = _bootstrap_booted_run(tmp_path)
     request = DebugIntrospectRunRequest(
         run_id=ctx.run_id,
-        target_ref="pilot-libvirt",
+        manifest_target_profile="pilot-libvirt",
         script='emit({"pid": 1})',
         timeout_seconds=30,
     )
@@ -252,7 +252,7 @@ def test_introspect_target_side_timeout(tmp_path) -> None:
     ctx = _bootstrap_booted_run(tmp_path)
     request = DebugIntrospectRunRequest(
         run_id=ctx.run_id,
-        target_ref="pilot-libvirt",
+        manifest_target_profile="pilot-libvirt",
         script="while True:\n    pass\n",
         timeout_seconds=5,
     )
@@ -274,7 +274,7 @@ def test_introspect_build_id_round_trips(tmp_path) -> None:
     ctx = _bootstrap_booted_run(tmp_path)
     request = DebugIntrospectRunRequest(
         run_id=ctx.run_id,
-        target_ref="pilot-libvirt",
+        manifest_target_profile="pilot-libvirt",
         script="emit({})",
         timeout_seconds=30,
     )
@@ -304,7 +304,7 @@ def test_introspect_allow_write_false_blocks_prog_write(tmp_path) -> None:
     ctx = _bootstrap_booted_run(tmp_path)
     request = DebugIntrospectRunRequest(
         run_id=ctx.run_id,
-        target_ref="pilot-libvirt",
+        manifest_target_profile="pilot-libvirt",
         script='prog.write(0, b"\\x00")',
         timeout_seconds=30,
         allow_write=False,
@@ -327,7 +327,7 @@ def test_introspect_allow_write_true_reaches_drgn(tmp_path) -> None:
     ctx = _bootstrap_booted_run(tmp_path)
     request = DebugIntrospectRunRequest(
         run_id=ctx.run_id,
-        target_ref="pilot-libvirt",
+        manifest_target_profile="pilot-libvirt",
         script='prog.write(0, b"\\x00"); emit({"reached": True})',
         timeout_seconds=30,
         allow_write=True,

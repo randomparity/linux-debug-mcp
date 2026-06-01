@@ -498,7 +498,7 @@ def test_introspect_adapter_builds_run_request_and_forwards_gate_collaborators(t
     raw = _tool_fn(app, "debug.introspect.run")(
         target=IntrospectTargetContext(
             run_id="run-1",
-            target_ref="local-qemu",
+            manifest_target_profile="local-qemu",
             artifact_root=str(tmp_path / "runs"),
         ),
         script="print('x')",
@@ -577,7 +577,7 @@ def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators
     raw = _tool_fn(app, "debug.postmortem.fetch")(
         target=PostmortemTargetContext(
             run_id="run-1",
-            target_ref="local-qemu",
+            manifest_target_profile="local-qemu",
             artifact_root=str(tmp_path / "runs"),
         ),
         dump_ref="/var/crash/d1",
@@ -628,6 +628,13 @@ def test_postmortem_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_pa
 
     assert raw["ok"] is False
     assert raw["error"]["category"] == "configuration_error"
+
+
+def test_live_adapter_contexts_use_manifest_target_profile_name() -> None:
+    assert "manifest_target_profile" in IntrospectTargetContext.model_fields
+    assert "target_ref" not in IntrospectTargetContext.model_fields
+    assert "manifest_target_profile" in PostmortemTargetContext.model_fields
+    assert "target_ref" not in PostmortemTargetContext.model_fields
 
 
 def test_workflow_adapter_forwards_debug_collaborators_and_converts_artifact_root(tmp_path: Path) -> None:

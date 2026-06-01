@@ -22,7 +22,7 @@ from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, 
 
 class IntrospectTargetContext(Model):
     run_id: str
-    target_ref: str
+    manifest_target_profile: str
     artifact_root: str | None = None
     debug_profile: str | None = None
     target_profile: str | None = None
@@ -146,7 +146,7 @@ def register_introspect_tools(
             options_model = optional_model_arg(options, IntrospectRunOptions)
             request = DebugIntrospectRunRequest(
                 run_id=target_model.run_id,
-                manifest_target_profile=target_model.target_ref,
+                manifest_target_profile=target_model.manifest_target_profile,
                 script=script,
                 timeout_seconds=options_model.timeout_seconds,
                 allow_write=options_model.allow_write,
@@ -174,7 +174,7 @@ def register_introspect_tools(
             options_model = optional_model_arg(options, IntrospectHelperOptions)
             request = DebugIntrospectHelperRequest(
                 run_id=target_model.run_id,
-                manifest_target_profile=target_model.target_ref,
+                manifest_target_profile=target_model.manifest_target_profile,
                 name=name,
                 args=options_model.args or {},
                 timeout_seconds=options_model.timeout_seconds,
@@ -199,7 +199,7 @@ def register_introspect_tools(
             options_model = optional_model_arg(options, IntrospectProbeOptions)
             request = DebugIntrospectCheckPrerequisitesRequest(
                 run_id=target_model.run_id,
-                manifest_target_profile=target_model.target_ref,
+                manifest_target_profile=target_model.manifest_target_profile,
                 timeout_seconds=options_model.timeout_seconds,
                 debug_profile=target_model.debug_profile,
                 target_profile=target_model.target_profile,
