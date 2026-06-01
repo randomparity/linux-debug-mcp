@@ -2,11 +2,11 @@ import os
 from pathlib import Path
 
 import pytest
+from handler_call_helpers import debug_continue_handler, debug_read_symbol_handler, debug_set_breakpoint_handler
 from workflow_helpers import call_workflow_build_boot_debug_handler
 
 from kdive import server
 from kdive.config import RootfsProfile, TargetProfile
-from kdive.debug.bound_handlers import debug_continue_handler, debug_read_symbol_handler, debug_set_breakpoint_handler
 from kdive.debug.handlers import DebugRuntime
 from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.providers.local.debug.gdb_mi import GdbMiEngine, GdbMiSessionRegistry

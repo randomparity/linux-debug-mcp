@@ -15,6 +15,12 @@ from typing import get_type_hints
 import pytest
 from _layer4_fakes import FakeQemuTransport, build_txn
 from conftest import kernel_provenance_details, write_vmlinux_with_build_id
+from handler_call_helpers import (
+    debug_continue_handler,
+    debug_list_breakpoints_handler,
+    debug_read_registers_handler,
+    debug_set_breakpoint_handler,
+)
 
 import kdive.server as server_module
 from kdive.artifacts.store import ArtifactStore
@@ -27,12 +33,6 @@ from kdive.debug import handlers as debug_handlers
 from kdive.debug import operations as debug_operations
 from kdive.debug import session_end as debug_session_end
 from kdive.debug import tools as debug_tools
-from kdive.debug.bound_handlers import (
-    debug_continue_handler,
-    debug_list_breakpoints_handler,
-    debug_read_registers_handler,
-    debug_set_breakpoint_handler,
-)
 from kdive.debug.session_end import _end_mi_debug_session, debug_end_session_handler
 from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.debug.tools import DebugToolContext, DebugToolHandlers
@@ -478,10 +478,8 @@ def test_debug_bound_handlers_use_request_forwarding_factories() -> None:
     ):
         assert f"def {helper_name}(" in source
 
-    assert source.count("request = request or DebugSymbolRequest(") == 1
-    assert source.count("request = request or DebugBreakpointIdRequest(") == 1
-    assert source.count("request = request or DebugSessionRequest(") == 1
-    assert source.count("request = request or DebugExecutionRequest(") == 1
+    assert "request = request or" not in source
+    assert "artifact_root: Path | None" not in source
 
 
 def test_debug_operation_leaf_handlers_use_request_forwarding_factory() -> None:

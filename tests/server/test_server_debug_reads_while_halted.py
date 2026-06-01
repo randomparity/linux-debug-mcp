@@ -13,10 +13,10 @@ import inspect
 from pathlib import Path
 
 from conftest import FakeMiEngine, build_debug_transport, kernel_provenance_details, write_vmlinux_with_build_id
+from handler_call_helpers import debug_read_registers_handler
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile
-from kdive.debug.bound_handlers import debug_read_registers_handler
 from kdive.debug.handlers import DebugRuntime
 from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.domain import ArtifactRef, RunRequest, StepResult, StepStatus

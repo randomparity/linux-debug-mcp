@@ -48,6 +48,8 @@ from conftest import (
     target_profile,
 )
 from handler_call_helpers import (
+    debug_continue_handler,
+    debug_read_registers_handler,
     target_boot_handler,
     target_run_tests_handler,
     transport_inject_break_handler,
@@ -73,7 +75,6 @@ from kdive.coordination.registry import (
     SessionRegistry,
 )
 from kdive.coordination.transaction import TransportTransaction
-from kdive.debug.bound_handlers import debug_continue_handler, debug_read_registers_handler
 from kdive.debug.handlers import DebugRuntime
 from kdive.debug.policy import halt_debug_transport
 from kdive.domain import ErrorCategory, StepResult, StepStatus

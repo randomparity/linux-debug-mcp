@@ -39,9 +39,9 @@ from conftest import (
 from conftest import (
     seed_legacy_debug_session as _seed_legacy_debug_session,
 )
+from handler_call_helpers import debug_continue_handler, debug_read_registers_handler
 
 from kdive.config import RootfsProfile
-from kdive.debug.bound_handlers import debug_continue_handler, debug_read_registers_handler
 from kdive.debug.handlers import DebugRuntime
 from kdive.debug.session_end import debug_end_session_handler
 from kdive.domain import ErrorCategory
