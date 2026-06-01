@@ -310,6 +310,7 @@ class _DebugStartAttach:
     session_id: str
     mi_probe_details: dict[str, object]
     replace_existing_debug: bool
+    runtime: _DebugStartRuntime
 
 
 @dataclass(frozen=True)
@@ -319,6 +320,16 @@ class _DebugStartRuntime:
     session_registry: SessionRegistry
     gdb_mi_engine: GdbMiEngine
     gdb_mi_sessions: GdbMiSessionRegistry
+
+
+@dataclass(frozen=True)
+class _DebugStartDependencies:
+    transaction: TransportTransaction | None
+    admission: AdmissionService | None
+    session_registry: SessionRegistry | None
+    session_guard: SessionGuard | None
+    gdb_mi_engine: GdbMiEngine | None
+    gdb_mi_sessions: GdbMiSessionRegistry | None
 
 
 @dataclass(frozen=True)
@@ -411,18 +422,14 @@ def _debug_start_session_preflight(
 def _debug_start_session_engine_missing(
     *,
     run_id: str,
-    transaction: TransportTransaction | None,
-    admission: AdmissionService | None,
-    session_registry: SessionRegistry | None,
-    gdb_mi_engine: GdbMiEngine | None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None,
+    dependencies: _DebugStartDependencies,
 ) -> ToolResponse | None:
     if (
-        transaction is not None
-        and admission is not None
-        and session_registry is not None
-        and gdb_mi_engine is not None
-        and gdb_mi_sessions is not None
+        dependencies.transaction is not None
+        and dependencies.admission is not None
+        and dependencies.session_registry is not None
+        and dependencies.gdb_mi_engine is not None
+        and dependencies.gdb_mi_sessions is not None
     ):
         return None
     return ToolResponse.failure(
@@ -476,11 +483,7 @@ def _debug_start_session_reuse_or_readiness(
     preflight: _DebugStartPreflight,
     new_session: bool,
     build_id_reader: Callable[[Path], str],
-    transaction: TransportTransaction | None,
-    admission: AdmissionService | None,
-    session_registry: SessionRegistry | None,
-    gdb_mi_engine: GdbMiEngine | None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None,
+    dependencies: _DebugStartDependencies,
 ) -> tuple[_DebugStartReadiness | None, ToolResponse | None]:
     store = preflight.store
     redactor = preflight.redactor
@@ -513,19 +516,21 @@ def _debug_start_session_reuse_or_readiness(
 
     engine_failure = _debug_start_session_engine_missing(
         run_id=run_id,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
+        dependencies=dependencies,
     )
     if engine_failure is not None:
         return None, engine_failure
-    transaction = _require_value(transaction, "debug transaction missing after availability check")
-    admission = _require_value(admission, "debug admission missing after availability check")
-    session_registry = _require_value(session_registry, "debug session registry missing after availability check")
-    gdb_mi_engine = _require_value(gdb_mi_engine, "debug gdb/MI engine missing after availability check")
-    gdb_mi_sessions = _require_value(gdb_mi_sessions, "debug gdb/MI registry missing after availability check")
+    transaction = _require_value(dependencies.transaction, "debug transaction missing after availability check")
+    admission = _require_value(dependencies.admission, "debug admission missing after availability check")
+    session_registry = _require_value(
+        dependencies.session_registry,
+        "debug session registry missing after availability check",
+    )
+    gdb_mi_engine = _require_value(dependencies.gdb_mi_engine, "debug gdb/MI engine missing after availability check")
+    gdb_mi_sessions = _require_value(
+        dependencies.gdb_mi_sessions,
+        "debug gdb/MI registry missing after availability check",
+    )
     return (
         _DebugStartReadiness(
             runtime=_DebugStartRuntime(
@@ -547,9 +552,10 @@ def _debug_start_session_open_and_probe(
     preflight: _DebugStartPreflight,
     readiness: _DebugStartReadiness,
     recovery: bool,
-    session_guard: SessionGuard | None,
+    dependencies: _DebugStartDependencies,
 ) -> tuple[_DebugStartAttach | None, ToolResponse | None]:
     runtime = readiness.runtime
+    session_guard = dependencies.session_guard
     target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
     if session_guard is not None:
         try:
@@ -626,6 +632,7 @@ def _debug_start_session_open_and_probe(
             session_id=session_id,
             mi_probe_details=mi_probe_details,
             replace_existing_debug=readiness.replace_existing_debug,
+            runtime=runtime,
         ),
         None,
     )
@@ -638,23 +645,14 @@ def _debug_start_session_locked_attach(
     new_session: bool,
     recovery: bool,
     build_id_reader: Callable[[Path], str],
-    transaction: TransportTransaction | None,
-    admission: AdmissionService | None,
-    session_registry: SessionRegistry | None,
-    session_guard: SessionGuard | None,
-    gdb_mi_engine: GdbMiEngine | None,
-    gdb_mi_sessions: GdbMiSessionRegistry | None,
+    dependencies: _DebugStartDependencies,
 ) -> tuple[_DebugStartAttach | None, ToolResponse | None]:
     readiness, readiness_failure = _debug_start_session_reuse_or_readiness(
         run_id=run_id,
         preflight=preflight,
         new_session=new_session,
         build_id_reader=build_id_reader,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
-        gdb_mi_engine=gdb_mi_engine,
-        gdb_mi_sessions=gdb_mi_sessions,
+        dependencies=dependencies,
     )
     if readiness_failure is not None:
         return None, readiness_failure
@@ -664,7 +662,7 @@ def _debug_start_session_locked_attach(
         preflight=preflight,
         readiness=readiness,
         recovery=recovery,
-        session_guard=session_guard,
+        dependencies=dependencies,
     )
 
 
@@ -673,14 +671,10 @@ def _debug_start_session_persist_success(
     run_id: str,
     preflight: _DebugStartPreflight,
     attach: _DebugStartAttach,
-    transaction: TransportTransaction,
-    admission: AdmissionService,
-    session_registry: SessionRegistry,
     session_guard: SessionGuard | None,
-    gdb_mi_engine: GdbMiEngine,
-    gdb_mi_sessions: GdbMiSessionRegistry,
 ) -> _DebugStartPersisted:
     store = preflight.store
+    runtime = attach.runtime
     session = _build_mi_debug_session(
         session_id=attach.session_id,
         run_id=run_id,
@@ -707,15 +701,15 @@ def _debug_start_session_persist_success(
         try:
             session_guard.verify_attached(post_ctx, attach.transport_session)
         except PreconditionError as exc:
-            reaped = gdb_mi_sessions.reap(attach.session_id)
+            reaped = runtime.gdb_mi_sessions.reap(attach.session_id)
             if reaped is not None:
                 with contextlib.suppress(Exception):
-                    gdb_mi_engine.force_resume(reaped)
+                    runtime.gdb_mi_engine.force_resume(reaped)
             session_guard.teardown(
                 post_ctx,
-                close=lambda: transaction.close(sid, force=False),
-                read_record=lambda: session_registry.read_record(tkey),
-                force_reap=lambda: transaction.force_release(sid),
+                close=lambda: runtime.transaction.close(sid, force=False),
+                read_record=lambda: runtime.session_registry.read_record(tkey),
+                force_reap=lambda: runtime.transaction.force_release(sid),
             )
             raise exc
     terminal = StepResult(
@@ -779,6 +773,14 @@ def _start_session(
     if preflight_failure is not None:
         return preflight_failure
     preflight = _require_value(preflight, "debug preflight missing without failure")
+    dependencies = _DebugStartDependencies(
+        transaction=transaction,
+        admission=admission,
+        session_registry=session_registry,
+        session_guard=session_guard,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
+    )
 
     attach: _DebugStartAttach | None = None
     persisted: _DebugStartPersisted | None = None
@@ -790,33 +792,18 @@ def _start_session(
                 new_session=new_session,
                 recovery=recovery,
                 build_id_reader=build_id_reader,
-                transaction=transaction,
-                admission=admission,
-                session_registry=session_registry,
-                session_guard=session_guard,
-                gdb_mi_engine=gdb_mi_engine,
-                gdb_mi_sessions=gdb_mi_sessions,
+                dependencies=dependencies,
             )
             if attach_failure is not None:
                 return attach_failure
             attach = _require_value(attach, "debug attach missing without failure")
 
-            transaction = _require_value(transaction, "debug transaction missing after attach")
-            admission = _require_value(admission, "debug admission missing after attach")
-            session_registry = _require_value(session_registry, "debug session registry missing after attach")
-            gdb_mi_engine = _require_value(gdb_mi_engine, "debug gdb/MI engine missing after attach")
-            gdb_mi_sessions = _require_value(gdb_mi_sessions, "debug gdb/MI registry missing after attach")
             try:
                 persisted = _debug_start_session_persist_success(
                     run_id=run_id,
                     preflight=preflight,
                     attach=attach,
-                    transaction=transaction,
-                    admission=admission,
-                    session_registry=session_registry,
                     session_guard=session_guard,
-                    gdb_mi_engine=gdb_mi_engine,
-                    gdb_mi_sessions=gdb_mi_sessions,
                 )
             except PreconditionError as exc:
                 return ToolResponse.failure(
@@ -832,12 +819,12 @@ def _start_session(
                     run_id=run_id,
                     session_id=attach.session_id,
                     transport_session=attach.transport_session,
-                    transaction=transaction,
-                    admission=admission,
-                    session_registry=session_registry,
+                    transaction=attach.runtime.transaction,
+                    admission=attach.runtime.admission,
+                    session_registry=attach.runtime.session_registry,
                     session_guard=session_guard,
-                    gdb_mi_engine=gdb_mi_engine,
-                    gdb_mi_sessions=gdb_mi_sessions,
+                    gdb_mi_engine=attach.runtime.gdb_mi_engine,
+                    gdb_mi_sessions=attach.runtime.gdb_mi_sessions,
                     redactor=preflight.redactor,
                 )
     except ManifestStateError as exc:
@@ -845,13 +832,12 @@ def _start_session(
 
     attach = _require_value(attach, "debug attach missing before success response")
     persisted = _require_value(persisted, "debug persistence result missing before success response")
-    admission = _require_value(admission, "debug admission missing before success response")
     return _debug_start_session_success_response(
         run_id=run_id,
         target_key=attach.target_key,
         details=persisted.details,
         artifacts=persisted.artifacts,
-        admission=admission,
+        admission=attach.runtime.admission,
         redactor=preflight.redactor,
     )
 
