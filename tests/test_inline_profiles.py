@@ -2,9 +2,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from conftest import make_source_tree
-from handler_call_helpers import target_boot_handler
+from handler_call_helpers import create_run_handler, target_boot_handler
 
-from kdive.artifacts.handlers import create_run_handler
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, RootfsProfile, TargetProfile
 from kdive.domain import ArtifactRef, StepResult, StepStatus

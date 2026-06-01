@@ -3,7 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from kdive.config import BootOverrides, DebugProfile, RootfsProfile, TargetProfile, TestSuiteProfile
+from kdive.artifacts.contracts import CreateRunHandlerRequest, CreateRunRuntime
+from kdive.artifacts.handlers import create_run_handler as _create_run_handler
+from kdive.config import BootOverrides, BuildOverrides, DebugProfile, RootfsProfile, TargetProfile, TestSuiteProfile
 from kdive.coordination.admission import AdmissionService, SnapshotStore
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
@@ -50,6 +52,43 @@ from kdive.transport.tools import (
 
 BreakMechanism = Callable[[BreakRequestMethod, BreakPlan | None], None]
 ProbeHalted = Callable[[TransportSession], bool]
+
+
+def create_run_handler(
+    *,
+    artifact_root: Path,
+    source_path: str,
+    build_profile: str | None = None,
+    target_profile: str | None = None,
+    rootfs_profile: str | None = None,
+    run_id: str | None = None,
+    debug_profile: str | None = None,
+    test_suite: str | None = None,
+    build_overrides: BuildOverrides | None = None,
+    boot_overrides: BootOverrides | None = None,
+    sensitive_paths: list[Path] | None = None,
+    build_profile_spec: dict[str, object] | None = None,
+    target_profile_spec: dict[str, object] | None = None,
+    rootfs_profile_spec: dict[str, object] | None = None,
+):
+    return _create_run_handler(
+        request=CreateRunHandlerRequest(
+            artifact_root=artifact_root,
+            source_path=source_path,
+            build_profile=build_profile,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            run_id=run_id,
+            debug_profile=debug_profile,
+            test_suite=test_suite,
+            build_overrides=build_overrides,
+            boot_overrides=boot_overrides,
+            build_profile_spec=build_profile_spec,
+            target_profile_spec=target_profile_spec,
+            rootfs_profile_spec=rootfs_profile_spec,
+        ),
+        runtime=CreateRunRuntime(sensitive_paths=sensitive_paths or []),
+    )
 
 
 def _debug_operation(

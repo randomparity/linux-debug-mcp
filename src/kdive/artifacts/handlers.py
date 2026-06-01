@@ -9,6 +9,7 @@ from typing import Any, TypeVar
 
 from pydantic import ValidationError
 
+from kdive.artifacts.contracts import CreateRunHandlerRequest, CreateRunRuntime
 from kdive.artifacts.manifest import RunManifest
 from kdive.artifacts.redaction import redacted_artifacts
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
@@ -124,73 +125,61 @@ def _resolve_initial_profiles(
 
 def create_run_handler(
     *,
-    artifact_root: Path,
-    source_path: str,
-    build_profile: str | None = None,
-    target_profile: str | None = None,
-    rootfs_profile: str | None = None,
-    run_id: str | None = None,
-    debug_profile: str | None = None,
-    test_suite: str | None = None,
-    build_overrides: BuildOverrides | None = None,
-    boot_overrides: BootOverrides | None = None,
-    sensitive_paths: list[Path] | None = None,
-    build_profile_spec: dict[str, Any] | None = None,
-    target_profile_spec: dict[str, Any] | None = None,
-    rootfs_profile_spec: dict[str, Any] | None = None,
+    request: CreateRunHandlerRequest,
+    runtime: CreateRunRuntime,
 ) -> ToolResponse:
     try:
-        resolved_source_path = validate_source_path(Path(source_path))
+        resolved_source_path = validate_source_path(Path(request.source_path))
     except PathSafetyError as exc:
         return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
             message=str(exc),
-            details={"source_path": source_path},
+            details={"source_path": request.source_path},
         )
     try:
         resolved = _resolve_initial_profiles(
             source_path=Path(resolved_source_path),
-            sensitive_paths=sensitive_paths or [],
-            build_profile=build_profile,
-            build_profile_spec=build_profile_spec,
-            target_profile=target_profile,
-            target_profile_spec=target_profile_spec,
-            rootfs_profile=rootfs_profile,
-            rootfs_profile_spec=rootfs_profile_spec,
-            build_overrides=build_overrides,
-            boot_overrides=boot_overrides,
+            sensitive_paths=runtime.sensitive_paths,
+            build_profile=request.build_profile,
+            build_profile_spec=request.build_profile_spec,
+            target_profile=request.target_profile,
+            target_profile_spec=request.target_profile_spec,
+            rootfs_profile=request.rootfs_profile,
+            rootfs_profile_spec=request.rootfs_profile_spec,
+            build_overrides=request.build_overrides,
+            boot_overrides=request.boot_overrides,
         )
     except (PathSafetyError, ValueError) as exc:
         return ToolResponse.failure(
             category=ErrorCategory.CONFIGURATION_ERROR,
             message=str(exc),
         )
-    request = RunRequest(
+    run_request = RunRequest(
         source_path=str(resolved_source_path),
         build_profile=resolved.build.name,
         target_profile=resolved.target.name,
         rootfs_profile=resolved.rootfs.name,
-        debug_profile=debug_profile,
-        test_suite=test_suite,
-        run_id=run_id,
-        build_overrides=build_overrides,
-        boot_overrides=boot_overrides,
+        debug_profile=request.debug_profile,
+        test_suite=request.test_suite,
+        run_id=request.run_id,
+        build_overrides=request.build_overrides,
+        boot_overrides=request.boot_overrides,
     )
     try:
-        store = ArtifactStore(artifact_root, source_paths=[resolved_source_path])
+        store = ArtifactStore(request.artifact_root, source_paths=[resolved_source_path])
         manifest = store.create_run(
-            request,
+            run_request,
             resolved_build_profile=resolved.build,
-            resolved_target_profile=resolved.target if target_profile_spec is not None else None,
-            resolved_rootfs_profile=resolved.rootfs if rootfs_profile_spec is not None else None,
+            resolved_target_profile=resolved.target if request.target_profile_spec is not None else None,
+            resolved_rootfs_profile=resolved.rootfs if request.rootfs_profile_spec is not None else None,
         )
     except ManifestStateError as exc:
         return ToolResponse.failure(
             category=exc.category,
             message=str(exc),
-            details={"artifact_root": str(artifact_root)},
+            details={"artifact_root": str(request.artifact_root)},
         )
-    manifest_path = artifact_root.expanduser().resolve() / manifest.run_id / "manifest.json"
+    manifest_path = request.artifact_root.expanduser().resolve() / manifest.run_id / "manifest.json"
     return ToolResponse.success(
         summary=f"created run {manifest.run_id}",
         run_id=manifest.run_id,

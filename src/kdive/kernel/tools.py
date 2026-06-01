@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
+from kdive.artifacts.contracts import CreateRunHandlerRequest, CreateRunRuntime
 from kdive.config import BootOverrides, BuildOverrides
 from kdive.domain import ToolResponse
 from kdive.model import Model
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 
 
 class CreateRunHandler(Protocol):
-    def __call__(self, *, request: CreateRunHandlerRequest, runtime: KernelToolRuntime) -> ToolResponse: ...
+    def __call__(self, *, request: CreateRunHandlerRequest, runtime: CreateRunRuntime) -> ToolResponse: ...
 
 
 class KernelBuildHandler(Protocol):
@@ -28,23 +29,6 @@ class KernelBuildHandler(Protocol):
 class KernelToolRuntime:
     sensitive_paths: list[Path]
     build_provider: LocalKernelBuildProvider | None = None
-
-
-@dataclass(frozen=True)
-class CreateRunHandlerRequest:
-    artifact_root: Path
-    source_path: str
-    build_profile: str
-    target_profile: str
-    rootfs_profile: str
-    run_id: str | None
-    debug_profile: str | None
-    test_suite: str | None
-    build_overrides: BuildOverrides | None
-    boot_overrides: BootOverrides | None
-    build_profile_spec: dict[str, Any] | None
-    target_profile_spec: dict[str, Any] | None
-    rootfs_profile_spec: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -122,7 +106,8 @@ def register_kernel_tools(
     kernel_build_handler: KernelBuildHandler,
 ) -> None:
     default_artifact_root_text = str(default_artifact_root)
-    runtime = KernelToolRuntime(sensitive_paths=sensitive_paths)
+    create_run_runtime = CreateRunRuntime(sensitive_paths=sensitive_paths)
+    build_runtime = KernelToolRuntime(sensitive_paths=sensitive_paths)
 
     @app.tool(name="kernel.create_run")
     def kernel_create_run(
@@ -160,7 +145,7 @@ def register_kernel_tools(
                 target_profile_spec=target_spec,
                 rootfs_profile_spec=rootfs_spec,
             ),
-            runtime=runtime,
+            runtime=create_run_runtime,
         ).model_dump(mode="json")
 
     @app.tool(name="kernel.build")
@@ -180,5 +165,5 @@ def register_kernel_tools(
                 build_profile=options_model.build_profile,
                 force_rebuild=options_model.force_rebuild,
             ),
-            runtime=runtime,
+            runtime=build_runtime,
         ).model_dump(mode="json")

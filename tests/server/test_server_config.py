@@ -3,13 +3,13 @@ from pathlib import Path
 
 import pytest
 from conftest import make_source_tree
+from handler_call_helpers import create_run_handler
 
 from kdive.config import BootOverrides, ServerConfig
 from kdive.kernel import tools as kernel_tools
 from kdive.server import (
     SERVER_CONFIG_ENV_VAR,
     create_app,
-    create_run_handler,
     load_server_config,
 )
 

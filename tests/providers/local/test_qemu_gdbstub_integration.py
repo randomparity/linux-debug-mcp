@@ -124,9 +124,8 @@ def test_live_frozen_boot_hits_early_breakpoint(tmp_path: Path, monkeypatch: pyt
     Gated behind the same live-gdbstub env guard as test_live_build_boot_debug_workflow; skipped
     in CI. Requires a real QEMU+KVM guest, a built kernel, and a managed debug domain.
     """
-    from handler_call_helpers import kernel_build_handler, target_boot_handler
+    from handler_call_helpers import create_run_handler, kernel_build_handler, target_boot_handler
 
-    from kdive.artifacts.handlers import create_run_handler
     from kdive.config import BootOverrides
 
     env = require_live_gdbstub_env()

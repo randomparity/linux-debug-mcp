@@ -125,27 +125,6 @@ DEFAULT_TEST_SUITES = _DEFAULT_TEST_SUITES
 _RequiredT = TypeVar("_RequiredT")
 
 
-def _kernel_create_run_tool_handler(
-    *, request: kernel_tools.CreateRunHandlerRequest, runtime: kernel_tools.KernelToolRuntime
-) -> ToolResponse:
-    return create_run_handler(
-        artifact_root=request.artifact_root,
-        source_path=request.source_path,
-        build_profile=request.build_profile,
-        target_profile=request.target_profile,
-        rootfs_profile=request.rootfs_profile,
-        run_id=request.run_id,
-        debug_profile=request.debug_profile,
-        test_suite=request.test_suite,
-        build_overrides=request.build_overrides,
-        boot_overrides=request.boot_overrides,
-        sensitive_paths=runtime.sensitive_paths,
-        build_profile_spec=request.build_profile_spec,
-        target_profile_spec=request.target_profile_spec,
-        rootfs_profile_spec=request.rootfs_profile_spec,
-    )
-
-
 def _require_value(value: _RequiredT | None, message: str) -> _RequiredT:
     if value is None:
         raise RuntimeError(message)
@@ -183,7 +162,7 @@ __all__ = (
 
 def _workflow_handler_dependencies() -> WorkflowHandlerDependencies:
     return WorkflowHandlerDependencies(
-        create_run_handler=_kernel_create_run_tool_handler,
+        create_run_handler=create_run_handler,
         kernel_build_handler=kernel_build_handler,
         target_boot_handler=target_boot_handler,
         target_run_tests_handler=target_run_tests_handler,
@@ -466,7 +445,7 @@ def create_app(
         app,
         default_artifact_root=DEFAULT_ARTIFACT_ROOT,
         sensitive_paths=sensitive_paths,
-        create_run_handler=_kernel_create_run_tool_handler,
+        create_run_handler=create_run_handler,
         kernel_build_handler=kernel_build_handler,
     )
 

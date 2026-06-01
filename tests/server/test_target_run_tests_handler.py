@@ -1,9 +1,8 @@
 from pathlib import Path
 
 from conftest import FakeTestProvider, create_booted_run, make_source_tree, rootfs
-from handler_call_helpers import target_run_tests_handler
+from handler_call_helpers import create_run_handler, target_run_tests_handler
 
-from kdive.artifacts.handlers import create_run_handler
 from kdive.artifacts.manifest import BootAttempt
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import (

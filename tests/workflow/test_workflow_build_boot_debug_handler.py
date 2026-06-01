@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from handler_call_helpers import kernel_build_handler, target_boot_handler, target_run_tests_handler
+from handler_call_helpers import (
+    create_run_handler,
+    kernel_build_handler,
+    target_boot_handler,
+    target_run_tests_handler,
+)
 from workflow_helpers import call_workflow_build_boot_debug_handler, direct_workflow_dependencies
 
 import kdive.server as server_module
@@ -8,7 +13,6 @@ from kdive.debug.session_handlers import _start_session as debug_start_session_h
 from kdive.domain import ErrorCategory, ToolResponse
 from kdive.server import (
     DEFAULT_TARGET_PROFILES,
-    create_run_handler,
     workflow_build_boot_debug_handler,
 )
 from kdive.workflow.contracts import WorkflowHandlerDependencies

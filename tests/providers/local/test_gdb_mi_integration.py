@@ -60,13 +60,14 @@ def test_engine_attaches_reads_one_record_and_detaches(tmp_path: Path, monkeypat
         f"KDIVE_DOMAIN must start with {_MANAGED_DOMAIN_PREFIX!r}: {env['KDIVE_DOMAIN']}"
     )
 
+    from handler_call_helpers import create_run_handler
+
     from kdive import server
     from kdive.config import RootfsProfile, TargetProfile
     from kdive.providers.local.debug.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiEngine, MiRecord
     from kdive.seams.target import TargetKey
     from kdive.server import (
         _build_transport_machinery,
-        create_run_handler,
         debug_start_session_handler,
         kernel_build_handler,
         target_boot_handler,

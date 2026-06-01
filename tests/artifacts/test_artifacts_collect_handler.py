@@ -2,10 +2,11 @@ import json
 from pathlib import Path
 
 from conftest import make_source_tree
+from handler_call_helpers import create_run_handler
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.domain import ArtifactRef, StepResult, StepStatus
-from kdive.server import artifacts_collect_handler, create_run_handler
+from kdive.server import artifacts_collect_handler
 
 
 def test_artifacts_collect_handler_lives_in_artifacts_package() -> None:

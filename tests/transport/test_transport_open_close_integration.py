@@ -191,13 +191,14 @@ def test_qemu_gdbstub_flow_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyP
         f"{_MANAGED_DOMAIN_PREFIX!r}: {env['KDIVE_DOMAIN']}"
     )
 
+    from handler_call_helpers import create_run_handler
+
     from kdive import server
     from kdive.config import RootfsProfile, TargetProfile
     from kdive.debug.contracts import DebugRuntime
     from kdive.providers.local.debug.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
     from kdive.server import (
         _build_transport_machinery,
-        create_run_handler,
         debug_read_registers_handler,
         debug_start_session_handler,
         kernel_build_handler,

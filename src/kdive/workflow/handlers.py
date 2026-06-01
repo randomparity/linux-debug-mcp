@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from kdive.artifacts.contracts import CreateRunRuntime
 from kdive.artifacts.manifest import RunManifest
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import BootOverrides, BuildOverrides
@@ -227,7 +228,7 @@ def _run_build_boot_workflow(
                 target_profile_spec=request.target_profile_spec,
                 rootfs_profile_spec=request.rootfs_profile_spec,
             ),
-            runtime=KernelToolRuntime(sensitive_paths=request.sensitive_paths or []),
+            runtime=CreateRunRuntime(sensitive_paths=request.sensitive_paths or []),
         )
         if not create_response.ok:
             return None, create_response

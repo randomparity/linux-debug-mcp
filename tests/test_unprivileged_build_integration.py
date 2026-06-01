@@ -153,9 +153,8 @@ def test_tier2_boot_reaches_readiness_marker(tmp_path: Path) -> None:
     base_image = prepared_dir / "kdive-build-test.qcow2"
     artifact_root = prepared_dir / "kdive-build-test-runs"
 
-    from handler_call_helpers import target_boot_handler
+    from handler_call_helpers import create_run_handler, target_boot_handler
 
-    from kdive.artifacts.handlers import create_run_handler
     from kdive.artifacts.store import ArtifactStore
     from kdive.config import RootfsProfile, TargetProfile
     from kdive.domain import ArtifactRef, StepResult, StepStatus

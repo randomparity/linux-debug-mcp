@@ -7,8 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from handler_call_helpers import create_run_handler
 
-from kdive.artifacts.handlers import create_run_handler
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile, RootfsProfile, TargetProfile
 from kdive.coordination.admission import AdmissionService, publish_ready_snapshot

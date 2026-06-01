@@ -2,6 +2,7 @@ import inspect
 from pathlib import Path
 
 from conftest import make_source_tree
+from handler_call_helpers import create_run_handler
 from mcp.server.fastmcp import FastMCP
 
 from kdive import server
@@ -19,7 +20,6 @@ from kdive.providers.handlers import list_providers_handler
 from kdive.server import (
     DEFAULT_TEST_SUITES,
     create_app,
-    create_run_handler,
     get_manifest_handler,
     not_implemented_handler,
     prerequisites_handler,
@@ -692,7 +692,7 @@ def test_host_prerequisites_tool_is_prereqs_owned() -> None:
 
 def test_create_run_freezes_merged_profiles(tmp_path):
     source = make_source_tree(tmp_path)
-    response = server.create_run_handler(
+    response = create_run_handler(
         artifact_root=tmp_path / "runs",
         source_path=str(source),
         build_profile="x86_64-default",
@@ -712,7 +712,7 @@ def test_create_run_freezes_merged_profiles(tmp_path):
 
 def test_create_run_response_redacts_secret_make_variable(tmp_path):
     source = make_source_tree(tmp_path)
-    response = server.create_run_handler(
+    response = create_run_handler(
         artifact_root=tmp_path / "runs",
         source_path=str(source),
         build_profile="x86_64-default",
@@ -728,7 +728,7 @@ def test_create_run_response_redacts_secret_make_variable(tmp_path):
 
 def test_create_run_response_redacts_secret_shaped_config_line(tmp_path):
     source = make_source_tree(tmp_path)
-    response = server.create_run_handler(
+    response = create_run_handler(
         artifact_root=tmp_path / "runs",
         source_path=str(source),
         build_profile="x86_64-default",
@@ -743,7 +743,7 @@ def test_create_run_response_redacts_secret_shaped_config_line(tmp_path):
 
 def test_create_run_rejects_unknown_base_profile(tmp_path):
     source = make_source_tree(tmp_path)
-    response = server.create_run_handler(
+    response = create_run_handler(
         artifact_root=tmp_path / "runs",
         source_path=str(source),
         build_profile="does-not-exist",
@@ -758,7 +758,7 @@ def test_create_run_rejects_unknown_base_profile(tmp_path):
 
 def test_create_run_freezes_merged_config_lines(tmp_path):
     source = make_source_tree(tmp_path)
-    response = server.create_run_handler(
+    response = create_run_handler(
         artifact_root=tmp_path / "runs",
         source_path=str(source),
         build_profile="x86_64-default",
@@ -776,7 +776,7 @@ def test_create_run_freezes_merged_config_lines(tmp_path):
 
 def test_build_reads_resolved_profile_not_global(tmp_path):
     src = make_source_tree(tmp_path)
-    created = server.create_run_handler(
+    created = create_run_handler(
         artifact_root=tmp_path / "runs",
         source_path=str(src),
         build_profile="x86_64-default",

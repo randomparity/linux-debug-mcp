@@ -5,6 +5,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from kdive.artifacts.contracts import CreateRunRuntime
 from kdive.artifacts.tools import (
     ArtifactCollectContext,
     ArtifactCollectOptions,
@@ -115,9 +116,15 @@ def test_profile_runtime_registries_are_read_only_mappings() -> None:
 def test_kernel_adapters_forward_grouped_payloads_and_override_models(tmp_path: Path) -> None:
     app = FastMCP("adapter-test")
     sensitive_paths = [tmp_path / "secret"]
-    calls: list[tuple[str, CreateRunHandlerRequest | KernelBuildHandlerRequest, KernelToolRuntime]] = []
+    calls: list[
+        tuple[
+            str,
+            CreateRunHandlerRequest | KernelBuildHandlerRequest,
+            CreateRunRuntime | KernelToolRuntime,
+        ]
+    ] = []
 
-    def create_handler(*, request: CreateRunHandlerRequest, runtime: KernelToolRuntime) -> ToolResponse:
+    def create_handler(*, request: CreateRunHandlerRequest, runtime: CreateRunRuntime) -> ToolResponse:
         calls.append(("create", request, runtime))
         return _success(run_id=request.run_id)
 
@@ -174,7 +181,7 @@ def test_kernel_adapters_forward_grouped_payloads_and_override_models(tmp_path: 
                 target_profile_spec={"name": "inline-target"},
                 rootfs_profile_spec=None,
             ),
-            KernelToolRuntime(sensitive_paths=sensitive_paths),
+            CreateRunRuntime(sensitive_paths=sensitive_paths),
         ),
         (
             "build",
