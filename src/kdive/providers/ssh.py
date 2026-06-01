@@ -162,6 +162,11 @@ class SubprocessSshRunner:
             return handle.read(_SNIPPET_LIMIT)
 
 
+CommandResult = SshCommandResult
+CommandRunner = SshRunner
+SubprocessCommandRunner = SubprocessSshRunner
+
+
 def build_ssh_argv(
     *,
     rootfs_profile: RootfsProfile,

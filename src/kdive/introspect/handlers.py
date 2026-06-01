@@ -11,7 +11,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from pydantic import ValidationError
 
@@ -61,7 +60,15 @@ from kdive.introspect.wrappers import (
     user_script_sha256,
 )
 from kdive.prereqs.drgn_probe import PROBE_SCRIPT
-from kdive.providers.ssh import SSH_TIMEOUT_GRACE_SECONDS, SshRunner, SubprocessSshRunner, build_ssh_argv
+from kdive.providers.ssh import (
+    SSH_TIMEOUT_GRACE_SECONDS,
+    CommandResult,
+    CommandRunner,
+    SshRunner,
+    SubprocessCommandRunner,
+    SubprocessSshRunner,
+    build_ssh_argv,
+)
 from kdive.safety.paths import PathSafetyError, confine_run_relative
 from kdive.safety.redaction import Redactor
 from kdive.seams.probes import (
@@ -188,10 +195,14 @@ class VmcoreIntrospectWorkspace:
 
 @dataclass(frozen=True)
 class VmcoreIntrospectRun:
-    ssh_result: Any
+    command_result: CommandResult
     started_at: datetime
     finished_at: datetime
     duration_ms: int
+
+    @property
+    def ssh_result(self) -> CommandResult:
+        return self.command_result
 
 
 def debug_introspect_run_handler(
@@ -518,15 +529,15 @@ def _run_vmcore_introspect_wrapper(
     workspace: VmcoreIntrospectWorkspace,
     request: DebugIntrospectFromVmcoreRequest,
     *,
-    runner: SshRunner | None,
+    runner: CommandRunner | None,
     clock: Callable[[], datetime],
 ) -> tuple[VmcoreIntrospectRun | None, ToolResponse | None]:
-    active_runner: SshRunner = runner or SubprocessSshRunner()
+    active_process_runner: CommandRunner = runner or SubprocessCommandRunner()
     argv = ["timeout", "--kill-after=2s", f"{request.timeout_seconds}s", "python3", "-"]
     started_at = clock()
     started_monotonic = time.monotonic()
     try:
-        ssh_result = active_runner.run(
+        command_result = active_process_runner.run(
             argv,
             timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
             stdout_path=workspace.stdout_path,
@@ -571,7 +582,7 @@ def _run_vmcore_introspect_wrapper(
         _chmod_best_effort(raw_path, 0o600)
     return (
         VmcoreIntrospectRun(
-            ssh_result=ssh_result,
+            command_result=command_result,
             started_at=started_at,
             finished_at=clock(),
             duration_ms=int((time.monotonic() - started_monotonic) * 1000),
@@ -584,7 +595,7 @@ def _execute_vmcore_introspect_call(
     request: DebugIntrospectFromVmcoreRequest,
     *,
     artifact_root: Path,
-    runner: SshRunner | None = None,
+    runner: CommandRunner | None = None,
     build_id_reader: Callable[[Path], str] = read_elf_build_id,
     clock: Callable[[], datetime] | None = None,
     operation_name: str = "debug.introspect.from_vmcore",
@@ -634,7 +645,7 @@ def debug_introspect_from_vmcore_handler(
     request: DebugIntrospectFromVmcoreRequest,
     *,
     artifact_root: Path,
-    runner: SshRunner | None = None,
+    runner: CommandRunner | None = None,
     build_id_reader: Callable[[Path], str] = read_elf_build_id,
     clock: Callable[[], datetime] | None = None,
 ) -> ToolResponse:
@@ -655,7 +666,7 @@ def debug_introspect_from_vmcore_helper_handler(
     request: DebugIntrospectFromVmcoreHelperRequest,
     *,
     artifact_root: Path,
-    runner: SshRunner | None = None,
+    runner: CommandRunner | None = None,
     build_id_reader: Callable[[Path], str] = read_elf_build_id,
     clock: Callable[[], datetime] | None = None,
 ) -> ToolResponse:
