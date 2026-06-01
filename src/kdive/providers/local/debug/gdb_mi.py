@@ -20,7 +20,7 @@ from pygdbmi.gdbmiparser import parse_response
 from kdive.domain import ErrorCategory, Model
 from kdive.providers.debug import MAX_INTERACTIVE_WAIT_SEC, MAX_MEMORY_READ_BYTES, GdbMiError
 from kdive.safety.redaction import Redactor
-from kdive.transport.core.base import Endpoint, TcpEndpoint
+from kdive.seams.transport_state import Endpoint, TcpEndpoint
 
 # Minimum gdb release that documents the mi3 interpreter (GDB manual "GDB/MI" chapter).
 MIN_GDB_VERSION = (9, 1)

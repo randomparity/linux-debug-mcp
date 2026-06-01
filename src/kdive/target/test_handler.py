@@ -29,9 +29,9 @@ from kdive.providers.local.test.local_ssh_tests import LocalSshTestProvider, Tes
 from kdive.providers.ssh import TestExecutionResult
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import TargetKey
+from kdive.seams.transport_state import ExecutionState
 from kdive.target.common import _configuration_failure, _require_value
 from kdive.target.tools import TargetRunTestsHandlerRequest, TargetToolRuntime
-from kdive.transport.core.base import ExecutionState
 
 logger = logging.getLogger(__name__)
 

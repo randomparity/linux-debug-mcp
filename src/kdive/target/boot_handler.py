@@ -24,6 +24,7 @@ from kdive.rootfs.sources import RootfsSourceError, resolve_rootfs_source
 from kdive.safety.paths import PathSafetyError, validate_rootfs_source
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import BreakHint, ConsoleKind, KernelProvenance, PlatformMetadata, TargetKey
+from kdive.seams.transport_state import LineRole, TransportRef
 from kdive.target.common import (
     _configuration_failure,
     _configuration_handler_failure,
@@ -31,7 +32,6 @@ from kdive.target.common import (
     _tool_response_from_handler_failure,
 )
 from kdive.target.tools import TargetBootHandlerRequest, TargetToolRuntime
-from kdive.transport.core.base import LineRole, TransportRef
 
 logger = logging.getLogger(__name__)
 

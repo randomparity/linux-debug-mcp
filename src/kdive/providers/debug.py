@@ -10,7 +10,7 @@ from pydantic.main import IncEx
 
 from kdive.domain import ArtifactRef, ErrorCategory
 from kdive.model import Model
-from kdive.transport.core.base import Endpoint
+from kdive.seams.transport_state import Endpoint
 
 MAX_INTERACTIVE_WAIT_SEC = 60
 MAX_MEMORY_READ_BYTES = 4096

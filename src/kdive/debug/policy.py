@@ -8,7 +8,7 @@ from kdive.coordination.registry import SessionRegistry
 from kdive.default_profiles import DEFAULT_DEBUG_PROFILES
 from kdive.domain import ErrorCategory
 from kdive.providers.debug import ProviderDebugError
-from kdive.transport.core.base import ExecutionState, TransportSession
+from kdive.seams.transport_state import ExecutionState, TransportSession
 
 
 def ensure_debug_operation_enabled(profile: DebugProfile, operation: str) -> None:
