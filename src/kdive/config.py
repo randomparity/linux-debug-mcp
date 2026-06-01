@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 
+from kdive.model import Model
 from kdive.safety.secrets import SecretReference
 
 _SAFE_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
@@ -94,13 +97,15 @@ def validate_make_variable_map(value: dict[str, str]) -> dict[str, str]:
     return value
 
 
-_ALLOWED_SSH_OPTIONS = {
-    "ConnectTimeout": {"validator": "timeout"},
-    "IdentitiesOnly": {"values": {"yes", "no"}},
-    "LogLevel": {"values": {"ERROR", "QUIET", "VERBOSE"}},
-    "StrictHostKeyChecking": {"values": {"accept-new", "yes"}},
+_CONNECT_TIMEOUT_MIN_SECONDS = 1
+_CONNECT_TIMEOUT_MAX_SECONDS = 3600
+_ALLOWED_SSH_OPTIONS: Mapping[str, frozenset[str] | None] = {
+    "ConnectTimeout": None,
+    "IdentitiesOnly": frozenset({"yes", "no"}),
+    "LogLevel": frozenset({"ERROR", "QUIET", "VERBOSE"}),
+    "StrictHostKeyChecking": frozenset({"accept-new", "yes"}),
 }
-ALLOWED_DEBUG_OPERATIONS = [
+ALLOWED_DEBUG_OPERATIONS = (
     "debug.start_session",
     "debug.interrupt",
     "debug.continue",
@@ -123,15 +128,14 @@ ALLOWED_DEBUG_OPERATIONS = [
     # add-symbol-file) so a breakpoint in the module resolves.
     "debug.load_module_symbols",
     "debug.end_session",
-    # Finding F14: transport.inject_break is destructive (halts the kernel) — gate it through the
-    # same DebugProfile.enabled_operations contract as every other halting/mutating debug op so a
-    # read-only profile can refuse it. Kept in this list (not a transport-only list) because the
-    # gate is per-DebugProfile and the existing `_ensure_debug_operation_enabled` consumes it.
+    # transport.inject_break is destructive (halts the kernel) — gate it through the same
+    # DebugProfile.enabled_operations contract as every other halting/mutating debug op so a
+    # read-only profile can refuse it. Kept in this list because the gate is per-DebugProfile.
     "transport.inject_break",
     "debug.introspect.run",
     "debug.introspect.helper",
     # Offline vmcore introspection (#55). Listed for enumerability/consistency;
-    # the vmcore path does not call `_ensure_debug_operation_enabled` (no
+    # the vmcore path does not call `ensure_debug_operation_enabled` (no
     # DebugProfile in the request) — it is never gated (§5.6 rule 3).
     "debug.introspect.from_vmcore",
     "debug.introspect.from_vmcore_helper",
@@ -151,10 +155,10 @@ ALLOWED_DEBUG_OPERATIONS = [
     "debug.postmortem.list_dumps",
     "debug.postmortem.fetch",
     # ADR 0011 / #56: capability token (NOT an MCP tool) gating allow_write=true on the live
-    # introspect path. Only ever passed to `_ensure_debug_operation_enabled`, never registered
+    # introspect path. Only ever passed to `ensure_debug_operation_enabled`, never registered
     # as a tool. A read-only profile narrows `enabled_operations` to exclude it to refuse writes.
     "debug.introspect.write",
-]
+)
 
 # Spec §5.2 step 4a: soft cap on introspect step records per run. The handler enforces this
 # once, without holding the manifest lock — see spec §5.3 "Soft-cap semantics".
@@ -215,22 +219,48 @@ TRIAGE_MODULES_HELPER = "modules"
 # Spec §11 open risk 4a: integer-percent threshold for the host-side prelude-cost warning;
 # fires when `prelude_ms * 100 >= PRELUDE_WARNING_FRACTION_PCT * timeout_seconds * 1000`.
 PRELUDE_WARNING_FRACTION_PCT = 40
-TRANSPORT_OPERATIONS = [
+TRANSPORT_OPERATIONS = (
     "transport.open",
     "transport.status",
     "transport.health",
     "transport.inject_break",
     "transport.close",
-]
-TRANSPORT_DESTRUCTIVE_PERMISSIONS = {
-    "transport.inject_break": ["drop target kernel into the debugger"],
-}
+)
+TRANSPORT_DESTRUCTIVE_PERMISSIONS = MappingProxyType(
+    {
+        "transport.inject_break": ("drop target kernel into the debugger",),
+    }
+)
 # ADR 0011 / #56: per-call ack required for live introspect write mode (allow_write=true),
 # mirroring TRANSPORT_DESTRUCTIVE_PERMISSIONS. Only the live `debug.introspect.run` path has a
 # writable target; the vmcore path rejects allow_write upstream and so has no entry here.
-INTROSPECT_DESTRUCTIVE_PERMISSIONS = {
-    "debug.introspect.run": ["mutate live kernel state via drgn write APIs"],
-}
+INTROSPECT_DESTRUCTIVE_PERMISSIONS = MappingProxyType(
+    {
+        "debug.introspect.run": ("mutate live kernel state via drgn write APIs",),
+    }
+)
+TARGET_DESTRUCTIVE_PERMISSIONS = MappingProxyType(
+    {
+        "target.boot": (
+            "define MCP-owned libvirt domains",
+            "update MCP-owned libvirt domains",
+            "start MCP-owned libvirt domains",
+            "stop MCP-owned libvirt domains",
+            "destroy MCP-owned libvirt domains",
+        ),
+        "target.run_tests": ("execute caller-supplied commands over target SSH",),
+    }
+)
+PROVIDER_DESTRUCTIVE_PERMISSIONS = MappingProxyType(
+    {
+        "reservation.request_host": ("reserve shared remote or physical targets",),
+        "reservation.release_host": ("release shared remote or physical targets",),
+        "provision.prepare_target": ("write target storage", "install boot artifacts on target"),
+        "hardware.power_control": ("change target power state",),
+        "hardware.boot_kernel": ("boot physical or remote targets",),
+        "workflow.reserve_provision_boot": ("reserve, provision, and boot target hardware",),
+    }
+)
 
 
 def validate_transport_operation(operation: str) -> str:
@@ -243,7 +273,7 @@ def missing_destructive_permissions(
     operation: str,
     acknowledged: list[str],
     *,
-    registry: dict[str, list[str]] | None = None,
+    registry: Mapping[str, Sequence[str]] | None = None,
 ) -> list[str]:
     """Return the destructive permissions an operation requires that the caller has not
     acknowledged. A non-destructive (or unknown) operation requires nothing, so the list is empty.
@@ -267,6 +297,23 @@ def validate_optional_ssh_text(value: str | None) -> str | None:
     return value
 
 
+def _validate_connect_timeout(value: str) -> None:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError("ConnectTimeout must be an integer") from exc
+    if not (_CONNECT_TIMEOUT_MIN_SECONDS <= parsed <= _CONNECT_TIMEOUT_MAX_SECONDS):
+        message = (
+            f"ConnectTimeout must be between {_CONNECT_TIMEOUT_MIN_SECONDS} and {_CONNECT_TIMEOUT_MAX_SECONDS} seconds"
+        )
+        raise ValueError(message)
+
+
+def _validate_fixed_ssh_option(key: str, value: str, allowed_values: frozenset[str]) -> None:
+    if value not in allowed_values:
+        raise ValueError(f"invalid SSH option value for {key}")
+
+
 def validate_ssh_options_map(value: dict[str, str]) -> dict[str, str]:
     for key, item in value.items():
         if key not in _ALLOWED_SSH_OPTIONS:
@@ -275,21 +322,16 @@ def validate_ssh_options_map(value: dict[str, str]) -> dict[str, str]:
             raise ValueError("SSH option names must be simple names")
         if not item or _has_control_character(item):
             raise ValueError(f"invalid SSH option value for {key}")
-        rule = _ALLOWED_SSH_OPTIONS[key]
-        if rule.get("validator") == "timeout":
-            try:
-                parsed = int(item)
-            except ValueError as exc:
-                raise ValueError("ConnectTimeout must be an integer") from exc
-            if parsed < 1 or parsed > 3600:
-                raise ValueError("ConnectTimeout must be between 1 and 3600 seconds")
-        elif item not in rule["values"]:
-            raise ValueError(f"invalid SSH option value for {key}")
+        allowed_values = _ALLOWED_SSH_OPTIONS[key]
+        if allowed_values is None:
+            _validate_connect_timeout(item)
+        else:
+            _validate_fixed_ssh_option(key, item, allowed_values)
     return value
 
 
-class ConfigModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+class ConfigModel(Model):
+    pass
 
 
 class BuildProfile(ConfigModel):

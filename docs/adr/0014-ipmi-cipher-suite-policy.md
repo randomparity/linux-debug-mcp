@@ -11,7 +11,7 @@ fails if a cipher-0 / non-`lanplus` code path can be reached," with tests provin
 IPMI session refuses cipher 0 and requires `lanplus`.
 
 The complication: the IPMI SOL transport (`ipmi-sol`, #15) is **not implemented**. It
-is a future-provider stub (`console-access-stub`) routed through `_future_stub_handler`,
+is a stub-provider stub (`console-access-stub`) routed through `_stub_provider_handler`,
 which validates the request contract and returns `NOT_IMPLEMENTED` without opening any
 resource. So there is no live "transport path" to instrument yet — only the
 `console.open_session` request contract, where `access_method` already accepts
@@ -41,7 +41,7 @@ actually assert when no `ipmitool` invocation exists yet?**
    `3`); for any other method the field must be `None`. This is the only IPMI
    configuration surface that exists, and it is the live code path that "refuses cipher
    0." `IpmiPolicyError` being a `ValueError` makes it a normal Pydantic validation
-   error, mapped to `CONFIGURATION_ERROR` by `_future_stub_handler`.
+   error, mapped to `CONFIGURATION_ERROR` by `_stub_provider_handler`.
 
 3. **`lanplus` is enforced structurally, not by a flag** — `_CONSOLE_ACCESS_METHODS`
    offers `ipmi-sol` only (no bare `lan`/`ipmi`), so an IPMI console can never select a
@@ -124,7 +124,7 @@ actually assert when no `ipmitool` invocation exists yet?**
 ## References
 
 Issue #67; spec
-`docs/superpowers/specs/2026-05-29-ipmi-cipher-policy-design.md`;
+`docs/archive/superpowers/specs/2026-05-29-ipmi-cipher-policy-design.md`;
 [ADR 0012](0012-secrets-store-backends-and-redaction.md) (credential redaction posture);
 `docs/specs/interface-contracts.md` (`ipmi-sol` is `brokered_required`); IPMI v2.0 /
 RMCP+ cipher suite definitions (suite 0 = no auth; suite 3 = RAKP-HMAC-SHA1 /

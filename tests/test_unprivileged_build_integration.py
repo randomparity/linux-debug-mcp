@@ -148,22 +148,23 @@ def test_tier2_boot_reaches_readiness_marker(tmp_path: Path) -> None:
     # KDIVE_ROOTFS locates the operator's pre-prepared, virt_image_t-labeled, qemu-traversable dir.
     # Both the base image and the run tree (overlay) must live here so the separate qemu user can
     # read the overlay AND its read-only backing file under qemu:///system (libvirt relabels only the
-    # writable overlay, not the backing file — libvirt_qemu.py:380-381,377-394).
+    # writable overlay, not the backing file — local_libvirt_qemu.py:380-381,377-394).
     prepared_dir = Path(env["KDIVE_ROOTFS"]).expanduser().parent
     base_image = prepared_dir / "kdive-build-test.qcow2"
     artifact_root = prepared_dir / "kdive-build-test-runs"
 
+    from handler_call_helpers import create_run_handler, target_boot_handler
+
     from kdive.artifacts.store import ArtifactStore
     from kdive.config import RootfsProfile, TargetProfile
     from kdive.domain import ArtifactRef, StepResult, StepStatus
-    from kdive.server import create_run_handler, target_boot_handler
 
     source = Path(env["KDIVE_SOURCE"]).expanduser()
     kernel_image = source / "arch" / "x86" / "boot" / "bzImage"
     assert kernel_image.is_file(), f"build a bzImage at {kernel_image} before running Tier 2"
 
     run_id = "run-unprivileged-build-tier2"
-    # The copy_on_write overlay lands under artifact_root (libvirt_qemu.py:377-394); its ancestor
+    # The copy_on_write overlay lands under artifact_root (local_libvirt_qemu.py:377-394); its ancestor
     # dirs are created with umask-masked mkdir() (store.py:68-71), so under qemu:///system the
     # separate qemu user can only traverse them if they are 0755. Force a 0022 umask for the run
     # tree (and the build) so the chain is qemu-traversable regardless of the operator's login umask.

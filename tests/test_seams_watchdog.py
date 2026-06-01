@@ -2,7 +2,7 @@
 
 Covers the arch knob lists, capture/relax/restore round-trip, capture-once baseline
 preservation, session_id keying, and restore-on-error/timeout via SessionGuard.teardown.
-See docs/superpowers/specs/2026-05-29-watchdog-relax-restore-design.md / docs/adr/0016-*.
+See docs/archive/superpowers/specs/2026-05-29-watchdog-relax-restore-design.md / docs/adr/0016-*.
 """
 
 import pytest

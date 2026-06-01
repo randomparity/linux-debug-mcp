@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
@@ -23,6 +24,29 @@ class ManifestStateError(RuntimeError):
     def __init__(self, message: str, category: ErrorCategory = ErrorCategory.INFRASTRUCTURE_FAILURE) -> None:
         super().__init__(message)
         self.category = category
+
+
+def record_step_with_retry(
+    store: ArtifactStore,
+    run_id: str,
+    result: StepResult,
+    *,
+    append: bool = False,
+    replace_succeeded: bool = False,
+    attempts: int = 5,
+    initial_delay_seconds: float = 0.01,
+) -> None:
+    """Retry transient manifest-lock failures while recording a step result."""
+    delay_seconds = initial_delay_seconds
+    for attempt in range(attempts):
+        try:
+            store.record_step_result(run_id, result, append=append, replace_succeeded=replace_succeeded)
+            return
+        except ManifestStateError as exc:
+            if "manifest is locked" not in str(exc) or attempt == attempts - 1:
+                raise
+            time.sleep(delay_seconds)
+            delay_seconds *= 2
 
 
 class ArtifactStore:
@@ -243,8 +267,16 @@ class ArtifactStore:
     def _write_manifest(self, run_dir: Path, manifest: RunManifest) -> None:
         manifest_path = run_dir / "manifest.json"
         temp_path = run_dir / ".manifest.json.tmp"
-        temp_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
-        os.replace(temp_path, manifest_path)
+        try:
+            temp_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+            os.replace(temp_path, manifest_path)
+        except OSError as exc:
+            with suppress(FileNotFoundError):
+                temp_path.unlink()
+            raise ManifestStateError(
+                f"failed to write manifest for {manifest.run_id} at {manifest_path}: {exc}",
+                ErrorCategory.INFRASTRUCTURE_FAILURE,
+            ) from exc
 
     def _generate_run_id(self) -> str:
         return f"run-{uuid.uuid4().hex[:16]}"

@@ -90,7 +90,16 @@ def read_vmcore_build_id(path: Path) -> str:
                 e_phentsize, e_phnum = struct.unpack_from(endian + "HH", ehdr, 42)
             if e_phnum == 0:
                 raise VmcoreBuildIdAbsent("vmcore has no program headers")
-            phdrs = _read_exact(fh, e_phoff, e_phentsize * e_phnum)
+            min_phentsize = 56 if is64 else 32
+            if e_phentsize < min_phentsize:
+                raise VmcoreBuildIdError(f"implausible e_phentsize {e_phentsize} for {'ELF64' if is64 else 'ELF32'}")
+            table_bytes = e_phentsize * e_phnum
+            file_size = fh.seek(0, 2)
+            if e_phoff + table_bytes > file_size:
+                raise VmcoreBuildIdError(
+                    f"program-header table ({table_bytes} bytes at offset {e_phoff}) extends past EOF ({file_size})"
+                )
+            phdrs = _read_exact(fh, e_phoff, table_bytes)
             for i in range(e_phnum):
                 ph = i * e_phentsize
                 (p_type,) = struct.unpack_from(endian + "I", phdrs, ph)

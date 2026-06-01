@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools==82.0.1", "wheel==0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,25 +9,26 @@ description = "MCP server foundation for Linux kernel build-boot-debug workflows
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "mcp>=1.9,<2",
-  "pydantic>=2.7,<3",
+  "defusedxml==0.7.1",
+  "mcp==1.27.1",
+  "pydantic==2.13.4",
   "pygdbmi==0.11.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "detect-secrets>=1.5,<2",
-  "pre-commit>=4.3,<5",
-  "ruff>=0.15,<1",
+  "detect-secrets==1.5.0",
+  "pre-commit==4.6.0",
+  "ruff==0.15.14",
   "ty==0.0.40",
 ]
 test = [
-  "hypothesis>=6.153,<7",
-  "pytest>=9.0.3,<10",
-  "pytest-cov>=7,<8",
+  "hypothesis==6.153.6",
+  "pytest==9.0.3",
+  "pytest-cov==7.1.0",
 ]
 keyring = [
-  "keyring>=25,<26",
+  "keyring==25.7.0",
 ]
 
 [tool.ruff]
@@ -63,3 +64,6 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra"
+markers = [
+  "live_vm: requires an operator-provided live libvirt VM environment",
+]

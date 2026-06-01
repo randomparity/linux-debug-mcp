@@ -1,0 +1,591 @@
+from __future__ import annotations
+
+import ast
+import inspect
+import socket
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import PROVIDER_DESTRUCTIVE_PERMISSIONS
+from kdive.domain import ToolResponse
+from kdive.providers import handlers as provider_handlers
+from kdive.providers import tools as provider_tools
+from kdive.providers.contracts.models import (
+    BootOrchestrationRequest,
+    ConsoleReadRequest,
+    ConsoleSessionRequest,
+    ConsoleWriteRequest,
+    HardwareControlRequest,
+    ProviderRequest,
+    ProvisioningRequest,
+    RemoteArtifactSyncRequest,
+    RemoteBuildRequest,
+    ReservationReleaseRequest,
+    ReservationRequest,
+    ReserveProvisionBootRequest,
+)
+from kdive.providers.handlers import STUB_PROVIDER_OPERATIONS
+from kdive.providers.local.build.local_kernel_build import LocalKernelBuildProvider
+from kdive.providers.local.target.local_libvirt_qemu import LibvirtQemuProvider
+from kdive.providers.local.test.local_ssh_tests import LocalSshTestProvider
+from kdive.providers.registry import ProviderRegistry
+from kdive.providers.stubs import remote_build_stub_capability
+from kdive.server import create_app
+
+VALID_CALLS = [
+    (
+        "remote.build_kernel",
+        {
+            "architecture": "ppc64le",
+            "source_ref": "linux-src",
+            "build_profile": "defconfig",
+        },
+        "remote-build-stub",
+        RemoteBuildRequest,
+    ),
+    (
+        "remote.sync_artifacts",
+        {
+            "architecture": "ppc64le",
+            "external_artifact_ref": "kernel-image",
+        },
+        "remote-artifact-sync-stub",
+        RemoteArtifactSyncRequest,
+    ),
+    (
+        "reservation.request_host",
+        {
+            "architecture": "ppc64le",
+            "reservation_pool": "lab-a",
+        },
+        "reservation-stub",
+        ReservationRequest,
+    ),
+    (
+        "reservation.release_host",
+        {
+            "architecture": "ppc64le",
+            "reservation_id": "reservation-1",
+        },
+        "reservation-stub",
+        ReservationReleaseRequest,
+    ),
+    (
+        "provision.prepare_target",
+        {
+            "architecture": "ppc64le",
+            "target_name": "host-01",
+            "provisioning_profile": "fedora",
+        },
+        "provisioning-stub",
+        ProvisioningRequest,
+    ),
+    (
+        "hardware.power_control",
+        {
+            "architecture": "ppc64le",
+            "target_name": "host-01",
+            "action": "cycle",
+        },
+        "hardware-control-stub",
+        HardwareControlRequest,
+    ),
+    (
+        "hardware.boot_kernel",
+        {
+            "architecture": "ppc64le",
+            "target_name": "host-01",
+            "kernel_artifact_ref": "kernel-image",
+        },
+        "boot-orchestration-stub",
+        BootOrchestrationRequest,
+    ),
+    (
+        "console.open_session",
+        {
+            "architecture": "ppc64le",
+            "target_name": "host-01",
+            "access_method": "serial",
+        },
+        "console-access-stub",
+        ConsoleSessionRequest,
+    ),
+    (
+        "console.read",
+        {
+            "architecture": "ppc64le",
+            "console_session_id": "console-1",
+            "max_bytes": 128,
+        },
+        "console-access-stub",
+        ConsoleReadRequest,
+    ),
+    (
+        "console.write",
+        {
+            "architecture": "ppc64le",
+            "console_session_id": "console-1",
+            "data": "help\n",
+        },
+        "console-access-stub",
+        ConsoleWriteRequest,
+    ),
+    (
+        "workflow.reserve_provision_boot",
+        {
+            "architecture": "ppc64le",
+            "reservation_pool": "lab-a",
+            "target_name": "host-01",
+            "provisioning_profile": "fedora",
+            "kernel_artifact_ref": "kernel-image",
+        },
+        "boot-orchestration-stub",
+        ReserveProvisionBootRequest,
+    ),
+]
+
+
+def _request_for(operation: str, payload):
+    return STUB_PROVIDER_OPERATIONS[operation].request_type(**payload)
+
+
+def _handler_response(operation: str, payload, *, registry=None) -> ToolResponse:
+    return provider_handlers.stub_provider_operation_handler(
+        request=_request_for(operation, payload),
+        spec=STUB_PROVIDER_OPERATIONS[operation],
+        registry=registry,
+    )
+
+
+def _tool_response(tool_name: str, **payload) -> ToolResponse:
+    if "architecture" in payload and "provider_input" not in payload:
+        provider_input = {"architecture": payload.pop("architecture")}
+        for key in ("provider_context", "execution_options"):
+            if key in payload:
+                provider_input[key] = payload.pop(key)
+        payload["provider_input"] = provider_input
+    raw = create_app()._tool_manager._tools[tool_name].fn(**payload)
+    return ToolResponse.model_validate(raw)
+
+
+def test_stub_provider_operation_specs_do_not_carry_repeated_handlers() -> None:
+    from kdive.providers import handlers
+
+    assert hasattr(provider_handlers, "stub_provider_operation_handler")
+    generic_handler = provider_handlers.stub_provider_operation_handler
+    assert inspect.signature(generic_handler).parameters["spec"].annotation != inspect.Signature.empty
+    assert not hasattr(handlers, "StubProviderHandler")
+    for operation, _, _, request_type in VALID_CALLS:
+        spec = STUB_PROVIDER_OPERATIONS[operation]
+        assert spec.operation == operation
+        assert spec.request_type is request_type
+        assert not hasattr(spec, "handler")
+
+    repeated_handler_names = {
+        "remote_build_kernel_handler",
+        "remote_sync_artifacts_handler",
+        "reservation_request_host_handler",
+        "reservation_release_host_handler",
+        "provision_prepare_target_handler",
+        "hardware_power_control_handler",
+        "hardware_boot_kernel_handler",
+        "console_open_session_handler",
+        "console_read_handler",
+        "console_write_handler",
+        "workflow_reserve_provision_boot_handler",
+    }
+    assert repeated_handler_names.isdisjoint(vars(handlers))
+
+
+def test_stub_provider_handler_has_explicit_request_contract() -> None:
+    signature = inspect.signature(provider_handlers.stub_provider_operation_handler)
+
+    assert set(signature.parameters) == {"request", "spec", "registry"}
+
+
+def test_stub_provider_runtime_vocabulary_does_not_use_future_terms() -> None:
+    from kdive.providers import handlers
+
+    provider_handler_names = {name for name in vars(handlers) if "future" in name.lower() or "Future" in name}
+    provider_tool_names = {name for name in vars(provider_tools) if "future" in name.lower() or "Future" in name}
+
+    assert provider_handler_names == set()
+    assert provider_tool_names == set()
+
+
+def test_stub_provider_handler_validates_direct_call_request_type() -> None:
+    response = provider_handlers.stub_provider_operation_handler(
+        request=ProviderRequest(architecture="ppc64le"),
+        spec=STUB_PROVIDER_OPERATIONS["remote.build_kernel"],
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert response.error.message == "stub provider request failed validation"
+    assert response.error.details == {
+        "validation_errors": [
+            {"field": "source_ref", "type": "missing"},
+            {"field": "build_profile", "type": "missing"},
+        ]
+    }
+
+
+def test_create_app_registers_stub_provider_tools_through_shared_helper() -> None:
+    app = create_app()
+
+    assert not hasattr(provider_tools, "_StubProviderPayloadAdapter")
+    assert not hasattr(provider_tools, "_provider_payload")
+
+    for operation, _, _, _ in VALID_CALLS:
+        tool = app._tool_manager._tools[operation]
+        assert tool.fn.__module__ == "kdive.providers.tools"
+
+
+def test_provider_tools_registration_uses_stub_operation_table() -> None:
+    for operation, _, _, request_type in VALID_CALLS:
+        spec = STUB_PROVIDER_OPERATIONS[operation]
+        assert spec.request_type is request_type
+
+
+def test_stub_provider_tool_schema_groups_repeated_provider_metadata() -> None:
+    signature = inspect.signature(create_app()._tool_manager._tools["remote.build_kernel"].fn)
+    assert "provider_input" in signature.parameters
+    assert "source_ref" in signature.parameters
+    assert "build_profile" in signature.parameters
+    assert "artifact_options" in signature.parameters
+    for repeated in (
+        "architecture",
+        "provider_context",
+        "execution_options",
+        "provider_name",
+        "timeout_seconds",
+        "operation_label",
+        "run_id",
+        "output_artifact_ref",
+    ):
+        assert repeated not in signature.parameters
+
+
+def test_stub_provider_tool_signature_matches_json_response_contract() -> None:
+    tool_fn = create_app()._tool_manager._tools["remote.build_kernel"].fn
+    signature = inspect.signature(tool_fn)
+
+    assert signature.parameters["provider_input"].annotation == provider_tools.ProviderOperationInput
+    assert signature.return_annotation == dict[str, Any]
+    assert tool_fn.__annotations__["provider_input"] == provider_tools.ProviderOperationInput
+    assert tool_fn.__annotations__["return"] == dict[str, Any]
+
+
+def test_stub_provider_tool_requests_are_built_by_explicit_wrappers() -> None:
+    assert not hasattr(provider_tools, "STUB_PROVIDER_TOOL_REQUEST_SPECS")
+    assert not hasattr(provider_tools, "StubProviderToolRequestSpec")
+    assert not hasattr(provider_tools, "_stub_provider_request")
+
+
+def test_stub_provider_request_factories_are_module_scoped() -> None:
+    source = Path(provider_tools.__file__).read_text(encoding="utf-8")
+    module = ast.parse(source)
+    register_fn = next(
+        node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "register_provider_tools"
+    )
+    nested_functions = [node.name for node in ast.walk(register_fn) if isinstance(node, ast.FunctionDef)]
+    module_functions = {node.name for node in module.body if isinstance(node, ast.FunctionDef)}
+    expected_factories = {
+        "remote_build_kernel",
+        "remote_sync_artifacts",
+        "reservation_request_host",
+        "reservation_release_host",
+        "provision_prepare_target",
+        "hardware_power_control",
+        "hardware_boot_kernel",
+        "console_open_session",
+        "console_read",
+        "console_write",
+        "workflow_reserve_provision_boot",
+    }
+
+    assert nested_functions == ["register_provider_tools", "providers_list"]
+    assert expected_factories.issubset(module_functions)
+
+
+def test_stub_provider_tool_registration_is_table_driven() -> None:
+    registry = provider_tools.PROVIDER_TOOL_REQUEST_FACTORIES
+    assert tuple(tool_name for tool_name, _factory in registry) == tuple(STUB_PROVIDER_OPERATIONS)
+
+
+def test_stub_provider_tool_grouped_metadata_reaches_request_validation() -> None:
+    response = _tool_response(
+        "remote.build_kernel",
+        architecture="ppc64le",
+        source_ref="linux-src",
+        build_profile="defconfig",
+        provider_context={"provider_name": "missing-provider", "operation_label": "remote-build", "run_id": "run-1"},
+        execution_options={"timeout_seconds": 60},
+        artifact_options={"output_artifact_ref": "kernel-image"},
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+
+
+def test_destructive_stub_provider_tools_require_acknowledgement() -> None:
+    response = _tool_response(
+        "reservation.request_host",
+        architecture="ppc64le",
+        reservation_pool="lab-a",
+        execution_options={"acknowledged_permissions": []},
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert response.error.details == {
+        "code": "permission_required",
+        "required_permissions": list(PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.request_host"]),
+    }
+
+
+def test_destructive_stub_provider_tools_accept_acknowledgement() -> None:
+    response = _tool_response(
+        "reservation.request_host",
+        architecture="ppc64le",
+        reservation_pool="lab-a",
+        execution_options={
+            "acknowledged_permissions": PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.request_host"],
+        },
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "not_implemented"
+
+
+@pytest.mark.parametrize(("operation", "payload", "provider_name", "_request_type"), VALID_CALLS)
+def test_stub_provider_handlers_return_not_implemented(
+    operation: str, payload, provider_name: str, _request_type
+) -> None:
+    response = _handler_response(operation, payload)
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "not_implemented"
+    assert response.error.details["provider_name"] == provider_name
+    assert response.error.details["operation"] == operation
+    assert response.error.details["architecture"] == payload["architecture"]
+    assert response.error.details["implementation_state"] == "stub"
+    assert response.error.details["documentation_paths"] == ["docs/ppc64le-provider-spike.md"]
+    assert response.suggested_next_actions == ["providers.list"]
+
+
+def test_stub_provider_handler_maps_malformed_requests_to_configuration_error() -> None:
+    response = _tool_response(
+        "hardware.power_control",
+        architecture="ppc64le",
+        target_name="host-01",
+        action="restart",
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert "action" in response.error.message
+    assert "reset" in response.error.message
+
+
+def test_stub_provider_tool_missing_argument_returns_tool_response() -> None:
+    response = _tool_response(
+        "remote.build_kernel",
+        architecture="ppc64le",
+        source_ref="linux-src",
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert "build_profile" in response.error.message
+
+
+def test_explicit_provider_selection_never_falls_back() -> None:
+    response = provider_handlers.stub_provider_operation_handler(
+        request=RemoteBuildRequest(
+            architecture="ppc64le",
+            source_ref="linux-src",
+            build_profile="defconfig",
+            provider_name="reservation-stub",
+        ),
+        spec=STUB_PROVIDER_OPERATIONS["remote.build_kernel"],
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert "does not advertise" in response.error.message
+
+
+def test_unknown_explicit_provider_returns_configuration_error() -> None:
+    response = provider_handlers.stub_provider_operation_handler(
+        request=RemoteBuildRequest(
+            architecture="ppc64le",
+            source_ref="linux-src",
+            build_profile="defconfig",
+            provider_name="missing-provider",
+        ),
+        spec=STUB_PROVIDER_OPERATIONS["remote.build_kernel"],
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+
+
+@pytest.mark.parametrize("reservation_id", ["", "../reservation", "bad id"])
+def test_reservation_release_rejects_unsafe_reservation_ids(reservation_id: str) -> None:
+    response = _tool_response(
+        "reservation.release_host",
+        architecture="ppc64le",
+        reservation_id=reservation_id,
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+
+
+def test_unsupported_architecture_returns_configuration_error() -> None:
+    response = _tool_response(
+        "remote.build_kernel",
+        architecture="aarch64",
+        source_ref="linux-src",
+        build_profile="defconfig",
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+
+
+def test_ambiguous_implicit_provider_selection_includes_candidate_names() -> None:
+    registry = ProviderRegistry()
+    first = remote_build_stub_capability()
+    registry.register(first)
+    registry.register(first.model_copy(update={"provider_name": "remote-build-stub-2"}))
+
+    response = provider_handlers.stub_provider_operation_handler(
+        request=RemoteBuildRequest(
+            architecture="ppc64le",
+            source_ref="linux-src",
+            build_profile="defconfig",
+        ),
+        spec=STUB_PROVIDER_OPERATIONS["remote.build_kernel"],
+        registry=registry,
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert response.error.details["candidate_provider_names"] == [
+        "remote-build-stub",
+        "remote-build-stub-2",
+    ]
+
+
+def test_console_write_validation_does_not_accept_credential_ref_or_echo_payload() -> None:
+    signature = inspect.signature(create_app()._tool_manager._tools["console.write"].fn)
+    assert "credential_ref" not in signature.parameters
+
+    response = _tool_response(
+        "console.write",
+        architecture="ppc64le",
+        console_session_id="console-1",
+        data="x" * 4097,
+    )
+
+    dumped = str(response.model_dump(mode="json"))
+    assert response.ok is False
+    assert "x" * 100 not in dumped
+
+
+@pytest.mark.parametrize(("operation", "payload", "provider_name", "_request_type"), VALID_CALLS)
+def test_stub_provider_handlers_do_not_create_run_workspace_or_touch_forbidden_dependencies(
+    operation: str,
+    payload,
+    provider_name: str,
+    _request_type,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_forbidden_dependency(*args: object, **kwargs: object) -> object:
+        raise AssertionError("stub providers must not touch forbidden dependencies")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subprocess, "run", fail_forbidden_dependency)
+    monkeypatch.setattr(subprocess, "Popen", fail_forbidden_dependency)
+    monkeypatch.setattr(socket, "socket", fail_forbidden_dependency)
+    monkeypatch.setattr(socket, "create_connection", fail_forbidden_dependency)
+    monkeypatch.setattr(Path, "read_text", fail_forbidden_dependency)
+    monkeypatch.setattr(Path, "read_bytes", fail_forbidden_dependency)
+    monkeypatch.setattr(ArtifactStore, "create_run", fail_forbidden_dependency)
+    monkeypatch.setattr(ArtifactStore, "record_step_result", fail_forbidden_dependency)
+    monkeypatch.setattr(LocalKernelBuildProvider, "plan_build", fail_forbidden_dependency)
+    monkeypatch.setattr(LocalSshTestProvider, "plan_tests", fail_forbidden_dependency)
+    monkeypatch.setattr(LibvirtQemuProvider, "plan_boot", fail_forbidden_dependency)
+
+    response = _handler_response(operation, payload)
+
+    assert response.error is not None
+    assert response.error.category == "not_implemented"
+    assert response.error.details["provider_name"] == provider_name
+    assert response.error.details["operation"] == operation
+    assert not (tmp_path / ".kdive" / "runs").exists()
+
+
+def test_console_open_ipmi_cipher_zero_is_configuration_error() -> None:
+    response = _tool_response(
+        "console.open_session",
+        architecture="x86_64",
+        target_name="host-01",
+        access_method="ipmi-sol",
+        console_options={"ipmi_cipher_suite": 0},
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert "ipmi_cipher_suite" in response.error.message
+
+
+def test_console_open_ipmi_default_cipher_reaches_not_implemented() -> None:
+    response = provider_handlers.stub_provider_operation_handler(
+        request=ConsoleSessionRequest(
+            architecture="x86_64",
+            target_name="host-01",
+            access_method="ipmi-sol",
+        ),
+        spec=STUB_PROVIDER_OPERATIONS["console.open_session"],
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "not_implemented"
+    assert response.error.details["provider_name"] == "console-access-stub"
+    assert response.error.details["operation"] == "console.open_session"
+
+
+def test_console_open_cipher_on_ssh_is_configuration_error() -> None:
+    response = _tool_response(
+        "console.open_session",
+        architecture="x86_64",
+        target_name="host-01",
+        access_method="ssh",
+        console_options={"ipmi_cipher_suite": 3},
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"

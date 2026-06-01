@@ -38,7 +38,7 @@ provider-suggested, **non-authoritative** `break_hints` list. `BreakMethod` /
 Two documents govern the policy and this ADR cites both: the interface **contract**
 §4.1 (the predicate table and reference mappings above, plus the fail-loud admission
 requirement) and the transport-abstraction **design**
-(`docs/superpowers/specs/2026-05-26-transport-abstraction-design.md`) §4.8
+(`docs/archive/superpowers/specs/2026-05-26-transport-abstraction-design.md`) §4.8
 "Break-plan executable preflight" (the *disproof-only* admission layer and the exact
 `no_break_plan`/`break_disproved` taxonomy). References below read "§4.1" for the
 contract and "design §4.8" for the preflight; they are distinct sections of distinct

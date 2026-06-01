@@ -5,7 +5,7 @@ import os
 import re
 import shutil
 import socket
-import subprocess
+import subprocess  # nosec B404
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -35,7 +35,7 @@ class SubprocessPrerequisiteRunner:
         # errors="replace": tool output (e.g. gdb's banner) is not guaranteed clean UTF-8, and a
         # strict decode would raise UnicodeDecodeError out of a prerequisite probe. Replacement keeps
         # the output usable for the substring/version checks the callers perform.
-        completed = subprocess.run(
+        completed = subprocess.run(  # nosec B603
             command,
             check=False,
             capture_output=True,
@@ -438,6 +438,10 @@ class PortProbeResult:
     detail: str = ""
 
 
+_GDBSTUB_PORT_MIN = 1
+_GDBSTUB_PORT_MAX = 65535
+
+
 def _default_port_probe(host: str, port: int) -> PortProbeResult:
     # Resolve the address family and bind tuple via getaddrinfo instead of guessing IPv4-vs-IPv6
     # from a ':' in the host. The heuristic mishandles bracketless IPv6 literals and scoped
@@ -465,7 +469,7 @@ def _parse_gdbstub_endpoint(endpoint: str) -> tuple[str, int] | None:
         port = int(port_text)
     except ValueError:
         return None
-    if not 1 <= port <= 65535:
+    if not _GDBSTUB_PORT_MIN <= port <= _GDBSTUB_PORT_MAX:
         return None
     return host, port
 

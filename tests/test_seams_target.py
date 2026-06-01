@@ -1,5 +1,6 @@
 import hashlib
 from datetime import UTC, datetime, timedelta, timezone
+from modulefinder import ModuleFinder
 
 import pytest
 from pydantic import ValidationError
@@ -23,6 +24,17 @@ def test_target_key_is_frozen_and_hashable():
     assert {key: "v"}[TargetKey(provisioner="local-qemu", target_id="run-1")] == "v"
     with pytest.raises(ValidationError):
         key.target_id = "mutated"
+
+
+def test_target_seam_does_not_import_coordination_or_transport_layers():
+    import kdive.seams.target as target_module
+
+    finder = ModuleFinder()
+    finder.run_script(target_module.__file__)
+    imported_modules = set(finder.modules)
+    assert not any(name == "kdive.coordination" or name.startswith("kdive.coordination.") for name in imported_modules)
+    assert not any(name == "kdive.transport" or name.startswith("kdive.transport.") for name in imported_modules)
+    assert not hasattr(target_module, "publish_ready_snapshot")
 
 
 def test_target_key_distinct_provisioners_do_not_collide():

@@ -1,0 +1,246 @@
+from pathlib import Path
+
+from handler_call_helpers import (
+    create_run_handler,
+    kernel_build_handler,
+    target_boot_handler,
+    target_run_tests_handler,
+)
+from workflow_helpers import call_workflow_build_boot_debug_handler, direct_workflow_dependencies
+
+import kdive.server as server_module
+from kdive.debug.session_handlers import _start_session as debug_start_session_handler
+from kdive.domain import ErrorCategory, ToolResponse
+from kdive.server import (
+    DEFAULT_TARGET_PROFILES,
+    workflow_build_boot_debug_handler,
+)
+from kdive.workflow.contracts import WorkflowHandlerDependencies
+
+
+def success(summary: str, *, run_id: str = "run-abc123") -> ToolResponse:
+    return ToolResponse.success(summary=summary, run_id=run_id, data={"summary": summary})
+
+
+def failure(category: ErrorCategory, message: str, *, run_id: str = "run-abc123") -> ToolResponse:
+    return ToolResponse.failure(category=category, message=message, run_id=run_id)
+
+
+def _install_workflow_dependencies(
+    *,
+    create_run=create_run_handler,
+    kernel_build=kernel_build_handler,
+    target_boot=target_boot_handler,
+    debug_start=debug_start_session_handler,
+) -> WorkflowHandlerDependencies:
+    return direct_workflow_dependencies(
+        create_run=create_run,
+        kernel_build=kernel_build,
+        target_boot=target_boot,
+        target_run_tests=target_run_tests_handler,
+        debug_start=debug_start,
+        artifacts_collect=server_module.artifacts_collect_handler,
+    )
+
+
+def test_workflow_build_boot_debug_success(tmp_path: Path) -> None:
+    calls: list[str] = []
+    captured: dict[str, dict[str, object]] = {}
+
+    dependencies = _install_workflow_dependencies(
+        create_run=lambda **kwargs: (
+            captured.setdefault("create", kwargs) and calls.append("create") or success("created")
+        ),
+        kernel_build=lambda **kwargs: (
+            captured.setdefault("build", kwargs) and calls.append("build") or success("built")
+        ),
+        target_boot=lambda **kwargs: captured.setdefault("boot", kwargs) and calls.append("boot") or success("booted"),
+        debug_start=lambda **kwargs: (
+            captured.setdefault("debug", kwargs) and calls.append("debug") or success("debug session started")
+        ),
+    )
+
+    response = call_workflow_build_boot_debug_handler(
+        workflow_build_boot_debug_handler,
+        artifact_root=tmp_path / "runs",
+        source_path=str(tmp_path),
+        build_profile="x86_64-default",
+        target_profile="local-qemu-debug",
+        rootfs_profile="minimal",
+        run_id="run-explicit",
+        debug_profile="qemu-gdbstub-default",
+        force_rebuild=True,
+        force_reboot=True,
+        new_session=True,
+        dependencies=dependencies,
+    )
+
+    assert calls == ["create", "build", "boot", "debug"]
+    assert response.ok is True
+    assert response.data["latest_successful_step"] == "debug"
+    assert captured["create"]["run_id"] == "run-explicit"
+    assert captured["create"]["debug_profile"] == "qemu-gdbstub-default"
+    assert captured["build"]["force_rebuild"] is True
+    assert captured["boot"]["force_reboot"] is True
+    assert captured["debug"]["debug_profile"] == "qemu-gdbstub-default"
+    assert captured["debug"]["new_session"] is True
+
+
+def test_workflow_build_boot_debug_stops_before_debug_when_boot_fails(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    dependencies = _install_workflow_dependencies(
+        create_run=lambda **kwargs: calls.append("create") or success("created"),
+        kernel_build=lambda **kwargs: calls.append("build") or success("built"),
+        target_boot=lambda **kwargs: calls.append("boot") or failure(ErrorCategory.BOOT_TIMEOUT, "boot timed out"),
+        debug_start=lambda **kwargs: calls.append("debug") or success("debug session started"),
+    )
+
+    response = call_workflow_build_boot_debug_handler(
+        workflow_build_boot_debug_handler,
+        artifact_root=tmp_path / "runs",
+        source_path=str(tmp_path),
+        build_profile="x86_64-default",
+        target_profile="local-qemu-debug",
+        rootfs_profile="minimal",
+        debug_profile="qemu-gdbstub-default",
+        dependencies=dependencies,
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == ErrorCategory.BOOT_TIMEOUT
+    assert response.data["failing_step"] == "boot"
+    assert calls == ["create", "build", "boot"]
+
+
+def test_workflow_build_boot_debug_stops_when_debug_start_fails(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    dependencies = _install_workflow_dependencies(
+        create_run=lambda **kwargs: calls.append("create") or success("created"),
+        kernel_build=lambda **kwargs: calls.append("build") or success("built"),
+        target_boot=lambda **kwargs: calls.append("boot") or success("booted"),
+        debug_start=lambda **kwargs: (
+            calls.append("debug") or failure(ErrorCategory.DEBUG_ATTACH_FAILURE, "debug attach failed")
+        ),
+    )
+
+    response = call_workflow_build_boot_debug_handler(
+        workflow_build_boot_debug_handler,
+        artifact_root=tmp_path / "runs",
+        source_path=str(tmp_path),
+        build_profile="x86_64-default",
+        target_profile="local-qemu-debug",
+        rootfs_profile="minimal",
+        debug_profile="qemu-gdbstub-default",
+        dependencies=dependencies,
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert response.data["failing_step"] == "debug"
+    assert calls == ["create", "build", "boot", "debug"]
+
+
+def test_workflow_build_boot_debug_allows_explicit_profile_when_manifest_did_not_pin_one(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "linux"
+    source.mkdir()
+    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
+    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    artifact_root = tmp_path / "runs"
+    created = create_run_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu-debug",
+        rootfs_profile="minimal",
+        run_id="run-debug",
+    )
+    assert created.ok is True
+    captured_debug: dict[str, object] = {}
+
+    def fake_debug(**kwargs: object) -> ToolResponse:
+        captured_debug.update(kwargs)
+        return success("debug session started", run_id="run-debug")
+
+    dependencies = _install_workflow_dependencies(
+        kernel_build=lambda **kwargs: success("built", run_id="run-debug"),
+        target_boot=lambda **kwargs: success("booted", run_id="run-debug"),
+        debug_start=fake_debug,
+    )
+
+    response = call_workflow_build_boot_debug_handler(
+        workflow_build_boot_debug_handler,
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu-debug",
+        rootfs_profile="minimal",
+        run_id="run-debug",
+        debug_profile="qemu-gdbstub-default",
+        dependencies=dependencies,
+    )
+
+    assert response.ok is True
+    assert captured_debug["debug_profile"] == "qemu-gdbstub-default"
+
+
+def test_workflow_build_boot_debug_uses_manifest_debug_profile_when_omitted(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "linux"
+    source.mkdir()
+    (source / "Kconfig").write_text("mainmenu\n", encoding="utf-8")
+    (source / "Makefile").write_text("VERSION = 6\n", encoding="utf-8")
+    artifact_root = tmp_path / "runs"
+    created = create_run_handler(
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu-debug",
+        rootfs_profile="minimal",
+        run_id="run-debug",
+        debug_profile="qemu-gdbstub-default",
+    )
+    assert created.ok is True
+    captured_debug: dict[str, object] = {}
+
+    def fake_debug(**kwargs: object) -> ToolResponse:
+        captured_debug.update(kwargs)
+        return success("debug session started", run_id="run-debug")
+
+    dependencies = _install_workflow_dependencies(
+        kernel_build=lambda **kwargs: success("built", run_id="run-debug"),
+        target_boot=lambda **kwargs: success("booted", run_id="run-debug"),
+        debug_start=fake_debug,
+    )
+
+    response = call_workflow_build_boot_debug_handler(
+        workflow_build_boot_debug_handler,
+        artifact_root=artifact_root,
+        source_path=str(source),
+        build_profile="x86_64-default",
+        target_profile="local-qemu-debug",
+        rootfs_profile="minimal",
+        run_id="run-debug",
+        dependencies=dependencies,
+    )
+
+    assert response.ok is True
+    assert captured_debug["debug_profile"] == "qemu-gdbstub-default"
+
+
+def test_default_target_profiles_include_debug_enabled_qemu_profile() -> None:
+    debug_profile = DEFAULT_TARGET_PROFILES["local-qemu-debug"]
+    non_debug_profile = DEFAULT_TARGET_PROFILES["local-qemu"]
+
+    assert debug_profile.debug_gdbstub is True
+    assert debug_profile.gdbstub_endpoint == "127.0.0.1:1234"
+    assert debug_profile.target_ref != non_debug_profile.target_ref
+    assert debug_profile.target_ref.startswith(debug_profile.managed_domain_prefix)

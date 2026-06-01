@@ -4,7 +4,7 @@ Relaxes kernel lockup detectors (and, on POWER, declares the out-of-band PHYP
 watchdog) before an interactive stop and restores the captured operator baseline on
 teardown. Stateful, keyed on session_id, capture-once. The restore is a SessionGuard
 TeardownStep; relax is a post-acquire call. Shipped inert (no concrete WatchdogControl
-channel) — see docs/superpowers/specs/2026-05-29-watchdog-relax-restore-design.md and
+channel) — see docs/archive/superpowers/specs/2026-05-29-watchdog-relax-restore-design.md and
 docs/adr/0016-watchdog-relax-restore-helper.md.
 """
 
@@ -140,7 +140,8 @@ class WatchdogPolicy:
             if is_owner:
                 capture = _CapturedState()
                 self._captures[ctx.session_id] = capture  # claim before releasing the lock
-        assert capture is not None
+        if capture is None:
+            raise RuntimeError("watchdog capture was not claimed")
         return self._first_relax(capture) if is_owner else self._reissue_relax(capture)
 
     def _first_relax(self, capture: _CapturedState) -> RelaxReport:

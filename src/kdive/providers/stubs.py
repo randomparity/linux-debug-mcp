@@ -3,18 +3,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from kdive.domain import (
-    ErrorCategory,
+from kdive.config import PROVIDER_DESTRUCTIVE_PERMISSIONS
+from kdive.domain import ErrorCategory, ToolResponse
+from kdive.providers.models import (
     ImplementationState,
     OperationSemantics,
     ProviderCapability,
     ProviderOperationCapability,
     TargetKind,
-    ToolResponse,
 )
 
 STUB_ARCHITECTURES = ["x86_64", "ppc64le"]
-NO_SIDE_EFFECT_LIMITATION = "Sprint 5 stub only: advertises future capability and performs no external side effects."
+STUB_AVAILABILITY_LIMITATION = "Stub provider only: advertises future capability and performs no external side effects."
 
 
 def _semantics(*, destructive: bool, idempotent: bool = False, retryable: bool = True) -> OperationSemantics:
@@ -40,7 +40,7 @@ def _operation(
         implementation_state=ImplementationState.STUB,
         required_host_tools=required_host_tools,
         destructive_permissions=destructive_permissions or [],
-        limitations=[NO_SIDE_EFFECT_LIMITATION],
+        limitations=[STUB_AVAILABILITY_LIMITATION],
     )
 
 
@@ -62,7 +62,7 @@ def _stub_capability(
         architectures=list(STUB_ARCHITECTURES),
         target_kinds=target_kinds,
         transports=transports,
-        limitations=[NO_SIDE_EFFECT_LIMITATION],
+        limitations=[STUB_AVAILABILITY_LIMITATION],
         operations=[operation.operation for operation in operations],
         operation_capabilities=operations,
         required_host_tools=required_host_tools,
@@ -105,7 +105,10 @@ def remote_artifact_sync_stub_capability() -> ProviderCapability:
 
 def reservation_stub_capability() -> ProviderCapability:
     tools = ["reservation-api-client"]
-    permissions = ["reserve shared remote or physical targets", "release shared remote or physical targets"]
+    permissions = [
+        *PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.request_host"],
+        *PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.release_host"],
+    ]
     return _stub_capability(
         name="reservation-stub",
         family="reservation",
@@ -118,13 +121,13 @@ def reservation_stub_capability() -> ProviderCapability:
                 "reservation.request_host",
                 destructive=True,
                 required_host_tools=tools,
-                destructive_permissions=["reserve shared remote or physical targets"],
+                destructive_permissions=list(PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.request_host"]),
             ),
             _operation(
                 "reservation.release_host",
                 destructive=True,
                 required_host_tools=tools,
-                destructive_permissions=["release shared remote or physical targets"],
+                destructive_permissions=list(PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.release_host"]),
             ),
         ],
     )
@@ -132,7 +135,7 @@ def reservation_stub_capability() -> ProviderCapability:
 
 def provisioning_stub_capability() -> ProviderCapability:
     tools = ["provisioning-cli", "ssh"]
-    permissions = ["write target storage", "install boot artifacts on target"]
+    permissions = list(PROVIDER_DESTRUCTIVE_PERMISSIONS["provision.prepare_target"])
     return _stub_capability(
         name="provisioning-stub",
         family="provisioning",
@@ -153,7 +156,7 @@ def provisioning_stub_capability() -> ProviderCapability:
 
 def hardware_control_stub_capability() -> ProviderCapability:
     tools = ["power-control-cli", "bmc-api-client"]
-    permissions = ["change target power state"]
+    permissions = list(PROVIDER_DESTRUCTIVE_PERMISSIONS["hardware.power_control"])
     return _stub_capability(
         name="hardware-control-stub",
         family="hardware",
@@ -188,11 +191,14 @@ def console_access_stub_capability() -> ProviderCapability:
     )
 
 
-def real_boot_stub_capability() -> ProviderCapability:
+def boot_orchestration_stub_capability() -> ProviderCapability:
     tools = ["boot-orchestrator", "reservation-api-client", "provisioning-cli", "power-control-cli"]
-    permissions = ["boot physical or remote targets", "reserve, provision, and boot target hardware"]
+    permissions = [
+        *PROVIDER_DESTRUCTIVE_PERMISSIONS["hardware.boot_kernel"],
+        *PROVIDER_DESTRUCTIVE_PERMISSIONS["workflow.reserve_provision_boot"],
+    ]
     return _stub_capability(
-        name="real-boot-stub",
+        name="boot-orchestration-stub",
         family="boot",
         target_kinds=[TargetKind.REMOTE, TargetKind.PHYSICAL],
         transports=["ssh", "bmc", "serial-console", "https-api"],
@@ -203,19 +209,19 @@ def real_boot_stub_capability() -> ProviderCapability:
                 "hardware.boot_kernel",
                 destructive=True,
                 required_host_tools=tools,
-                destructive_permissions=["boot physical or remote targets"],
+                destructive_permissions=list(PROVIDER_DESTRUCTIVE_PERMISSIONS["hardware.boot_kernel"]),
             ),
             _operation(
                 "workflow.reserve_provision_boot",
                 destructive=True,
                 required_host_tools=tools,
-                destructive_permissions=["reserve, provision, and boot target hardware"],
+                destructive_permissions=list(PROVIDER_DESTRUCTIVE_PERMISSIONS["workflow.reserve_provision_boot"]),
             ),
         ],
     )
 
 
-def future_stub_capability_factories() -> list[Callable[[], ProviderCapability]]:
+def stub_provider_capability_factories() -> list[Callable[[], ProviderCapability]]:
     return [
         remote_build_stub_capability,
         remote_artifact_sync_stub_capability,
@@ -223,11 +229,11 @@ def future_stub_capability_factories() -> list[Callable[[], ProviderCapability]]
         provisioning_stub_capability,
         hardware_control_stub_capability,
         console_access_stub_capability,
-        real_boot_stub_capability,
+        boot_orchestration_stub_capability,
     ]
 
 
-def future_configuration_error_response(message: str, details: dict[str, object] | None = None) -> ToolResponse:
+def stub_configuration_error_response(message: str, details: dict[str, object] | None = None) -> ToolResponse:
     return ToolResponse.failure(
         category=ErrorCategory.CONFIGURATION_ERROR,
         message=message,
@@ -236,7 +242,7 @@ def future_configuration_error_response(message: str, details: dict[str, object]
     )
 
 
-def select_future_provider(
+def select_stub_provider(
     registry: Any,
     *,
     operation: str,
@@ -245,19 +251,19 @@ def select_future_provider(
 ) -> ProviderCapability | ToolResponse:
     if provider_name is not None:
         try:
-            provider = registry.get(provider_name)
+            provider = registry.require(provider_name)
         except KeyError:
-            return future_configuration_error_response(
+            return stub_configuration_error_response(
                 "unknown provider",
                 {"provider_name": provider_name, "operation": operation, "architecture": architecture},
             )
         if operation not in provider.operations:
-            return future_configuration_error_response(
+            return stub_configuration_error_response(
                 "provider does not advertise requested operation",
                 {"provider_name": provider_name, "operation": operation, "architecture": architecture},
             )
         if architecture not in provider.architectures:
-            return future_configuration_error_response(
+            return stub_configuration_error_response(
                 "provider does not advertise requested architecture",
                 {"provider_name": provider_name, "operation": operation, "architecture": architecture},
             )
@@ -265,12 +271,12 @@ def select_future_provider(
 
     candidates = registry.find_by_operation_and_architecture(operation=operation, architecture=architecture)
     if not candidates:
-        return future_configuration_error_response(
+        return stub_configuration_error_response(
             "no provider advertises requested operation and architecture",
             {"operation": operation, "architecture": architecture},
         )
     if len(candidates) > 1:
-        return future_configuration_error_response(
+        return stub_configuration_error_response(
             "multiple providers advertise requested operation and architecture",
             {
                 "operation": operation,
@@ -281,7 +287,7 @@ def select_future_provider(
     return candidates[0]
 
 
-def future_not_implemented_response(
+def stub_not_implemented_response(
     *,
     provider: ProviderCapability,
     operation: str,
@@ -290,7 +296,7 @@ def future_not_implemented_response(
 ) -> ToolResponse:
     return ToolResponse.failure(
         category=ErrorCategory.NOT_IMPLEMENTED,
-        message=f"{provider.provider_name} advertises future operation {operation} but is not implemented",
+        message=f"{provider.provider_name} advertises stub operation {operation} but is not implemented",
         details={
             "provider_name": provider.provider_name,
             "operation": operation,

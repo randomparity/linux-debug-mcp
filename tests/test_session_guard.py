@@ -2,7 +2,7 @@
 
 Covers the precondition/teardown protocol surface, enter/verify_attached phases, and the
 idempotent teardown invariant (steps -> close -> resume verify -> force_reap remediation).
-See docs/superpowers/specs/2026-05-29-session-guard-design.md / docs/adr/0013-*.
+See docs/archive/superpowers/specs/2026-05-29-session-guard-design.md / docs/adr/0013-*.
 """
 
 import pytest
@@ -17,7 +17,7 @@ from kdive.seams.guard import (
     TeardownStep,
 )
 from kdive.seams.target import TargetKey
-from kdive.transport.base import ExecutionState
+from kdive.transport.core.base import ExecutionState
 
 
 def _ctx(reason: str = "ended", session_id: str | None = "sess-1") -> SessionGuardContext:

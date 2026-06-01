@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from kdive.seams.break_policy import BreakPlanError, BreakPolicy
 from kdive.seams.target import PlatformMetadata, TargetKey
-from kdive.transport.base import BreakMethod, BreakPlan, TransportRef
+from kdive.seams.transport_state import BreakMethod, BreakPlan, TransportRef
 
 
 class SelectionError(RuntimeError):

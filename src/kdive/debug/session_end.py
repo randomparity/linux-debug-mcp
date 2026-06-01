@@ -1,0 +1,215 @@
+from __future__ import annotations
+
+import contextlib
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import TypeVar
+
+from kdive.artifacts.redaction import redacted_artifacts
+from kdive.artifacts.store import ArtifactStore, ManifestStateError
+from kdive.config import DebugProfile
+from kdive.coordination.admission import AdmissionService
+from kdive.coordination.registry import SessionRegistry
+from kdive.coordination.transaction import TransportTransaction
+from kdive.debug.policy import ensure_debug_operation_enabled, resolve_debug_profile
+from kdive.debug.session_state import (
+    debug_session_manifest_details,
+    is_legacy_debug_session,
+    load_active_debug_session,
+    mark_legacy_session_recovery_required,
+    mi_session_artifacts,
+    persist_mi_debug_session,
+    preserved_debug_step_details,
+    recorded_transport_session_id,
+)
+from kdive.debug.tools import DebugSessionRequest, DebugToolContext
+from kdive.domain import ErrorCategory, StepResult, StepStatus, ToolResponse
+from kdive.handlers.shared import configuration_failure_response as _configuration_failure
+from kdive.providers.debug import DebugSessionState, GdbMiEngine, GdbMiSessionRegistry, ProviderDebugError
+from kdive.safety.redaction import Redactor
+from kdive.seams.guard import SessionGuard, SessionGuardContext
+from kdive.seams.target import TargetKey
+
+_RequiredT = TypeVar("_RequiredT")
+
+
+def _require_value(value: _RequiredT | None, message: str) -> _RequiredT:
+    if value is None:
+        raise RuntimeError(message)
+    return value
+
+
+def _end_mi_debug_session(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None,
+    debug_profiles: Mapping[str, DebugProfile] | None,
+    gdb_mi_engine: GdbMiEngine | None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None,
+) -> ToolResponse:
+    """Reap the live gdb/MI attachment and durably record the session ENDED."""
+    store = ArtifactStore(artifact_root, create_root=False)
+    if not (store.run_dir(run_id) / "manifest.json").is_file():
+        return _configuration_failure(run_id=run_id, message=f"run not found: {run_id}")
+    redactor = Redactor()
+    try:
+        with store.debug_lock(run_id):
+            session = load_active_debug_session(store, run_id, debug_session_id, allow_ended=True)
+            profile = resolve_debug_profile(profile_name=session.selected_debug_profile, debug_profiles=debug_profiles)
+            ensure_debug_operation_enabled(profile, "debug.end_session")
+            ended = session.model_copy(
+                update={"current_execution_state": DebugSessionState.ENDED, "ended_at": datetime.now(UTC).isoformat()}
+            )
+            persist_mi_debug_session(store=store, run_id=run_id, session=ended)
+            details = {
+                **debug_session_manifest_details(store=store, run_id=run_id, session=ended),
+                **preserved_debug_step_details(store, run_id),
+            }
+            terminal = StepResult(
+                step_name="debug",
+                status=StepStatus.SUCCEEDED,
+                summary="debug.end_session succeeded",
+                artifacts=mi_session_artifacts(store=store, run_id=run_id, session=ended),
+                details=details,
+            )
+            store.record_step_result(run_id, terminal, replace_succeeded=True)
+            if gdb_mi_sessions is not None:
+                reaped = gdb_mi_sessions.reap(session.session_id)
+                if reaped is not None and gdb_mi_engine is not None:
+                    with contextlib.suppress(Exception):
+                        gdb_mi_engine.force_resume(reaped)
+    except ManifestStateError as exc:
+        return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
+    except OSError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            message=redactor.redact_text(f"failed to record debug.end_session: {exc}"),
+            run_id=run_id,
+            details={"code": "debug_session_end_record_failed"},
+            suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
+        )
+    except ProviderDebugError as exc:
+        return ToolResponse.failure(
+            category=exc.category,
+            message=redactor.redact_text(str(exc)),
+            run_id=run_id,
+            details=redactor.redact_value(exc.details),
+            suggested_next_actions=["debug.start_session", "artifacts.get_manifest"],
+        )
+    return ToolResponse.success(
+        summary="debug.end_session succeeded",
+        run_id=run_id,
+        data=redactor.redact_value(details),
+        artifacts=redacted_artifacts(mi_session_artifacts(store=store, run_id=run_id, session=ended), redactor),
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
+def _close_bound_transport_session(
+    *,
+    run_id: str,
+    transport_session_id: str | None,
+    transaction: TransportTransaction | None,
+    session_registry: SessionRegistry | None,
+    session_guard: SessionGuard | None,
+) -> None:
+    if transaction is None or transport_session_id is None:
+        return
+    if session_guard is None or session_registry is None:
+        transaction.close(transport_session_id, force=True)
+        return
+
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    ended_record = session_registry.read_record(target_key)
+    ended_generation = ended_record.generation if ended_record is not None else 0
+    session_guard.teardown(
+        SessionGuardContext(
+            target_key=target_key,
+            generation=ended_generation,
+            session_id=transport_session_id,
+            reason="ended",
+        ),
+        close=lambda: transaction.close(transport_session_id, force=True),
+        read_record=lambda: session_registry.read_record(target_key),
+        force_reap=lambda: transaction.force_release(transport_session_id),
+    )
+
+
+def _mark_legacy_recovery_if_needed(
+    *,
+    run_id: str,
+    is_legacy_session: bool,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+) -> None:
+    if not is_legacy_session:
+        return
+    admission = _require_value(admission, "admission service missing for legacy session recovery marker")
+    session_registry = _require_value(
+        session_registry,
+        "session registry missing for legacy session recovery marker",
+    )
+    mark_legacy_session_recovery_required(run_id=run_id, admission=admission, session_registry=session_registry)
+
+
+def _end_session(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    debug_session_id: str | None = None,
+    debug_profiles: Mapping[str, DebugProfile] | None = None,
+    transaction: TransportTransaction | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+    session_guard: SessionGuard | None = None,
+    gdb_mi_engine: GdbMiEngine | None = None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None = None,
+) -> ToolResponse:
+    transport_session_id = (
+        recorded_transport_session_id(artifact_root=artifact_root, run_id=run_id) if transaction is not None else None
+    )
+    is_legacy_session = is_legacy_debug_session(
+        admission=admission,
+        session_registry=session_registry,
+        transport_session_id=transport_session_id,
+        run_id=run_id,
+    )
+    response = _end_mi_debug_session(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        debug_session_id=debug_session_id,
+        debug_profiles=debug_profiles,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
+    )
+    if response.ok:
+        _close_bound_transport_session(
+            run_id=run_id,
+            transport_session_id=transport_session_id,
+            transaction=transaction,
+            session_registry=session_registry,
+            session_guard=session_guard,
+        )
+        _mark_legacy_recovery_if_needed(
+            run_id=run_id,
+            is_legacy_session=is_legacy_session,
+            admission=admission,
+            session_registry=session_registry,
+        )
+    return response
+
+
+def debug_end_session_handler(*, request: DebugSessionRequest, runtime: DebugToolContext) -> ToolResponse:
+    return _end_session(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_session_id=request.debug_session_id,
+        transaction=runtime.transaction,
+        admission=runtime.admission,
+        session_registry=runtime.session_registry,
+        session_guard=runtime.session_guard,
+        gdb_mi_engine=runtime.gdb_mi_engine,
+        gdb_mi_sessions=runtime.gdb_mi_sessions,
+    )

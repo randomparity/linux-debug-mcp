@@ -1,24 +1,70 @@
 import pytest
 from pydantic import ValidationError
 
-from kdive import __version__
+from kdive import __version__, domain
 from kdive.config import BootOverrides, BuildOverrides
 from kdive.domain import (
     ArtifactRef,
-    DebugIntrospectRunRequest,
     ErrorCategory,
-    OperationSemantics,
     PrerequisiteCheck,
     PrerequisiteStatus,
-    ProviderCapability,
     RunRequest,
-    TargetKind,
     ToolResponse,
+)
+from kdive.introspect.models import (
+    DebugIntrospectCheckPrerequisitesRequest,
+    DebugIntrospectHelperRequest,
+    DebugIntrospectRunRequest,
+)
+from kdive.providers.models import (
+    OperationSemantics,
+    ProviderCapability,
+    TargetKind,
 )
 
 
 def test_package_exports_version() -> None:
     assert __version__ == "0.1.0"
+
+
+def test_postmortem_models_live_in_postmortem_package() -> None:
+    assert not hasattr(domain, "DebugPostmortemCrashRequest")
+
+
+def test_capability_specific_models_live_outside_shared_domain() -> None:
+    moved_names = {
+        "DebugIntrospectRunRequest",
+        "DebugIntrospectCheckPrerequisitesRequest",
+        "DebugIntrospectHelperRequest",
+        "DebugIntrospectFromVmcoreRequest",
+        "DebugIntrospectFromVmcoreHelperRequest",
+        "OperationSemantics",
+        "ProviderCapability",
+        "ProviderDependency",
+        "ProviderOperationCapability",
+        "ImplementationState",
+        "TargetKind",
+    }
+
+    assert sorted(name for name in moved_names if hasattr(domain, name)) == []
+
+
+@pytest.mark.parametrize(
+    ("request_type", "payload"),
+    [
+        (DebugIntrospectRunRequest, {"run_id": "r1", "target_ref": "local-qemu", "script": "print(1)"}),
+        (DebugIntrospectHelperRequest, {"run_id": "r1", "target_ref": "local-qemu", "name": "sysinfo"}),
+        (DebugIntrospectCheckPrerequisitesRequest, {"run_id": "r1", "target_ref": "local-qemu"}),
+    ],
+)
+def test_live_introspect_requests_reject_deprecated_target_ref_alias(
+    request_type: type[
+        DebugIntrospectRunRequest | DebugIntrospectHelperRequest | DebugIntrospectCheckPrerequisitesRequest
+    ],
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        request_type(**payload)
 
 
 def test_success_response_serializes_with_shared_envelope() -> None:
@@ -135,7 +181,7 @@ def test_prerequisite_check_serializes_status_and_fix() -> None:
 
 
 def test_debug_introspect_run_request_minimal() -> None:
-    req = DebugIntrospectRunRequest(run_id="r1", target_ref="local-qemu", script="print(1)")
+    req = DebugIntrospectRunRequest(run_id="r1", manifest_target_profile="local-qemu", script="print(1)")
     assert req.timeout_seconds == 30
     assert req.allow_write is False
     assert req.acknowledged_permissions == []
@@ -145,10 +191,15 @@ def test_debug_introspect_run_request_minimal() -> None:
 
 
 def test_debug_introspect_run_request_acknowledged_permissions() -> None:
-    req = DebugIntrospectRunRequest(run_id="r1", target_ref="local-qemu", script="pass", acknowledged_permissions=["x"])
+    req = DebugIntrospectRunRequest(
+        run_id="r1",
+        manifest_target_profile="local-qemu",
+        script="pass",
+        acknowledged_permissions=["x"],
+    )
     assert req.acknowledged_permissions == ["x"]
 
 
 def test_debug_introspect_run_request_rejects_extra_fields() -> None:
     with pytest.raises(ValidationError):
-        DebugIntrospectRunRequest(run_id="r1", target_ref="t", script="s", unknown=1)
+        DebugIntrospectRunRequest(run_id="r1", manifest_target_profile="t", script="s", unknown=1)

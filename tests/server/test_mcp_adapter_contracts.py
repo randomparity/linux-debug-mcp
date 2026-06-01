@@ -1,0 +1,891 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from mcp.server.fastmcp import FastMCP
+
+from kdive.artifacts.contracts import CreateRunRuntime
+from kdive.artifacts.tools import (
+    ArtifactCollectContext,
+    ArtifactCollectOptions,
+    ArtifactManifestContext,
+    register_artifact_tools,
+)
+from kdive.config import BootOverrides, BuildOverrides
+from kdive.debug.contracts import DebugRuntime
+from kdive.domain import ToolResponse
+from kdive.introspect.context import LiveIntrospectRuntime, VmcoreIntrospectRuntime
+from kdive.introspect.models import (
+    DebugIntrospectFromVmcoreHelperRequest,
+    DebugIntrospectRunRequest,
+)
+from kdive.introspect.tools import (
+    IntrospectRunOptions,
+    IntrospectTargetContext,
+    IntrospectToolContext,
+    IntrospectToolHandlers,
+    register_introspect_tools,
+)
+from kdive.kernel.tools import (
+    CreateRunContext,
+    CreateRunHandlerRequest,
+    CreateRunOptions,
+    CreateRunProfiles,
+    KernelBuildContext,
+    KernelBuildHandlerRequest,
+    KernelBuildOptions,
+    KernelToolRuntime,
+    register_kernel_tools,
+)
+from kdive.postmortem.models import DebugPostmortemFetchRequest
+from kdive.postmortem.tools import (
+    DrgnHelperRequest,
+    PostmortemFetchOptions,
+    PostmortemTargetContext,
+    PostmortemToolContext,
+    PostmortemToolHandlers,
+    PostmortemToolRuntime,
+    register_postmortem_tools,
+)
+from kdive.prereqs.tools import (
+    HostPrerequisitesContext,
+    HostPrerequisitesHandlerRequest,
+    HostPrerequisitesOptions,
+    HostPrerequisitesProfiles,
+    HostPrerequisitesRuntime,
+    register_prereq_tools,
+)
+from kdive.target.tools import (
+    TargetBootContext,
+    TargetBootHandlerRequest,
+    TargetBootOptions,
+    TargetBootProfiles,
+    TargetRunContext,
+    TargetRunOptions,
+    TargetRunTestsHandlerRequest,
+    TargetToolContext,
+    TargetToolHandlers,
+    TargetToolRuntime,
+    register_target_tools,
+)
+from kdive.transport.tools import (
+    TransportBreakOptions,
+    TransportCloseHandlerRequest,
+    TransportCloseOptions,
+    TransportInjectBreakHandlerRequest,
+    TransportOpenHandlerRequest,
+    TransportTargetContext,
+    TransportToolContext,
+    TransportToolHandlers,
+    register_transport_tools,
+)
+from kdive.workflow.contracts import (
+    WorkflowBuildBootDebugHandlerRequest,
+    WorkflowBuildBootTestHandlerRequest,
+    WorkflowHandlerDependencies,
+    WorkflowToolRuntime,
+)
+from kdive.workflow.tools import (
+    WorkflowBuildBootDebugOptions,
+    WorkflowBuildBootTestOptions,
+    WorkflowProfileInputs,
+    WorkflowRunContext,
+    WorkflowToolContext,
+    WorkflowToolHandlers,
+    register_workflow_tools,
+)
+
+
+def _tool_fn(app: FastMCP, name: str):
+    return app._tool_manager._tools[name].fn
+
+
+def _success(**data: Any) -> ToolResponse:
+    return ToolResponse.success(summary="ok", data=data)
+
+
+def test_profile_runtime_registries_are_read_only_mappings() -> None:
+    assert TargetToolRuntime.__annotations__["target_profiles"] == "Mapping[str, TargetProfile] | None"
+    assert TargetToolRuntime.__annotations__["rootfs_profiles"] == "Mapping[str, RootfsProfile] | None"
+    assert TargetToolRuntime.__annotations__["test_suites"] == "Mapping[str, TestSuiteProfile] | None"
+    assert TransportToolContext.__annotations__["debug_profiles"] == "Mapping[str, DebugProfile] | None"
+    assert DebugRuntime.__annotations__["debug_profiles"] == "Mapping[str, DebugProfile] | None"
+
+
+def test_kernel_adapters_forward_grouped_payloads_and_override_models(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    sensitive_paths = [tmp_path / "secret"]
+    calls: list[
+        tuple[
+            str,
+            CreateRunHandlerRequest | KernelBuildHandlerRequest,
+            CreateRunRuntime | KernelToolRuntime,
+        ]
+    ] = []
+
+    def create_handler(*, request: CreateRunHandlerRequest, runtime: CreateRunRuntime) -> ToolResponse:
+        calls.append(("create", request, runtime))
+        return _success(run_id=request.run_id)
+
+    def build_handler(*, request: KernelBuildHandlerRequest, runtime: KernelToolRuntime) -> ToolResponse:
+        calls.append(("build", request, runtime))
+        return _success(run_id=request.run_id)
+
+    register_kernel_tools(
+        app,
+        default_artifact_root=tmp_path / "default",
+        sensitive_paths=sensitive_paths,
+        create_run_handler=create_handler,
+        kernel_build_handler=build_handler,
+    )
+
+    raw_create = _tool_fn(app, "kernel.create_run")(
+        profiles=CreateRunProfiles(
+            source_path="/src/linux",
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+        ),
+        context=CreateRunContext(artifact_root=str(tmp_path / "runs"), run_id="run-1"),
+        options=CreateRunOptions(
+            debug_profile="qemu-gdbstub-default",
+            test_suite="smoke",
+            build_overrides={"make_variables": {"LOCALVERSION": "-kdive"}},
+            boot_overrides={"kernel_args": ["panic=1"]},
+            profile_specs={"build": {"name": "inline-build"}, "target": {"name": "inline-target"}},
+        ),
+    )
+    raw_build = _tool_fn(app, "kernel.build")(
+        context=KernelBuildContext(run_id="run-1", artifact_root=str(tmp_path / "runs")),
+        options=KernelBuildOptions(build_profile="inline-build", force_rebuild=True),
+    )
+
+    assert raw_create["ok"] is True
+    assert raw_build["ok"] is True
+    assert calls == [
+        (
+            "create",
+            CreateRunHandlerRequest(
+                artifact_root=tmp_path / "runs",
+                source_path="/src/linux",
+                build_profile="x86_64-default",
+                target_profile="local-qemu",
+                rootfs_profile="minimal",
+                run_id="run-1",
+                debug_profile="qemu-gdbstub-default",
+                test_suite="smoke",
+                build_overrides=BuildOverrides(make_variables={"LOCALVERSION": "-kdive"}),
+                boot_overrides=BootOverrides(kernel_args=["panic=1"]),
+                build_profile_spec={"name": "inline-build"},
+                target_profile_spec={"name": "inline-target"},
+                rootfs_profile_spec=None,
+            ),
+            CreateRunRuntime(sensitive_paths=sensitive_paths),
+        ),
+        (
+            "build",
+            KernelBuildHandlerRequest(
+                artifact_root=tmp_path / "runs",
+                run_id="run-1",
+                build_profile="inline-build",
+                force_rebuild=True,
+            ),
+            KernelToolRuntime(sensitive_paths=sensitive_paths),
+        ),
+    ]
+
+
+def test_kernel_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    register_kernel_tools(
+        app,
+        default_artifact_root=tmp_path / "default",
+        sensitive_paths=[],
+        create_run_handler=lambda **_kwargs: _success(),
+        kernel_build_handler=lambda **_kwargs: _success(),
+    )
+
+    raw = _tool_fn(app, "kernel.create_run")(
+        profiles={
+            "source_path": "/src/linux",
+            "build_profile": "x86_64-default",
+            "target_profile": "local-qemu",
+            "rootfs_profile": "minimal",
+        },
+        options={"profile_specs": {"debug": {"name": "unsupported"}}},
+    )
+
+    assert raw["ok"] is False
+    assert raw["error"]["category"] == "configuration_error"
+
+
+def test_target_adapters_forward_grouped_payloads_and_collaborators(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    admission = object()
+    registry = object()
+    sensitive_paths = [tmp_path / "secret"]
+    calls: list[tuple[str, TargetBootHandlerRequest | TargetRunTestsHandlerRequest, TargetToolRuntime]] = []
+
+    def boot_handler(*, request: TargetBootHandlerRequest, runtime: TargetToolRuntime) -> ToolResponse:
+        calls.append(("boot", request, runtime))
+        return _success(run_id=request.run_id)
+
+    def run_tests_handler(*, request: TargetRunTestsHandlerRequest, runtime: TargetToolRuntime) -> ToolResponse:
+        calls.append(("run_tests", request, runtime))
+        return _success(run_id=request.run_id)
+
+    register_target_tools(
+        app,
+        context=TargetToolContext(
+            default_artifact_root=tmp_path / "default",
+            sensitive_paths=sensitive_paths,
+            admission=admission,
+            session_registry=registry,
+        ),
+        handlers=TargetToolHandlers(
+            boot=boot_handler,
+            run_tests=run_tests_handler,
+        ),
+    )
+
+    raw_boot = _tool_fn(app, "target.boot")(
+        context=TargetBootContext(run_id="run-1", artifact_root=str(tmp_path / "runs")),
+        profiles=TargetBootProfiles(target_profile="local-qemu", rootfs_profile="minimal"),
+        options=TargetBootOptions(
+            force_reboot=True,
+            boot_overrides={"kernel_args": ["console=ttyS0"]},
+            acknowledged_permissions=["start MCP-owned libvirt domains"],
+        ),
+    )
+    raw_tests = _tool_fn(app, "target.run_tests")(
+        context=TargetRunContext(run_id="run-1", artifact_root=str(tmp_path / "runs")),
+        options=TargetRunOptions(
+            test_suite="smoke",
+            commands=[["uname", "-a"]],
+            force_rerun=True,
+            attempt=2,
+            acknowledged_permissions=["execute caller-supplied commands over target SSH"],
+        ),
+    )
+
+    assert raw_boot["ok"] is True
+    assert raw_tests["ok"] is True
+    assert calls == [
+        (
+            "boot",
+            TargetBootHandlerRequest(
+                artifact_root=tmp_path / "runs",
+                run_id="run-1",
+                target_profile="local-qemu",
+                rootfs_profile="minimal",
+                force_reboot=True,
+                boot_overrides=BootOverrides(kernel_args=["console=ttyS0"]),
+                acknowledged_permissions=["start MCP-owned libvirt domains"],
+            ),
+            TargetToolRuntime(sensitive_paths=sensitive_paths, admission=admission, session_registry=registry),
+        ),
+        (
+            "run_tests",
+            TargetRunTestsHandlerRequest(
+                artifact_root=tmp_path / "runs",
+                run_id="run-1",
+                test_suite="smoke",
+                commands=[["uname", "-a"]],
+                force_rerun=True,
+                attempt=2,
+                acknowledged_permissions=["execute caller-supplied commands over target SSH"],
+            ),
+            TargetToolRuntime(sensitive_paths=sensitive_paths, admission=admission, session_registry=registry),
+        ),
+    ]
+
+
+def test_target_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    register_target_tools(
+        app,
+        context=TargetToolContext(
+            default_artifact_root=tmp_path / "default",
+            sensitive_paths=[],
+            admission=object(),
+            session_registry=object(),
+        ),
+        handlers=TargetToolHandlers(
+            boot=lambda **_kwargs: _success(),
+            run_tests=lambda **_kwargs: _success(),
+        ),
+    )
+
+    raw = _tool_fn(app, "target.boot")(context={})
+
+    assert raw["ok"] is False
+    assert raw["error"]["category"] == "configuration_error"
+
+
+def test_prereq_adapter_forwards_grouped_payloads(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    calls: list[tuple[HostPrerequisitesHandlerRequest, HostPrerequisitesRuntime]] = []
+
+    def prereq_handler(*, request: HostPrerequisitesHandlerRequest, runtime: HostPrerequisitesRuntime) -> ToolResponse:
+        calls.append((request, runtime))
+        return _success()
+
+    register_prereq_tools(
+        app,
+        default_artifact_root=tmp_path / "default",
+        prerequisites_handler=prereq_handler,
+    )
+
+    raw = _tool_fn(app, "host.check_prerequisites")(
+        context=HostPrerequisitesContext(artifact_root=str(tmp_path / "runs")),
+        profiles=HostPrerequisitesProfiles(
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+        ),
+        options=HostPrerequisitesOptions(source_path="/src/linux", enable_libvirt_check=True),
+    )
+
+    assert raw["ok"] is True
+    assert calls == [
+        (
+            HostPrerequisitesHandlerRequest(
+                artifact_root=tmp_path / "runs",
+                source_path="/src/linux",
+                enable_libvirt_check=True,
+                build_profile="x86_64-default",
+                target_profile="local-qemu",
+                rootfs_profile="minimal",
+            ),
+            HostPrerequisitesRuntime(),
+        )
+    ]
+
+
+def test_prereq_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    register_prereq_tools(
+        app,
+        default_artifact_root=tmp_path / "default",
+        prerequisites_handler=lambda **_kwargs: _success(),
+    )
+
+    raw = _tool_fn(app, "host.check_prerequisites")(context={"unexpected": "field"})
+
+    assert raw["ok"] is False
+    assert raw["error"]["category"] == "configuration_error"
+
+
+def test_artifact_adapter_uses_grouped_context_and_options(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    calls: list[dict[str, Any]] = []
+
+    def collect_handler(**kwargs: Any) -> ToolResponse:
+        calls.append(kwargs)
+        return _success(run_id=kwargs["run_id"])
+
+    def manifest_handler(**kwargs: Any) -> ToolResponse:
+        calls.append(kwargs)
+        return _success(run_id=kwargs["run_id"])
+
+    register_artifact_tools(
+        app,
+        default_artifact_root=tmp_path / "default",
+        collect_handler=collect_handler,
+        manifest_handler=manifest_handler,
+    )
+
+    raw = _tool_fn(app, "artifacts.collect")(
+        context=ArtifactCollectContext(run_id="run-1", artifact_root=str(tmp_path / "runs")),
+        options=ArtifactCollectOptions(force_recollect=True),
+    )
+    manifest_raw = _tool_fn(app, "artifacts.get_manifest")(
+        context=ArtifactManifestContext(run_id="run-2", artifact_root=str(tmp_path / "runs")),
+    )
+
+    assert raw["ok"] is True
+    assert manifest_raw["ok"] is True
+    assert calls == [
+        {
+            "artifact_root": tmp_path / "runs",
+            "run_id": "run-1",
+            "force_recollect": True,
+        },
+        {
+            "artifact_root": tmp_path / "runs",
+            "run_id": "run-2",
+        },
+    ]
+
+
+def test_transport_adapter_forwards_inject_break_collaborators_and_path(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    transaction = object()
+    admission = object()
+    registry = object()
+    calls: list[tuple[TransportInjectBreakHandlerRequest, TransportToolContext]] = []
+
+    def inject_break_handler(
+        *, request: TransportInjectBreakHandlerRequest, runtime: TransportToolContext
+    ) -> ToolResponse:
+        calls.append((request, runtime))
+        return _success(session_id=request.session_id)
+
+    register_transport_tools(
+        app,
+        context=TransportToolContext(
+            default_artifact_root=tmp_path / "default",
+            transaction=transaction,
+            admission=admission,
+            session_registry=registry,
+        ),
+        handlers=TransportToolHandlers(
+            open=lambda *, request, runtime: _success(),
+            close=lambda *, request, runtime: _success(),
+            inject_break=inject_break_handler,
+        ),
+    )
+
+    raw = _tool_fn(app, "transport.inject_break")(
+        context=TransportTargetContext(
+            run_id="run-1",
+            artifact_root=str(tmp_path / "runs"),
+        ),
+        options=TransportBreakOptions(
+            session_id="session-1",
+            acknowledged_permissions=["drop target kernel into the debugger"],
+        ),
+    )
+
+    assert raw["ok"] is True
+    assert calls == [
+        (
+            TransportInjectBreakHandlerRequest(
+                run_id="run-1",
+                session_id="session-1",
+                acknowledged_permissions=["drop target kernel into the debugger"],
+                artifact_root=tmp_path / "runs",
+            ),
+            TransportToolContext(
+                default_artifact_root=tmp_path / "default",
+                transaction=transaction,
+                admission=admission,
+                session_registry=registry,
+            ),
+        )
+    ]
+
+
+def test_transport_adapter_forwards_operation_requests(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    tool_context = TransportToolContext(
+        default_artifact_root=tmp_path / "default",
+        transaction=object(),
+        admission=object(),
+        session_registry=object(),
+    )
+    calls: list[tuple[str, object, TransportToolContext]] = []
+
+    def open_handler(*, request: TransportOpenHandlerRequest, runtime: TransportToolContext) -> ToolResponse:
+        calls.append(("open", request, runtime))
+        return _success(session_id="session-1")
+
+    def close_handler(*, request: TransportCloseHandlerRequest, runtime: TransportToolContext) -> ToolResponse:
+        calls.append(("close", request, runtime))
+        return _success(session_id=request.session_id)
+
+    register_transport_tools(
+        app,
+        context=tool_context,
+        handlers=TransportToolHandlers(
+            open=open_handler,
+            close=close_handler,
+            inject_break=lambda *, request, runtime: _success(session_id=request.session_id),
+        ),
+    )
+
+    open_raw = _tool_fn(app, "transport.open")(
+        context=TransportTargetContext(run_id="run-1"),
+        options={"recovery": True},
+    )
+    close_raw = _tool_fn(app, "transport.close")(
+        context=TransportTargetContext(run_id="run-1"),
+        options=TransportCloseOptions(session_id="session-1"),
+    )
+
+    assert open_raw["ok"] is True
+    assert close_raw["ok"] is True
+    assert calls == [
+        ("open", TransportOpenHandlerRequest(run_id="run-1", recovery=True), tool_context),
+        ("close", TransportCloseHandlerRequest(run_id="run-1", session_id="session-1"), tool_context),
+    ]
+
+
+def test_introspect_adapter_builds_run_request_and_forwards_gate_collaborators(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    admission = object()
+    registry = object()
+    calls: list[tuple[DebugIntrospectRunRequest, dict[str, Any]]] = []
+
+    def run_handler(request: DebugIntrospectRunRequest, **kwargs: Any) -> ToolResponse:
+        calls.append((request, kwargs))
+        return _success(call_id="inspect-1")
+
+    register_introspect_tools(
+        app,
+        context=IntrospectToolContext(
+            default_artifact_root=tmp_path / "default",
+            admission=admission,
+            session_registry=registry,
+        ),
+        handlers=IntrospectToolHandlers(
+            run=run_handler,
+            helper=lambda *_args, **_kwargs: _success(),
+            check_prereqs=lambda *_args, **_kwargs: _success(),
+            from_vmcore=lambda *_args, **_kwargs: _success(),
+            from_vmcore_helper=lambda *_args, **_kwargs: _success(),
+        ),
+    )
+
+    raw = _tool_fn(app, "debug.introspect.run")(
+        target=IntrospectTargetContext(
+            run_id="run-1",
+            manifest_target_profile="local-qemu",
+            artifact_root=str(tmp_path / "runs"),
+        ),
+        script="print('x')",
+        options=IntrospectRunOptions(
+            timeout_seconds=9,
+            allow_write=True,
+            acknowledged_permissions=["read/write target memory"],
+            args={"limit": 1},
+        ),
+    )
+
+    assert raw["ok"] is True
+    request, kwargs = calls[0]
+    assert request == DebugIntrospectRunRequest(
+        run_id="run-1",
+        manifest_target_profile="local-qemu",
+        script="print('x')",
+        timeout_seconds=9,
+        allow_write=True,
+        acknowledged_permissions=["read/write target memory"],
+        args={"limit": 1},
+    )
+    assert set(kwargs) == {"runtime"}
+    assert kwargs["runtime"] == LiveIntrospectRuntime(
+        artifact_root=tmp_path / "runs",
+        admission=admission,
+        session_registry=registry,
+    )
+
+
+def test_introspect_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    register_introspect_tools(
+        app,
+        context=IntrospectToolContext(
+            default_artifact_root=tmp_path / "default",
+            admission=object(),
+            session_registry=object(),
+        ),
+        handlers=IntrospectToolHandlers(
+            run=lambda *_args, **_kwargs: _success(),
+            helper=lambda *_args, **_kwargs: _success(),
+            check_prereqs=lambda *_args, **_kwargs: _success(),
+            from_vmcore=lambda *_args, **_kwargs: _success(),
+            from_vmcore_helper=lambda *_args, **_kwargs: _success(),
+        ),
+    )
+
+    raw = _tool_fn(app, "debug.introspect.run")(
+        target={},
+        script="print('x')",
+    )
+
+    assert raw["ok"] is False
+    assert raw["error"]["category"] == "configuration_error"
+
+
+def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    admission = object()
+    registry = object()
+    calls: list[tuple[DebugPostmortemFetchRequest, dict[str, Any]]] = []
+    drgn_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def crash_handler(*_args: Any, **_kwargs: Any) -> ToolResponse:
+        return _success()
+
+    def drgn_helper_handler(*_args: Any, **_kwargs: Any) -> ToolResponse:
+        drgn_calls.append((_args, _kwargs))
+        return _success()
+
+    def fetch_handler(*, request: DebugPostmortemFetchRequest, **kwargs: Any) -> ToolResponse:
+        calls.append((request, kwargs))
+        return _success(vmcore_ref="inputs/vmcore")
+
+    register_postmortem_tools(
+        app,
+        context=PostmortemToolContext(
+            default_artifact_root=tmp_path / "default",
+            admission=admission,
+            session_registry=registry,
+        ),
+        handlers=PostmortemToolHandlers(
+            crash=crash_handler,
+            triage=lambda *_args, **_kwargs: _success(),
+            triage_drgn_helper=drgn_helper_handler,
+            check_prereqs=lambda *_args, **_kwargs: _success(),
+            list_dumps=lambda *_args, **_kwargs: _success(),
+            fetch=fetch_handler,
+        ),
+    )
+
+    raw = _tool_fn(app, "debug.postmortem.fetch")(
+        target=PostmortemTargetContext(
+            run_id="run-1",
+            manifest_target_profile="local-qemu",
+            artifact_root=str(tmp_path / "runs"),
+        ),
+        dump_ref="/var/crash/d1",
+        options=PostmortemFetchOptions(
+            force=True,
+            dump_dir="/var/crash",
+            max_bytes=123,
+            timeout_seconds=17,
+        ),
+    )
+
+    assert raw["ok"] is True
+    request, kwargs = calls[0]
+    assert request == DebugPostmortemFetchRequest(
+        run_id="run-1",
+        manifest_target_profile="local-qemu",
+        dump_ref="/var/crash/d1",
+        force=True,
+        dump_dir="/var/crash",
+        max_bytes=123,
+        timeout_seconds=17,
+    )
+    runtime = kwargs["runtime"]
+    assert isinstance(runtime, PostmortemToolRuntime)
+    assert runtime.artifact_root == tmp_path / "runs"
+    assert runtime.admission is admission
+    assert runtime.session_registry is registry
+    assert runtime.crash_handler is crash_handler
+    assert runtime.drgn_helper_handler is not drgn_helper_handler
+    assert callable(runtime.drgn_helper_handler)
+
+    helper_request = DrgnHelperRequest(
+        run_id="run-1",
+        vmcore_ref="inputs/vmcore",
+        vmlinux_ref="build/vmlinux",
+        name="dmesg",
+    )
+    assert runtime.drgn_helper_handler(request=helper_request, runtime=runtime).ok is True
+    assert len(drgn_calls) == 1
+    source_request = drgn_calls[0][0][0]
+    assert source_request == DebugIntrospectFromVmcoreHelperRequest(
+        run_id="run-1",
+        vmcore_ref="inputs/vmcore",
+        vmlinux_ref="build/vmlinux",
+        name="dmesg",
+    )
+    assert drgn_calls[0][1] == {
+        "runtime": VmcoreIntrospectRuntime(artifact_root=tmp_path / "runs"),
+    }
+
+
+def test_postmortem_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    register_postmortem_tools(
+        app,
+        context=PostmortemToolContext(
+            default_artifact_root=tmp_path / "default",
+            admission=object(),
+            session_registry=object(),
+        ),
+        handlers=PostmortemToolHandlers(
+            crash=lambda *_args, **_kwargs: _success(),
+            triage=lambda *_args, **_kwargs: _success(),
+            triage_drgn_helper=lambda *_args, **_kwargs: _success(),
+            check_prereqs=lambda *_args, **_kwargs: _success(),
+            list_dumps=lambda *_args, **_kwargs: _success(),
+            fetch=lambda *_args, **_kwargs: _success(),
+        ),
+    )
+
+    raw = _tool_fn(app, "debug.postmortem.fetch")(
+        target={},
+        dump_ref="/var/crash/d1",
+    )
+
+    assert raw["ok"] is False
+    assert raw["error"]["category"] == "configuration_error"
+
+
+def test_live_adapter_contexts_use_manifest_target_profile_name() -> None:
+    assert "manifest_target_profile" in IntrospectTargetContext.model_fields
+    assert "target_ref" not in IntrospectTargetContext.model_fields
+    assert "manifest_target_profile" in PostmortemTargetContext.model_fields
+    assert "target_ref" not in PostmortemTargetContext.model_fields
+
+
+def test_workflow_adapter_forwards_debug_collaborators_and_converts_artifact_root(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    admission = object()
+    registry = object()
+    transaction = object()
+    session_guard = object()
+    gdb_mi_engine = object()
+    gdb_mi_sessions = object()
+    calls: list[tuple[WorkflowBuildBootDebugHandlerRequest, WorkflowToolRuntime]] = []
+
+    def build_boot_debug_handler(
+        *, request: WorkflowBuildBootDebugHandlerRequest, runtime: WorkflowToolRuntime
+    ) -> ToolResponse:
+        calls.append((request, runtime))
+        return _success(run_id=request.run_id)
+
+    dependencies = WorkflowHandlerDependencies(
+        create_run_handler=lambda **_kwargs: _success(),
+        kernel_build_handler=lambda **_kwargs: _success(),
+        target_boot_handler=lambda **_kwargs: _success(),
+        target_run_tests_handler=lambda **_kwargs: _success(),
+        debug_start_session_handler=lambda **_kwargs: _success(),
+        artifacts_collect_handler=lambda **_kwargs: _success(),
+    )
+    register_workflow_tools(
+        app,
+        context=WorkflowToolContext(
+            default_artifact_root=tmp_path / "default",
+            sensitive_paths=[],
+            admission=admission,
+            session_registry=registry,
+            transaction=transaction,
+            session_guard=session_guard,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+            dependencies=dependencies,
+        ),
+        handlers=WorkflowToolHandlers(
+            build_boot_test=lambda **_kwargs: _success(),
+            build_boot_debug=build_boot_debug_handler,
+        ),
+    )
+
+    raw = _tool_fn(app, "workflow.build_boot_debug")(
+        profiles=WorkflowProfileInputs(
+            source_path="/src",
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+        ),
+        context=WorkflowRunContext(artifact_root=str(tmp_path / "runs"), run_id="run-1"),
+        options=WorkflowBuildBootDebugOptions(
+            debug_profile="qemu-gdbstub-default",
+            force_rebuild=True,
+            force_reboot=True,
+            new_session=True,
+            acknowledged_permissions=["start MCP-owned libvirt domains"],
+        ),
+    )
+
+    assert raw["ok"] is True
+    assert calls == [
+        (
+            WorkflowBuildBootDebugHandlerRequest(
+                artifact_root=tmp_path / "runs",
+                source_path="/src",
+                build_profile="x86_64-default",
+                target_profile="local-qemu",
+                rootfs_profile="minimal",
+                run_id="run-1",
+                debug_profile="qemu-gdbstub-default",
+                force_rebuild=True,
+                force_reboot=True,
+                new_session=True,
+                build_overrides=None,
+                boot_overrides=None,
+                build_profile_spec=None,
+                target_profile_spec=None,
+                rootfs_profile_spec=None,
+                acknowledged_permissions=["start MCP-owned libvirt domains"],
+            ),
+            WorkflowToolRuntime(
+                sensitive_paths=[],
+                admission=admission,
+                session_registry=registry,
+                transaction=transaction,
+                session_guard=session_guard,
+                gdb_mi_engine=gdb_mi_engine,
+                gdb_mi_sessions=gdb_mi_sessions,
+                dependencies=dependencies,
+            ),
+        )
+    ]
+
+
+def test_workflow_adapter_forwards_safety_override_inputs(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    sensitive_paths = [tmp_path / "secret"]
+    calls: list[tuple[WorkflowBuildBootTestHandlerRequest, WorkflowToolRuntime]] = []
+
+    def build_boot_test_handler(
+        *, request: WorkflowBuildBootTestHandlerRequest, runtime: WorkflowToolRuntime
+    ) -> ToolResponse:
+        calls.append((request, runtime))
+        return _success(run_id=request.run_id)
+
+    dependencies = WorkflowHandlerDependencies(
+        create_run_handler=lambda **_kwargs: _success(),
+        kernel_build_handler=lambda **_kwargs: _success(),
+        target_boot_handler=lambda **_kwargs: _success(),
+        target_run_tests_handler=lambda **_kwargs: _success(),
+        debug_start_session_handler=lambda **_kwargs: _success(),
+        artifacts_collect_handler=lambda **_kwargs: _success(),
+    )
+    register_workflow_tools(
+        app,
+        context=WorkflowToolContext(
+            default_artifact_root=tmp_path / "default",
+            sensitive_paths=sensitive_paths,
+            admission=object(),
+            session_registry=object(),
+            transaction=object(),
+            session_guard=object(),
+            gdb_mi_engine=object(),
+            gdb_mi_sessions=object(),
+            dependencies=dependencies,
+        ),
+        handlers=WorkflowToolHandlers(
+            build_boot_test=build_boot_test_handler,
+            build_boot_debug=lambda **_kwargs: _success(),
+        ),
+    )
+
+    raw = _tool_fn(app, "workflow.build_boot_test")(
+        profiles=WorkflowProfileInputs(
+            source_path="/src",
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+        ),
+        options=WorkflowBuildBootTestOptions(
+            build_overrides={"make_variables": {"KCFLAGS": "-O2"}},
+            boot_overrides={"kernel_args": ["panic=1"]},
+            profile_specs={"build": {"name": "inline-build"}, "rootfs": {"name": "inline-rootfs"}},
+        ),
+    )
+
+    assert raw["ok"] is True
+    request, runtime = calls[0]
+    assert request.build_overrides == BuildOverrides(make_variables={"KCFLAGS": "-O2"})
+    assert request.boot_overrides == BootOverrides(kernel_args=["panic=1"])
+    assert request.build_profile_spec == {"name": "inline-build"}
+    assert request.target_profile_spec is None
+    assert request.rootfs_profile_spec == {"name": "inline-rootfs"}
+    assert runtime.sensitive_paths == sensitive_paths

@@ -182,5 +182,5 @@ is not a `SessionGuard` exit and a reboot restores watchdog defaults anyway.
 contract §5.5 (bounded lifecycle teardown), §5.6 (ssh-tier HALTED gating);
 [ADR 0013](0013-session-guard-precondition-teardown-seam.md) (the SessionGuard seam,
 empty slots, dispatcher-not-routed decision); spec
-`docs/superpowers/specs/2026-05-29-watchdog-relax-restore-design.md`; kernel
+`docs/archive/superpowers/specs/2026-05-29-watchdog-relax-restore-design.md`; kernel
 `Documentation/admin-guide/lockup-watchdogs.rst`.

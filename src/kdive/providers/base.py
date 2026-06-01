@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from kdive.domain import OperationSemantics, ProviderCapability, TargetKind
+from kdive.providers.models import (
+    OperationSemantics,
+    ProviderCapability,
+    TargetKind,
+)
 
 
-def sprint0_capability(
+def local_provider_capability(
     *,
     name: str,
     operations: list[str],
@@ -18,7 +22,7 @@ def sprint0_capability(
         provider_family=provider_family,
         architectures=["x86_64"],
         target_kinds=[TargetKind.LOCAL, TargetKind.VIRTUAL],
-        transports=transports or list(access_methods),
+        transports=list(access_methods) if transports is None else transports,
         operations=operations,
         required_host_tools=[],
         destructive_permissions=[],

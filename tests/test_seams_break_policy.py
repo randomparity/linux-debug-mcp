@@ -2,7 +2,7 @@ import pytest
 
 from kdive.seams.break_policy import BreakPlanError, ReferenceBreakPolicy
 from kdive.seams.target import ConsoleKind, PlatformMetadata
-from kdive.transport.base import BreakMethod, LineRole, TransportRef
+from kdive.transport.core.base import BreakMethod, LineRole, TransportRef
 
 
 def _platform(*, ssh: bool, console: ConsoleKind = ConsoleKind.UART) -> PlatformMetadata:

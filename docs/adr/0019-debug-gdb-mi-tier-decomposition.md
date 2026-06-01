@@ -29,7 +29,7 @@ So #13 is not a greenfield add — it is an **engine replacement plus a migratio
    - **Phase C — core operations, MI-typed.** Migrate breakpoints/watchpoints, `continue`, `step`/`next`/`finish`, `-stack-list-frames`, `-stack-list-variables`, register/memory reads onto MI typed JSON; **delete** the corresponding batch-mode paths. `-data-evaluate-expression` is used **only internally** to implement the existing named inspectors (`kernel_version`, `symbol_address`); the `debug.evaluate` allowlist is preserved exactly and no arbitrary-expression capability is exposed (see rejected alternative below).
    - **Phase D — module symbols, robustness, serial transport.** Per-module section-address discovery + `add-symbol-file` at runtime addresses; `set remotetimeout`, retry/backoff, transport-stall detect-and-report (never hang); break entry via `transport.inject_break` using ADR 0018's `BreakPolicy`; serial-KGDB (demuxed) smoke test + transport-quality warning surfacing (SOL/vterm → suggest `debug.kdb`/`debug.introspect`); `docs/debug-gdb.md`.
 
-5. **Record the design in a spec.** `docs/superpowers/specs/2026-05-29-debug-gdb-mi-tier-design.md` carries the full phase breakdown, the per-phase scope/acceptance/coordination, and the sibling-issue map; this ADR records only the decisions and their rejected alternatives.
+5. **Record the design in a spec.** `docs/archive/superpowers/specs/2026-05-29-debug-gdb-mi-tier-design.md` carries the full phase breakdown, the per-phase scope/acceptance/coordination, and the sibling-issue map; this ADR records only the decisions and their rejected alternatives.
 
 ## Consequences
 

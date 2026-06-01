@@ -228,7 +228,7 @@ only the success path.
 
 ## References
 
-spec `docs/superpowers/specs/2026-05-30-debug-postmortem-triage-design.md`;
+spec `docs/archive/superpowers/specs/2026-05-30-debug-postmortem-triage-design.md`;
 interface contract `docs/specs/interface-contracts.md` §5.5 (`target.crashed`
 first-reaction), §5.6 rule 3 (never gated), §4.2 (fail-loud);
 ADR 0026 (`debug.postmortem.crash`: build-id reader, framing, parsers),

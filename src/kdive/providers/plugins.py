@@ -4,16 +4,20 @@ from collections.abc import Callable
 
 from pydantic import Field, field_validator
 
-from kdive.domain import ImplementationState, Model, ProviderCapability
-from kdive.providers.base import sprint0_capability
-from kdive.providers.libvirt_qemu import local_libvirt_qemu_capability
-from kdive.providers.local_crash_postmortem import local_crash_postmortem_capability
-from kdive.providers.local_drgn_introspect import local_drgn_introspect_capability
-from kdive.providers.local_kernel_build import local_kernel_build_capability
-from kdive.providers.local_ssh_tests import local_ssh_tests_capability
-from kdive.providers.local_vmcore_retrieval import local_vmcore_retrieval_capability
-from kdive.providers.qemu_gdbstub import local_qemu_gdbstub_capability
-from kdive.providers.stubs import future_stub_capability_factories
+from kdive.domain import Model
+from kdive.providers.base import local_provider_capability
+from kdive.providers.local.build.local_kernel_build import local_kernel_build_capability
+from kdive.providers.local.debug.local_qemu_gdbstub import local_qemu_gdbstub_capability
+from kdive.providers.local.introspect.local_drgn_introspect import local_drgn_introspect_capability
+from kdive.providers.local.postmortem.local_crash_postmortem import local_crash_postmortem_capability
+from kdive.providers.local.postmortem.local_vmcore_retrieval import local_vmcore_retrieval_capability
+from kdive.providers.local.target.local_libvirt_qemu import local_libvirt_qemu_capability
+from kdive.providers.local.test.local_ssh_tests import local_ssh_tests_capability
+from kdive.providers.models import (
+    ImplementationState,
+    ProviderCapability,
+)
+from kdive.providers.stubs import stub_provider_capability_factories
 
 
 class ProviderPluginSpec(Model):
@@ -39,7 +43,7 @@ def local_provider_plugin_specs() -> list[ProviderPluginSpec]:
             plugin_version="0.1.0",
             implementation_state=ImplementationState.IMPLEMENTED,
             provider_capability_factories=[
-                lambda: sprint0_capability(
+                lambda: local_provider_capability(
                     name="local-artifacts",
                     operations=["kernel.create_run", "artifacts.get_manifest"],
                     access_methods=["filesystem"],
@@ -47,7 +51,7 @@ def local_provider_plugin_specs() -> list[ProviderPluginSpec]:
                     provider_family="artifacts",
                     transports=["filesystem"],
                 ),
-                lambda: sprint0_capability(
+                lambda: local_provider_capability(
                     name="local-prereqs",
                     operations=["host.check_prerequisites"],
                     access_methods=["subprocess", "filesystem"],
@@ -71,10 +75,10 @@ def local_provider_plugin_specs() -> list[ProviderPluginSpec]:
 def stub_provider_plugin_specs() -> list[ProviderPluginSpec]:
     return [
         ProviderPluginSpec(
-            plugin_name="builtins.future-stubs",
+            plugin_name="builtins.stub-providers",
             plugin_version="0.1.0",
             implementation_state=ImplementationState.STUB,
-            provider_capability_factories=future_stub_capability_factories(),
+            provider_capability_factories=stub_provider_capability_factories(),
             documentation_paths=["docs/ppc64le-provider-spike.md"],
             limitations=[
                 "Stub providers are discoverability-only and do not open network, serial, or power-control resources."
@@ -85,7 +89,3 @@ def stub_provider_plugin_specs() -> list[ProviderPluginSpec]:
 
 def built_in_provider_plugin_specs() -> list[ProviderPluginSpec]:
     return [*local_provider_plugin_specs(), *stub_provider_plugin_specs()]
-
-
-def builtin_provider_plugin_specs() -> list[ProviderPluginSpec]:
-    return built_in_provider_plugin_specs()

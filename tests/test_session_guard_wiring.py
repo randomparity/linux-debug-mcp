@@ -14,22 +14,20 @@ from pathlib import Path
 import pytest
 from _layer4_fakes import KEY, PLATFORM, FakeQemuTransport, build_txn
 from conftest import FakeMiEngine, kernel_provenance_details, write_vmlinux_with_build_id
+from coordination_observers import assert_no_admission_binding, assert_stop_guard_released
 
 from kdive.config import DebugProfile
-from kdive.coordination.admission import AdmissionError, AdmissionService
+from kdive.coordination.admission import AdmissionError, AdmissionService, publish_ready_snapshot
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
+from kdive.debug.session_end import _end_session as debug_end_session_handler
+from kdive.debug.session_handlers import _start_session as debug_start_session_handler
 from kdive.domain import ArtifactRef, RunRequest, StepResult, StepStatus
-from kdive.providers.gdb_mi import GdbMiSessionRegistry
+from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard, SessionGuardContext
 from kdive.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleEvent, LifecycleKind
-from kdive.seams.target import publish_ready_snapshot
-from kdive.server import (
-    _admit_run_tests_ssh_tier,
-    debug_end_session_handler,
-    debug_start_session_handler,
-)
-from kdive.transport.base import LineRole, TransportRef
+from kdive.target.test_handler import _admit_run_tests_ssh_tier
+from kdive.transport.core.base import LineRole, TransportRef
 
 from kdive.artifacts.store import ArtifactStore  # isort: skip
 
@@ -232,8 +230,8 @@ def test_resume_on_error_reaps_and_tombstones(tmp_path):
     assert registry.read_record(KEY) is None  # record deleted (not left HALTED)
     tombstone = registry.read_tombstone(KEY)
     assert tombstone is not None and tombstone.reason == "closed_while_halted"
-    assert admission._bindings.get(KEY, []) == []  # promoted binding deregistered
-    txn._guard.acquire(KEY)  # guard is free (no GuardConflict)
+    assert_no_admission_binding(admission, KEY)
+    assert_stop_guard_released(txn, KEY)
 
 
 def test_ssh_tier_rejected_while_halted_then_admitted_after_end(tmp_path):

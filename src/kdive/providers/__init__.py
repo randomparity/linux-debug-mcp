@@ -1,1 +1,1 @@
-"""Provider contracts and registry."""
+"""Provider contracts, registries, and local provider implementations."""

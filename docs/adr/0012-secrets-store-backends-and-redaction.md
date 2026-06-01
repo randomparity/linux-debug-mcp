@@ -5,7 +5,7 @@
 **Context layer:** Hardening (08) — secret resolution + redaction, consumed by transport
 (Layer 3/4)
 **Issue:** #65
-**Spec:** `docs/superpowers/specs/2026-05-29-secrets-store-and-redaction-design.md`
+**Spec:** `docs/archive/superpowers/specs/2026-05-29-secrets-store-and-redaction-design.md`
 
 ## Context
 

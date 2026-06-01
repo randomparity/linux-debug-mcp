@@ -12,15 +12,16 @@ import struct
 
 import pytest
 
-import kdive.server as server
 from kdive.coordination.registry import RecoveryTombstone, SessionRegistry
+from kdive.debug import operations as debug_operations
+from kdive.debug.contracts import DebugReadMemoryRequest
 from kdive.domain import ErrorCategory
 from kdive.postmortem.dumps import is_within_dump_dir, parse_dump_listing
 from kdive.prereqs.checks import PortProbeResult, _default_port_probe
 from kdive.prereqs.drgn_probe import PROBE_SCRIPT
-from kdive.providers.gdb_mi import MAX_MEMORY_READ_BYTES, GdbMiError
+from kdive.providers.local.debug.gdb_mi import MAX_MEMORY_READ_BYTES, GdbMiError
 from kdive.seams.target import TargetKey
-from kdive.transport.serial_local import SerialLocalConfigError, SerialLocalTransport
+from kdive.transport.backends.serial_local import SerialLocalConfigError, SerialLocalTransport
 
 
 # --- TD-04: serial-local port/baud int() coercion ---------------------------------------------
@@ -54,11 +55,10 @@ class _RecordingEngine:
 
 
 def _read_memory(engine: _RecordingEngine, *, address: object, byte_count: object) -> dict[str, object]:
-    return server._engine_op_data(
+    return debug_operations._engine_op_data(
         engine=engine,  # type: ignore[arg-type]
         attachment=object(),  # type: ignore[arg-type]
-        method_name="read_memory",
-        kwargs={"address": address, "byte_count": byte_count},
+        request=DebugReadMemoryRequest(address=address, byte_count=byte_count),  # type: ignore[arg-type]
     )
 
 

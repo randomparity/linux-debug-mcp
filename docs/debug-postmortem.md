@@ -7,7 +7,7 @@ returns parsed JSON keyed by command plus a preserved, redacted transcript. It i
 offline, host-side, and **always concurrent-safe** — no live target, no admission gate,
 never gated by a `DebugProfile`.
 
-Design: [spec](superpowers/specs/2026-05-30-debug-postmortem-crash-design.md) ·
+Design: [spec](archive/superpowers/specs/2026-05-30-debug-postmortem-crash-design.md) ·
 [ADR 0026](adr/0026-postmortem-crash-batch-runner.md).
 
 ## Request
@@ -123,7 +123,7 @@ recommended first reaction to the `target.crashed` lifecycle event. It composes 
 crash and drgn offline tiers into a single typed report against one `(vmcore, vmlinux)`
 pair. It is offline and **never gated**, like the rest of this tier.
 
-Design: [spec](superpowers/specs/2026-05-30-debug-postmortem-triage-design.md) ·
+Design: [spec](archive/superpowers/specs/2026-05-30-debug-postmortem-triage-design.md) ·
 [ADR 0027](adr/0027-postmortem-triage-composition.md).
 
 ## Request
@@ -186,7 +186,7 @@ service state. Unlike the offline crash/triage tools, it touches a live target, 
 is an ssh-tier op gated on the target lifecycle: a `HALTED` target is fast-rejected
 (interface-contracts §5.6 rule 2), never left to hang.
 
-Design: [spec](superpowers/specs/2026-05-30-debug-postmortem-check-prereqs-design.md) ·
+Design: [spec](archive/superpowers/specs/2026-05-30-debug-postmortem-check-prereqs-design.md) ·
 [ADR 0028](adr/0028-postmortem-check-prereqs-kdump-readiness.md).
 
 ## Request

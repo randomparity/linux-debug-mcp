@@ -2,12 +2,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from conftest import make_source_tree
+from handler_call_helpers import create_run_handler, target_boot_handler
 
 from kdive.artifacts.store import ArtifactStore
-from kdive.config import RootfsProfile, TargetProfile
+from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, RootfsProfile, TargetProfile
 from kdive.domain import ArtifactRef, StepResult, StepStatus
-from kdive.providers.libvirt_qemu import BootExecutionResult
-from kdive.server import create_run_handler, target_boot_handler
+from kdive.providers.local.target.local_libvirt_qemu import BootExecutionResult
 
 
 def build_spec() -> dict[str, object]:
@@ -259,7 +259,12 @@ def test_boot_uses_inline_frozen_target_and_rootfs(tmp_path: Path) -> None:
     _record_build(artifact_root, run_id)
     provider = RecordingBootProvider()
 
-    response = target_boot_handler(artifact_root=artifact_root, run_id=run_id, provider=provider)
+    response = target_boot_handler(
+        artifact_root=artifact_root,
+        run_id=run_id,
+        provider=provider,
+        acknowledged_permissions=TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"],
+    )
 
     assert response.ok is True
     assert provider.planned_target is not None

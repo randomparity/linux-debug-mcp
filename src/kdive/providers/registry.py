@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from kdive.domain import Model, ProviderCapability
+from kdive.domain import Model
+from kdive.providers.models import ProviderCapability
 from kdive.providers.plugins import ProviderPluginSpec, built_in_provider_plugin_specs
 
 
@@ -36,8 +37,14 @@ class ProviderRegistry:
                 limitations=list(plugin_spec.limitations),
             )
 
-    def get(self, name: str) -> ProviderCapability:
-        return self._providers[name]
+    def get(self, name: str) -> ProviderCapability | None:
+        return self._providers.get(name)
+
+    def require(self, name: str) -> ProviderCapability:
+        try:
+            return self._providers[name]
+        except KeyError as exc:
+            raise KeyError(f"unknown provider: {name}") from exc
 
     def list_capabilities(self) -> list[ProviderCapability]:
         return list(self._providers.values())

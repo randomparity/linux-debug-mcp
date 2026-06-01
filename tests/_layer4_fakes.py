@@ -16,7 +16,7 @@ from kdive.safety.secrets import SecretReferenceKind
 from kdive.seams.guard import InProcessStopCapableGuard
 from kdive.seams.secrets import EnvSecretsBackend, SecretsStore
 from kdive.seams.target import BreakHint, ConsoleKind, PlatformMetadata, TargetKey, TargetState
-from kdive.transport.base import (
+from kdive.transport.core.base import (
     BackendAttachment,
     BreakMethod,
     BreakPlan,
@@ -197,7 +197,7 @@ class FakeSshRunner:
         self.started = threading.Event()
 
     def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None, max_stdout_bytes=None):
-        from kdive.providers.local_ssh_tests import SshCommandResult
+        from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 
         self.started.set()
         if cancel is not None:

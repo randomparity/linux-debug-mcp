@@ -225,7 +225,7 @@ at — exactly the split #55 uses (`sensitive/stdout.raw` vs `debug/.../stdout.j
 
 ## References
 
-spec `docs/superpowers/specs/2026-05-30-debug-postmortem-crash-design.md`;
+spec `docs/archive/superpowers/specs/2026-05-30-debug-postmortem-crash-design.md`;
 interface contract `docs/specs/interface-contracts.md` §4.2, §5.6 rule 3, §3.3;
 ADR 0010 (offline execution model, host-authoritative build-id, never-gated),
 ADR 0008 (symbols package leaf), ADR 0011 (write-mode N/A to a core);

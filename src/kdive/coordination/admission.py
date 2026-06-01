@@ -12,7 +12,7 @@ from enum import StrEnum
 from kdive.domain import ErrorCategory
 from kdive.seams.lifecycle import InvalidationResult, LifecycleDispatcher, LifecycleEvent
 from kdive.seams.target import LeaseInfo, PlatformMetadata, TargetKey, TargetState
-from kdive.transport.base import (
+from kdive.seams.transport_state import (
     DEFAULT_MIN_LEASE_TTL_SECONDS,
     ExecutionState,
     OpenRequest,
@@ -84,6 +84,39 @@ class TargetSnapshot:
     platform: PlatformMetadata
     state: TargetState
     lease: LeaseInfo | None = None
+
+
+def require_target_snapshot(admission: AdmissionService, target_key: TargetKey) -> TargetSnapshot:
+    snapshot = admission.current_snapshot(target_key)
+    if snapshot is None:
+        raise AdmissionError(
+            "no authoritative snapshot for target; boot must publish a READY snapshot first",
+            category=ErrorCategory.READINESS_FAILURE,
+            code="snapshot_missing",
+        )
+    return snapshot
+
+
+def publish_ready_snapshot(
+    admission: AdmissionService,
+    *,
+    target_key: TargetKey,
+    generation: int,
+    transports: Iterable[TransportRef],
+    platform: PlatformMetadata,
+    lease: LeaseInfo | None = None,
+) -> None:
+    """Publish the authoritative READY snapshot for a target that has completed boot."""
+    admission.publish_snapshot(
+        target_key,
+        TargetSnapshot(
+            generation=generation,
+            transports=tuple(transports),
+            platform=platform,
+            state=TargetState.READY,
+            lease=lease,
+        ),
+    )
 
 
 class AdmissionHandle:
@@ -272,7 +305,7 @@ class AdmissionService:
         """Public re-entrant per-TargetKey lock context. Used by the open() transaction to extend
         the admission critical section across `promote → register handle → clear recovery →
         subscribe to dispatcher` so a concurrent `invalidate_lifecycle` cannot cancel a freshly
-        promoted handle between promote and subscribe (Finding F3)."""
+        promoted handle between promote and subscribe."""
         lock = self._key_lock(target_key)
         lock.acquire()
         try:
@@ -955,8 +988,8 @@ class AdmissionService:
         close happen atomically under the key lock; `emit` runs outside it (bounded teardown must
         not hold the admission lock).
 
-        **Finding F1**: `close_admission=False` skips step 1 — the cancel fence and `_closed_at`
-        write — and only emits the lifecycle event. Used by `SessionRegistry.reconcile()` when the
+        `close_admission=False` skips step 1 — the cancel fence and `_closed_at` write — and only
+        emits the lifecycle event. Used by `SessionRegistry.reconcile()` when the
         durable record's backend is already dead (or never had a fenceable pid), so admission must
         not be locked-closed on next startup. The stale-retry guard still runs: a delayed-retry
         of a prior incarnation's invalidation is a complete no-op regardless of `close_admission`.

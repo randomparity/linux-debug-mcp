@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
 from kdive.seams.target import TargetKey
-from kdive.transport.base import ExecutionState, TransportSession
+from kdive.seams.transport_state import ExecutionState, TransportSession
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ class InProcessStopCapableGuard:
         """Coarse, **tokenless** force-free of the current holder — the §5.6 contract primitive for
         an invalidator that does not hold the session's token. The §5.4 invalidation path in this
         codebase does NOT use it: `TransportTransaction` holds the `GuardToken` in-process and frees
-        the guard by the fenced `release(target_key, token)` instead (ADR 0002 Finding #4, ADR 0015),
+        the guard by the fenced `release(target_key, token)` instead (ADR 0002 / ADR 0015),
         so `revoke` has no in-process caller today. It is retained as a Protocol primitive a swapped
         #08 impl (or a tokenless force-reap path) can use.
 
@@ -167,7 +167,7 @@ class TeardownStep(Protocol):
 
 class SessionGuard:
     """Stateless lifecycle policy for interactive stop-capable debug sessions (spec
-    docs/superpowers/specs/2026-05-29-session-guard-design.md, ADR 0013). Composes the existing
+    docs/archive/superpowers/specs/2026-05-29-session-guard-design.md, ADR 0013). Composes the existing
     guard/lease/transaction primitives; holds no per-session state. #66 ships empty slots; #69
     adds a TeardownStep, #70 adds pre/post-attach Preconditions."""
 

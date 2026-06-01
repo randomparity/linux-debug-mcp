@@ -82,7 +82,7 @@ To run the core `uv` environment setup and host check directly:
 ```bash
 uv venv --allow-existing
 uv pip install -e '.[test,dev]'
-uv run python -m kdive.dev_setup check-host
+uv run python -m kdive.prereqs.dev_setup check-host
 ```
 
 This direct sequence does not install pre-commit hooks or run hooks once. Use

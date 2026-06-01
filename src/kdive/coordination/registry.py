@@ -13,7 +13,7 @@ from typing import Protocol
 from pydantic import ValidationError
 
 from kdive.seams.target import TargetKey
-from kdive.transport.base import ExecutionState, TransportSession
+from kdive.seams.transport_state import ExecutionState, TransportSession
 
 logger = logging.getLogger(__name__)
 
@@ -28,18 +28,17 @@ class _RecoveryMarker(Protocol):
 
 @dataclass(frozen=True)
 class OrphanReap:
-    """Per-reap callback payload (Finding #3 / ADR 0006). One record reaped by
-    `SessionRegistry.reconcile()`: a durable record whose `backend_pid` either did not match a
-    live process by start-time fingerprint, or whose `execution_state` was HALTED/UNKNOWN. The
-    server's `_build_transport_machinery` closure consumes this and drives
-    `admission.invalidate_lifecycle(target_key, CRASHED)` — the production source of `LifecycleEvent`
-    in #10. Carries the durable record itself so the callback can read any field (backend_pid,
-    backend_start_time, etc.) without re-loading from disk.
+    """Per-reap callback payload. One record reaped by `SessionRegistry.reconcile()`: a durable
+    record whose `backend_pid` either did not match a live process by start-time fingerprint, or
+    whose `execution_state` was HALTED/UNKNOWN. The server's `_build_transport_machinery` closure
+    consumes this and drives `admission.invalidate_lifecycle(target_key, CRASHED)` — the production
+    source of `LifecycleEvent` in #10. Carries the durable record itself so the callback can read any
+    field (backend_pid, backend_start_time, etc.) without re-loading from disk.
 
-    `close_admission_required` (Finding F1) is True iff `proxy.stop_by_identity(...)` actually
-    killed a fingerprint-matched live backend during this reap — i.e. there was a live orphan that
-    a still-active subscriber might want to tear down. False when the durable record was present
-    but the backend was already dead, fingerprint-unverifiable, or `backend_pid is None` (the
+    `close_admission_required` is True iff `proxy.stop_by_identity(...)` actually killed a
+    fingerprint-matched live backend during this reap — i.e. there was a live orphan that a
+    still-active subscriber might want to tear down. False when the durable record was present but
+    the backend was already dead, fingerprint-unverifiable, or `backend_pid is None` (the
     qemu-gdbstub case): nothing alive was reaped, so admission must NOT be locked-closed (no
     production reopen() caller exists; closing admission here permanently bricks the target until
     process restart)."""
@@ -53,8 +52,8 @@ class OrphanReap:
 
 @dataclass(frozen=True)
 class OrphanReapReport:
-    """Aggregated outcome of one `SessionRegistry.reconcile()` (Finding F9). `reaped` lists every
-    record reaped this pass; `failures` lists `(record, exception)` pairs for callback dispatches
+    """Aggregated outcome of one `SessionRegistry.reconcile()`. `reaped` lists every record reaped
+    this pass; `failures` lists `(record, exception)` pairs for callback dispatches
     that raised, so the caller can log them via the project logger instead of the original
     `contextlib.suppress` silently swallowing the error. Reconcile completes its work even if a
     subset of callbacks raise — a buggy callback must not block the remaining reap work."""
@@ -75,7 +74,7 @@ class RecoveryTombstone:
 
 
 def _fsync_dir(path: Path) -> None:
-    """Fsync a directory so a prior os.replace into it is durable on disk (Finding F4). On power
+    """Fsync a directory so a prior os.replace into it is durable on disk. On power
     loss the rename can otherwise be lost, leaving the stale prior record. Best-effort: a
     filesystem that rejects directory fsync (EINVAL) is logged and ignored; other OSErrors
     likewise — durability is the goal but a fsync failure must not crash the caller."""
@@ -95,7 +94,7 @@ def _fsync_dir(path: Path) -> None:
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
     """Write-tmp → fsync → os.replace → fsync parent dir, so a crash mid-write never leaves a
-    torn record (ADR 0005) AND the rename itself is durable across power loss (Finding F4). The
+    torn record (ADR 0005) AND the rename itself is durable across power loss. The
     rename is atomic on the same filesystem; readers see old or new, never partial."""
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as handle:
@@ -116,8 +115,8 @@ class SessionRegistry:
     per TargetKey, filenames derived from `TargetKey.recovery_key()` so opaque key parts are
     never path segments. Atomic writes; the flock + reaper live in later tasks (A3/A4).
 
-    `on_orphan_reaped` is the optional production lifecycle-source callback (Finding #3 /
-    ADR 0006): every successful reap inside `reconcile()` invokes it BEFORE the record is
+    `on_orphan_reaped` is the optional production lifecycle-source callback: every successful reap
+    inside `reconcile()` invokes it BEFORE the record is
     deleted, so the closure can drive `admission.invalidate_lifecycle(..., CRASHED)` and run
     the §4.5 chain end-to-end. Defaults to `None` (tests that don't need the production
     lifecycle source omit the parameter and behavior is unchanged)."""
@@ -131,6 +130,18 @@ class SessionRegistry:
         self._dir = directory
         self._lock_fd: int | None = None
         self._on_orphan_reaped = on_orphan_reaped
+        self._lifecycle_started = False
+
+    def bind_orphan_reap_callback(self, callback: Callable[[OrphanReap], None]) -> None:
+        """Bind the reconcile orphan-reap callback before the registry lifecycle starts.
+
+        Startup composition sometimes injects a registry that was constructed before the
+        lifecycle dispatcher exists. This method makes that dependency explicit while refusing
+        late rewires once the instance lock has been acquired or reconciliation has begun.
+        """
+        if self._lifecycle_started:
+            raise RuntimeError("bind_orphan_reap_callback must run before registry lifecycle starts")
+        self._on_orphan_reaped = callback
 
     def acquire_instance_lock(self) -> None:
         path = self._dir / "instance.lock"
@@ -141,6 +152,7 @@ class SessionRegistry:
             os.close(self._lock_fd)
             self._lock_fd = None
             raise InstanceLockError("another kdive server already holds the registry instance lock") from exc
+        self._lifecycle_started = True
 
     def release_instance_lock(self) -> None:
         if self._lock_fd is not None:
@@ -190,8 +202,8 @@ class SessionRegistry:
         existed = path.exists()
         path.unlink(missing_ok=True)
         if existed:
-            # Finding F4: a deletion is also an inode-tree mutation; fsync the parent so power
-            # loss after delete does not resurrect the stale record on next mount.
+            # A deletion is also an inode-tree mutation; fsync the parent so power loss after delete
+            # does not resurrect the stale record on next mount.
             _fsync_dir(path.parent)
 
     def list_records(self) -> list[TransportSession]:
@@ -242,7 +254,7 @@ class SessionRegistry:
             existed = path.exists()
             path.unlink(missing_ok=True)
             if existed:
-                _fsync_dir(path.parent)  # Finding F4: durable deletion
+                _fsync_dir(path.parent)
 
     def reconcile(self, *, proxy: _ReapProxy, admission: _RecoveryMarker) -> OrphanReapReport:
         """Crash reconciliation (ADR 0005, spec §4.7/§10.2). MUST run after
@@ -250,18 +262,18 @@ class SessionRegistry:
         orphan backends (start-time fenced — never a foreign pid), re-asserts every durable
         tombstone into admission, and tombstones any record left HALTED/UNKNOWN.
 
-        When `on_orphan_reaped` was wired at construction (Finding #3), every record reaped
-        here fires the callback BEFORE deletion — that is the production source of
-        `LifecycleEvent` in #10, so `admission.invalidate_lifecycle(target_key, CRASHED)` runs
-        the §4.5 close+emit chain against this same admission/dispatcher pair. The callback's
-        `OrphanReap.close_admission_required` field (Finding F1) tells the consumer whether to
-        pass `close_admission=True`: True iff `proxy.stop_by_identity()` actually killed a live
+        When `on_orphan_reaped` is wired, every record reaped here fires the callback BEFORE
+        deletion — that is the production source of `LifecycleEvent`, so
+        `admission.invalidate_lifecycle(target_key, CRASHED)` runs the §4.5 close+emit chain
+        against this same admission/dispatcher pair. The callback's
+        `OrphanReap.close_admission_required` field tells the consumer whether to pass
+        `close_admission=True`: True iff `proxy.stop_by_identity()` actually killed a live
         backend this pass. False when the record was present but the backend was dead, the pid
         was unfenceable, or `backend_pid is None` (qemu-gdbstub) — closing admission then would
         permanently lock the target (no production code path calls `reopen()`).
 
-        Returns an `OrphanReapReport` listing every reap and any callback failure (Finding F9).
-        Callback exceptions are collected, not silently swallowed; the caller logs the failures
+        Returns an `OrphanReapReport` listing every reap and any callback failure. Callback
+        exceptions are collected, not silently swallowed; the caller logs the failures
         via the project logger. A buggy callback still does not block remaining reap work — the
         durable record delete still runs for every record.
 
@@ -276,6 +288,7 @@ class SessionRegistry:
         (a crash mid-reconcile re-runs it next start). It must not assume the delete will be rolled
         back if it raises; it will not be.
         """
+        self._lifecycle_started = True
         report = OrphanReapReport()
         # 1. re-assert persisted tombstones (durable across restarts). A malformed marker is
         #    logged and skipped (TD-17) rather than aborting reconcile and blocking startup.
@@ -312,11 +325,9 @@ class SessionRegistry:
                 close_admission_required=killed_live_backend,
             )
             report.reaped.append(reap)
-            # The production lifecycle-source callback (Finding #3 / F9): notify BEFORE the
-            # record is deleted so the consumer can read `backend_pid`/etc. off the snapshot if
-            # it needs them. A raising callback is COLLECTED into the report (logged by the
-            # caller) — the durable record delete below must always run, so a buggy callback
-            # cannot block remaining reap work.
+            # Notify BEFORE the record is deleted so the consumer can read `backend_pid`/etc. off
+            # the snapshot if it needs them. A raising callback is collected into the report
+            # (logged by the caller); the durable record delete below must always run.
             if self._on_orphan_reaped is not None:
                 try:
                     self._on_orphan_reaped(reap)

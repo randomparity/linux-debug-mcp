@@ -8,6 +8,8 @@ from kdive.config import (
     INTROSPECT_DESTRUCTIVE_PERMISSIONS,
     MAX_INTROSPECT_CALLS_PER_RUN,
     PRELUDE_WARNING_FRACTION_PCT,
+    PROVIDER_DESTRUCTIVE_PERMISSIONS,
+    TARGET_DESTRUCTIVE_PERMISSIONS,
     ArtifactPolicy,
     BootOverrides,
     BuildOverrides,
@@ -16,9 +18,13 @@ from kdive.config import (
     RootfsProfile,
     ServerConfig,
     TargetProfile,
-    TestCommand,
-    TestSuiteProfile,
     missing_destructive_permissions,
+)
+from kdive.config import (
+    TestCommand as ConfigTestCommand,
+)
+from kdive.config import (
+    TestSuiteProfile as ConfigTestSuiteProfile,
 )
 from kdive.safety.secrets import SecretReference, SecretReferenceKind
 
@@ -202,14 +208,14 @@ def test_sprint_3_rootfs_profile_accepts_ssh_access_fields() -> None:
 
 
 def test_test_suite_profile_accepts_ordered_commands() -> None:
-    suite = TestSuiteProfile(
+    suite = ConfigTestSuiteProfile(
         name="smoke-basic",
         timeout_seconds=30,
         stop_on_failure=True,
         collect_dmesg=True,
         commands=[
-            TestCommand(name="uname", argv=["uname", "-a"]),
-            TestCommand(name="proc-version", argv=["test", "-r", "/proc/version"]),
+            ConfigTestCommand(name="uname", argv=["uname", "-a"]),
+            ConfigTestCommand(name="proc-version", argv=["test", "-r", "/proc/version"]),
         ],
     )
 
@@ -220,13 +226,13 @@ def test_test_suite_profile_accepts_ordered_commands() -> None:
 @pytest.mark.parametrize("name", ["", "../bad", "bad/name", "bad name", "bad\nname"])
 def test_test_command_rejects_non_filesystem_safe_names(name: str) -> None:
     with pytest.raises(ValidationError):
-        TestCommand(name=name, argv=["uname"])
+        ConfigTestCommand(name=name, argv=["uname"])
 
 
 @pytest.mark.parametrize("argv", [[], [""], ["bad\narg"], ["bad\0arg"]])
 def test_test_command_rejects_empty_or_control_character_argv(argv: list[str]) -> None:
     with pytest.raises(ValidationError):
-        TestCommand(name="bad", argv=argv)
+        ConfigTestCommand(name="bad", argv=argv)
 
 
 @pytest.mark.parametrize(
@@ -370,17 +376,49 @@ def test_allowed_debug_operations_includes_introspect_write() -> None:
 
 
 def test_introspect_destructive_permissions_has_run_entry() -> None:
-    assert INTROSPECT_DESTRUCTIVE_PERMISSIONS["debug.introspect.run"] == [
-        "mutate live kernel state via drgn write APIs"
-    ]
+    assert INTROSPECT_DESTRUCTIVE_PERMISSIONS["debug.introspect.run"] == (
+        "mutate live kernel state via drgn write APIs",
+    )
+
+
+def test_target_destructive_permissions_has_boot_entry() -> None:
+    assert TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"] == (
+        "define MCP-owned libvirt domains",
+        "update MCP-owned libvirt domains",
+        "start MCP-owned libvirt domains",
+        "stop MCP-owned libvirt domains",
+        "destroy MCP-owned libvirt domains",
+    )
+
+
+def test_target_destructive_permissions_has_run_tests_entry() -> None:
+    assert TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"] == ("execute caller-supplied commands over target SSH",)
+
+
+def test_provider_destructive_permissions_cover_stub_operations() -> None:
+    assert dict(PROVIDER_DESTRUCTIVE_PERMISSIONS) == {
+        "reservation.request_host": ("reserve shared remote or physical targets",),
+        "reservation.release_host": ("release shared remote or physical targets",),
+        "provision.prepare_target": ("write target storage", "install boot artifacts on target"),
+        "hardware.power_control": ("change target power state",),
+        "hardware.boot_kernel": ("boot physical or remote targets",),
+        "workflow.reserve_provision_boot": ("reserve, provision, and boot target hardware",),
+    }
+
+
+def test_destructive_permission_registries_are_immutable() -> None:
+    with pytest.raises(TypeError):
+        TARGET_DESTRUCTIVE_PERMISSIONS["new.operation"] = ("permission",)
+
+    with pytest.raises(TypeError):
+        TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"][0] = "permission"
 
 
 def test_missing_destructive_permissions_introspect_registry() -> None:
     required = INTROSPECT_DESTRUCTIVE_PERMISSIONS["debug.introspect.run"]
-    assert (
-        missing_destructive_permissions("debug.introspect.run", [], registry=INTROSPECT_DESTRUCTIVE_PERMISSIONS)
-        == required
-    )
+    assert missing_destructive_permissions(
+        "debug.introspect.run", [], registry=INTROSPECT_DESTRUCTIVE_PERMISSIONS
+    ) == list(required)
     assert (
         missing_destructive_permissions("debug.introspect.run", required, registry=INTROSPECT_DESTRUCTIVE_PERMISSIONS)
         == []
@@ -391,6 +429,22 @@ def test_missing_destructive_permissions_introspect_registry() -> None:
         )
         == []
     )
+
+
+def test_missing_destructive_permissions_target_registry() -> None:
+    for operation, required in TARGET_DESTRUCTIVE_PERMISSIONS.items():
+        assert missing_destructive_permissions(operation, [], registry=TARGET_DESTRUCTIVE_PERMISSIONS) == list(required)
+        assert missing_destructive_permissions(operation, required, registry=TARGET_DESTRUCTIVE_PERMISSIONS) == []
+
+
+def test_missing_destructive_permissions_provider_registry() -> None:
+    for operation, required in PROVIDER_DESTRUCTIVE_PERMISSIONS.items():
+        assert missing_destructive_permissions(
+            operation,
+            [],
+            registry=PROVIDER_DESTRUCTIVE_PERMISSIONS,
+        ) == list(required)
+        assert missing_destructive_permissions(operation, required, registry=PROVIDER_DESTRUCTIVE_PERMISSIONS) == []
 
 
 def test_missing_destructive_permissions_defaults_to_transport_registry() -> None:
