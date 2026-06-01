@@ -303,18 +303,8 @@ def test_debug_start_session_handler_uses_request_runtime_contract() -> None:
     assert list(params) == ["request", "runtime"]
 
 
-def test_debug_start_locked_attach_uses_grouped_runtime_boundary() -> None:
-    params = inspect.signature(session_handlers._debug_start_session_locked_attach).parameters
-    dependency_params = {
-        "admission",
-        "transaction",
-        "session_registry",
-        "gdb_mi_engine",
-        "gdb_mi_sessions",
-    }
-
-    assert "dependencies" in params
-    assert dependency_params.isdisjoint(params)
+def test_debug_start_session_has_no_extra_locked_attach_boundary() -> None:
+    assert not hasattr(session_handlers, "_debug_start_session_locked_attach")
 
 
 def test_debug_operation_handlers_use_typed_operation_requests() -> None:

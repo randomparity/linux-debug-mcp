@@ -644,34 +644,6 @@ def _debug_start_session_open_and_probe(
     )
 
 
-def _debug_start_session_locked_attach(
-    *,
-    run_id: str,
-    preflight: _DebugStartPreflight,
-    new_session: bool,
-    recovery: bool,
-    build_id_reader: Callable[[Path], str],
-    dependencies: _DebugStartDependencies,
-) -> tuple[_DebugStartAttach | None, ToolResponse | None]:
-    readiness, readiness_failure = _debug_start_session_reuse_or_readiness(
-        run_id=run_id,
-        preflight=preflight,
-        new_session=new_session,
-        build_id_reader=build_id_reader,
-        dependencies=dependencies,
-    )
-    if readiness_failure is not None:
-        return None, readiness_failure
-    readiness = _require_value(readiness, "debug readiness missing without failure")
-    return _debug_start_session_open_and_probe(
-        run_id=run_id,
-        preflight=preflight,
-        readiness=readiness,
-        recovery=recovery,
-        dependencies=dependencies,
-    )
-
-
 def _debug_start_session_persist_success(
     *,
     run_id: str,
@@ -792,12 +764,21 @@ def _start_session(
     persisted: _DebugStartPersisted | None = None
     try:
         with preflight.store.debug_lock(run_id):
-            attach, attach_failure = _debug_start_session_locked_attach(
+            readiness, readiness_failure = _debug_start_session_reuse_or_readiness(
                 run_id=run_id,
                 preflight=preflight,
                 new_session=new_session,
-                recovery=recovery,
                 build_id_reader=build_id_reader,
+                dependencies=dependencies,
+            )
+            if readiness_failure is not None:
+                return readiness_failure
+            readiness = _require_value(readiness, "debug readiness missing without failure")
+            attach, attach_failure = _debug_start_session_open_and_probe(
+                run_id=run_id,
+                preflight=preflight,
+                readiness=readiness,
+                recovery=recovery,
                 dependencies=dependencies,
             )
             if attach_failure is not None:
