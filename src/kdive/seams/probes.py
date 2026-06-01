@@ -239,7 +239,15 @@ def parse_probe_stdout(
     oversized = f"{noun} stdout exceeded {PROBE_STDOUT_CAP} bytes"
     if ssh_result.oversized_output:
         return None, fail(oversized, "oversized_output")
-    raw_stdout = read_capped(stdout_path, PROBE_STDOUT_CAP)
+    try:
+        raw_stdout = read_capped(stdout_path, PROBE_STDOUT_CAP)
+    except OSError as exc:
+        return None, fail(
+            f"{noun} stdout could not be read",
+            "probe_stdout_unreadable",
+            exception_type=type(exc).__name__,
+            exception_message=redact_and_truncate(ctx.redactor, str(exc), cap=256),
+        )
     if raw_stdout is None:
         return None, fail(oversized, "oversized_output")
     if ssh_result.cancelled or ssh_result.timed_out or ssh_result.stdin_failed:
