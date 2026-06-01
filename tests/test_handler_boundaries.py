@@ -15,7 +15,11 @@ DEBUG_POLICY_SOURCE = ROOT / "src" / "kdive" / "debug" / "policy.py"
 DEBUG_MODULE_SYMBOLS_SOURCE = ROOT / "src" / "kdive" / "debug" / "module_symbols.py"
 DEBUG_SESSION_END_SOURCE = ROOT / "src" / "kdive" / "debug" / "session_end.py"
 DEBUG_SESSION_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "debug" / "session_handlers.py"
-POSTMORTEM_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "triage" / "handlers.py"
+POSTMORTEM_HANDLER_SOURCES = [
+    ROOT / "src" / "kdive" / "postmortem" / "crash" / "handler.py",
+    ROOT / "src" / "kdive" / "postmortem" / "dumps" / "handlers.py",
+    ROOT / "src" / "kdive" / "postmortem" / "triage" / "handlers.py",
+]
 POSTMORTEM_DUMP_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "dumps" / "handlers.py"
 SHARED_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "handlers" / "shared.py"
 PROBE_SEAM_SOURCE = ROOT / "src" / "kdive" / "seams" / "probes.py"
@@ -144,8 +148,14 @@ def test_shared_probe_boundary_does_not_import_private_transport_handlers() -> N
 
 
 def test_postmortem_handlers_do_not_import_introspect_execution_internals() -> None:
-    assert "kdive.introspect.execution" not in _imported_modules(POSTMORTEM_HANDLERS_SOURCE)
-    assert "kdive.introspect.handlers" not in _imported_modules(POSTMORTEM_HANDLERS_SOURCE)
+    forbidden = {"kdive.introspect.execution", "kdive.introspect.handlers"}
+    offenders = {
+        str(path.relative_to(ROOT)): sorted(_imported_modules(path) & forbidden)
+        for path in POSTMORTEM_HANDLER_SOURCES
+        if _imported_modules(path) & forbidden
+    }
+
+    assert offenders == {}
 
 
 def test_debug_features_do_not_import_private_transport_handler_helpers() -> None:
