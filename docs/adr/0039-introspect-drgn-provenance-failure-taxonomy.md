@@ -47,6 +47,13 @@ resolve the module build-id in three ordered steps with distinct outcomes:
   carry `error_type` and the observed `drgn.__version__` (`drgn_version`, captured in
   the prelude, `None` if `import drgn` itself failed), so a version gap is diagnosable
   against the running drgn without a second round-trip.
+- The `AttributeError` vs other-exception split is a **fast-path heuristic**, not a
+  guarantee: it captures the common version-gap shapes (`main_module` method absent,
+  `build_id` attribute absent) but a divergent drgn could in principle raise a
+  non-`AttributeError` for a real gap, or an `AttributeError` for an unrelated reason.
+  `error_type` and `drgn_version` are the **authoritative** fields an agent reads to
+  localize the fault; the `status` string is a triage hint. Both buckets are
+  `INFRASTRUCTURE_FAILURE`, so a miscategorization never changes the error category.
 
 ## Consequences
 
@@ -61,6 +68,11 @@ resolve the module build-id in three ordered steps with distinct outcomes:
 - The golden live-wrapper snapshot (`tests/golden/live_wrapper_template.txt`) is
   regenerated. Wrapper tests gain coverage for `drgn_api_incompatible` and (live)
   `provenance_unverifiable`.
+- The live test stub (`_install_stub_drgn`) must distinguish "`main_module()` raises"
+  from "`main_module()` returns a `None` build-id." The existing
+  `test_wrapper_drgn_version_skew_exits_3` (today: stub raises `AttributeError` for a
+  `None` build-id) is re-pointed to drive an explicit raise, since a returned `None`
+  build-id now resolves to `provenance_unverifiable`, not version skew.
 - #147 (active readiness self-test) builds on this taxonomy: a preflight that opens a
   target and confirms `main_module().build_id` resolves reports these same statuses.
 
