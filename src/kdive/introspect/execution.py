@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from pydantic import ValidationError
 
@@ -295,6 +295,29 @@ class _IntrospectCallWorkspace:
     wrapper: str
     stdout_path: Path
     stderr_path: Path
+
+
+class IntrospectFinalizationWorkspace(Protocol):
+    call_id: str
+    agent_dir: Path
+    sensitive_call_dir: Path
+    stdout_path: Path
+    stderr_path: Path
+
+
+class IntrospectFinalizationRun(Protocol):
+    ssh_result: SshCommandResult
+    started_at: datetime
+    finished_at: datetime
+    duration_ms: int
+
+
+@dataclass(frozen=True)
+class _IntrospectFinalizedRun:
+    ssh_result: SshCommandResult
+    started_at: datetime
+    finished_at: datetime
+    duration_ms: int
 
 
 @dataclass(frozen=True)
@@ -1064,18 +1087,16 @@ def _execute_admitted_introspect_ssh(
         return _finalize_introspect_call(
             store=store,
             run_id=run_id,
-            call_id=workspace.call_id,
-            ssh_result=ssh_run.result,
-            stdout_path=workspace.stdout_path,
-            stderr_path=workspace.stderr_path,
-            agent_dir=workspace.agent_dir,
-            sensitive_call_dir=workspace.sensitive_call_dir,
+            workspace=workspace,
+            run=_IntrospectFinalizedRun(
+                ssh_result=ssh_run.result,
+                started_at=ssh_run.started_at,
+                finished_at=finished_at,
+                duration_ms=duration_ms,
+            ),
             redactor=redactor,
             expected_build_id=build_id,
             request_timeout_seconds=request.timeout_seconds,
-            started_at=ssh_run.started_at,
-            finished_at=finished_at,
-            duration_ms=duration_ms,
             operation_name=operation_name,
             drgn_open_message="drgn could not attach to the live target",
             exec_principal=resolved_rootfs.ssh_user,
@@ -1643,18 +1664,11 @@ def _finalize_introspect_call(
     *,
     store: ArtifactStore,
     run_id: str,
-    call_id: str,
-    ssh_result: SshCommandResult,
-    stdout_path: Path,
-    stderr_path: Path,
-    agent_dir: Path,
-    sensitive_call_dir: Path,
+    workspace: IntrospectFinalizationWorkspace,
+    run: IntrospectFinalizationRun,
     redactor: Redactor,
     expected_build_id: str,
     request_timeout_seconds: int,
-    started_at: datetime,
-    finished_at: datetime,
-    duration_ms: int,
     operation_name: str,
     drgn_open_message: str,
     exec_principal: str | None,
@@ -1686,17 +1700,17 @@ def _finalize_introspect_call(
         return _record_introspect_failure(
             store=store,
             run_id=run_id,
-            call_id=call_id,
+            call_id=workspace.call_id,
             category=category,
             code=code,
             message=message,
-            agent_dir=agent_dir,
-            sensitive_dir=sensitive_call_dir,
+            agent_dir=workspace.agent_dir,
+            sensitive_dir=workspace.sensitive_call_dir,
             redactor=redactor,
             raw_stderr=raw_stderr,
             ssh_exit=ssh_exit,
             request_timeout_seconds=request_timeout_seconds,
-            duration_ms=duration_ms,
+            duration_ms=run.duration_ms,
             ssh_user=exec_principal,
             outcome_status_for_forensics=outcome_status_for_forensics,
             include_stdout_json=include_stdout_json,
@@ -1706,9 +1720,9 @@ def _finalize_introspect_call(
         )
 
     _, raw_stderr, parsed, ssh_exit, terminal = _triage_introspect_runner_output(
-        ssh_result=ssh_result,
-        stdout_path=stdout_path,
-        stderr_path=stderr_path,
+        ssh_result=run.ssh_result,
+        stdout_path=workspace.stdout_path,
+        stderr_path=workspace.stderr_path,
         fail=_fail,
     )
     if terminal is not None:
@@ -1735,18 +1749,18 @@ def _finalize_introspect_call(
     return _record_introspect_success(
         store=store,
         run_id=run_id,
-        call_id=call_id,
-        ssh_result=ssh_result,
-        agent_dir=agent_dir,
-        sensitive_call_dir=sensitive_call_dir,
+        call_id=workspace.call_id,
+        ssh_result=run.ssh_result,
+        agent_dir=workspace.agent_dir,
+        sensitive_call_dir=workspace.sensitive_call_dir,
         redacted_payload=redacted_payload,
         outcome_status=outcome_status,
         raw_stderr=raw_stderr,
         redactor=redactor,
         request_timeout_seconds=request_timeout_seconds,
-        started_at=started_at,
-        finished_at=finished_at,
-        duration_ms=duration_ms,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+        duration_ms=run.duration_ms,
         operation_name=operation_name,
         exec_principal=exec_principal,
         post_validator=post_validator,
