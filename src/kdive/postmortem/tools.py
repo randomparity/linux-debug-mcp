@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -67,6 +68,11 @@ class PostmortemToolRuntime:
     session_registry: SessionRegistry | None = None
     rootfs_profiles: Mapping[str, RootfsProfile] | None = None
     ssh_runner: SshRunner | None = None
+    crash_handler: Callable[..., ToolResponse] | None = None
+    drgn_helper_handler: Callable[..., ToolResponse] | None = None
+    vmcore_build_id_reader: Callable[[Path], str] | None = None
+    vmlinux_build_id_reader: Callable[[Path], str] | None = None
+    clock: Callable[[], datetime] | None = None
 
 
 class PostmortemCrashHandler(Protocol):
@@ -119,12 +125,16 @@ class _PostmortemRegistrationContext:
     default_artifact_root: str
     admission: AdmissionService
     session_registry: SessionRegistry
+    crash_handler: PostmortemCrashHandler
+    drgn_helper_handler: Callable[..., ToolResponse]
 
     def runtime(self, value: str | None) -> PostmortemToolRuntime:
         return PostmortemToolRuntime(
             artifact_root=Path(value or self.default_artifact_root),
             admission=self.admission,
             session_registry=self.session_registry,
+            crash_handler=self.crash_handler,
+            drgn_helper_handler=self.drgn_helper_handler,
         )
 
 
@@ -306,6 +316,7 @@ def register_postmortem_tools(
     session_registry: SessionRegistry,
     crash_handler: PostmortemCrashHandler,
     triage_handler: PostmortemTriageHandler,
+    triage_drgn_helper_handler: Callable[..., ToolResponse],
     check_prereqs_handler: PostmortemCheckPrereqsHandler,
     list_dumps_handler: PostmortemListDumpsHandler,
     fetch_handler: PostmortemFetchHandler,
@@ -314,6 +325,8 @@ def register_postmortem_tools(
         default_artifact_root=str(default_artifact_root),
         admission=admission,
         session_registry=session_registry,
+        crash_handler=crash_handler,
+        drgn_helper_handler=triage_drgn_helper_handler,
     )
     _register_postmortem_crash_tool(
         app,

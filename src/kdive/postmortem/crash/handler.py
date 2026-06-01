@@ -382,6 +382,9 @@ def debug_postmortem_crash_handler(
     if runtime is not None:
         artifact_root = runtime.artifact_root
         runner = runtime.ssh_runner if runner is None else runner
+        vmcore_build_id_reader = runtime.vmcore_build_id_reader or vmcore_build_id_reader
+        vmlinux_build_id_reader = runtime.vmlinux_build_id_reader or vmlinux_build_id_reader
+        clock = runtime.clock or clock
     if artifact_root is None:
         raise TypeError("artifact_root is required when runtime is not provided")
     run_id = request.run_id

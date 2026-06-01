@@ -565,6 +565,12 @@ def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators
     registry = object()
     calls: list[tuple[DebugPostmortemFetchRequest, dict[str, Any]]] = []
 
+    def crash_handler(*_args: Any, **_kwargs: Any) -> ToolResponse:
+        return _success()
+
+    def drgn_helper_handler(*_args: Any, **_kwargs: Any) -> ToolResponse:
+        return _success()
+
     def fetch_handler(request: DebugPostmortemFetchRequest, **kwargs: Any) -> ToolResponse:
         calls.append((request, kwargs))
         return _success(vmcore_ref="inputs/vmcore")
@@ -574,8 +580,9 @@ def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators
         default_artifact_root=tmp_path / "default",
         admission=admission,
         session_registry=registry,
-        crash_handler=lambda *_args, **_kwargs: _success(),
+        crash_handler=crash_handler,
         triage_handler=lambda *_args, **_kwargs: _success(),
+        triage_drgn_helper_handler=drgn_helper_handler,
         check_prereqs_handler=lambda *_args, **_kwargs: _success(),
         list_dumps_handler=lambda *_args, **_kwargs: _success(),
         fetch_handler=fetch_handler,
@@ -612,6 +619,8 @@ def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators
             artifact_root=tmp_path / "runs",
             admission=admission,
             session_registry=registry,
+            crash_handler=crash_handler,
+            drgn_helper_handler=drgn_helper_handler,
         )
     }
 
@@ -625,6 +634,7 @@ def test_postmortem_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_pa
         session_registry=object(),
         crash_handler=lambda *_args, **_kwargs: _success(),
         triage_handler=lambda *_args, **_kwargs: _success(),
+        triage_drgn_helper_handler=lambda *_args, **_kwargs: _success(),
         check_prereqs_handler=lambda *_args, **_kwargs: _success(),
         list_dumps_handler=lambda *_args, **_kwargs: _success(),
         fetch_handler=lambda *_args, **_kwargs: _success(),

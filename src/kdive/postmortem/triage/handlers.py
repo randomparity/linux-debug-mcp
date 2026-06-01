@@ -286,7 +286,7 @@ def debug_postmortem_triage_handler(
     *,
     runtime: PostmortemToolRuntime | None = None,
     artifact_root: Path | None = None,
-    drgn_helper_handler: Callable[..., ToolResponse],
+    drgn_helper_handler: Callable[..., ToolResponse] | None = None,
     runner: SshRunner | None = None,
     vmcore_build_id_reader: Callable[[Path], str] = read_vmcore_build_id,
     vmlinux_build_id_reader: Callable[[Path], str] = read_elf_build_id,
@@ -297,8 +297,15 @@ def debug_postmortem_triage_handler(
     if runtime is not None:
         artifact_root = runtime.artifact_root
         runner = runtime.ssh_runner if runner is None else runner
+        vmcore_build_id_reader = runtime.vmcore_build_id_reader or vmcore_build_id_reader
+        vmlinux_build_id_reader = runtime.vmlinux_build_id_reader or vmlinux_build_id_reader
+        clock = runtime.clock or clock
+        crash_handler = runtime.crash_handler or crash_handler
+        drgn_helper_handler = runtime.drgn_helper_handler or drgn_helper_handler
     if artifact_root is None:
         raise TypeError("artifact_root is required when runtime is not provided")
+    if drgn_helper_handler is None:
+        raise TypeError("drgn_helper_handler is required")
     run_id = request.run_id
     now = clock or _utcnow
     ctx, failure = resolve_postmortem_vmcore_context(
