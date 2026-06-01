@@ -18,7 +18,7 @@ def sprint0_capability(
         provider_family=provider_family,
         architectures=["x86_64"],
         target_kinds=[TargetKind.LOCAL, TargetKind.VIRTUAL],
-        transports=transports or list(access_methods),
+        transports=list(access_methods) if transports is None else transports,
         operations=operations,
         required_host_tools=[],
         destructive_permissions=[],

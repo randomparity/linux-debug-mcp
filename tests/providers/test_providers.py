@@ -13,6 +13,7 @@ from kdive.domain import (
 )
 from kdive.model import Model
 from kdive.providers import debug as debug_contracts
+from kdive.providers.base import sprint0_capability
 from kdive.providers.local.debug.qemu_gdbstub import DebugSession, DebugSessionState
 from kdive.providers.local.introspect import local_drgn_introspect
 from kdive.providers.plugins import ProviderPluginSpec, local_provider_plugin_specs
@@ -234,6 +235,52 @@ def test_default_providers_expose_richer_metadata() -> None:
             assert isinstance(operation_capability.required_host_tools, list)
             assert isinstance(operation_capability.destructive_permissions, list)
             assert isinstance(operation_capability.limitations, list)
+
+
+def test_sprint0_capability_defaults_to_access_methods_transports_copy() -> None:
+    access_methods = ["filesystem"]
+
+    provider = sprint0_capability(
+        name="local-example",
+        operations=["host.check_prerequisites"],
+        access_methods=access_methods,
+        concurrent_safe=True,
+    )
+    access_methods.append("subprocess")
+
+    assert provider.provider_name == "local-example"
+    assert provider.provider_version == "0.1.0"
+    assert provider.provider_family == "local"
+    assert provider.architectures == ["x86_64"]
+    assert provider.target_kinds == [TargetKind.LOCAL, TargetKind.VIRTUAL]
+    assert provider.operations == ["host.check_prerequisites"]
+    assert provider.required_host_tools == []
+    assert provider.destructive_permissions == []
+    assert provider.access_methods == ["filesystem"]
+    assert provider.transports == ["filesystem"]
+    assert provider.semantics == OperationSemantics(
+        idempotent=True,
+        retryable=True,
+        destructive=False,
+        cancelable=False,
+        concurrent_safe=True,
+    )
+
+
+def test_sprint0_capability_preserves_explicit_transports_and_overrides() -> None:
+    provider = sprint0_capability(
+        name="remote-example",
+        provider_family="debug",
+        operations=["debug.start_session", "debug.end_session"],
+        access_methods=["filesystem"],
+        transports=[],
+        concurrent_safe=False,
+    )
+
+    assert provider.provider_family == "debug"
+    assert provider.operations == ["debug.start_session", "debug.end_session"]
+    assert provider.transports == []
+    assert provider.semantics.concurrent_safe is False
 
 
 def test_local_provider_families_and_transports_are_specific() -> None:
