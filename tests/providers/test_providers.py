@@ -17,7 +17,7 @@ from kdive.domain import (
 )
 from kdive.model import Model
 from kdive.providers import debug as debug_contracts
-from kdive.providers.base import sprint0_capability
+from kdive.providers.base import local_provider_capability
 from kdive.providers.local.introspect import local_drgn_introspect
 from kdive.providers.plugins import ProviderPluginSpec, local_provider_plugin_specs
 from kdive.providers.registry import ProviderRegistry
@@ -284,10 +284,10 @@ def test_default_providers_expose_richer_metadata() -> None:
             assert isinstance(operation_capability.limitations, list)
 
 
-def test_sprint0_capability_defaults_to_access_methods_transports_copy() -> None:
+def test_local_provider_capability_defaults_to_access_methods_transports_copy() -> None:
     access_methods = ["filesystem"]
 
-    provider = sprint0_capability(
+    provider = local_provider_capability(
         name="local-example",
         operations=["host.check_prerequisites"],
         access_methods=access_methods,
@@ -314,8 +314,8 @@ def test_sprint0_capability_defaults_to_access_methods_transports_copy() -> None
     )
 
 
-def test_sprint0_capability_preserves_explicit_transports_and_overrides() -> None:
-    provider = sprint0_capability(
+def test_local_provider_capability_preserves_explicit_transports_and_overrides() -> None:
+    provider = local_provider_capability(
         name="remote-example",
         provider_family="debug",
         operations=["debug.start_session", "debug.end_session"],

@@ -3,7 +3,7 @@ from __future__ import annotations
 from kdive.domain import OperationSemantics, ProviderCapability, TargetKind
 
 
-def sprint0_capability(
+def local_provider_capability(
     *,
     name: str,
     operations: list[str],

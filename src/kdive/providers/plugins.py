@@ -5,7 +5,7 @@ from collections.abc import Callable
 from pydantic import Field, field_validator
 
 from kdive.domain import ImplementationState, Model, ProviderCapability
-from kdive.providers.base import sprint0_capability
+from kdive.providers.base import local_provider_capability
 from kdive.providers.local.build.local_kernel_build import local_kernel_build_capability
 from kdive.providers.local.debug.qemu_gdbstub import local_qemu_gdbstub_capability
 from kdive.providers.local.introspect.local_drgn_introspect import local_drgn_introspect_capability
@@ -39,7 +39,7 @@ def local_provider_plugin_specs() -> list[ProviderPluginSpec]:
             plugin_version="0.1.0",
             implementation_state=ImplementationState.IMPLEMENTED,
             provider_capability_factories=[
-                lambda: sprint0_capability(
+                lambda: local_provider_capability(
                     name="local-artifacts",
                     operations=["kernel.create_run", "artifacts.get_manifest"],
                     access_methods=["filesystem"],
@@ -47,7 +47,7 @@ def local_provider_plugin_specs() -> list[ProviderPluginSpec]:
                     provider_family="artifacts",
                     transports=["filesystem"],
                 ),
-                lambda: sprint0_capability(
+                lambda: local_provider_capability(
                     name="local-prereqs",
                     operations=["host.check_prerequisites"],
                     access_methods=["subprocess", "filesystem"],
@@ -85,7 +85,3 @@ def stub_provider_plugin_specs() -> list[ProviderPluginSpec]:
 
 def built_in_provider_plugin_specs() -> list[ProviderPluginSpec]:
     return [*local_provider_plugin_specs(), *stub_provider_plugin_specs()]
-
-
-def builtin_provider_plugin_specs() -> list[ProviderPluginSpec]:
-    return built_in_provider_plugin_specs()

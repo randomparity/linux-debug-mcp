@@ -3,6 +3,15 @@
 from kdive.providers.plugins import local_provider_plugin_specs
 
 
+def test_provider_plugin_api_uses_current_naming() -> None:
+    import kdive.providers.base as provider_base
+    import kdive.providers.plugins as provider_plugins
+
+    assert hasattr(provider_base, "local_provider_capability")
+    assert not hasattr(provider_base, "sprint0_capability")
+    assert not hasattr(provider_plugins, "builtin_provider_plugin_specs")
+
+
 def test_local_drgn_introspect_capability_is_registered() -> None:
     specs = local_provider_plugin_specs()
     cap_names = {
