@@ -63,16 +63,16 @@ from kdive.prereqs.drgn_probe import PROBE_SCRIPT
 from kdive.providers.ssh import SshRunner, SubprocessSshRunner, build_ssh_argv
 from kdive.safety.paths import PathSafetyError, confine_run_relative
 from kdive.safety.redaction import Redactor
-from kdive.seams.target import KernelProvenance
-from kdive.symbols.build_id import BuildIdReadError, read_elf_build_id
-from kdive.symbols.resolve import SymbolResolutionError, resolve_symbols
-from kdive.symbols.verify import BUILD_ID_RE
-from kdive.target.probes import (
+from kdive.seams.probes import (
     PROBE_STDOUT_CAP,
     prepare_probe_dirs,
     reject_if_target_halted,
     resolve_probe_context,
 )
+from kdive.seams.target import KernelProvenance
+from kdive.symbols.build_id import BuildIdReadError, read_elf_build_id
+from kdive.symbols.resolve import SymbolResolutionError, resolve_symbols
+from kdive.symbols.verify import BUILD_ID_RE
 
 
 def debug_introspect_check_prerequisites_handler(

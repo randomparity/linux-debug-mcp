@@ -8,7 +8,7 @@ from kdive.domain import ArtifactRef, ErrorCategory, PrerequisiteCheck, Prerequi
 from kdive.handlers.shared import _require_value
 from kdive.prereqs.drgn_probe import UNKNOWN, USABLE, build_probe_checks, python_missing_checks
 from kdive.providers.ssh import SshCommandResult
-from kdive.target.probes import PROBE_STDOUT_CAP, ProbeContext, read_capped, redact_and_truncate
+from kdive.seams.probes import PROBE_STDOUT_CAP, ProbeContext, read_capped, redact_and_truncate
 
 
 def _no_json_response(

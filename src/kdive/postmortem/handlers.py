@@ -63,9 +63,7 @@ from kdive.postmortem.triage import CrashOutcome, DrgnOutcome, any_section_ok, a
 from kdive.prereqs.kdump_probe import render_kdump_probe_script
 from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner, build_ssh_argv
 from kdive.safety.redaction import Redactor
-from kdive.symbols.build_id import read_elf_build_id
-from kdive.symbols.vmcore_build_id import read_vmcore_build_id
-from kdive.target.probes import (
+from kdive.seams.probes import (
     PROBE_STDOUT_CAP,
     chmod_best_effort,
     configuration_failure,
@@ -76,6 +74,8 @@ from kdive.target.probes import (
     resolve_probe_context,
     target_python_remote_argv,
 )
+from kdive.symbols.build_id import read_elf_build_id
+from kdive.symbols.vmcore_build_id import read_vmcore_build_id
 
 SSH_TIMEOUT_GRACE_SECONDS = 10
 

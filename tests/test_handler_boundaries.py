@@ -8,7 +8,7 @@ INTROSPECT_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "introspect" / "handlers.p
 INTROSPECT_EXECUTION_SOURCE = ROOT / "src" / "kdive" / "introspect" / "execution.py"
 POSTMORTEM_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "handlers.py"
 SHARED_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "handlers" / "shared.py"
-TARGET_PROBES_SOURCE = ROOT / "src" / "kdive" / "target" / "probes.py"
+PROBE_SEAM_SOURCE = ROOT / "src" / "kdive" / "seams" / "probes.py"
 
 
 def test_extracted_handler_modules_do_not_import_server_module() -> None:
@@ -52,19 +52,22 @@ def test_live_introspection_does_not_keep_passthrough_wrappers() -> None:
     assert "def _prepare_live_wrapper(" not in execution_source
 
 
-def test_target_probe_helpers_live_in_domain_named_module() -> None:
+def test_shared_probe_helpers_live_in_public_boundary_module() -> None:
     shared_source = SHARED_HANDLERS_SOURCE.read_text(encoding="utf-8")
     introspect_source = INTROSPECT_HANDLERS_SOURCE.read_text(encoding="utf-8")
     postmortem_source = POSTMORTEM_HANDLERS_SOURCE.read_text(encoding="utf-8")
 
     assert "def _resolve_probe_context(" not in shared_source
     assert "def _parse_probe_stdout(" not in shared_source
-    assert "from kdive.target.probes import" in introspect_source
-    assert "from kdive.target.probes import" in postmortem_source
+    assert PROBE_SEAM_SOURCE.is_file()
+    assert "from kdive.seams.probes import" in introspect_source
+    assert "from kdive.seams.probes import" in postmortem_source
+    assert "from kdive.target.probes import" not in introspect_source
+    assert "from kdive.target.probes import" not in postmortem_source
 
 
 def test_target_probe_substrate_does_not_own_feature_response_assembly() -> None:
-    target_source = TARGET_PROBES_SOURCE.read_text(encoding="utf-8")
+    target_source = PROBE_SEAM_SOURCE.read_text(encoding="utf-8")
     introspect_source = INTROSPECT_HANDLERS_SOURCE.read_text(encoding="utf-8")
     postmortem_source = POSTMORTEM_HANDLERS_SOURCE.read_text(encoding="utf-8")
 
@@ -80,8 +83,8 @@ def test_target_probe_substrate_does_not_own_feature_response_assembly() -> None
 def test_feature_probe_handlers_import_public_target_probe_substrate() -> None:
     for source_path in (INTROSPECT_HANDLERS_SOURCE, POSTMORTEM_HANDLERS_SOURCE):
         source = source_path.read_text(encoding="utf-8")
-        assert "from kdive.target.probes import (" in source
-        assert "    _" not in source.split("from kdive.target.probes import (", 1)[1].split(")", 1)[0]
+        assert "from kdive.seams.probes import (" in source
+        assert "    _" not in source.split("from kdive.seams.probes import (", 1)[1].split(")", 1)[0]
 
 
 def test_server_does_not_reexport_private_feature_helpers() -> None:
