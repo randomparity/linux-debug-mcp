@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
 import shutil
 import time
 import uuid
@@ -64,6 +66,20 @@ from kdive.target.probes import (
     resolve_probe_context,
     target_python_remote_argv,
 )
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temp_fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as temp_file:
+            temp_file.write(text)
+            temp_file.flush()
+        os.replace(temp_path, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            temp_path.unlink()
+        raise
 
 
 def build_scp_argv(
@@ -168,7 +184,7 @@ def _run_dump_enumeration(
     if failure is not None:
         return None, failure
     parsed = _require_value(parsed, "dump enumeration parser returned no data without failure")
-    (agent_dir / "probe.json").write_text(json.dumps(ctx.redactor.redact_value(parsed)), encoding="utf-8")
+    _atomic_write_text(agent_dir / "probe.json", json.dumps(ctx.redactor.redact_value(parsed)))
     return parsed, None
 
 
@@ -524,7 +540,7 @@ def _fetch_under_lock(
             "files": ctx.redactor.redact_value([f.model_dump(mode="json") for f in fetched]),
             **ref_map,
         }
-        (dest_dir / "fetch.json").write_text(json.dumps(details), encoding="utf-8")
+        _atomic_write_text(dest_dir / "fetch.json", json.dumps(details))
         step = StepResult(
             step_name=step_name,
             status=StepStatus.SUCCEEDED,
