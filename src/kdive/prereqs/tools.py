@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -12,16 +13,17 @@ from kdive.tools.adapter_boundary import adapter_validation_failure, optional_mo
 
 
 class HostPrerequisitesHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        source_path: str | None,
-        enable_libvirt_check: bool,
-        build_profile: str | None,
-        target_profile: str | None,
-        rootfs_profile: str | None,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: HostPrerequisitesHandlerRequest) -> ToolResponse: ...
+
+
+@dataclass(frozen=True)
+class HostPrerequisitesHandlerRequest:
+    artifact_root: Path
+    source_path: str | None
+    enable_libvirt_check: bool
+    build_profile: str | None
+    target_profile: str | None
+    rootfs_profile: str | None
 
 
 class HostPrerequisitesContext(Model):
@@ -59,11 +61,12 @@ def register_prereq_tools(
             options_model = optional_model_arg(options, HostPrerequisitesOptions)
         except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
-        return prerequisites_handler(
+        request = HostPrerequisitesHandlerRequest(
             artifact_root=Path(context_model.artifact_root or default_artifact_root_text),
             source_path=options_model.source_path,
             enable_libvirt_check=options_model.enable_libvirt_check,
             build_profile=profiles_model.build_profile,
             target_profile=profiles_model.target_profile,
             rootfs_profile=profiles_model.rootfs_profile,
-        ).model_dump(mode="json")
+        )
+        return prerequisites_handler(request=request).model_dump(mode="json")

@@ -16,39 +16,16 @@ from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, 
 
 
 class TransportOpenHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        run_id: str,
-        recovery: bool,
-        transaction: TransportTransaction,
-        admission: AdmissionService,
-        session_registry: SessionRegistry,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: TransportOpenHandlerRequest, runtime: TransportToolContext) -> ToolResponse: ...
 
 
 class TransportCloseHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        run_id: str,
-        session_id: str,
-        transaction: TransportTransaction,
-        session_registry: SessionRegistry,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: TransportCloseHandlerRequest, runtime: TransportToolContext) -> ToolResponse: ...
 
 
 class TransportInjectBreakHandler(Protocol):
     def __call__(
-        self,
-        *,
-        run_id: str,
-        session_id: str,
-        acknowledged_permissions: list[str] | None,
-        artifact_root: Path,
-        transaction: TransportTransaction,
-        admission: AdmissionService,
-        session_registry: SessionRegistry,
+        self, *, request: TransportInjectBreakHandlerRequest, runtime: TransportToolContext
     ) -> ToolResponse: ...
 
 
@@ -65,6 +42,26 @@ class TransportToolContext:
     transaction: TransportTransaction
     admission: AdmissionService
     session_registry: SessionRegistry
+
+
+@dataclass(frozen=True)
+class TransportOpenHandlerRequest:
+    run_id: str
+    recovery: bool
+
+
+@dataclass(frozen=True)
+class TransportCloseHandlerRequest:
+    run_id: str
+    session_id: str
+
+
+@dataclass(frozen=True)
+class TransportInjectBreakHandlerRequest:
+    run_id: str
+    session_id: str
+    acknowledged_permissions: list[str] | None
+    artifact_root: Path
 
 
 class TransportTargetContext(Model):
@@ -98,13 +95,11 @@ def register_transport_tools(
             options_model = optional_model_arg(options, TransportOpenOptions)
         except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
-        return handlers.open(
+        request = TransportOpenHandlerRequest(
             run_id=context_model.run_id,
             recovery=options_model.recovery,
-            transaction=tool_context.transaction,
-            admission=tool_context.admission,
-            session_registry=tool_context.session_registry,
-        ).model_dump(mode="json")
+        )
+        return handlers.open(request=request, runtime=tool_context).model_dump(mode="json")
 
     @app.tool(name="transport.close")
     def transport_close(context: TransportTargetContext | dict[str, Any], session_id: str) -> dict[str, Any]:
@@ -112,12 +107,11 @@ def register_transport_tools(
             context_model = model_arg(context, TransportTargetContext)
         except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
-        return handlers.close(
+        request = TransportCloseHandlerRequest(
             run_id=context_model.run_id,
             session_id=session_id,
-            transaction=tool_context.transaction,
-            session_registry=tool_context.session_registry,
-        ).model_dump(mode="json")
+        )
+        return handlers.close(request=request, runtime=tool_context).model_dump(mode="json")
 
     @app.tool(name="transport.inject_break")
     def transport_inject_break(
@@ -130,12 +124,10 @@ def register_transport_tools(
             options_model = optional_model_arg(options, TransportBreakOptions)
         except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
-        return handlers.inject_break(
+        request = TransportInjectBreakHandlerRequest(
             run_id=context_model.run_id,
             session_id=session_id,
             acknowledged_permissions=options_model.acknowledged_permissions,
             artifact_root=Path(context_model.artifact_root or str(tool_context.default_artifact_root)),
-            transaction=tool_context.transaction,
-            admission=tool_context.admission,
-            session_registry=tool_context.session_registry,
-        ).model_dump(mode="json")
+        )
+        return handlers.inject_break(request=request, runtime=tool_context).model_dump(mode="json")

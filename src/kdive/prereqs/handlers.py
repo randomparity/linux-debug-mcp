@@ -19,6 +19,7 @@ from kdive.prereqs.checks import (
     check_rootfs_builder,
     check_rootfs_image,
 )
+from kdive.prereqs.tools import HostPrerequisitesHandlerRequest
 
 _READINESS_CHECK_IDS = {"build": "kernel.config", "target": "gdbstub.port", "rootfs": "rootfs.image"}
 
@@ -42,8 +43,9 @@ def _resolve_readiness_profile(
 
 def prerequisites_handler(
     *,
-    artifact_root: Path,
-    source_path: str | None,
+    request: HostPrerequisitesHandlerRequest | None = None,
+    artifact_root: Path | None = None,
+    source_path: str | None = None,
     enable_libvirt_check: bool = False,
     build_profile: str | None = None,
     target_profile: str | None = None,
@@ -55,6 +57,15 @@ def prerequisites_handler(
     runner: PrerequisiteRunner | None = None,
     kvm_probe: Callable[[], bool] | None = None,
 ) -> ToolResponse:
+    if request is not None:
+        artifact_root = request.artifact_root
+        source_path = request.source_path
+        enable_libvirt_check = request.enable_libvirt_check
+        build_profile = request.build_profile
+        target_profile = request.target_profile
+        rootfs_profile = request.rootfs_profile
+    if artifact_root is None:
+        raise TypeError("artifact_root is required")
     build_profiles = build_profiles if build_profiles is not None else DEFAULT_BUILD_PROFILES
     target_profiles = target_profiles if target_profiles is not None else DEFAULT_TARGET_PROFILES
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES

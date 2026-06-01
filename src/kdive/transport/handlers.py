@@ -19,6 +19,12 @@ from kdive.seams.guard import GuardConflict
 from kdive.seams.target import TargetKey
 from kdive.transport.core.base import BreakPlan, ExecutionState, LineRole, OpenRequest, TransportSession
 from kdive.transport.core.break_inject import BreakRequestMethod, InjectBreakError
+from kdive.transport.tools import (
+    TransportCloseHandlerRequest,
+    TransportInjectBreakHandlerRequest,
+    TransportOpenHandlerRequest,
+    TransportToolContext,
+)
 
 
 def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any] | None = None) -> ToolResponse:
@@ -132,22 +138,35 @@ def _transport_open_request(*, run_id: str, admission: AdmissionService) -> Open
 
 def transport_open_handler(
     *,
-    run_id: str,
+    request: TransportOpenHandlerRequest | None = None,
+    runtime: TransportToolContext | None = None,
+    run_id: str | None = None,
     recovery: bool = False,
     transaction: TransportTransaction | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
+    if request is not None:
+        run_id = request.run_id
+        recovery = request.recovery
+    if runtime is not None:
+        transaction = runtime.transaction
+        admission = runtime.admission
+        session_registry = runtime.session_registry
+    if run_id is None:
+        raise TypeError("run_id is required")
     if transaction is None or admission is None or session_registry is None:
         return _transport_disabled_failure(run_id=run_id)
     redactor = Redactor()
     try:
-        request = _transport_open_request(run_id=run_id, admission=admission)
-        session = transaction.open(request, recovery=recovery)
+        open_request = _transport_open_request(run_id=run_id, admission=admission)
+        session = transaction.open(open_request, recovery=recovery)
     except KeyError:
         return _configuration_failure(
             run_id=run_id,
-            message=redactor.redact_text(f"no transport provider registered for {request.transport_ref.provider!r}"),
+            message=redactor.redact_text(
+                f"no transport provider registered for {open_request.transport_ref.provider!r}"
+            ),
             details=redactor.redact_value({"code": "unknown_transport_provider"}),
         )
     except (GuardConflict, EndpointSafetyError) as exc:
@@ -223,11 +242,23 @@ class BreakMechanism(Protocol):
 
 def transport_close_handler(
     *,
-    run_id: str,
-    session_id: str,
+    request: TransportCloseHandlerRequest | None = None,
+    runtime: TransportToolContext | None = None,
+    run_id: str | None = None,
+    session_id: str | None = None,
     transaction: TransportTransaction | None = None,
     session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
+    if request is not None:
+        run_id = request.run_id
+        session_id = request.session_id
+    if runtime is not None:
+        transaction = runtime.transaction
+        session_registry = runtime.session_registry
+    if run_id is None:
+        raise TypeError("run_id is required")
+    if session_id is None:
+        raise TypeError("session_id is required")
     if transaction is None or session_registry is None:
         return _transport_disabled_failure(run_id=run_id)
     try:
@@ -272,8 +303,10 @@ def transport_close_handler(
 
 def transport_inject_break_handler(
     *,
-    run_id: str,
-    session_id: str,
+    request: TransportInjectBreakHandlerRequest | None = None,
+    runtime: TransportToolContext | None = None,
+    run_id: str | None = None,
+    session_id: str | None = None,
     acknowledged_permissions: list[str] | None = None,
     artifact_root: Path | None = None,
     transaction: TransportTransaction | None = None,
@@ -283,6 +316,19 @@ def transport_inject_break_handler(
     break_mechanism: BreakMechanism | None = None,
     probe_halted: Callable[[TransportSession], bool] = probe_rsp_halted,
 ) -> ToolResponse:
+    if request is not None:
+        run_id = request.run_id
+        session_id = request.session_id
+        acknowledged_permissions = request.acknowledged_permissions
+        artifact_root = request.artifact_root
+    if runtime is not None:
+        transaction = runtime.transaction
+        admission = runtime.admission
+        session_registry = runtime.session_registry
+    if run_id is None:
+        raise TypeError("run_id is required")
+    if session_id is None:
+        raise TypeError("session_id is required")
     if transaction is None or admission is None or session_registry is None:
         return _transport_disabled_failure(run_id=run_id)
     missing = missing_destructive_permissions("transport.inject_break", acknowledged_permissions or [])

@@ -34,6 +34,7 @@ from kdive.postmortem.tools import (
 )
 from kdive.prereqs.tools import (
     HostPrerequisitesContext,
+    HostPrerequisitesHandlerRequest,
     HostPrerequisitesOptions,
     HostPrerequisitesProfiles,
     register_prereq_tools,
@@ -51,6 +52,9 @@ from kdive.target.tools import (
 )
 from kdive.transport.tools import (
     TransportBreakOptions,
+    TransportCloseHandlerRequest,
+    TransportInjectBreakHandlerRequest,
+    TransportOpenHandlerRequest,
     TransportTargetContext,
     TransportToolContext,
     TransportToolHandlers,
@@ -270,10 +274,10 @@ def test_target_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_path: 
 
 def test_prereq_adapter_forwards_grouped_payloads(tmp_path: Path) -> None:
     app = FastMCP("adapter-test")
-    calls: list[dict[str, Any]] = []
+    calls: list[HostPrerequisitesHandlerRequest] = []
 
-    def prereq_handler(**kwargs: Any) -> ToolResponse:
-        calls.append(kwargs)
+    def prereq_handler(*, request: HostPrerequisitesHandlerRequest) -> ToolResponse:
+        calls.append(request)
         return _success()
 
     register_prereq_tools(
@@ -294,14 +298,14 @@ def test_prereq_adapter_forwards_grouped_payloads(tmp_path: Path) -> None:
 
     assert raw["ok"] is True
     assert calls == [
-        {
-            "artifact_root": tmp_path / "runs",
-            "source_path": "/src/linux",
-            "enable_libvirt_check": True,
-            "build_profile": "x86_64-default",
-            "target_profile": "local-qemu",
-            "rootfs_profile": "minimal",
-        }
+        HostPrerequisitesHandlerRequest(
+            artifact_root=tmp_path / "runs",
+            source_path="/src/linux",
+            enable_libvirt_check=True,
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+        )
     ]
 
 
@@ -366,11 +370,13 @@ def test_transport_adapter_forwards_inject_break_collaborators_and_path(tmp_path
     transaction = object()
     admission = object()
     registry = object()
-    calls: list[dict[str, Any]] = []
+    calls: list[tuple[TransportInjectBreakHandlerRequest, TransportToolContext]] = []
 
-    def inject_break_handler(**kwargs: Any) -> ToolResponse:
-        calls.append(kwargs)
-        return _success(session_id=kwargs["session_id"])
+    def inject_break_handler(
+        *, request: TransportInjectBreakHandlerRequest, runtime: TransportToolContext
+    ) -> ToolResponse:
+        calls.append((request, runtime))
+        return _success(session_id=request.session_id)
 
     register_transport_tools(
         app,
@@ -381,8 +387,8 @@ def test_transport_adapter_forwards_inject_break_collaborators_and_path(tmp_path
             session_registry=registry,
         ),
         handlers=TransportToolHandlers(
-            open=lambda **_kwargs: _success(),
-            close=lambda **_kwargs: _success(),
+            open=lambda *, request, runtime: _success(),
+            close=lambda *, request, runtime: _success(),
             inject_break=inject_break_handler,
         ),
     )
@@ -400,15 +406,65 @@ def test_transport_adapter_forwards_inject_break_collaborators_and_path(tmp_path
 
     assert raw["ok"] is True
     assert calls == [
-        {
-            "run_id": "run-1",
-            "session_id": "session-1",
-            "acknowledged_permissions": ["drop target kernel into the debugger"],
-            "artifact_root": tmp_path / "runs",
-            "transaction": transaction,
-            "admission": admission,
-            "session_registry": registry,
-        }
+        (
+            TransportInjectBreakHandlerRequest(
+                run_id="run-1",
+                session_id="session-1",
+                acknowledged_permissions=["drop target kernel into the debugger"],
+                artifact_root=tmp_path / "runs",
+            ),
+            TransportToolContext(
+                default_artifact_root=tmp_path / "default",
+                transaction=transaction,
+                admission=admission,
+                session_registry=registry,
+            ),
+        )
+    ]
+
+
+def test_transport_adapter_forwards_operation_requests(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    tool_context = TransportToolContext(
+        default_artifact_root=tmp_path / "default",
+        transaction=object(),
+        admission=object(),
+        session_registry=object(),
+    )
+    calls: list[tuple[str, object, TransportToolContext]] = []
+
+    def open_handler(*, request: TransportOpenHandlerRequest, runtime: TransportToolContext) -> ToolResponse:
+        calls.append(("open", request, runtime))
+        return _success(session_id="session-1")
+
+    def close_handler(*, request: TransportCloseHandlerRequest, runtime: TransportToolContext) -> ToolResponse:
+        calls.append(("close", request, runtime))
+        return _success(session_id=request.session_id)
+
+    register_transport_tools(
+        app,
+        context=tool_context,
+        handlers=TransportToolHandlers(
+            open=open_handler,
+            close=close_handler,
+            inject_break=lambda *, request, runtime: _success(session_id=request.session_id),
+        ),
+    )
+
+    open_raw = _tool_fn(app, "transport.open")(
+        context=TransportTargetContext(run_id="run-1"),
+        options={"recovery": True},
+    )
+    close_raw = _tool_fn(app, "transport.close")(
+        context=TransportTargetContext(run_id="run-1"),
+        session_id="session-1",
+    )
+
+    assert open_raw["ok"] is True
+    assert close_raw["ok"] is True
+    assert calls == [
+        ("open", TransportOpenHandlerRequest(run_id="run-1", recovery=True), tool_context),
+        ("close", TransportCloseHandlerRequest(run_id="run-1", session_id="session-1"), tool_context),
     ]
 
 
