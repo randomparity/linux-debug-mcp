@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from functools import cache
+from types import MappingProxyType
 
 from kdive.introspect.helpers.base import HelperSpec
 
@@ -16,5 +18,5 @@ def built_in_helper_specs() -> list[HelperSpec]:
 
 
 @cache
-def get_helper_registry() -> dict[str, HelperSpec]:
-    return {spec.name: spec for spec in built_in_helper_specs()}
+def get_helper_registry() -> Mapping[str, HelperSpec]:
+    return MappingProxyType({spec.name: spec for spec in built_in_helper_specs()})

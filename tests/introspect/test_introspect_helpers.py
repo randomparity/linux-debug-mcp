@@ -26,6 +26,15 @@ def test_registry_maps_name_to_spec() -> None:
     assert registry["sysinfo"].version >= 1
 
 
+def test_registry_is_read_only() -> None:
+    registry = get_helper_registry()
+
+    with pytest.raises(TypeError):
+        registry["sysinfo"] = registry["tasks"]
+
+    assert get_helper_registry()["sysinfo"].name == "sysinfo"
+
+
 def test_server_uses_cached_helper_registry_accessor() -> None:
     assert get_helper_registry() is get_helper_registry()
     assert "HELPER_REGISTRY" not in server_module.__dict__
