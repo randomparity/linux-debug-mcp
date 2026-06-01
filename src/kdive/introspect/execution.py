@@ -25,7 +25,6 @@ from kdive.introspect.result import (
     _redact_and_truncate,
 )
 from kdive.introspect.runner import (
-    SSH_TIMEOUT_GRACE_SECONDS,
     _admit_introspect_call,
     _execute_admitted_introspect_ssh,
     _run_introspect_sudo_preflight,
@@ -109,7 +108,6 @@ __all__ = (
     "HELPER_CAP_PROFILE",
     "MAX_INTROSPECT_CALLS_PER_RUN",
     "RUN_STDOUT_CAP",
-    "SSH_TIMEOUT_GRACE_SECONDS",
     "IntrospectPostValidator",
     "LiveIntrospectRuntime",
     "PostValidatorVerdict",

@@ -15,6 +15,7 @@ from kdive.config import RootfsProfile
 from kdive.domain import ArtifactRef, ErrorCategory, StepStatus
 
 _SNIPPET_LIMIT = 4096
+SSH_TIMEOUT_GRACE_SECONDS = 10
 
 
 @dataclass(frozen=True)

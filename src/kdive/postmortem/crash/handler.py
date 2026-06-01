@@ -28,7 +28,7 @@ from kdive.postmortem.crash.commands import crash_command_rejection_reason, vali
 from kdive.postmortem.crash.parsers import parse_command
 from kdive.postmortem.models import DebugPostmortemCrashRequest
 from kdive.postmortem.tools import PostmortemToolRuntime
-from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner
+from kdive.providers.ssh import SSH_TIMEOUT_GRACE_SECONDS, SshCommandResult, SshRunner, SubprocessSshRunner
 from kdive.safety.paths import PathSafetyError, confine_run_relative
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import KernelProvenance
@@ -42,7 +42,6 @@ from kdive.symbols.vmcore_build_id import (
     read_vmcore_build_id,
 )
 
-SSH_TIMEOUT_GRACE_SECONDS = 10
 _POSTMORTEM_CRASH_STEP_RE = re.compile(r"^postmortem\.crash:[0-9a-f]{32}$")
 
 

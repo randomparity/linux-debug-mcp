@@ -52,10 +52,7 @@ from kdive.introspect.result import (
     _record_terminal_introspect_result,
     _redact_and_truncate,
 )
-from kdive.introspect.runner import (
-    SSH_TIMEOUT_GRACE_SECONDS,
-    _target_python_remote_argv,
-)
+from kdive.introspect.runner import _target_python_remote_argv
 from kdive.introspect.wrappers import (
     SCRIPT_BYTE_CAP,
     WrapperRenderError,
@@ -64,7 +61,7 @@ from kdive.introspect.wrappers import (
     user_script_sha256,
 )
 from kdive.prereqs.drgn_probe import PROBE_SCRIPT
-from kdive.providers.ssh import SshRunner, SubprocessSshRunner, build_ssh_argv
+from kdive.providers.ssh import SSH_TIMEOUT_GRACE_SECONDS, SshRunner, SubprocessSshRunner, build_ssh_argv
 from kdive.safety.paths import PathSafetyError, confine_run_relative
 from kdive.safety.redaction import Redactor
 from kdive.seams.probes import (

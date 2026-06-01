@@ -44,7 +44,13 @@ from kdive.postmortem.models import (
 from kdive.postmortem.probes import assemble_kdump_probe_response, validated_dump_dir
 from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.prereqs.kdump_probe import render_kdump_probe_script
-from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner, build_ssh_argv
+from kdive.providers.ssh import (
+    SSH_TIMEOUT_GRACE_SECONDS,
+    SshCommandResult,
+    SshRunner,
+    SubprocessSshRunner,
+    build_ssh_argv,
+)
 from kdive.seams.probes import (
     PROBE_STDOUT_CAP,
     ProbeContext,
@@ -57,8 +63,6 @@ from kdive.seams.probes import (
     resolve_probe_context,
     target_python_remote_argv,
 )
-
-SSH_TIMEOUT_GRACE_SECONDS = 10
 
 
 def build_scp_argv(

@@ -31,11 +31,9 @@ from kdive.providers.debug import (
     GdbMiSessionRegistry,
     ProviderDebugError,
 )
-from kdive.providers.ssh import SshRunner, SubprocessSshRunner, build_ssh_argv
+from kdive.providers.ssh import SSH_TIMEOUT_GRACE_SECONDS, SshRunner, SubprocessSshRunner, build_ssh_argv
 from kdive.safety.paths import PathSafetyError
 from kdive.safety.redaction import Redactor
-
-SSH_TIMEOUT_GRACE_SECONDS = 10
 
 # Phase D (#82): a loadable kernel module's name (sysfs normalizes the source name's hyphens to
 # underscores under /sys/module/, so the agent-facing name is the underscore form).

@@ -39,12 +39,11 @@ from kdive.introspect.wrappers import (
     render_wrapper_skeleton,
     user_script_sha256,
 )
-from kdive.providers.ssh import SshCommandResult, SshRunner, build_ssh_argv
+from kdive.providers.ssh import SSH_TIMEOUT_GRACE_SECONDS, SshCommandResult, SshRunner, build_ssh_argv
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import TargetKey
 
 logger = logging.getLogger(__name__)
-SSH_TIMEOUT_GRACE_SECONDS = 10
 
 
 def _target_python_remote_argv(*, timeout_seconds: int, use_sudo: bool) -> list[str]:
