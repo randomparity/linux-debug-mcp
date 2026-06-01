@@ -16,7 +16,7 @@ from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
 from kdive.providers.debug import DebugSession
-from kdive.providers.local.target.libvirt_qemu import BootExecutionResult, ProviderBootError
+from kdive.providers.local.target.local_libvirt_qemu import BootExecutionResult, ProviderBootError
 from kdive.providers.local.test.local_ssh_tests import TestExecutionResult
 from kdive.seams.target import (
     BreakHint,

@@ -17,7 +17,7 @@ from kdive.artifacts.store import ArtifactStore
 from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, BootOverrides, RootfsOverrides, RootfsProfile, TargetProfile
 from kdive.coordination.admission import AdmissionService, SnapshotStore
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
-from kdive.providers.local.target.libvirt_qemu import BootExecutionResult, ProviderBootError
+from kdive.providers.local.target.local_libvirt_qemu import BootExecutionResult, ProviderBootError
 from kdive.seams.target import TargetKey
 from kdive.target import boot_handler as target_handlers
 

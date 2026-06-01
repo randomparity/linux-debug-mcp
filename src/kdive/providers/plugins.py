@@ -7,11 +7,11 @@ from pydantic import Field, field_validator
 from kdive.domain import Model
 from kdive.providers.base import local_provider_capability
 from kdive.providers.local.build.local_kernel_build import local_kernel_build_capability
-from kdive.providers.local.debug.qemu_gdbstub import local_qemu_gdbstub_capability
+from kdive.providers.local.debug.local_qemu_gdbstub import local_qemu_gdbstub_capability
 from kdive.providers.local.introspect.local_drgn_introspect import local_drgn_introspect_capability
 from kdive.providers.local.postmortem.local_crash_postmortem import local_crash_postmortem_capability
 from kdive.providers.local.postmortem.local_vmcore_retrieval import local_vmcore_retrieval_capability
-from kdive.providers.local.target.libvirt_qemu import local_libvirt_qemu_capability
+from kdive.providers.local.target.local_libvirt_qemu import local_libvirt_qemu_capability
 from kdive.providers.local.test.local_ssh_tests import local_ssh_tests_capability
 from kdive.providers.models import (
     ImplementationState,

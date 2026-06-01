@@ -19,7 +19,7 @@ from kdive.config import (
 from kdive.coordination.admission import AdmissionService, publish_ready_snapshot
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES, DEFAULT_TARGET_PROFILES
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
-from kdive.providers.local.target.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
+from kdive.providers.local.target.local_libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from kdive.rootfs.sources import RootfsSourceError, resolve_rootfs_source
 from kdive.safety.paths import PathSafetyError, validate_rootfs_source
 from kdive.safety.redaction import Redactor

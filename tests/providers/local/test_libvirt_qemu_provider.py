@@ -9,7 +9,7 @@ import pytest
 
 from kdive.config import RootfsProfile, TargetProfile
 from kdive.domain import ErrorCategory, StepStatus
-from kdive.providers.local.target.libvirt_qemu import (
+from kdive.providers.local.target.local_libvirt_qemu import (
     CommandResult,
     ConsoleResult,
     LibvirtQemuProvider,
@@ -25,7 +25,7 @@ def test_libvirt_qemu_import_does_not_register_xml_namespaces(monkeypatch) -> No
     import importlib
     import sys
 
-    module_name = "kdive.providers.local.target.libvirt_qemu"
+    module_name = "kdive.providers.local.target.local_libvirt_qemu"
     original_module = sys.modules.pop(module_name, None)
     calls: list[tuple[str, str]] = []
     monkeypatch.setattr(ElementTree, "register_namespace", lambda prefix, uri: calls.append((prefix, uri)))
@@ -840,7 +840,7 @@ def test_execute_boot_success_details_carry_assembled_kernel_args(tmp_path: Path
 
     assert result.status == StepStatus.SUCCEEDED
     # The default target_profile() uses kernel_args=["panic=1"]; the provider
-    # assembles root=/console= onto it (libvirt_qemu.py:591-597).
+    # assembles root=/console= onto it (local_libvirt_qemu.py:591-597).
     assert result.details["kernel_args"] == plan.kernel_args
     assert "root=/dev/vda" in result.details["kernel_args"]
     assert "console=ttyS0" in result.details["kernel_args"]
@@ -1336,7 +1336,7 @@ def test_render_domain_xml_copy_on_write_points_at_overlay_and_is_writable(tmp_p
 
 
 def test_capability_advertises_qemu_img() -> None:
-    from kdive.providers.local.target.libvirt_qemu import local_libvirt_qemu_capability
+    from kdive.providers.local.target.local_libvirt_qemu import local_libvirt_qemu_capability
 
     capability = local_libvirt_qemu_capability()
     assert "qemu-img" in capability.required_host_tools

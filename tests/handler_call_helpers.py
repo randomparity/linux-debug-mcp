@@ -36,7 +36,7 @@ from kdive.debug.tools import (
 from kdive.kernel.handlers import kernel_build_handler as _kernel_build_handler
 from kdive.kernel.tools import KernelBuildHandlerRequest, KernelToolRuntime
 from kdive.providers.local.build.local_kernel_build import LocalKernelBuildProvider
-from kdive.providers.local.target.libvirt_qemu import LibvirtQemuProvider
+from kdive.providers.local.target.local_libvirt_qemu import LibvirtQemuProvider
 from kdive.providers.local.test.local_ssh_tests import LocalSshTestProvider
 from kdive.target.boot_handler import target_boot_handler as _target_boot_handler
 from kdive.target.test_handler import target_run_tests_handler as _target_run_tests_handler

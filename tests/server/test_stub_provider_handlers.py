@@ -30,7 +30,7 @@ from kdive.providers.contracts.models import (
 )
 from kdive.providers.handlers import STUB_PROVIDER_OPERATIONS
 from kdive.providers.local.build.local_kernel_build import LocalKernelBuildProvider
-from kdive.providers.local.target.libvirt_qemu import LibvirtQemuProvider
+from kdive.providers.local.target.local_libvirt_qemu import LibvirtQemuProvider
 from kdive.providers.local.test.local_ssh_tests import LocalSshTestProvider
 from kdive.providers.registry import ProviderRegistry
 from kdive.providers.stubs import remote_build_stub_capability

@@ -17,7 +17,7 @@ from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, 
 
 if TYPE_CHECKING:
     from kdive.config import RootfsProfile, TargetProfile, TestSuiteProfile
-    from kdive.providers.local.target.libvirt_qemu import LibvirtQemuProvider
+    from kdive.providers.local.target.local_libvirt_qemu import LibvirtQemuProvider
     from kdive.providers.local.test.local_ssh_tests import LocalSshTestProvider
 
 

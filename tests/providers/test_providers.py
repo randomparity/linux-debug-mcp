@@ -137,11 +137,11 @@ def test_registry_rejects_duplicate_names() -> None:
 
 
 def test_debug_session_uses_shared_model_base() -> None:
-    from kdive.providers.local.debug import qemu_gdbstub
+    from kdive.providers.local.debug import local_qemu_gdbstub
 
-    assert not hasattr(qemu_gdbstub, "DebugSession")
-    assert not hasattr(qemu_gdbstub, "DebugSessionState")
-    assert not hasattr(qemu_gdbstub, "ProviderDebugError")
+    assert not hasattr(local_qemu_gdbstub, "DebugSession")
+    assert not hasattr(local_qemu_gdbstub, "DebugSessionState")
+    assert not hasattr(local_qemu_gdbstub, "ProviderDebugError")
 
     assert issubclass(DebugSession, Model)
     assert DebugSession.__bases__ == (Model,)
@@ -248,17 +248,18 @@ def test_default_registry_exposes_local_provider_capabilities() -> None:
     assert "kernel.build" in providers["local-kernel-build"].operations
     assert "make" in providers["local-kernel-build"].required_host_tools
 
-    libvirt_qemu = providers["local-libvirt-qemu"]
-    assert libvirt_qemu.operations == ["target.boot"]
-    assert libvirt_qemu.required_host_tools == ["virsh", "qemu-img"]
-    assert libvirt_qemu.target_kinds == [TargetKind.VIRTUAL]
-    assert libvirt_qemu.access_methods == ["libvirt", "serial-console", "filesystem"]
-    assert libvirt_qemu.destructive_permissions == list(TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"])
-    assert libvirt_qemu.semantics.idempotent is True
-    assert libvirt_qemu.semantics.retryable is True
-    assert libvirt_qemu.semantics.destructive is True
-    assert libvirt_qemu.semantics.cancelable is False
-    assert libvirt_qemu.semantics.concurrent_safe is False
+    local_libvirt_qemu = providers["local-libvirt-qemu"]
+    assert local_libvirt_qemu.operations == ["target.boot"]
+    assert local_libvirt_qemu.required_host_tools == ["virsh", "qemu-img"]
+    assert local_libvirt_qemu.target_kinds == [TargetKind.VIRTUAL]
+    assert local_libvirt_qemu.access_methods == ["libvirt", "serial-console", "filesystem"]
+    target_boot_permissions = list(TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"])
+    assert local_libvirt_qemu.destructive_permissions == target_boot_permissions
+    assert local_libvirt_qemu.semantics.idempotent is True
+    assert local_libvirt_qemu.semantics.retryable is True
+    assert local_libvirt_qemu.semantics.destructive is True
+    assert local_libvirt_qemu.semantics.cancelable is False
+    assert local_libvirt_qemu.semantics.concurrent_safe is False
 
     ssh_tests = providers["local-ssh-tests"]
     assert ssh_tests.operations == ["target.run_tests"]
@@ -267,15 +268,16 @@ def test_default_registry_exposes_local_provider_capabilities() -> None:
     assert ssh_tests.destructive_permissions == list(TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"])
     assert ssh_tests.semantics.destructive is True
 
-    qemu_gdbstub = providers["local-qemu-gdbstub"]
-    assert qemu_gdbstub.destructive_permissions == []
+    local_qemu_gdbstub = providers["local-qemu-gdbstub"]
+    assert local_qemu_gdbstub.destructive_permissions == []
     operation_permissions = {
-        capability.operation: capability.destructive_permissions for capability in qemu_gdbstub.operation_capabilities
+        capability.operation: capability.destructive_permissions
+        for capability in local_qemu_gdbstub.operation_capabilities
     }
     assert operation_permissions["transport.inject_break"] == list(
         TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"]
     )
-    assert operation_permissions["workflow.build_boot_debug"] == list(TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"])
+    assert operation_permissions["workflow.build_boot_debug"] == target_boot_permissions
 
 
 def test_default_providers_expose_richer_metadata() -> None:

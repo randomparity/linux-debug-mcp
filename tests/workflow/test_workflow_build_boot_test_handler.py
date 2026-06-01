@@ -30,7 +30,7 @@ from kdive.config import (
 from kdive.debug.session_handlers import _start_session as debug_start_session_handler
 from kdive.domain import ArtifactRef, ErrorCategory, StepStatus, ToolResponse
 from kdive.providers.local.build.local_kernel_build import LocalKernelBuildProvider
-from kdive.providers.local.target.libvirt_qemu import BootExecutionResult
+from kdive.providers.local.target.local_libvirt_qemu import BootExecutionResult
 from kdive.providers.local.test.local_ssh_tests import TestExecutionResult as _TestExecutionResult
 from kdive.server import (
     create_run_handler,
