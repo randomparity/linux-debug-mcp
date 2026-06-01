@@ -43,6 +43,7 @@ class FakeSshRunner:
                 "timeout": timeout,
                 "stdout_path": stdout_path,
                 "stderr_path": stderr_path,
+                "cancel": cancel,
                 "stdin": stdin,
             }
         )
@@ -249,6 +250,32 @@ def test_execute_collects_dmesg_without_failing_smoke_result(tmp_path: Path) -> 
     assert result.status == StepStatus.SUCCEEDED
     assert (tmp_path / "tests" / "attempt-001" / "dmesg.txt").is_file()
     assert result.details["dmesg"]["exit_status"] == 1
+
+
+def test_execute_threads_cancel_event_into_dmesg_collection(tmp_path: Path) -> None:
+    runner = FakeSshRunner(
+        results=[
+            SshCommandResult(exit_status=0, stdout="ok\n", stderr=""),
+            SshCommandResult(exit_status=-1, stdout="", stderr="", cancelled=True),
+        ]
+    )
+    provider = LocalSshTestProvider(runner=runner)
+    plan = provider.plan_tests(
+        run_id="run-abc123",
+        run_dir=tmp_path,
+        rootfs_profile=rootfs(),
+        suite=suite(collect_dmesg=True),
+        adhoc_commands=[],
+        attempt=1,
+    )
+    cancel = threading.Event()
+    cancel.set()
+
+    result = provider.execute_tests(plan, cancel=cancel)
+
+    assert runner.calls[1]["argv"] == plan.dmesg_command.ssh_argv
+    assert runner.calls[1]["cancel"] is cancel
+    assert result.details["dmesg"]["cancelled"] is True
 
 
 def test_summary_redacts_key_path_and_secret_like_output(tmp_path: Path) -> None:

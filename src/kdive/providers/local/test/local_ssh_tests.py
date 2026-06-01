@@ -191,7 +191,7 @@ class LocalSshTestProvider:
                 if plan.stop_on_failure:
                     break
 
-        dmesg_result = self._run_dmesg(plan) if plan.dmesg_command is not None else None
+        dmesg_result = self._run_dmesg(plan, cancel=cancel) if plan.dmesg_command is not None else None
         artifacts = self._existing_artifacts(plan)
         ended_at = datetime.now(UTC)
         status = StepStatus.FAILED if required_failed else StepStatus.SUCCEEDED
@@ -279,7 +279,7 @@ class LocalSshTestProvider:
             metadata_path=attempt_dir / "dmesg.command.json",
         )
 
-    def _run_dmesg(self, plan: TestPlan) -> dict[str, object]:
+    def _run_dmesg(self, plan: TestPlan, *, cancel: threading.Event | None = None) -> dict[str, object]:
         command = plan.dmesg_command
         if command is None:
             return {}
@@ -290,6 +290,7 @@ class LocalSshTestProvider:
             timeout=command.timeout_seconds,
             stdout_path=command.stdout_path,
             stderr_path=command.stderr_path,
+            cancel=cancel,
         )
         ended = datetime.now(UTC)
         return self._command_metadata(
@@ -319,6 +320,7 @@ class LocalSshTestProvider:
             "timeout_seconds": command.timeout_seconds,
             "exit_status": result.exit_status,
             "timed_out": result.timed_out,
+            "cancelled": result.cancelled,
             "started_at": started_at.isoformat(),
             "ended_at": ended_at.isoformat(),
             "elapsed_seconds": round(elapsed_seconds, 6),
