@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,10 +15,7 @@ from kdive.config import (
     TRIAGE_MODULES_HELPER,
 )
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
-from kdive.postmortem.crash.handler import (
-    debug_postmortem_crash_handler,
-    resolve_postmortem_vmcore_context,
-)
+from kdive.postmortem.crash.handler import resolve_postmortem_vmcore_context
 from kdive.postmortem.models import (
     DebugPostmortemCrashRequest,
     DebugPostmortemTriageReport,
@@ -275,8 +272,6 @@ def debug_postmortem_triage_handler(
     runtime: PostmortemToolRuntime,
 ) -> ToolResponse:
     """Spec §4 / ADR 0027. Compose the crash + drgn offline tiers into one report; no admission gate."""
-    if runtime.crash_handler is None:
-        runtime = replace(runtime, crash_handler=debug_postmortem_crash_handler)
     if runtime.drgn_helper_handler is None:
         raise TypeError("drgn_helper_handler is required")
     run_id = request.run_id

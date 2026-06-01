@@ -3,6 +3,8 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
+import pytest
+
 import kdive.server as server_module
 from kdive.artifacts.store import ArtifactStore
 from kdive.domain import (
@@ -107,6 +109,24 @@ def _runtime(
         vmcore_build_id_reader=lambda _p: vmcore_build_id,
         vmlinux_build_id_reader=lambda _p: vmlinux_build_id,
     )
+
+
+def test_triage_requires_crash_handler_in_runtime(tmp_path: Path) -> None:
+    _run(tmp_path)
+    drgn = _Recorder(_drgn_ok({}))
+
+    with pytest.raises(TypeError, match="requires crash and drgn helper handlers"):
+        debug_postmortem_triage_handler(
+            DebugPostmortemTriageRequest(run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux"),
+            runtime=PostmortemToolRuntime(
+                artifact_root=tmp_path,
+                drgn_helper_handler=drgn,
+                vmcore_build_id_reader=lambda _p: GOOD_ID,
+                vmlinux_build_id_reader=lambda _p: GOOD_ID,
+            ),
+        )
+
+    assert drgn.calls == []
 
 
 def test_triage_subcall_exception_becomes_section_failure(tmp_path: Path) -> None:

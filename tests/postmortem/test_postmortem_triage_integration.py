@@ -15,6 +15,7 @@ from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.server import (
     debug_introspect_from_vmcore_handler,
     debug_introspect_from_vmcore_helper_handler,
+    debug_postmortem_crash_handler,
     debug_postmortem_triage_handler,
 )
 
@@ -54,7 +55,11 @@ def test_triage_real_core_consistency(tmp_path) -> None:
 
     resp = debug_postmortem_triage_handler(
         DebugPostmortemTriageRequest(run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux"),
-        runtime=PostmortemToolRuntime(artifact_root=tmp_path, drgn_helper_handler=drgn_helper),
+        runtime=PostmortemToolRuntime(
+            artifact_root=tmp_path,
+            crash_handler=debug_postmortem_crash_handler,
+            drgn_helper_handler=drgn_helper,
+        ),
     )
     assert resp.ok is True, resp.error
     report = resp.data["report"]
