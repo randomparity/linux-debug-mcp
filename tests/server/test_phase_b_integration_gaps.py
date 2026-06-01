@@ -38,6 +38,7 @@ from conftest import (
     rootfs,
     write_vmlinux_with_build_id,
 )
+from handler_call_helpers import target_run_tests_handler
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile
@@ -54,7 +55,6 @@ from kdive.seams.target import (
     TargetKey,
 )
 from kdive.server import create_app
-from kdive.target.handlers import target_run_tests_handler
 from kdive.transport.core.base import (
     ExecutionState,
     LineRole,

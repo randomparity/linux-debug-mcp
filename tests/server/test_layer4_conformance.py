@@ -47,6 +47,7 @@ from conftest import (
     seed_legacy_debug_session,
     target_profile,
 )
+from handler_call_helpers import target_boot_handler, target_run_tests_handler
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, TRANSPORT_DESTRUCTIVE_PERMISSIONS
@@ -84,8 +85,6 @@ from kdive.seams.target import (
     TargetState,
 )
 from kdive.server import (
-    target_boot_handler,
-    target_run_tests_handler,
     transport_inject_break_handler,
     transport_open_handler,
 )

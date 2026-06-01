@@ -37,6 +37,7 @@ from kdive.prereqs.tools import (
     HostPrerequisitesHandlerRequest,
     HostPrerequisitesOptions,
     HostPrerequisitesProfiles,
+    HostPrerequisitesRuntime,
     register_prereq_tools,
 )
 from kdive.target.tools import (
@@ -275,10 +276,10 @@ def test_target_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_path: 
 
 def test_prereq_adapter_forwards_grouped_payloads(tmp_path: Path) -> None:
     app = FastMCP("adapter-test")
-    calls: list[HostPrerequisitesHandlerRequest] = []
+    calls: list[tuple[HostPrerequisitesHandlerRequest, HostPrerequisitesRuntime]] = []
 
-    def prereq_handler(*, request: HostPrerequisitesHandlerRequest) -> ToolResponse:
-        calls.append(request)
+    def prereq_handler(*, request: HostPrerequisitesHandlerRequest, runtime: HostPrerequisitesRuntime) -> ToolResponse:
+        calls.append((request, runtime))
         return _success()
 
     register_prereq_tools(
@@ -299,13 +300,16 @@ def test_prereq_adapter_forwards_grouped_payloads(tmp_path: Path) -> None:
 
     assert raw["ok"] is True
     assert calls == [
-        HostPrerequisitesHandlerRequest(
-            artifact_root=tmp_path / "runs",
-            source_path="/src/linux",
-            enable_libvirt_check=True,
-            build_profile="x86_64-default",
-            target_profile="local-qemu",
-            rootfs_profile="minimal",
+        (
+            HostPrerequisitesHandlerRequest(
+                artifact_root=tmp_path / "runs",
+                source_path="/src/linux",
+                enable_libvirt_check=True,
+                build_profile="x86_64-default",
+                target_profile="local-qemu",
+                rootfs_profile="minimal",
+            ),
+            HostPrerequisitesRuntime(),
         )
     ]
 

@@ -22,7 +22,7 @@ from kdive.artifacts.handlers import (
 from kdive.artifacts.manifest import RunManifest
 from kdive.artifacts.store import ArtifactStore, record_step_with_retry
 from kdive.artifacts.tools import register_artifact_tools
-from kdive.config import ServerConfig
+from kdive.config import BootOverrides, ServerConfig
 from kdive.coordination.admission import (
     AdmissionService,
     SnapshotStore,
@@ -153,44 +153,95 @@ def _kernel_create_run_tool_handler(
 def _kernel_build_tool_handler(
     *, request: kernel_tools.KernelBuildHandlerRequest, runtime: kernel_tools.KernelToolRuntime
 ) -> ToolResponse:
-    _ = runtime
-    return kernel_build_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        build_profile=request.build_profile,
-        force_rebuild=request.force_rebuild,
-    )
+    return kernel_build_handler(request=request, runtime=runtime)
 
 
 def _target_boot_tool_handler(
     *, request: target_tools.TargetBootHandlerRequest, runtime: target_tools.TargetToolRuntime
 ) -> ToolResponse:
-    return target_boot_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        target_profile=request.target_profile,
-        rootfs_profile=request.rootfs_profile,
-        force_reboot=request.force_reboot,
-        boot_overrides=request.boot_overrides,
-        acknowledged_permissions=request.acknowledged_permissions,
-        sensitive_paths=runtime.sensitive_paths,
-        admission=runtime.admission,
-    )
+    return target_boot_handler(request=request, runtime=runtime)
 
 
 def _target_run_tests_tool_handler(
     *, request: target_tools.TargetRunTestsHandlerRequest, runtime: target_tools.TargetToolRuntime
 ) -> ToolResponse:
+    return target_run_tests_handler(request=request, runtime=runtime)
+
+
+def _kernel_build_workflow_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    build_profile: str | None = None,
+    force_rebuild: bool = False,
+) -> ToolResponse:
+    return kernel_build_handler(
+        request=kernel_tools.KernelBuildHandlerRequest(
+            artifact_root=artifact_root,
+            run_id=run_id,
+            build_profile=build_profile,
+            force_rebuild=force_rebuild,
+        ),
+        runtime=kernel_tools.KernelToolRuntime(sensitive_paths=[]),
+    )
+
+
+def _target_boot_workflow_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    target_profile: str | None = None,
+    rootfs_profile: str | None = None,
+    force_reboot: bool = False,
+    boot_overrides: BootOverrides | None = None,
+    acknowledged_permissions: list[str] | None = None,
+    sensitive_paths: list[Path] | None = None,
+    admission: AdmissionService | None = None,
+) -> ToolResponse:
+    return target_boot_handler(
+        request=target_tools.TargetBootHandlerRequest(
+            artifact_root=artifact_root,
+            run_id=run_id,
+            target_profile=target_profile,
+            rootfs_profile=rootfs_profile,
+            force_reboot=force_reboot,
+            boot_overrides=boot_overrides,
+            acknowledged_permissions=acknowledged_permissions,
+        ),
+        runtime=target_tools.TargetToolRuntime(
+            sensitive_paths=sensitive_paths or [],
+            admission=admission,
+            session_registry=None,
+        ),
+    )
+
+
+def _target_run_tests_workflow_handler(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    test_suite: str | None = None,
+    commands: list[list[str]] | None = None,
+    force_rerun: bool = False,
+    acknowledged_permissions: list[str] | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
+) -> ToolResponse:
     return target_run_tests_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        test_suite=request.test_suite,
-        commands=request.commands,
-        force_rerun=request.force_rerun,
-        attempt=request.attempt,
-        acknowledged_permissions=request.acknowledged_permissions,
-        admission=runtime.admission,
-        session_registry=runtime.session_registry,
+        request=target_tools.TargetRunTestsHandlerRequest(
+            artifact_root=artifact_root,
+            run_id=run_id,
+            test_suite=test_suite,
+            commands=commands,
+            force_rerun=force_rerun,
+            attempt=None,
+            acknowledged_permissions=acknowledged_permissions,
+        ),
+        runtime=target_tools.TargetToolRuntime(
+            sensitive_paths=[],
+            admission=admission,
+            session_registry=session_registry,
+        ),
     )
 
 
@@ -299,9 +350,9 @@ def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any]
 def _workflow_handler_dependencies() -> WorkflowHandlerDependencies:
     return WorkflowHandlerDependencies(
         create_run_handler=create_run_handler,
-        kernel_build_handler=kernel_build_handler,
-        target_boot_handler=target_boot_handler,
-        target_run_tests_handler=target_run_tests_handler,
+        kernel_build_handler=_kernel_build_workflow_handler,
+        target_boot_handler=_target_boot_workflow_handler,
+        target_run_tests_handler=_target_run_tests_workflow_handler,
         debug_start_session_handler=_workflow_debug_start_session_handler,
         artifacts_collect_handler=artifacts_collect_handler,
     )

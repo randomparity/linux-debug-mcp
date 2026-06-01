@@ -11,6 +11,7 @@ from conftest import (
     rootfs_profile,
     target_profile,
 )
+from handler_call_helpers import target_boot_handler
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, BootOverrides, RootfsOverrides, RootfsProfile, TargetProfile
@@ -19,7 +20,6 @@ from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, Too
 from kdive.providers.local.target.libvirt_qemu import BootExecutionResult, ProviderBootError
 from kdive.seams.target import TargetKey
 from kdive.target import handlers as target_handlers
-from kdive.target.handlers import target_boot_handler
 
 
 def boot(

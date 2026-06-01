@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
@@ -13,6 +13,11 @@ from kdive.coordination.registry import SessionRegistry
 from kdive.domain import ToolResponse
 from kdive.model import Model
 from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, optional_model_arg
+
+if TYPE_CHECKING:
+    from kdive.config import RootfsProfile, TargetProfile, TestSuiteProfile
+    from kdive.providers.local.target.libvirt_qemu import LibvirtQemuProvider
+    from kdive.providers.local.test.local_ssh_tests import LocalSshTestProvider
 
 
 class TargetBootHandler(Protocol):
@@ -26,8 +31,14 @@ class TargetRunTestsHandler(Protocol):
 @dataclass(frozen=True)
 class TargetToolRuntime:
     sensitive_paths: list[Path]
-    admission: AdmissionService
-    session_registry: SessionRegistry
+    admission: AdmissionService | None
+    session_registry: SessionRegistry | None
+    boot_provider: LibvirtQemuProvider | None = None
+    test_provider: LocalSshTestProvider | None = None
+    target_profiles: dict[str, TargetProfile] | None = None
+    rootfs_profiles: dict[str, RootfsProfile] | None = None
+    test_suites: dict[str, TestSuiteProfile] | None = None
+    default_libvirt_uri: str | None = None
 
 
 @dataclass(frozen=True)

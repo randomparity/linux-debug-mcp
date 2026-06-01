@@ -188,6 +188,20 @@ def test_transport_and_prereq_handlers_accept_structured_boundaries_only() -> No
         assert list(inspect.signature(handler).parameters) == ["request", "runtime"]
 
 
+def test_target_and_kernel_handlers_accept_structured_boundaries_only() -> None:
+    from kdive.kernel.handlers import kernel_build_handler
+    from kdive.target.handlers import target_boot_handler, target_run_tests_handler
+
+    handlers = [
+        kernel_build_handler,
+        target_boot_handler,
+        target_run_tests_handler,
+    ]
+
+    for handler in handlers:
+        assert list(inspect.signature(handler).parameters) == ["request", "runtime"]
+
+
 def test_server_does_not_reexport_private_feature_helpers() -> None:
     import kdive.server as server
 

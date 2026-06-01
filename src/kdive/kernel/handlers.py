@@ -8,6 +8,7 @@ from kdive.artifacts.store import ArtifactStore, ManifestStateError, record_step
 from kdive.config import BuildProfile
 from kdive.default_profiles import DEFAULT_BUILD_PROFILES
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
+from kdive.kernel.tools import KernelBuildHandlerRequest, KernelToolRuntime
 from kdive.providers.local.build.local_kernel_build import (
     BuildExecutionResult,
     BuildIdMissing,
@@ -70,18 +71,15 @@ class _KernelBuildContext:
 
 def kernel_build_handler(
     *,
-    artifact_root: Path,
-    run_id: str,
-    build_profile: str | None = None,
-    force_rebuild: bool = False,
-    provider: LocalKernelBuildProvider | None = None,
+    request: KernelBuildHandlerRequest,
+    runtime: KernelToolRuntime,
 ) -> ToolResponse:
     context, response = _resolve_kernel_build_request(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        build_profile=build_profile,
-        force_rebuild=force_rebuild,
-        provider=provider,
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        build_profile=request.build_profile,
+        force_rebuild=request.force_rebuild,
+        provider=runtime.build_provider,
     )
     if response is not None:
         return response
@@ -90,7 +88,7 @@ def kernel_build_handler(
     if response is not None:
         return response
     execution = _require_build_execution(execution)
-    return _build_execution_response(run_id=run_id, execution=execution)
+    return _build_execution_response(run_id=request.run_id, execution=execution)
 
 
 def _resolve_kernel_build_request(

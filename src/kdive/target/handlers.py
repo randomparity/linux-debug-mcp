@@ -39,6 +39,7 @@ from kdive.rootfs.sources import RootfsSourceError, resolve_rootfs_source
 from kdive.safety.paths import PathSafetyError, validate_rootfs_source
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import BreakHint, ConsoleKind, KernelProvenance, PlatformMetadata, TargetKey
+from kdive.target.tools import TargetBootHandlerRequest, TargetRunTestsHandlerRequest, TargetToolRuntime
 from kdive.transport.core.base import ExecutionState, LineRole, TransportRef
 
 logger = logging.getLogger(__name__)
@@ -769,20 +770,13 @@ def _boot_under_locks(
 
 def target_boot_handler(
     *,
-    artifact_root: Path,
-    run_id: str,
-    target_profile: str | None = None,
-    rootfs_profile: str | None = None,
-    force_reboot: bool = False,
-    provider: LibvirtQemuProvider | None = None,
-    target_profiles: dict[str, TargetProfile] | None = None,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
-    default_libvirt_uri: str | None = None,
-    boot_overrides: BootOverrides | None = None,
-    acknowledged_permissions: list[str] | None = None,
-    sensitive_paths: list[Path] | None = None,
-    admission: AdmissionService | None = None,
+    request: TargetBootHandlerRequest,
+    runtime: TargetToolRuntime,
 ) -> ToolResponse:
+    artifact_root = request.artifact_root
+    run_id = request.run_id
+    boot_overrides = request.boot_overrides
+    force_reboot = request.force_reboot
     try:
         store = ArtifactStore(artifact_root, create_root=False)
         manifest_path = store.run_dir(run_id) / "manifest.json"
@@ -795,13 +789,13 @@ def target_boot_handler(
     resolved_inputs = _resolve_boot_inputs(
         manifest=manifest,
         run_id=run_id,
-        target_profile=target_profile,
-        rootfs_profile=rootfs_profile,
-        target_profiles=target_profiles,
-        rootfs_profiles=rootfs_profiles,
-        default_libvirt_uri=default_libvirt_uri,
+        target_profile=request.target_profile,
+        rootfs_profile=request.rootfs_profile,
+        target_profiles=runtime.target_profiles,
+        rootfs_profiles=runtime.rootfs_profiles,
+        default_libvirt_uri=runtime.default_libvirt_uri,
         boot_overrides=boot_overrides,
-        sensitive_paths=sensitive_paths,
+        sensitive_paths=runtime.sensitive_paths,
     )
     if isinstance(resolved_inputs, _HandlerFailure):
         return _tool_response_from_handler_failure(resolved_inputs)
@@ -822,14 +816,14 @@ def target_boot_handler(
         return _short_circuit_boot_success(
             run_id=run_id,
             result=existing,
-            admission=admission,
+            admission=runtime.admission,
             manifest=manifest,
             rootfs_profile=resolved_rootfs_profile,
         )
 
     missing = missing_destructive_permissions(
         "target.boot",
-        acknowledged_permissions or [],
+        request.acknowledged_permissions or [],
         registry=TARGET_DESTRUCTIVE_PERMISSIONS,
     )
     if missing:
@@ -839,7 +833,7 @@ def target_boot_handler(
             details={"code": "permission_required", "required_permissions": missing},
         )
 
-    provider = provider or LibvirtQemuProvider()
+    provider = runtime.boot_provider or LibvirtQemuProvider()
 
     return _boot_under_locks(
         store=store,
@@ -852,7 +846,7 @@ def target_boot_handler(
         has_new_boot_overrides=has_new_boot_overrides,
         existing=existing,
         provider=provider,
-        admission=admission,
+        admission=runtime.admission,
     )
 
 
@@ -1240,19 +1234,12 @@ def _locked_run_tests_execution(
 
 def target_run_tests_handler(
     *,
-    artifact_root: Path,
-    run_id: str,
-    test_suite: str | None = None,
-    commands: list[list[str]] | None = None,
-    force_rerun: bool = False,
-    attempt: int | None = None,
-    acknowledged_permissions: list[str] | None = None,
-    provider: LocalSshTestProvider | None = None,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
-    test_suites: dict[str, TestSuiteProfile] | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
+    request: TargetRunTestsHandlerRequest,
+    runtime: TargetToolRuntime,
 ) -> ToolResponse:
+    artifact_root = request.artifact_root
+    run_id = request.run_id
+    force_rerun = request.force_rerun
     try:
         store = ArtifactStore(artifact_root, create_root=False)
         manifest_path = store.run_dir(run_id) / "manifest.json"
@@ -1270,13 +1257,13 @@ def target_run_tests_handler(
         run_id=run_id,
         manifest=manifest,
         boot_result=boot_result,
-        test_suite=test_suite,
-        commands=commands,
+        test_suite=request.test_suite,
+        commands=request.commands,
         force_rerun=force_rerun,
-        attempt=attempt,
-        provider=provider,
-        rootfs_profiles=rootfs_profiles,
-        test_suites=test_suites,
+        attempt=request.attempt,
+        provider=runtime.test_provider,
+        rootfs_profiles=runtime.rootfs_profiles,
+        test_suites=runtime.test_suites,
     )
     if input_failure is not None:
         return input_failure
@@ -1285,7 +1272,7 @@ def target_run_tests_handler(
     if inputs.adhoc_commands:
         missing = missing_destructive_permissions(
             "target.run_tests",
-            acknowledged_permissions or [],
+            request.acknowledged_permissions or [],
             registry=TARGET_DESTRUCTIVE_PERMISSIONS,
         )
         if missing:
@@ -1301,8 +1288,8 @@ def target_run_tests_handler(
             run_id=run_id,
             inputs=inputs,
             force_rerun=force_rerun,
-            admission=admission,
-            session_registry=session_registry,
+            admission=runtime.admission,
+            session_registry=runtime.session_registry,
         )
         if isinstance(completed, ToolResponse):
             return completed

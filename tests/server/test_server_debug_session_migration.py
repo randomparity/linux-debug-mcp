@@ -12,6 +12,7 @@ from pathlib import Path
 
 from _layer4_fakes import FakeQemuTransport, build_txn
 from conftest import FakeMiEngine, FakeTestProvider, kernel_provenance_details, rootfs, write_vmlinux_with_build_id
+from handler_call_helpers import target_run_tests_handler
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile, RootfsProfile
@@ -28,7 +29,6 @@ from kdive.seams.target import (
     PlatformMetadata,
     TargetKey,
 )
-from kdive.target.handlers import target_run_tests_handler
 from kdive.transport.core.base import ExecutionState, LineRole, TransportRef
 
 # build_txn seeds the snapshot for TargetKey("local-qemu", "run-1"); use that run_id so the

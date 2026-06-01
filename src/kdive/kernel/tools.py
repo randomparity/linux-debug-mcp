@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
@@ -11,6 +11,9 @@ from kdive.config import BootOverrides, BuildOverrides
 from kdive.domain import ToolResponse
 from kdive.model import Model
 from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, optional_model_arg
+
+if TYPE_CHECKING:
+    from kdive.providers.local.build.local_kernel_build import LocalKernelBuildProvider
 
 
 class CreateRunHandler(Protocol):
@@ -24,6 +27,7 @@ class KernelBuildHandler(Protocol):
 @dataclass(frozen=True)
 class KernelToolRuntime:
     sensitive_paths: list[Path]
+    build_provider: LocalKernelBuildProvider | None = None
 
 
 @dataclass(frozen=True)

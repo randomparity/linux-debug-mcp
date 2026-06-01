@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from conftest import NoopBuildRunner as _NoopBuildRunner
 from conftest import make_source_tree
+from handler_call_helpers import kernel_build_handler, target_boot_handler, target_run_tests_handler
 from workflow_helpers import build_boot_test_request, call_workflow_build_boot_test_handler
 
 import kdive.server as server_module
@@ -29,9 +30,6 @@ from kdive.providers.local.target.libvirt_qemu import BootExecutionResult
 from kdive.providers.local.test.local_ssh_tests import TestExecutionResult as _TestExecutionResult
 from kdive.server import (
     create_run_handler,
-    kernel_build_handler,
-    target_boot_handler,
-    target_run_tests_handler,
     workflow_build_boot_test_handler,
 )
 from kdive.workflow import handlers as workflow_handlers

@@ -2,6 +2,7 @@ import threading
 from datetime import UTC, datetime
 
 from conftest import FakeTestProvider, create_booted_run, rootfs
+from handler_call_helpers import target_run_tests_handler
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS
@@ -15,7 +16,6 @@ from kdive.seams.target import (
     PlatformMetadata,
     TargetKey,
 )
-from kdive.target.handlers import target_run_tests_handler
 from kdive.transport.core.base import (
     ExecutionState,
     LineRole,

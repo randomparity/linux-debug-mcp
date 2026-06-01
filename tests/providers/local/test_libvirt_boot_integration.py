@@ -2,12 +2,12 @@ import os
 from pathlib import Path
 
 import pytest
+from handler_call_helpers import target_boot_handler
 
 from kdive.artifacts.handlers import create_run_handler
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import RootfsProfile, TargetProfile
 from kdive.domain import ArtifactRef, StepResult, StepStatus
-from kdive.target.handlers import target_boot_handler
 
 MANAGED_DOMAIN_PREFIX = "kdive-"
 REQUIRED_ENV = [
