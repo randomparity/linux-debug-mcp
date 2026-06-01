@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -11,6 +12,63 @@ SHARED_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "handlers" / "shared.py"
 PROBE_SEAM_SOURCE = ROOT / "src" / "kdive" / "seams" / "probes.py"
 
 
+def _module_ast(path: Path) -> ast.Module:
+    return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+
+def _defined_functions(path: Path) -> set[str]:
+    return {node.name for node in ast.walk(_module_ast(path)) if isinstance(node, ast.FunctionDef)}
+
+
+def _assigned_names(path: Path) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(_module_ast(path)):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return names
+
+
+def _imported_modules(path: Path) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(_module_ast(path)):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            modules.add(node.module)
+    return modules
+
+
+def _imported_names(path: Path, module: str) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(_module_ast(path)):
+        if isinstance(node, ast.ImportFrom) and node.module == module:
+            names.update(alias.name for alias in node.names)
+    return names
+
+
+def _function_node(path: Path, name: str) -> ast.FunctionDef:
+    for node in ast.walk(_module_ast(path)):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"{name} not defined in {path.relative_to(ROOT)}")
+
+
+def _called_names(node: ast.AST) -> set[str]:
+    calls: set[str] = set()
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call):
+            continue
+        if isinstance(child.func, ast.Name):
+            calls.add(child.func.id)
+        elif isinstance(child.func, ast.Attribute) and isinstance(child.func.value, ast.Name):
+            calls.add(f"{child.func.value.id}.{child.func.attr}")
+    return calls
+
+
 def test_extracted_handler_modules_do_not_import_server_module() -> None:
     handler_sources = [
         path
@@ -18,17 +76,13 @@ def test_extracted_handler_modules_do_not_import_server_module() -> None:
         if path.name in {"handlers.py", "session_handlers.py", "crash_handler.py"}
     ]
 
-    offenders = [
-        path.relative_to(ROOT) for path in handler_sources if "kdive.server" in path.read_text(encoding="utf-8")
-    ]
+    offenders = [path.relative_to(ROOT) for path in handler_sources if "kdive.server" in _imported_modules(path)]
 
     assert offenders == []
 
 
 def test_server_does_not_own_shared_probe_helpers() -> None:
-    server_source = SERVER_SOURCE.read_text(encoding="utf-8")
-
-    assert "PROBE_STDOUT_CAP =" not in server_source
+    server_definitions = _defined_functions(SERVER_SOURCE)
 
     duplicated_helpers = [
         "_resolve_probe_context",
@@ -41,61 +95,57 @@ def test_server_does_not_own_shared_probe_helpers() -> None:
         "_assemble_kdump_response",
     ]
 
-    assert [helper for helper in duplicated_helpers if f"def {helper}(" in server_source] == []
+    assert "PROBE_STDOUT_CAP" not in _assigned_names(SERVER_SOURCE)
+    assert [helper for helper in duplicated_helpers if helper in server_definitions] == []
 
 
 def test_live_introspection_does_not_keep_passthrough_wrappers() -> None:
-    handler_source = INTROSPECT_HANDLERS_SOURCE.read_text(encoding="utf-8")
-    execution_source = INTROSPECT_EXECUTION_SOURCE.read_text(encoding="utf-8")
-
-    assert "def _execute_live_introspect_call(" not in handler_source
-    assert "def _prepare_live_wrapper(" not in execution_source
+    assert "_execute_live_introspect_call" not in _defined_functions(INTROSPECT_HANDLERS_SOURCE)
+    assert "_prepare_live_wrapper" not in _defined_functions(INTROSPECT_EXECUTION_SOURCE)
 
 
 def test_shared_probe_helpers_live_in_public_boundary_module() -> None:
-    shared_source = SHARED_HANDLERS_SOURCE.read_text(encoding="utf-8")
-    introspect_source = INTROSPECT_HANDLERS_SOURCE.read_text(encoding="utf-8")
-    postmortem_source = POSTMORTEM_HANDLERS_SOURCE.read_text(encoding="utf-8")
+    shared_definitions = _defined_functions(SHARED_HANDLERS_SOURCE)
 
-    assert "def _resolve_probe_context(" not in shared_source
-    assert "def _parse_probe_stdout(" not in shared_source
+    assert "_resolve_probe_context" not in shared_definitions
+    assert "_parse_probe_stdout" not in shared_definitions
     assert PROBE_SEAM_SOURCE.is_file()
-    assert "from kdive.seams.probes import" in introspect_source
-    assert "from kdive.seams.probes import" in postmortem_source
-    assert "from kdive.target.probes import" not in introspect_source
-    assert "from kdive.target.probes import" not in postmortem_source
+    assert _imported_names(INTROSPECT_HANDLERS_SOURCE, "kdive.seams.probes")
+    assert _imported_names(POSTMORTEM_HANDLERS_SOURCE, "kdive.seams.probes")
+    assert "kdive.target.probes" not in _imported_modules(INTROSPECT_HANDLERS_SOURCE)
+    assert "kdive.target.probes" not in _imported_modules(POSTMORTEM_HANDLERS_SOURCE)
 
 
 def test_target_probe_substrate_does_not_own_feature_response_assembly() -> None:
-    target_source = PROBE_SEAM_SOURCE.read_text(encoding="utf-8")
-    introspect_source = INTROSPECT_HANDLERS_SOURCE.read_text(encoding="utf-8")
-    postmortem_source = POSTMORTEM_HANDLERS_SOURCE.read_text(encoding="utf-8")
+    target_imports = _imported_modules(PROBE_SEAM_SOURCE)
+    target_definitions = _defined_functions(PROBE_SEAM_SOURCE)
 
-    assert "kdive.prereqs.drgn_probe" not in target_source
-    assert "kdive.prereqs.kdump_probe" not in target_source
-    assert "kdive.postmortem.dumps" not in target_source
-    assert "def assemble_introspect_probe_response(" not in target_source
-    assert "def assemble_kdump_probe_response(" not in target_source
-    assert "from kdive.introspect.probes import assemble_introspect_probe_response" in introspect_source
-    assert "from kdive.postmortem.probes import assemble_kdump_probe_response" in postmortem_source
+    assert "kdive.prereqs.drgn_probe" not in target_imports
+    assert "kdive.prereqs.kdump_probe" not in target_imports
+    assert "kdive.postmortem.dumps" not in target_imports
+    assert "assemble_introspect_probe_response" not in target_definitions
+    assert "assemble_kdump_probe_response" not in target_definitions
+    assert "assemble_introspect_probe_response" in _imported_names(
+        INTROSPECT_HANDLERS_SOURCE, "kdive.introspect.probes"
+    )
+    assert "assemble_kdump_probe_response" in _imported_names(POSTMORTEM_HANDLERS_SOURCE, "kdive.postmortem.probes")
 
 
 def test_feature_probe_handlers_import_public_target_probe_substrate() -> None:
     for source_path in (INTROSPECT_HANDLERS_SOURCE, POSTMORTEM_HANDLERS_SOURCE):
-        source = source_path.read_text(encoding="utf-8")
-        assert "from kdive.seams.probes import (" in source
-        assert "    _" not in source.split("from kdive.seams.probes import (", 1)[1].split(")", 1)[0]
+        seam_imports = _imported_names(source_path, "kdive.seams.probes")
+        assert seam_imports
+        assert not any(name.startswith("_") for name in seam_imports)
 
 
 def test_shared_probe_boundary_does_not_import_private_transport_handlers() -> None:
-    probe_source = PROBE_SEAM_SOURCE.read_text(encoding="utf-8")
-    target_source = (ROOT / "src" / "kdive" / "target" / "handlers.py").read_text(encoding="utf-8")
-    debug_session_source = (ROOT / "src" / "kdive" / "debug" / "session_handlers.py").read_text(encoding="utf-8")
+    target_handlers = ROOT / "src" / "kdive" / "target" / "handlers.py"
+    debug_session_handlers = ROOT / "src" / "kdive" / "debug" / "session_handlers.py"
 
-    assert "from kdive.transport.handlers import _require_snapshot" not in probe_source
-    assert "from kdive.transport.handlers import _require_snapshot" not in target_source
-    assert "_require_snapshot" not in debug_session_source
-    assert "require_target_snapshot" in probe_source
+    assert "_require_snapshot" not in _imported_names(PROBE_SEAM_SOURCE, "kdive.transport.handlers")
+    assert "_require_snapshot" not in _imported_names(target_handlers, "kdive.transport.handlers")
+    assert "_require_snapshot" not in _imported_names(debug_session_handlers, "kdive.transport.handlers")
+    assert "require_target_snapshot" in _imported_names(PROBE_SEAM_SOURCE, "kdive.coordination.admission")
 
 
 def test_server_does_not_reexport_private_feature_helpers() -> None:
@@ -158,19 +208,20 @@ def test_server_public_api_is_explicit_and_composition_scoped() -> None:
 
 
 def test_transport_machinery_startup_uses_named_phase_helpers() -> None:
-    server_source = SERVER_SOURCE.read_text(encoding="utf-8")
-    builder_source = server_source.split("def _build_transport_machinery(", 1)[1].split("\ndef create_app(", 1)[0]
+    server_definitions = _defined_functions(SERVER_SOURCE)
+    builder = _function_node(SERVER_SOURCE, "_build_transport_machinery")
+    builder_calls = _called_names(builder)
 
     for helper in (
         "_bind_transport_lifecycle",
         "_build_transport_secrets",
         "_reconcile_transport_before_serve",
     ):
-        assert f"def {helper}(" in server_source
-        assert f"{helper}(" in builder_source
+        assert helper in server_definitions
+        assert helper in builder_calls
 
-    assert "SecretsStore(" not in builder_source
-    assert "session_registry.reconcile(" not in builder_source
+    assert "SecretsStore" not in builder_calls
+    assert "session_registry.reconcile" not in builder_calls
 
 
 def test_server_does_not_expose_capability_model_or_helper_aliases() -> None:
