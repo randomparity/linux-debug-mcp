@@ -23,6 +23,7 @@ from kdive.debug.operations import (
     _recorded_transport_session_id,
 )
 from kdive.debug.policy import ensure_debug_operation_enabled, resolve_debug_profile
+from kdive.debug.tools import DebugSessionRequest, DebugToolContext
 from kdive.domain import ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.providers.debug import DebugSessionState, GdbMiEngine, GdbMiSessionRegistry, ProviderDebugError
 from kdive.safety.redaction import Redactor
@@ -105,7 +106,7 @@ def _end_mi_debug_session(
     )
 
 
-def debug_end_session_handler(
+def _end_session(
     *,
     artifact_root: Path,
     run_id: str,
@@ -161,3 +162,17 @@ def debug_end_session_handler(
         )
         _mark_legacy_session_recovery_required(run_id=run_id, admission=admission, session_registry=session_registry)
     return response
+
+
+def debug_end_session_handler(*, request: DebugSessionRequest, runtime: DebugToolContext) -> ToolResponse:
+    return _end_session(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_session_id=request.debug_session_id,
+        transaction=runtime.transaction,
+        admission=runtime.admission,
+        session_registry=runtime.session_registry,
+        session_guard=runtime.session_guard,
+        gdb_mi_engine=runtime.gdb_mi_engine,
+        gdb_mi_sessions=runtime.gdb_mi_sessions,
+    )

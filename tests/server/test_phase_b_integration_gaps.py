@@ -46,7 +46,7 @@ from kdive.coordination.admission import AdmissionService, publish_ready_snapsho
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.debug.policy import halt_debug_transport
-from kdive.debug.session_handlers import debug_start_session_handler
+from kdive.debug.session_handlers import _start_session as debug_start_session_handler
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
 from kdive.providers.local.test.local_ssh_tests import TestExecutionResult

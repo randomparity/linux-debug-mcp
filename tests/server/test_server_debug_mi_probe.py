@@ -21,7 +21,7 @@ from kdive.config import DebugProfile, RootfsProfile
 from kdive.coordination.admission import AdmissionService, publish_ready_snapshot
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
-from kdive.debug.session_handlers import debug_start_session_handler
+from kdive.debug.session_handlers import _start_session as debug_start_session_handler
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import CANONICAL_PROBE_SYMBOL, GdbMiSessionRegistry
 from kdive.seams.target import (

@@ -9,6 +9,7 @@ session-of-record other than the live engine attachment.
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import get_type_hints
 
@@ -28,15 +29,14 @@ from kdive.config import DebugProfile
 from kdive.coordination.admission import AdmissionService, publish_ready_snapshot
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
-from kdive.debug import bound_handlers as debug_bound_handlers
 from kdive.debug import handlers as debug_handlers
 from kdive.debug import operations as debug_operations
 from kdive.debug import session_end as debug_session_end
 from kdive.debug import tools as debug_tools
 from kdive.debug.session_end import _end_mi_debug_session, debug_end_session_handler
-from kdive.debug.session_handlers import debug_start_session_handler
+from kdive.debug.session_handlers import _start_session as debug_start_session_handler
 from kdive.debug.tools import DebugToolContext, DebugToolHandlers
-from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
+from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus
 from kdive.introspect import execution as introspect_execution
 from kdive.providers.debug import GdbMiSessionRegistry as GdbMiSessionRegistryContract
 from kdive.providers.local.debug.gdb_mi import (
@@ -385,8 +385,8 @@ def test_debug_session_details_uses_state_enum_for_ended_filter() -> None:
 def test_server_delegates_debug_handler_set_to_debug_package() -> None:
     server_source = Path(server_module.__file__).read_text(encoding="utf-8")
 
-    assert "DebugToolHandlers(" not in server_source
-    assert "debug_tool_handlers()" in server_source
+    assert "debug_tool_handlers()" not in server_source
+    assert "kdive.debug.bound_handlers" not in server_source
     for handler_name in (
         "debug_read_registers_handler",
         "debug_set_breakpoint_handler",
@@ -428,18 +428,11 @@ def test_debug_operation_handlers_accept_runtime_instead_of_dependency_bundle() 
         "debug_interrupt_handler",
     )
 
-    for module in (debug_handlers, debug_bound_handlers):
-        for handler_name in operation_handler_names:
-            handler = getattr(module, handler_name)
-            params = inspect.signature(handler).parameters
-            assert "runtime" in params
-            assert all(param.kind is not inspect.Parameter.VAR_KEYWORD for param in params.values())
-            assert dependency_params.isdisjoint(params)
-
     for handler_name in operation_handler_names:
         handler = getattr(debug_handlers, handler_name)
         params = inspect.signature(handler).parameters
-        assert params["runtime"].annotation == "DebugRuntime"
+        assert list(params) == ["request", "runtime"]
+        assert dependency_params.isdisjoint(params)
 
     assert not hasattr(debug_tools, "_debug_runtime_kwargs")
     assert not hasattr(debug_tools, "_gated_debug_runtime_kwargs")
@@ -460,26 +453,16 @@ def test_debug_load_module_symbols_handler_groups_runtime_and_options() -> None:
         "gdb_mi_sessions",
     }
 
-    assert "runtime" in params
-    assert "options" in params
+    assert list(params) == ["request", "runtime"]
     assert dependency_params.isdisjoint(params)
     assert all(param.kind is not inspect.Parameter.VAR_KEYWORD for param in params.values())
     assert hasattr(module_symbols, "ModuleSymbolLoadOptions")
 
 
-def test_debug_bound_handlers_use_request_forwarding_factories() -> None:
-    source = Path(debug_bound_handlers.__file__).read_text(encoding="utf-8")
+def test_debug_bound_handler_adapter_module_is_removed() -> None:
+    import importlib.util
 
-    for helper_name in (
-        "_make_symbol_bound_handler",
-        "_make_breakpoint_id_bound_handler",
-        "_make_session_query_bound_handler",
-        "_make_execution_control_bound_handler",
-    ):
-        assert f"def {helper_name}(" in source
-
-    assert "request = request or" not in source
-    assert "artifact_root: Path | None" not in source
+    assert importlib.util.find_spec("kdive.debug.bound_handlers") is None
 
 
 def test_debug_operation_leaf_handlers_use_request_forwarding_factory() -> None:
@@ -492,39 +475,18 @@ def test_debug_operation_leaf_handlers_use_request_forwarding_factory() -> None:
         "debug_read_memory_handler",
         "debug_evaluate_handler",
     ):
-        assert f"def {handler_name}(" not in source
         assert callable(getattr(debug_handlers, handler_name))
+        assert list(inspect.signature(getattr(debug_handlers, handler_name)).parameters) == ["request", "runtime"]
 
 
-def test_debug_operation_leaf_handlers_require_explicit_operation_core(tmp_path: Path) -> None:
-    with pytest.raises(TypeError, match="operation_core"):
+def test_debug_operation_handlers_hide_explicit_operation_core(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="unexpected keyword"):
         debug_handlers.debug_read_registers_handler(
             artifact_root=tmp_path / "runs",
             run_id="run-1",
             registers=["rax"],
             runtime=debug_handlers.DebugRuntime(),
         )
-
-
-def test_debug_operation_handlers_accept_explicit_operation_core(tmp_path: Path) -> None:
-    captured: dict[str, object] = {}
-
-    def operation_core(**kwargs):
-        captured.update(kwargs)
-        return ToolResponse.success(summary="read", run_id=kwargs["run_id"], data={})
-
-    response = debug_handlers.debug_read_registers_handler(
-        artifact_root=tmp_path / "runs",
-        run_id="run-1",
-        registers=["rax"],
-        runtime=debug_handlers.DebugRuntime(),
-        operation_core=operation_core,
-    )
-
-    assert response.ok is True
-    assert captured["artifact_root"] == tmp_path / "runs"
-    assert captured["run_id"] == "run-1"
-    assert isinstance(captured["request"], debug_handlers.DebugReadRegistersRequest)
 
 
 def test_server_no_longer_reexports_private_debug_operation_helpers() -> None:

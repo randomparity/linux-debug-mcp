@@ -3,7 +3,7 @@ from pathlib import Path
 from workflow_helpers import call_workflow_build_boot_debug_handler
 
 import kdive.server as server_module
-from kdive.debug.session_handlers import debug_start_session_handler
+from kdive.debug.session_handlers import _start_session as debug_start_session_handler
 from kdive.domain import ErrorCategory, ToolResponse
 from kdive.server import (
     DEFAULT_TARGET_PROFILES,

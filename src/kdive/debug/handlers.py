@@ -165,6 +165,38 @@ class DebugRuntime:
     gdb_mi_sessions: GdbMiSessionRegistry | None = None
 
 
+class DebugToolSessionRequest(Protocol):
+    artifact_root: Path
+    run_id: str
+    debug_session_id: str | None
+
+
+class DebugToolRegistersRequest(DebugToolSessionRequest, Protocol):
+    registers: list[str]
+
+
+class DebugToolSymbolRequest(DebugToolSessionRequest, Protocol):
+    symbol: str
+
+
+class DebugToolMemoryRequest(DebugToolSessionRequest, Protocol):
+    address: int
+    byte_count: int
+
+
+class DebugToolEvaluateRequest(DebugToolSessionRequest, Protocol):
+    inspector: str
+    arguments: dict[str, object] | None
+
+
+class DebugToolBreakpointIdRequest(DebugToolSessionRequest, Protocol):
+    breakpoint_id: str
+
+
+class DebugToolExecutionRequest(DebugToolSessionRequest, Protocol):
+    timeout_seconds: int | None
+
+
 class DebugOperationCore(Protocol):
     def __call__(
         self,
@@ -430,3 +462,171 @@ debug_step_handler = _make_debug_execution_control_handler("debug_step_handler",
 debug_next_handler = _make_debug_execution_control_handler("debug_next_handler", DebugNextRequest)
 debug_finish_handler = _make_debug_execution_control_handler("debug_finish_handler", DebugFinishRequest)
 debug_interrupt_handler = _make_debug_execution_control_handler("debug_interrupt_handler", DebugInterruptRequest)
+
+_debug_read_registers_leaf_handler = debug_read_registers_handler
+_debug_read_symbol_leaf_handler = debug_read_symbol_handler
+_debug_read_memory_leaf_handler = debug_read_memory_handler
+_debug_evaluate_leaf_handler = debug_evaluate_handler
+_debug_set_breakpoint_leaf_handler = debug_set_breakpoint_handler
+_debug_set_watchpoint_leaf_handler = debug_set_watchpoint_handler
+_debug_clear_breakpoint_leaf_handler = debug_clear_breakpoint_handler
+_debug_clear_watchpoint_leaf_handler = debug_clear_watchpoint_handler
+_debug_list_breakpoints_leaf_handler = debug_list_breakpoints_handler
+_debug_backtrace_leaf_handler = debug_backtrace_handler
+_debug_list_variables_leaf_handler = debug_list_variables_handler
+_debug_continue_leaf_handler = debug_continue_handler
+_debug_step_leaf_handler = debug_step_handler
+_debug_next_leaf_handler = debug_next_handler
+_debug_finish_leaf_handler = debug_finish_handler
+_debug_interrupt_leaf_handler = debug_interrupt_handler
+
+
+def _operation_core() -> DebugOperationCore:
+    from kdive.debug.operations import _debug_operation_response
+
+    return _debug_operation_response
+
+
+def debug_read_registers_handler(*, request: DebugToolRegistersRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _debug_read_registers_leaf_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        registers=request.registers,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_operation_core(),
+    )
+
+
+def debug_read_symbol_handler(*, request: DebugToolSymbolRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _debug_read_symbol_leaf_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        symbol=request.symbol,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_operation_core(),
+    )
+
+
+def debug_read_memory_handler(*, request: DebugToolMemoryRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _debug_read_memory_leaf_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        address=request.address,
+        byte_count=request.byte_count,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_operation_core(),
+    )
+
+
+def debug_evaluate_handler(*, request: DebugToolEvaluateRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _debug_evaluate_leaf_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        inspector=request.inspector,
+        arguments=request.arguments,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_operation_core(),
+    )
+
+
+def _symbol_control_handler(
+    leaf_handler: Callable[..., ToolResponse], *, request: DebugToolSymbolRequest, runtime: DebugRuntime
+) -> ToolResponse:
+    return leaf_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        symbol=request.symbol,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_operation_core(),
+    )
+
+
+def _breakpoint_id_control_handler(
+    leaf_handler: Callable[..., ToolResponse], *, request: DebugToolBreakpointIdRequest, runtime: DebugRuntime
+) -> ToolResponse:
+    return leaf_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        breakpoint_id=request.breakpoint_id,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_operation_core(),
+    )
+
+
+def _session_query_handler(
+    leaf_handler: Callable[..., ToolResponse], *, request: DebugToolSessionRequest, runtime: DebugRuntime
+) -> ToolResponse:
+    return leaf_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_session_id=request.debug_session_id,
+        runtime=runtime,
+        operation_core=_operation_core(),
+    )
+
+
+def _execution_control_handler(
+    leaf_handler: Callable[..., ToolResponse], *, request: DebugToolExecutionRequest, runtime: DebugRuntime
+) -> ToolResponse:
+    return leaf_handler(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_session_id=request.debug_session_id,
+        timeout_seconds=request.timeout_seconds,
+        runtime=runtime,
+        operation_core=_operation_core(),
+    )
+
+
+def debug_set_breakpoint_handler(*, request: DebugToolSymbolRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _symbol_control_handler(_debug_set_breakpoint_leaf_handler, request=request, runtime=runtime)
+
+
+def debug_set_watchpoint_handler(*, request: DebugToolSymbolRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _symbol_control_handler(_debug_set_watchpoint_leaf_handler, request=request, runtime=runtime)
+
+
+def debug_clear_breakpoint_handler(*, request: DebugToolBreakpointIdRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _breakpoint_id_control_handler(_debug_clear_breakpoint_leaf_handler, request=request, runtime=runtime)
+
+
+def debug_clear_watchpoint_handler(*, request: DebugToolBreakpointIdRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _breakpoint_id_control_handler(_debug_clear_watchpoint_leaf_handler, request=request, runtime=runtime)
+
+
+def debug_list_breakpoints_handler(*, request: DebugToolSessionRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _session_query_handler(_debug_list_breakpoints_leaf_handler, request=request, runtime=runtime)
+
+
+def debug_backtrace_handler(*, request: DebugToolSessionRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _session_query_handler(_debug_backtrace_leaf_handler, request=request, runtime=runtime)
+
+
+def debug_list_variables_handler(*, request: DebugToolSessionRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _session_query_handler(_debug_list_variables_leaf_handler, request=request, runtime=runtime)
+
+
+def debug_continue_handler(*, request: DebugToolExecutionRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _execution_control_handler(_debug_continue_leaf_handler, request=request, runtime=runtime)
+
+
+def debug_step_handler(*, request: DebugToolExecutionRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _execution_control_handler(_debug_step_leaf_handler, request=request, runtime=runtime)
+
+
+def debug_next_handler(*, request: DebugToolExecutionRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _execution_control_handler(_debug_next_leaf_handler, request=request, runtime=runtime)
+
+
+def debug_finish_handler(*, request: DebugToolExecutionRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _execution_control_handler(_debug_finish_leaf_handler, request=request, runtime=runtime)
+
+
+def debug_interrupt_handler(*, request: DebugToolExecutionRequest, runtime: DebugRuntime) -> ToolResponse:
+    return _execution_control_handler(_debug_interrupt_leaf_handler, request=request, runtime=runtime)

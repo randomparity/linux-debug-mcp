@@ -24,6 +24,7 @@ from kdive.debug.operations import (
     _teardown_debug_transport,
 )
 from kdive.debug.policy import ensure_debug_operation_enabled, halt_debug_transport, resolve_debug_profile
+from kdive.debug.tools import DebugStartSessionRequest, DebugToolContext
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.handlers.shared import _require_value
 from kdive.providers.debug import (
@@ -671,7 +672,7 @@ def _debug_start_session_success_response(
     )
 
 
-def debug_start_session_handler(
+def _start_session(
     *,
     artifact_root: Path,
     run_id: str,
@@ -770,4 +771,19 @@ def debug_start_session_handler(
         artifacts=persisted.artifacts,
         admission=admission,
         redactor=preflight.redactor,
+    )
+
+
+def debug_start_session_handler(*, request: DebugStartSessionRequest, runtime: DebugToolContext) -> ToolResponse:
+    return _start_session(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_profile=request.debug_profile,
+        new_session=request.new_session,
+        transaction=runtime.transaction,
+        admission=runtime.admission,
+        session_registry=runtime.session_registry,
+        session_guard=runtime.session_guard,
+        gdb_mi_engine=runtime.gdb_mi_engine,
+        gdb_mi_sessions=runtime.gdb_mi_sessions,
     )

@@ -166,43 +166,43 @@ def test_transport_and_prereq_handlers_accept_structured_boundaries_only() -> No
         transport_open_handler,
     )
 
-    handlers = [
+    debug_handlers = [
         transport_open_handler,
         transport_close_handler,
         transport_inject_break_handler,
         prerequisites_handler,
     ]
 
-    for handler in handlers:
+    for handler in debug_handlers:
         assert list(inspect.signature(handler).parameters) == ["request", "runtime"]
 
 
-def test_debug_bound_handlers_accept_structured_boundaries_only() -> None:
-    from kdive.debug import bound_handlers
+def test_debug_handlers_accept_structured_boundaries_only() -> None:
+    from kdive.debug import handlers, module_symbols, session_end, session_handlers
 
-    handlers = [
-        bound_handlers.debug_start_session_handler,
-        bound_handlers.debug_read_registers_handler,
-        bound_handlers.debug_read_symbol_handler,
-        bound_handlers.debug_read_memory_handler,
-        bound_handlers.debug_evaluate_handler,
-        bound_handlers.debug_load_module_symbols_handler,
-        bound_handlers.debug_set_breakpoint_handler,
-        bound_handlers.debug_set_watchpoint_handler,
-        bound_handlers.debug_clear_breakpoint_handler,
-        bound_handlers.debug_clear_watchpoint_handler,
-        bound_handlers.debug_list_breakpoints_handler,
-        bound_handlers.debug_backtrace_handler,
-        bound_handlers.debug_list_variables_handler,
-        bound_handlers.debug_continue_handler,
-        bound_handlers.debug_step_handler,
-        bound_handlers.debug_next_handler,
-        bound_handlers.debug_finish_handler,
-        bound_handlers.debug_interrupt_handler,
-        bound_handlers.debug_end_session_handler,
+    debug_handlers = [
+        session_handlers.debug_start_session_handler,
+        handlers.debug_read_registers_handler,
+        handlers.debug_read_symbol_handler,
+        handlers.debug_read_memory_handler,
+        handlers.debug_evaluate_handler,
+        module_symbols.debug_load_module_symbols_handler,
+        handlers.debug_set_breakpoint_handler,
+        handlers.debug_set_watchpoint_handler,
+        handlers.debug_clear_breakpoint_handler,
+        handlers.debug_clear_watchpoint_handler,
+        handlers.debug_list_breakpoints_handler,
+        handlers.debug_backtrace_handler,
+        handlers.debug_list_variables_handler,
+        handlers.debug_continue_handler,
+        handlers.debug_step_handler,
+        handlers.debug_next_handler,
+        handlers.debug_finish_handler,
+        handlers.debug_interrupt_handler,
+        session_end.debug_end_session_handler,
     ]
 
-    for handler in handlers:
+    for handler in debug_handlers:
         assert list(inspect.signature(handler).parameters) == ["request", "runtime"]
 
 

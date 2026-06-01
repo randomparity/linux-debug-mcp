@@ -30,9 +30,11 @@ from kdive.coordination.admission import (
 from kdive.coordination.lease import ConsoleLeaseManager
 from kdive.coordination.registry import OrphanReap, SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
-from kdive.debug.bound_handlers import debug_tool_handlers
-from kdive.debug.session_handlers import debug_start_session_handler as _workflow_debug_start_session_handler
-from kdive.debug.tools import DebugToolContext, register_debug_tools
+from kdive.debug import handlers as debug_handlers
+from kdive.debug import module_symbols as debug_module_symbols
+from kdive.debug import session_end as debug_session_end
+from kdive.debug import session_handlers as debug_session_handlers
+from kdive.debug.tools import DebugToolContext, DebugToolHandlers, register_debug_tools
 from kdive.default_profiles import DEFAULT_BUILD_PROFILES as _DEFAULT_BUILD_PROFILES
 from kdive.default_profiles import DEFAULT_DEBUG_PROFILES as _DEFAULT_DEBUG_PROFILES
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES as _DEFAULT_ROOTFS_PROFILES
@@ -344,7 +346,7 @@ def _workflow_handler_dependencies() -> WorkflowHandlerDependencies:
         kernel_build_handler=_kernel_build_workflow_handler,
         target_boot_handler=_target_boot_workflow_handler,
         target_run_tests_handler=_target_run_tests_workflow_handler,
-        debug_start_session_handler=_workflow_debug_start_session_handler,
+        debug_start_session_handler=debug_session_handlers._start_session,
         artifacts_collect_handler=artifacts_collect_handler,
     )
 
@@ -681,7 +683,27 @@ def create_app(
             gdb_mi_engine=gdb_mi_engine,
             gdb_mi_sessions=gdb_mi_sessions,
         ),
-        handlers=debug_tool_handlers(),
+        handlers=DebugToolHandlers(
+            start_session=debug_session_handlers.debug_start_session_handler,
+            read_registers=debug_handlers.debug_read_registers_handler,
+            read_symbol=debug_handlers.debug_read_symbol_handler,
+            read_memory=debug_handlers.debug_read_memory_handler,
+            evaluate=debug_handlers.debug_evaluate_handler,
+            load_module_symbols=debug_module_symbols.debug_load_module_symbols_handler,
+            set_breakpoint=debug_handlers.debug_set_breakpoint_handler,
+            set_watchpoint=debug_handlers.debug_set_watchpoint_handler,
+            clear_breakpoint=debug_handlers.debug_clear_breakpoint_handler,
+            clear_watchpoint=debug_handlers.debug_clear_watchpoint_handler,
+            list_breakpoints=debug_handlers.debug_list_breakpoints_handler,
+            backtrace=debug_handlers.debug_backtrace_handler,
+            list_variables=debug_handlers.debug_list_variables_handler,
+            continue_execution=debug_handlers.debug_continue_handler,
+            step=debug_handlers.debug_step_handler,
+            next=debug_handlers.debug_next_handler,
+            finish=debug_handlers.debug_finish_handler,
+            interrupt=debug_handlers.debug_interrupt_handler,
+            end_session=debug_session_end.debug_end_session_handler,
+        ),
     )
 
     register_transport_tools(

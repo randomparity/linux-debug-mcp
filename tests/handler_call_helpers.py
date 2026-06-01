@@ -7,23 +7,23 @@ from kdive.config import BootOverrides, DebugProfile, RootfsProfile, TargetProfi
 from kdive.coordination.admission import AdmissionService, SnapshotStore
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
-from kdive.debug.bound_handlers import debug_backtrace_handler as _debug_backtrace_handler
-from kdive.debug.bound_handlers import debug_clear_breakpoint_handler as _debug_clear_breakpoint_handler
-from kdive.debug.bound_handlers import debug_clear_watchpoint_handler as _debug_clear_watchpoint_handler
-from kdive.debug.bound_handlers import debug_continue_handler as _debug_continue_handler
-from kdive.debug.bound_handlers import debug_evaluate_handler as _debug_evaluate_handler
-from kdive.debug.bound_handlers import debug_finish_handler as _debug_finish_handler
-from kdive.debug.bound_handlers import debug_interrupt_handler as _debug_interrupt_handler
-from kdive.debug.bound_handlers import debug_list_breakpoints_handler as _debug_list_breakpoints_handler
-from kdive.debug.bound_handlers import debug_list_variables_handler as _debug_list_variables_handler
-from kdive.debug.bound_handlers import debug_next_handler as _debug_next_handler
-from kdive.debug.bound_handlers import debug_read_memory_handler as _debug_read_memory_handler
-from kdive.debug.bound_handlers import debug_read_registers_handler as _debug_read_registers_handler
-from kdive.debug.bound_handlers import debug_read_symbol_handler as _debug_read_symbol_handler
-from kdive.debug.bound_handlers import debug_set_breakpoint_handler as _debug_set_breakpoint_handler
-from kdive.debug.bound_handlers import debug_set_watchpoint_handler as _debug_set_watchpoint_handler
-from kdive.debug.bound_handlers import debug_step_handler as _debug_step_handler
 from kdive.debug.handlers import DebugRuntime
+from kdive.debug.handlers import debug_backtrace_handler as _debug_backtrace_handler
+from kdive.debug.handlers import debug_clear_breakpoint_handler as _debug_clear_breakpoint_handler
+from kdive.debug.handlers import debug_clear_watchpoint_handler as _debug_clear_watchpoint_handler
+from kdive.debug.handlers import debug_continue_handler as _debug_continue_handler
+from kdive.debug.handlers import debug_evaluate_handler as _debug_evaluate_handler
+from kdive.debug.handlers import debug_finish_handler as _debug_finish_handler
+from kdive.debug.handlers import debug_interrupt_handler as _debug_interrupt_handler
+from kdive.debug.handlers import debug_list_breakpoints_handler as _debug_list_breakpoints_handler
+from kdive.debug.handlers import debug_list_variables_handler as _debug_list_variables_handler
+from kdive.debug.handlers import debug_next_handler as _debug_next_handler
+from kdive.debug.handlers import debug_read_memory_handler as _debug_read_memory_handler
+from kdive.debug.handlers import debug_read_registers_handler as _debug_read_registers_handler
+from kdive.debug.handlers import debug_read_symbol_handler as _debug_read_symbol_handler
+from kdive.debug.handlers import debug_set_breakpoint_handler as _debug_set_breakpoint_handler
+from kdive.debug.handlers import debug_set_watchpoint_handler as _debug_set_watchpoint_handler
+from kdive.debug.handlers import debug_step_handler as _debug_step_handler
 from kdive.debug.tools import (
     DebugBreakpointIdRequest,
     DebugEvaluateRequest,

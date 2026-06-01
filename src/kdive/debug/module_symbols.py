@@ -21,6 +21,7 @@ from kdive.debug.operations import (
     _teardown_stalled_debug_session,
 )
 from kdive.debug.policy import ensure_debug_operation_enabled, resolve_debug_profile
+from kdive.debug.tools import DebugLoadModuleSymbolsRequest, DebugToolContext
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES
 from kdive.domain import ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.providers.debug import (
@@ -140,7 +141,7 @@ def _default_module_ko_finder(build_tree: Path, module_name: str) -> Path | None
     return None
 
 
-def debug_load_module_symbols_handler(
+def _load_module_symbols(
     *,
     artifact_root: Path,
     run_id: str,
@@ -205,6 +206,29 @@ def debug_load_module_symbols_handler(
         run_id=run_id,
         data=redactor.redact_value({"loaded_module": completed.loaded_payload}),
         suggested_next_actions=["debug.set_breakpoint"],
+    )
+
+
+def debug_load_module_symbols_handler(
+    *, request: DebugLoadModuleSymbolsRequest, runtime: DebugToolContext
+) -> ToolResponse:
+    return _load_module_symbols(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        options=ModuleSymbolLoadOptions(
+            module=request.module,
+            sections=request.sections,
+            ko_path=request.ko_path,
+        ),
+        debug_session_id=request.debug_session_id,
+        runtime=DebugRuntime(
+            admission=runtime.admission,
+            transaction=runtime.transaction,
+            session_registry=runtime.session_registry,
+            session_guard=runtime.session_guard,
+            gdb_mi_engine=runtime.gdb_mi_engine,
+            gdb_mi_sessions=runtime.gdb_mi_sessions,
+        ),
     )
 
 

@@ -9,7 +9,7 @@ from kdive.artifacts.store import ArtifactStore
 from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, BootOverrides, BuildOverrides, RootfsProfile, TargetProfile
 from kdive.coordination.admission import AdmissionService, SnapshotStore
 from kdive.coordination.registry import SessionRegistry
-from kdive.debug import bound_handlers as debug_bound_handlers
+from kdive.debug import handlers as debug_handlers
 from kdive.domain import ArtifactRef, StepResult, StepStatus, ToolResponse
 from kdive.kernel import handlers as kernel_handlers
 from kdive.kernel import tools as kernel_tools
@@ -248,13 +248,12 @@ def test_prerequisites_handler_lives_outside_server_catch_all() -> None:
 
 def test_debug_operation_handlers_live_outside_server_catch_all() -> None:
     for handler in (
-        debug_bound_handlers.debug_read_registers_handler,
-        debug_bound_handlers.debug_set_breakpoint_handler,
-        debug_bound_handlers.debug_continue_handler,
+        debug_handlers.debug_read_registers_handler,
+        debug_handlers.debug_set_breakpoint_handler,
+        debug_handlers.debug_continue_handler,
     ):
-        assert handler.__module__ == "kdive.debug.bound_handlers"
-        assert "_debug_operation_response" in inspect.getsource(handler)
-        assert "operation_core" in inspect.getsource(handler)
+        assert handler.__module__ == "kdive.debug.handlers"
+        assert list(inspect.signature(handler).parameters) == ["request", "runtime"]
     assert not hasattr(server, "debug_read_registers_handler")
 
 
