@@ -571,7 +571,7 @@ def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators
     def drgn_helper_handler(*_args: Any, **_kwargs: Any) -> ToolResponse:
         return _success()
 
-    def fetch_handler(request: DebugPostmortemFetchRequest, **kwargs: Any) -> ToolResponse:
+    def fetch_handler(*, request: DebugPostmortemFetchRequest, **kwargs: Any) -> ToolResponse:
         calls.append((request, kwargs))
         return _success(vmcore_ref="inputs/vmcore")
 

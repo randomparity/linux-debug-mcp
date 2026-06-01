@@ -78,8 +78,8 @@ class PostmortemToolRuntime:
 class PostmortemCrashHandler(Protocol):
     def __call__(
         self,
-        request: DebugPostmortemCrashRequest,
         *,
+        request: DebugPostmortemCrashRequest,
         runtime: PostmortemToolRuntime,
     ) -> ToolResponse: ...
 
@@ -87,8 +87,8 @@ class PostmortemCrashHandler(Protocol):
 class PostmortemTriageHandler(Protocol):
     def __call__(
         self,
-        request: DebugPostmortemTriageRequest,
         *,
+        request: DebugPostmortemTriageRequest,
         runtime: PostmortemToolRuntime,
     ) -> ToolResponse: ...
 
@@ -96,8 +96,8 @@ class PostmortemTriageHandler(Protocol):
 class PostmortemCheckPrereqsHandler(Protocol):
     def __call__(
         self,
-        request: DebugPostmortemCheckPrereqsRequest,
         *,
+        request: DebugPostmortemCheckPrereqsRequest,
         runtime: PostmortemToolRuntime,
     ) -> ToolResponse: ...
 
@@ -105,8 +105,8 @@ class PostmortemCheckPrereqsHandler(Protocol):
 class PostmortemListDumpsHandler(Protocol):
     def __call__(
         self,
-        request: DebugPostmortemListDumpsRequest,
         *,
+        request: DebugPostmortemListDumpsRequest,
         runtime: PostmortemToolRuntime,
     ) -> ToolResponse: ...
 
@@ -114,8 +114,8 @@ class PostmortemListDumpsHandler(Protocol):
 class PostmortemFetchHandler(Protocol):
     def __call__(
         self,
-        request: DebugPostmortemFetchRequest,
         *,
+        request: DebugPostmortemFetchRequest,
         runtime: PostmortemToolRuntime,
     ) -> ToolResponse: ...
 
@@ -169,7 +169,7 @@ def _register_postmortem_crash_tool(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                request,
+                request=request,
                 runtime=context.runtime(vmcore_model.artifact_root),
             )
         )
@@ -200,7 +200,7 @@ def _register_postmortem_triage_tool(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                request,
+                request=request,
                 runtime=context.runtime(vmcore_model.artifact_root),
             )
         )
@@ -232,7 +232,7 @@ def _register_postmortem_check_prereqs_tool(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                request,
+                request=request,
                 runtime=context.runtime(target_model.artifact_root),
             )
         )
@@ -265,7 +265,7 @@ def _register_postmortem_list_dumps_tool(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                request,
+                request=request,
                 runtime=context.runtime(target_model.artifact_root),
             )
         )
@@ -302,7 +302,7 @@ def _register_postmortem_fetch_tool(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                request,
+                request=request,
                 runtime=context.runtime(target_model.artifact_root),
             )
         )
