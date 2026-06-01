@@ -42,8 +42,8 @@ from kdive.introspect.wrappers import (
 )
 from kdive.providers.ssh import SSH_TIMEOUT_GRACE_SECONDS, SshCommandResult, SshRunner, build_ssh_argv
 from kdive.safety.redaction import Redactor
-from kdive.seams.probes import probe_runner_exception_failure
 from kdive.seams.target import TargetKey
+from kdive.target.probes import probe_runner_exception_failure
 
 logger = logging.getLogger(__name__)
 

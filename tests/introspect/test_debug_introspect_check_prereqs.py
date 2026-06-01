@@ -15,8 +15,8 @@ from kdive.introspect.context import LiveIntrospectRuntime
 from kdive.introspect.handlers import debug_introspect_check_prerequisites_handler
 from kdive.introspect.models import DebugIntrospectCheckPrerequisitesRequest
 from kdive.providers.local.test.local_ssh_tests import SshCommandResult
-from kdive.seams.probes import PROBE_STDOUT_CAP
 from kdive.server import create_app
+from kdive.target.probes import PROBE_STDOUT_CAP
 from kdive.transport.core.base import ExecutionState
 
 VALID_BUILD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
@@ -357,7 +357,7 @@ def test_unreadable_stdout_is_tool_response_failure(
     def unreadable_stdout(_path: Path, _cap: int) -> str | None:
         raise OSError("permission denied")
 
-    monkeypatch.setattr("kdive.seams.probes.read_capped", unreadable_stdout)
+    monkeypatch.setattr("kdive.target.probes.read_capped", unreadable_stdout)
 
     resp = debug_introspect_check_prerequisites_handler(
         _req(run_id),

@@ -5,7 +5,7 @@ from kdive.config import RootfsProfile
 from kdive.domain import ErrorCategory
 from kdive.providers.ssh import SshCommandResult
 from kdive.safety.redaction import Redactor
-from kdive.seams.probes import ProbeContext, parse_probe_stdout, probe_runner_exception_failure
+from kdive.target.probes import ProbeContext, parse_probe_stdout, probe_runner_exception_failure
 
 
 def _probe_context(tmp_path: Path) -> ProbeContext:

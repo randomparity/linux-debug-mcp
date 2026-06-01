@@ -9,7 +9,7 @@ from kdive.handlers.shared import _require_value
 from kdive.postmortem.dumps import DEFAULT_DUMP_DIR
 from kdive.prereqs.kdump_probe import build_kdump_checks
 from kdive.providers.ssh import SshCommandResult
-from kdive.seams.probes import ProbeContext, configuration_failure, parse_probe_stdout
+from kdive.target.probes import ProbeContext, configuration_failure, parse_probe_stdout
 
 
 class _SupportsDumpRequest(Protocol):

@@ -8,7 +8,7 @@ from kdive.domain import ArtifactRef, PrerequisiteCheck, PrerequisiteStatus, Too
 from kdive.handlers.shared import _require_value
 from kdive.prereqs.drgn_probe import UNKNOWN, USABLE, build_probe_checks, python_missing_checks
 from kdive.providers.ssh import SshCommandResult
-from kdive.seams.probes import ProbeContext, parse_probe_stdout
+from kdive.target.probes import ProbeContext, parse_probe_stdout
 
 
 def _python_missing_probe_success(

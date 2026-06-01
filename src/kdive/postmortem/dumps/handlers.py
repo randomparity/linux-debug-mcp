@@ -51,7 +51,7 @@ from kdive.providers.ssh import (
     SubprocessSshRunner,
     build_ssh_argv,
 )
-from kdive.seams.probes import (
+from kdive.target.probes import (
     PROBE_STDOUT_CAP,
     ProbeContext,
     chmod_best_effort,

@@ -22,7 +22,8 @@ POSTMORTEM_HANDLER_SOURCES = [
 ]
 POSTMORTEM_DUMP_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "dumps" / "handlers.py"
 SHARED_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "handlers" / "shared.py"
-PROBE_SEAM_SOURCE = ROOT / "src" / "kdive" / "seams" / "probes.py"
+TARGET_PROBE_SOURCE = ROOT / "src" / "kdive" / "target" / "probes.py"
+LEGACY_PROBE_MODULE = ".".join(("kdive", "seams", "probes"))
 CONFIGURATION_FAILURE_DUPLICATE_SOURCES = [
     ROOT / "src" / "kdive" / "artifacts" / "handlers.py",
     ROOT / "src" / "kdive" / "debug" / "operations.py",
@@ -105,17 +106,17 @@ def test_server_does_not_own_probe_substrate_constants() -> None:
     assert "PROBE_STDOUT_CAP" not in _assigned_names(SERVER_SOURCE)
 
 
-def test_shared_probe_helpers_live_in_public_boundary_module() -> None:
-    assert PROBE_SEAM_SOURCE.is_file()
-    assert _imported_names(INTROSPECT_HANDLERS_SOURCE, "kdive.seams.probes")
-    assert _imported_names(POSTMORTEM_DUMP_HANDLERS_SOURCE, "kdive.seams.probes")
-    assert "kdive.target.probes" not in _imported_modules(INTROSPECT_HANDLERS_SOURCE)
-    assert "kdive.target.probes" not in _imported_modules(POSTMORTEM_DUMP_HANDLERS_SOURCE)
+def test_shared_probe_helpers_live_in_target_probe_module() -> None:
+    assert TARGET_PROBE_SOURCE.is_file()
+    assert _imported_names(INTROSPECT_HANDLERS_SOURCE, "kdive.target.probes")
+    assert _imported_names(POSTMORTEM_DUMP_HANDLERS_SOURCE, "kdive.target.probes")
+    assert LEGACY_PROBE_MODULE not in _imported_modules(INTROSPECT_HANDLERS_SOURCE)
+    assert LEGACY_PROBE_MODULE not in _imported_modules(POSTMORTEM_DUMP_HANDLERS_SOURCE)
 
 
 def test_target_probe_substrate_does_not_own_feature_response_assembly() -> None:
-    target_imports = _imported_modules(PROBE_SEAM_SOURCE)
-    target_definitions = _defined_functions(PROBE_SEAM_SOURCE)
+    target_imports = _imported_modules(TARGET_PROBE_SOURCE)
+    target_definitions = _defined_functions(TARGET_PROBE_SOURCE)
 
     assert "kdive.prereqs.drgn_probe" not in target_imports
     assert "kdive.prereqs.kdump_probe" not in target_imports
@@ -132,19 +133,19 @@ def test_target_probe_substrate_does_not_own_feature_response_assembly() -> None
 
 def test_feature_probe_handlers_import_public_target_probe_substrate() -> None:
     for source_path in (INTROSPECT_HANDLERS_SOURCE, POSTMORTEM_DUMP_HANDLERS_SOURCE):
-        seam_imports = _imported_names(source_path, "kdive.seams.probes")
-        assert seam_imports
-        assert not any(name.startswith("_") for name in seam_imports)
+        target_imports = _imported_names(source_path, "kdive.target.probes")
+        assert target_imports
+        assert not any(name.startswith("_") for name in target_imports)
 
 
 def test_shared_probe_boundary_does_not_import_private_transport_handlers() -> None:
     debug_session_handlers = ROOT / "src" / "kdive" / "debug" / "session_handlers.py"
 
-    assert "_require_snapshot" not in _imported_names(PROBE_SEAM_SOURCE, "kdive.transport.handlers")
+    assert "_require_snapshot" not in _imported_names(TARGET_PROBE_SOURCE, "kdive.transport.handlers")
     assert "_require_snapshot" not in _imported_names(TARGET_BOOT_HANDLER_SOURCE, "kdive.transport.handlers")
     assert "_require_snapshot" not in _imported_names(TARGET_TEST_HANDLER_SOURCE, "kdive.transport.handlers")
     assert "_require_snapshot" not in _imported_names(debug_session_handlers, "kdive.transport.handlers")
-    assert "require_target_snapshot" in _imported_names(PROBE_SEAM_SOURCE, "kdive.coordination.admission")
+    assert "require_target_snapshot" in _imported_names(TARGET_PROBE_SOURCE, "kdive.coordination.admission")
 
 
 def test_postmortem_handlers_do_not_import_introspect_execution_internals() -> None:

@@ -44,14 +44,14 @@ from kdive.providers.ssh import (
     build_ssh_argv,
 )
 from kdive.safety.redaction import Redactor
-from kdive.seams.probes import (
+from kdive.symbols.build_id import read_elf_build_id
+from kdive.target.probes import (
     PROBE_STDOUT_CAP,
     prepare_probe_dirs,
     probe_runner_exception_failure,
     reject_if_target_halted,
     resolve_probe_context,
 )
-from kdive.symbols.build_id import read_elf_build_id
 
 
 def debug_introspect_check_prerequisites_handler(
