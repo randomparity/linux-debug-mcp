@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import kdive.server as server_module
@@ -19,6 +20,19 @@ GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 def test_triage_handler_lives_in_postmortem_package() -> None:
     assert postmortem_handlers.debug_postmortem_triage_handler.__module__ == "kdive.postmortem.handlers"
     assert server_module.debug_postmortem_triage_handler is postmortem_handlers.debug_postmortem_triage_handler
+
+
+def test_triage_handler_is_split_into_named_phases() -> None:
+    handler_source = inspect.getsource(postmortem_handlers.debug_postmortem_triage_handler)
+
+    for helper_name in (
+        "_run_triage_sources",
+        "_build_triage_report_state",
+        "_record_failed_triage",
+        "_persist_successful_triage_report",
+    ):
+        assert hasattr(postmortem_handlers, helper_name)
+        assert f"{helper_name}(" in handler_source
 
 
 def _run(tmp_path: Path) -> ArtifactStore:

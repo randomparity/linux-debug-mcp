@@ -6,6 +6,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,7 @@ from kdive.postmortem.models import (
     DebugPostmortemCrashRequest,
     DebugPostmortemFetchRequest,
     DebugPostmortemListDumpsRequest,
+    DebugPostmortemTriageReport,
     DebugPostmortemTriageRequest,
     DumpEntry,
     FetchedFile,
@@ -77,6 +79,22 @@ from kdive.target.probes import (
 )
 
 SSH_TIMEOUT_GRACE_SECONDS = 10
+
+
+@dataclass(frozen=True)
+class _TriageSourceResponses:
+    crash: ToolResponse
+    dmesg: ToolResponse
+    modules: ToolResponse
+
+
+@dataclass(frozen=True)
+class _TriageReportState:
+    report: DebugPostmortemTriageReport
+    sub_call_ids: dict[str, str | None]
+    started_at: datetime
+    finished_at: datetime
+    duration_ms: int
 
 
 def build_scp_argv(
@@ -664,37 +682,18 @@ def _triage_subcall_failure(*, run_id: str, code: str, exc: Exception) -> ToolRe
     )
 
 
-def debug_postmortem_triage_handler(
+def _run_triage_sources(
     request: DebugPostmortemTriageRequest,
     *,
     artifact_root: Path,
-    runner: SshRunner | None = None,
-    vmcore_build_id_reader: Callable[[Path], str] = read_vmcore_build_id,
-    vmlinux_build_id_reader: Callable[[Path], str] = read_elf_build_id,
-    clock: Callable[[], datetime] | None = None,
-    crash_handler: Callable[..., ToolResponse] = debug_postmortem_crash_handler,
-    drgn_helper_handler: Callable[..., ToolResponse] = debug_introspect_from_vmcore_helper_handler,
-) -> ToolResponse:
-    """Spec §4 / ADR 0027. Compose the crash + drgn offline tiers into one report; no admission gate."""
+    runner: SshRunner | None,
+    vmcore_build_id_reader: Callable[[Path], str],
+    vmlinux_build_id_reader: Callable[[Path], str],
+    clock: Callable[[], datetime] | None,
+    crash_handler: Callable[..., ToolResponse],
+    drgn_helper_handler: Callable[..., ToolResponse],
+) -> _TriageSourceResponses:
     run_id = request.run_id
-    now = clock or _utcnow
-    ctx, failure = resolve_postmortem_vmcore_context(
-        request,
-        artifact_root=artifact_root,
-        vmcore_build_id_reader=vmcore_build_id_reader,
-        vmlinux_build_id_reader=vmlinux_build_id_reader,
-    )
-    if failure is not None:
-        return failure
-    if ctx is None:
-        raise RuntimeError("postmortem vmcore context missing after successful resolution")
-    store = ctx.store
-    run_dir = ctx.run_dir
-    vmcore_build_id = ctx.vmcore_build_id
-
-    started_at = now()
-    started_monotonic = time.monotonic()
-
     try:
         crash_resp = crash_handler(
             DebugPostmortemCrashRequest(
@@ -733,72 +732,106 @@ def debug_postmortem_triage_handler(
         except Exception as exc:  # noqa: BLE001 - triage boundary normalizes subcall exceptions
             return _triage_subcall_failure(run_id=run_id, code="offline_introspect_failed", exc=exc)
 
-    dmesg_resp = drgn(TRIAGE_DMESG_HELPER)
-    modules_resp = drgn(TRIAGE_MODULES_HELPER)
+    return _TriageSourceResponses(
+        crash=crash_resp,
+        dmesg=drgn(TRIAGE_DMESG_HELPER),
+        modules=drgn(TRIAGE_MODULES_HELPER),
+    )
 
+
+def _build_triage_report_state(
+    *,
+    vmcore_build_id: str,
+    sources: _TriageSourceResponses,
+    started_at: datetime,
+    finished_at: datetime,
+    duration_ms: int,
+) -> _TriageReportState:
     crash_outcome = CrashOutcome(
-        ok=crash_resp.ok,
-        reason=None if crash_resp.ok else _triage_reason(crash_resp),
-        results=crash_resp.data.get("results", {}) if crash_resp.ok else {},
+        ok=sources.crash.ok,
+        reason=None if sources.crash.ok else _triage_reason(sources.crash),
+        results=sources.crash.data.get("results", {}) if sources.crash.ok else {},
     )
     dmesg_outcome = DrgnOutcome(
-        ok=dmesg_resp.ok,
-        reason=None if dmesg_resp.ok else _triage_reason(dmesg_resp),
-        result=dmesg_resp.data.get("result", {}) if dmesg_resp.ok else {},
+        ok=sources.dmesg.ok,
+        reason=None if sources.dmesg.ok else _triage_reason(sources.dmesg),
+        result=sources.dmesg.data.get("result", {}) if sources.dmesg.ok else {},
     )
     modules_outcome = DrgnOutcome(
-        ok=modules_resp.ok,
-        reason=None if modules_resp.ok else _triage_reason(modules_resp),
-        result=modules_resp.data.get("result", {}) if modules_resp.ok else {},
+        ok=sources.modules.ok,
+        reason=None if sources.modules.ok else _triage_reason(sources.modules),
+        result=sources.modules.data.get("result", {}) if sources.modules.ok else {},
+    )
+    return _TriageReportState(
+        report=assemble_report(
+            vmcore_build_id=vmcore_build_id,
+            crash=crash_outcome,
+            dmesg=dmesg_outcome,
+            modules=modules_outcome,
+        ),
+        sub_call_ids={
+            "crash": _triage_subcall_id(sources.crash),
+            "dmesg": _triage_subcall_id(sources.dmesg),
+            "modules": _triage_subcall_id(sources.modules),
+        },
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_ms=duration_ms,
     )
 
-    report = assemble_report(
-        vmcore_build_id=vmcore_build_id,
-        crash=crash_outcome,
-        dmesg=dmesg_outcome,
-        modules=modules_outcome,
-    )
-    sub_call_ids = {
-        "crash": _triage_subcall_id(crash_resp),
-        "dmesg": _triage_subcall_id(dmesg_resp),
-        "modules": _triage_subcall_id(modules_resp),
+
+def _record_failed_triage(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    state: _TriageReportState,
+    redactor: Redactor,
+) -> ToolResponse:
+    section_reasons = {
+        "panic_reason": state.report.panic_reason.reason,
+        "faulting_task": state.report.faulting_task.reason,
+        "backtrace": state.report.backtrace.reason,
+        "recent_dmesg": state.report.recent_dmesg.reason,
+        "modules": state.report.modules.reason,
     }
-    redactor = Redactor(secret_values=[])
-    duration_ms = int((time.monotonic() - started_monotonic) * 1000)
-    finished_at = now()
-
-    if not any_section_ok(report):
-        section_reasons = {
-            "panic_reason": report.panic_reason.reason,
-            "faulting_task": report.faulting_task.reason,
-            "backtrace": report.backtrace.reason,
-            "recent_dmesg": report.recent_dmesg.reason,
-            "modules": report.modules.reason,
+    details = redactor.redact_value(
+        {
+            "code": "triage_all_sources_failed",
+            "sub_call_ids": state.sub_call_ids,
+            "section_reasons": section_reasons,
         }
-        details = redactor.redact_value(
-            {"code": "triage_all_sources_failed", "sub_call_ids": sub_call_ids, "section_reasons": section_reasons}
-        )
-        _record_terminal_introspect_result(
-            store,
-            run_id,
-            StepResult(
-                step_name=f"postmortem.triage:{uuid.uuid4().hex}",
-                status=StepStatus.FAILED,
-                summary="triage: all sources failed",
-                artifacts=[],
-                details={"code": "triage_all_sources_failed", "duration_ms": duration_ms},
-            ),
-        )
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message="triage produced no usable section; both crash and drgn sources failed",
-            details=details,
-            suggested_next_actions=["artifacts.get_manifest"],
-        )
+    )
+    _record_terminal_introspect_result(
+        store,
+        run_id,
+        StepResult(
+            step_name=f"postmortem.triage:{uuid.uuid4().hex}",
+            status=StepStatus.FAILED,
+            summary="triage: all sources failed",
+            artifacts=[],
+            details={"code": "triage_all_sources_failed", "duration_ms": state.duration_ms},
+        ),
+    )
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        run_id=run_id,
+        message="triage produced no usable section; both crash and drgn sources failed",
+        details=details,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
 
+
+def _persist_successful_triage_report(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    run_dir: Path,
+    vmcore_build_id: str,
+    state: _TriageReportState,
+    redactor: Redactor,
+) -> ToolResponse:
     call_id = uuid.uuid4().hex
-    redacted_report = redactor.redact_value(report.model_dump(mode="json"))
+    redacted_report = redactor.redact_value(state.report.model_dump(mode="json"))
     agent_dir = run_dir / "debug" / "postmortem" / "triage" / call_id
     agent_dir.mkdir(parents=True, mode=0o700)
     report_path = agent_dir / "report.json"
@@ -826,7 +859,7 @@ def debug_postmortem_triage_handler(
                 "call_id": call_id,
                 "vmcore_build_id": vmcore_build_id,
                 "partial": partial,
-                "duration_ms": duration_ms,
+                "duration_ms": state.duration_ms,
             },
         ),
     )
@@ -838,10 +871,10 @@ def debug_postmortem_triage_handler(
             "report": redacted_report,
             "partial": partial,
             "vmcore_build_id": vmcore_build_id,
-            "sub_call_ids": sub_call_ids,
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
-            "duration_ms": duration_ms,
+            "sub_call_ids": state.sub_call_ids,
+            "started_at": state.started_at.isoformat(),
+            "finished_at": state.finished_at.isoformat(),
+            "duration_ms": state.duration_ms,
         },
         artifacts=[artifact],
         suggested_next_actions=[
@@ -849,4 +882,67 @@ def debug_postmortem_triage_handler(
             "debug.introspect.from_vmcore_helper",
             "artifacts.get_manifest",
         ],
+    )
+
+
+def debug_postmortem_triage_handler(
+    request: DebugPostmortemTriageRequest,
+    *,
+    artifact_root: Path,
+    runner: SshRunner | None = None,
+    vmcore_build_id_reader: Callable[[Path], str] = read_vmcore_build_id,
+    vmlinux_build_id_reader: Callable[[Path], str] = read_elf_build_id,
+    clock: Callable[[], datetime] | None = None,
+    crash_handler: Callable[..., ToolResponse] = debug_postmortem_crash_handler,
+    drgn_helper_handler: Callable[..., ToolResponse] = debug_introspect_from_vmcore_helper_handler,
+) -> ToolResponse:
+    """Spec §4 / ADR 0027. Compose the crash + drgn offline tiers into one report; no admission gate."""
+    run_id = request.run_id
+    now = clock or _utcnow
+    ctx, failure = resolve_postmortem_vmcore_context(
+        request,
+        artifact_root=artifact_root,
+        vmcore_build_id_reader=vmcore_build_id_reader,
+        vmlinux_build_id_reader=vmlinux_build_id_reader,
+    )
+    if failure is not None:
+        return failure
+    if ctx is None:
+        raise RuntimeError("postmortem vmcore context missing after successful resolution")
+    store = ctx.store
+    run_dir = ctx.run_dir
+    vmcore_build_id = ctx.vmcore_build_id
+
+    started_at = now()
+    started_monotonic = time.monotonic()
+    sources = _run_triage_sources(
+        request,
+        artifact_root=artifact_root,
+        runner=runner,
+        vmcore_build_id_reader=vmcore_build_id_reader,
+        vmlinux_build_id_reader=vmlinux_build_id_reader,
+        clock=clock,
+        crash_handler=crash_handler,
+        drgn_helper_handler=drgn_helper_handler,
+    )
+    duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+    state = _build_triage_report_state(
+        vmcore_build_id=vmcore_build_id,
+        sources=sources,
+        started_at=started_at,
+        finished_at=now(),
+        duration_ms=duration_ms,
+    )
+    redactor = Redactor(secret_values=[])
+
+    if not any_section_ok(state.report):
+        return _record_failed_triage(store=store, run_id=run_id, state=state, redactor=redactor)
+
+    return _persist_successful_triage_report(
+        store=store,
+        run_id=run_id,
+        run_dir=run_dir,
+        vmcore_build_id=vmcore_build_id,
+        state=state,
+        redactor=redactor,
     )
