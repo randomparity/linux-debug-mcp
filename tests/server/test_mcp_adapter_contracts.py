@@ -173,7 +173,12 @@ def test_kernel_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_path: 
     )
 
     raw = _tool_fn(app, "kernel.create_run")(
-        profiles=CreateRunProfiles(source_path="/src/linux"),
+        profiles={
+            "source_path": "/src/linux",
+            "build_profile": "x86_64-default",
+            "target_profile": "local-qemu",
+            "rootfs_profile": "minimal",
+        },
         options={"profile_specs": {"debug": {"name": "unsupported"}}},
     )
 

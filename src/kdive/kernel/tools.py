@@ -34,9 +34,9 @@ class KernelToolRuntime:
 class CreateRunHandlerRequest:
     artifact_root: Path
     source_path: str
-    build_profile: str | None
-    target_profile: str | None
-    rootfs_profile: str | None
+    build_profile: str
+    target_profile: str
+    rootfs_profile: str
     run_id: str | None
     debug_profile: str | None
     test_suite: str | None
@@ -57,9 +57,9 @@ class KernelBuildHandlerRequest:
 
 class CreateRunProfiles(Model):
     source_path: str
-    build_profile: str | None = None
-    target_profile: str | None = None
-    rootfs_profile: str | None = None
+    build_profile: str
+    target_profile: str
+    rootfs_profile: str
 
 
 class CreateRunContext(Model):
@@ -127,7 +127,8 @@ def register_kernel_tools(
     @app.tool(name="kernel.create_run")
     def kernel_create_run(
         context: CreateRunContext | dict[str, Any] | None = None,
-        profiles: CreateRunProfiles | dict[str, Any] | None = None,
+        *,
+        profiles: CreateRunProfiles | dict[str, Any],
         options: CreateRunOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:

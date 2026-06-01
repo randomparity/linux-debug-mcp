@@ -630,6 +630,16 @@ def test_root_kernel_and_host_tools_use_grouped_inputs() -> None:
         assert expected.issubset(properties), tool_name
         assert flat_properties.isdisjoint(properties), tool_name
 
+    create_run_schema = app._tool_manager._tools["kernel.create_run"].parameters
+    assert create_run_schema["required"] == ["profiles"]
+    profiles_schema = create_run_schema["$defs"]["CreateRunProfiles"]
+    assert profiles_schema["required"] == [
+        "source_path",
+        "build_profile",
+        "target_profile",
+        "rootfs_profile",
+    ]
+
 
 def test_mcp_tool_signatures_use_context_operand_options_order() -> None:
     app = create_app()
