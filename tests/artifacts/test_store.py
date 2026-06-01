@@ -1,9 +1,10 @@
 import pytest
 
+from kdive.artifacts import store as store_module
 from kdive.artifacts.manifest import BootAttempt
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import BuildProfile, RootfsProfile, TargetProfile
-from kdive.domain import RunRequest, StepResult, StepStatus
+from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus
 
 
 def _store(tmp_path) -> ArtifactStore:
@@ -92,3 +93,22 @@ def test_record_step_result_append_true_rejects_collision(tmp_path):
     store.record_step_result(manifest.run_id, first, append=True)
     with pytest.raises(ManifestStateError):
         store.record_step_result(manifest.run_id, first, append=True)
+
+
+def test_manifest_write_oserror_raises_manifest_state_error(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    manifest = store.create_run(_request())
+    result = StepResult(step_name="build", status=StepStatus.SUCCEEDED, summary="built")
+
+    def fail_replace(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store_module.os, "replace", fail_replace)
+
+    with pytest.raises(ManifestStateError) as exc_info:
+        store.record_step_result(manifest.run_id, result)
+
+    assert exc_info.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert manifest.run_id in str(exc_info.value)
+    assert "manifest.json" in str(exc_info.value)
+    assert "disk full" in str(exc_info.value)

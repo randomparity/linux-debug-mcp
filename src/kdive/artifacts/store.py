@@ -267,8 +267,16 @@ class ArtifactStore:
     def _write_manifest(self, run_dir: Path, manifest: RunManifest) -> None:
         manifest_path = run_dir / "manifest.json"
         temp_path = run_dir / ".manifest.json.tmp"
-        temp_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
-        os.replace(temp_path, manifest_path)
+        try:
+            temp_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+            os.replace(temp_path, manifest_path)
+        except OSError as exc:
+            with suppress(FileNotFoundError):
+                temp_path.unlink()
+            raise ManifestStateError(
+                f"failed to write manifest for {manifest.run_id} at {manifest_path}: {exc}",
+                ErrorCategory.INFRASTRUCTURE_FAILURE,
+            ) from exc
 
     def _generate_run_id(self) -> str:
         return f"run-{uuid.uuid4().hex[:16]}"
