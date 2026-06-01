@@ -3,7 +3,7 @@
 KDIVE is a Python MCP server for local Linux kernel build, boot,
 smoke-test, artifact, and QEMU gdbstub debug workflows. It also ships
 discovery-only stubs for future remote, reservation, provisioning, hardware,
-console, and real-boot providers.
+console, and boot-orchestration providers.
 
 ## Architecture
 
@@ -97,7 +97,7 @@ Only the debug-session step and the 11 `debug.*` operations are direct
 | provisioning | provisioning-stub | stub | x86_64, ppc64le | provision.prepare_target | remote / physical |
 | hardware | hardware-control-stub | stub | x86_64, ppc64le | hardware.power_control | physical |
 | console | console-access-stub | stub | x86_64, ppc64le | console.open_session, console.read, console.write | remote / physical |
-| boot | real-boot-stub | stub | x86_64, ppc64le | hardware.boot_kernel, workflow.reserve_provision_boot | remote / physical |
+| boot | boot-orchestration-stub | stub | x86_64, ppc64le | hardware.boot_kernel, workflow.reserve_provision_boot | remote / physical |
 
 A stub request returns `not_implemented` only when it is contract-valid and
 resolves to exactly one advertised provider; validation and provider-selection

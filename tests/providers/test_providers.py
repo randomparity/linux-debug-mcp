@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Any, get_args, get_type_hints
 
@@ -24,6 +25,7 @@ from kdive.providers.registry import ProviderRegistry
 
 DebugSession = debug_contracts.DebugSession
 DebugSessionState = debug_contracts.DebugSessionState
+README = Path(__file__).parents[2] / "README.md"
 
 
 def test_local_provider_modules_are_grouped_by_capability_family() -> None:
@@ -474,6 +476,23 @@ def test_default_registry_includes_stub_providers() -> None:
     assert {capability.operation: capability.destructive_permissions for capability in operation_capabilities} == {
         operation: list(permissions) for operation, permissions in PROVIDER_DESTRUCTIVE_PERMISSIONS.items()
     }
+
+
+def test_readme_stub_provider_table_matches_default_registry() -> None:
+    documented_stub_names = set(
+        re.findall(
+            r"^\| [^|]+ \| ([^|]+) \| stub \|",
+            README.read_text(encoding="utf-8"),
+            flags=re.MULTILINE,
+        )
+    )
+    registry_stub_names = {
+        provider.provider_name
+        for provider in ProviderRegistry.with_defaults().list_capabilities()
+        if provider.implementation_state is ImplementationState.STUB
+    }
+
+    assert documented_stub_names == registry_stub_names
 
 
 def test_registry_finds_providers_by_operation_and_architecture_deterministically() -> None:
