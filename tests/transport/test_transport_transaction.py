@@ -86,6 +86,25 @@ def test_attach_failure_rolls_back_everything(tmp_path):
     assert txn_ok.open(make_request()).record_state is RecordState.READY
 
 
+def test_open_rollback_cleanup_error_does_not_mask_open_failure(tmp_path, monkeypatch):
+    guard = InProcessStopCapableGuard()
+    reg = SessionRegistry(directory=tmp_path)
+    original_delete = reg.delete_record
+
+    def delete_record_fails_once(*args, **kwargs):
+        monkeypatch.setattr(reg, "delete_record", original_delete)
+        raise OSError("delete failed during rollback")
+
+    monkeypatch.setattr(reg, "delete_record", delete_record_fails_once)
+    txn, admission = build_txn(FakeQemuTransport(crash=True), guard=guard, registry=reg)
+
+    with pytest.raises(RuntimeError, match="attach blew up"):
+        txn.open(make_request())
+
+    assert admission._bindings.get(KEY, []) == []
+    guard.acquire(KEY)
+
+
 def test_on_partial_writes_backend_pid_through_before_ready(tmp_path):
     # Finding #1: the backend pid must be in the durable OPENING record the instant the
     # backend_process partial fires — before attach() returns — so a death before READY is

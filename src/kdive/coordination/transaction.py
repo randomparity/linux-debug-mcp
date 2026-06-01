@@ -511,23 +511,41 @@ class TransportTransaction:
         transport: Transport,
         handle: AdmissionHandle,
     ) -> None:
+        def cleanup(description: str, step: Callable[[], object]) -> None:
+            try:
+                step()
+            except Exception:  # noqa: BLE001 - rollback must not mask the primary open failure
+                logger.warning("transaction.open rollback cleanup failed: %s", description, exc_info=True)
+
         # reverse order; each guarded so a partial rollback still completes.
         _best_effort_reap(transport, state)
         if state.session_id is not None:
-            self._tokens.pop(state.session_id, None)
-            self._handles.pop(state.session_id, None)  # keep _handles symmetric with _tokens
+            session_id = state.session_id
+            self._tokens.pop(session_id, None)
+            self._handles.pop(session_id, None)  # keep _handles symmetric with _tokens
             # Session-id fenced: rollback only erases the record this in-flight open() wrote
             # (the OPENING/READY record carries `session_id == state.session_id` by construction).
-            self._registry.delete_record(target_key, expected_session_id=state.session_id)
-            if self._dispatcher is not None:
-                self._dispatcher.unsubscribe(target_key, state.session_id)
+            cleanup(
+                "delete opening record",
+                lambda: self._registry.delete_record(target_key, expected_session_id=session_id),
+            )
+            dispatcher = self._dispatcher
+            if dispatcher is not None:
+                cleanup(
+                    "unsubscribe lifecycle subscriber",
+                    lambda: dispatcher.unsubscribe(target_key, session_id),
+                )
         if state.lease_token is not None:
-            self._leases.release(target_key, state.lease_token)
+            lease_token = state.lease_token
+            cleanup("release console lease", lambda: self._leases.release(target_key, lease_token))
         if state.guard_token is not None:
-            self._guard.release(target_key, state.guard_token)  # FENCED by-token release (ADR 0002)
+            guard_token = state.guard_token
+            cleanup(
+                "release stop guard",
+                lambda: self._guard.release(target_key, guard_token),  # FENCED by-token release (ADR 0002)
+            )
         # rollback is best-effort; an admission-rollback failure must never mask the original error.
-        with contextlib.suppress(Exception):
-            self._admission.rollback(handle)
+        cleanup("rollback admission handle", lambda: self._admission.rollback(handle))
 
     def close(self, session_id: str, *, force: bool = False) -> None:
         """Tear down an open session: write CLOSING, close the backend, release the lease and the
