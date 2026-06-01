@@ -288,8 +288,8 @@ def _register_registers_query(
     handler: DebugReadRegistersHandler,
 ) -> None:
     def debug_registers_query(
-        registers: list[str],
         context: DebugSessionContext | dict[str, Any],
+        registers: list[str],
     ) -> dict[str, Any]:
         try:
             artifact_root, run_id, debug_session_id = _session_context(
@@ -323,8 +323,8 @@ def _register_symbol_query(
     handler: DebugReadSymbolHandler,
 ) -> None:
     def debug_symbol_query(
-        symbol: str,
         context: DebugSessionContext | dict[str, Any],
+        symbol: str,
     ) -> dict[str, Any]:
         try:
             artifact_root, run_id, debug_session_id = _session_context(
@@ -369,9 +369,9 @@ def _register_debug_read_tools(
 
     @app.tool(name="debug.read_memory")
     def debug_read_memory(
+        context: DebugSessionContext | dict[str, Any],
         address: int,
         byte_count: int,
-        context: DebugSessionContext | dict[str, Any],
     ) -> dict[str, Any]:
         try:
             artifact_root, run_id, debug_session_id = _session_context(
@@ -395,8 +395,8 @@ def _register_debug_read_tools(
 
     @app.tool(name="debug.evaluate")
     def debug_evaluate(
-        inspector: str,
         context: DebugSessionContext | dict[str, Any],
+        inspector: str,
         options: DebugEvaluateOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
@@ -426,8 +426,8 @@ def _register_debug_module_symbol_tools(
 ) -> None:
     @app.tool(name="debug.load_module_symbols")
     def debug_load_module_symbols(
-        module: str,
         context: DebugSessionContext | dict[str, Any],
+        module: str,
         options: DebugLoadModuleSymbolsOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
@@ -462,8 +462,8 @@ def _register_symbol_control(
     handler: DebugSymbolControlHandler,
 ) -> None:
     def debug_symbol_control(
-        symbol: str,
         context: DebugSessionContext | dict[str, Any],
+        symbol: str,
     ) -> dict[str, Any]:
         try:
             artifact_root, run_id, debug_session_id = _session_context(
@@ -497,8 +497,8 @@ def _register_breakpoint_id_control(
     handler: DebugBreakpointIdControlHandler,
 ) -> None:
     def debug_breakpoint_id_control(
-        breakpoint_id: str,
         context: DebugSessionContext | dict[str, Any],
+        breakpoint_id: str,
     ) -> dict[str, Any]:
         try:
             artifact_root, run_id, debug_session_id = _session_context(

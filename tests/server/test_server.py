@@ -582,6 +582,29 @@ def test_root_kernel_and_host_tools_use_grouped_inputs() -> None:
         assert flat_properties.isdisjoint(properties), tool_name
 
 
+def test_mcp_tool_signatures_use_context_operand_options_order() -> None:
+    app = create_app()
+
+    expected_order = {
+        "host.check_prerequisites": ["context", "profiles", "options"],
+        "kernel.create_run": ["context", "profiles", "options"],
+        "kernel.build": ["context", "options"],
+        "target.boot": ["context", "profiles", "options"],
+        "target.run_tests": ["context", "options"],
+        "workflow.build_boot_test": ["context", "profiles", "options"],
+        "workflow.build_boot_debug": ["context", "profiles", "options"],
+        "debug.read_registers": ["context", "registers"],
+        "debug.read_symbol": ["context", "symbol"],
+        "debug.read_memory": ["context", "address", "byte_count"],
+        "debug.evaluate": ["context", "inspector", "options"],
+        "debug.load_module_symbols": ["context", "module", "options"],
+        "debug.introspect.run": ["target", "script", "options"],
+    }
+
+    for tool_name, expected in expected_order.items():
+        assert list(inspect.signature(app._tool_manager._tools[tool_name].fn).parameters) == expected, tool_name
+
+
 def test_kernel_build_tool_and_handler_are_kernel_owned() -> None:
     from kdive.kernel import handlers as kernel_handlers
 

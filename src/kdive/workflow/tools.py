@@ -129,8 +129,8 @@ def register_workflow_tools(
 
     @app.tool(name="workflow.build_boot_test")
     def workflow_build_boot_test(
-        profiles: WorkflowProfileInputs | dict[str, Any],
         context: WorkflowRunContext | dict[str, Any] | None = None,
+        profiles: WorkflowProfileInputs | dict[str, Any] | None = None,
         options: WorkflowBuildBootTestOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
@@ -160,8 +160,8 @@ def register_workflow_tools(
 
     @app.tool(name="workflow.build_boot_debug")
     def workflow_build_boot_debug(
-        profiles: WorkflowProfileInputs | dict[str, Any],
         context: WorkflowRunContext | dict[str, Any] | None = None,
+        profiles: WorkflowProfileInputs | dict[str, Any] | None = None,
         options: WorkflowBuildBootDebugOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:

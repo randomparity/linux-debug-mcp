@@ -122,8 +122,8 @@ def register_kernel_tools(
 
     @app.tool(name="kernel.create_run")
     def kernel_create_run(
-        profiles: CreateRunProfiles | dict[str, Any],
         context: CreateRunContext | dict[str, Any] | None = None,
+        profiles: CreateRunProfiles | dict[str, Any] | None = None,
         options: CreateRunOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
