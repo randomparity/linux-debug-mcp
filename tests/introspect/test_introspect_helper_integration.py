@@ -10,7 +10,7 @@ Runs require a configured libvirt VM host with the env vars set; they SKIP
 cleanly without them.  Every test asserts ``resp.ok is True`` first so any
 handler failure surfaces the full error details.
 This is a manual/live VM suite; deterministic helper output contracts live in
-``tests/introspect/test_introspect_helpers.py``.
+the pure helper unit tests.
 """
 
 import contextlib

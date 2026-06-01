@@ -5,7 +5,7 @@ from __future__ import annotations
 from pydantic import Field
 
 from kdive.domain import Model
-from kdive.introspect_helpers.base import HelperSpec
+from kdive.introspect.helpers.base import HelperSpec
 
 
 class Args(Model):

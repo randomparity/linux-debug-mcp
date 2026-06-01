@@ -50,6 +50,7 @@ from kdive.introspect.execution import (
     _target_python_remote_argv,
     _utcnow,
 )
+from kdive.introspect.helpers import get_helper_registry
 from kdive.introspect.probes import assemble_introspect_probe_response
 from kdive.introspect.wrappers import (
     SCRIPT_BYTE_CAP,
@@ -58,7 +59,6 @@ from kdive.introspect.wrappers import (
     render_vmcore_wrapper_skeleton,
     user_script_sha256,
 )
-from kdive.introspect_helpers import get_helper_registry
 from kdive.prereqs.drgn_probe import PROBE_SCRIPT
 from kdive.providers.ssh import SshRunner, SubprocessSshRunner, build_ssh_argv
 from kdive.safety.paths import PathSafetyError, confine_run_relative

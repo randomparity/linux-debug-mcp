@@ -1,9 +1,17 @@
 import pytest
 
-import kdive.introspect_helpers as helpers_module
+import kdive.introspect.helpers as helpers_module
 import kdive.server as server_module
-from kdive.introspect_helpers import built_in_helper_specs, get_helper_registry
-from kdive.introspect_helpers.base import HelperSpec
+from kdive.introspect.helpers import built_in_helper_specs, get_helper_registry
+from kdive.introspect.helpers.base import HelperSpec
+
+
+def test_helpers_live_under_introspect_package() -> None:
+    import importlib.util
+
+    assert importlib.util.find_spec("kdive.introspect.helpers") is not None
+    old_package = "kdive." + "introspect" + "_helpers"
+    assert importlib.util.find_spec(old_package) is None
 
 
 def test_registry_names_are_unique_and_expected() -> None:
@@ -33,7 +41,7 @@ def test_every_spec_script_calls_emit() -> None:
 
 
 def test_sysinfo_model_validates_sample() -> None:
-    from kdive.introspect_helpers.sysinfo import Output
+    from kdive.introspect.helpers.sysinfo import Output
 
     Output.model_validate(
         {
@@ -51,7 +59,7 @@ def test_sysinfo_model_validates_sample() -> None:
 def test_sysinfo_model_rejects_extra_field() -> None:
     from pydantic import ValidationError
 
-    from kdive.introspect_helpers.sysinfo import Output
+    from kdive.introspect.helpers.sysinfo import Output
 
     with pytest.raises(ValidationError):
         Output.model_validate(
@@ -72,7 +80,7 @@ def test_sysinfo_model_rejects_extra_field() -> None:
 
 
 def test_tasks_args_defaults() -> None:
-    from kdive.introspect_helpers.tasks import Args
+    from kdive.introspect.helpers.tasks import Args
 
     a = Args()
     assert a.states == ["D"]
@@ -81,7 +89,7 @@ def test_tasks_args_defaults() -> None:
 
 
 def test_tasks_output_validates_sample() -> None:
-    from kdive.introspect_helpers.tasks import Output
+    from kdive.introspect.helpers.tasks import Output
 
     Output.model_validate(
         {
@@ -103,13 +111,13 @@ def test_tasks_output_validates_sample() -> None:
 
 
 def test_dmesg_args_default() -> None:
-    from kdive.introspect_helpers.dmesg import Args
+    from kdive.introspect.helpers.dmesg import Args
 
     assert Args().max_entries == 1000
 
 
 def test_dmesg_output_validates_sample() -> None:
-    from kdive.introspect_helpers.dmesg import Output
+    from kdive.introspect.helpers.dmesg import Output
 
     Output.model_validate({"entries": [{"ts_usec": 1, "level": 6, "text": "boot"}], "truncated": False})
 
@@ -118,7 +126,7 @@ def test_dmesg_output_validates_sample() -> None:
 
 
 def test_modules_output_validates_sample() -> None:
-    from kdive.introspect_helpers.modules import Output
+    from kdive.introspect.helpers.modules import Output
 
     Output.model_validate(
         {
@@ -140,7 +148,7 @@ def test_modules_output_validates_sample() -> None:
 
 
 def test_slab_output_validates_sample() -> None:
-    from kdive.introspect_helpers.slab import Output
+    from kdive.introspect.helpers.slab import Output
 
     Output.model_validate(
         {
@@ -162,7 +170,7 @@ def test_slab_output_validates_sample() -> None:
 
 
 def test_irq_output_validates_sample() -> None:
-    from kdive.introspect_helpers.irq import Output
+    from kdive.introspect.helpers.irq import Output
 
     Output.model_validate(
         {"irqs": [{"irq": 0, "name": "timer", "counts_per_cpu": [10, 12], "affinity": [0, 1]}], "decode_errors": 0}
@@ -170,7 +178,7 @@ def test_irq_output_validates_sample() -> None:
 
 
 def test_irq_name_nullable() -> None:
-    from kdive.introspect_helpers.irq import Output
+    from kdive.introspect.helpers.irq import Output
 
     Output.model_validate(
         {"irqs": [{"irq": 1, "name": None, "counts_per_cpu": [0], "affinity": [0]}], "decode_errors": 0}
@@ -180,7 +188,7 @@ def test_irq_name_nullable() -> None:
 def test_irq_affinity_nullable() -> None:
     # v1 reports affinity=None rather than fabricating a value when the cpumask
     # cannot be decoded; the model must accept it.
-    from kdive.introspect_helpers.irq import Output
+    from kdive.introspect.helpers.irq import Output
 
     Output.model_validate(
         {"irqs": [{"irq": 2, "name": None, "counts_per_cpu": [0, 0], "affinity": None}], "decode_errors": 1}
@@ -193,7 +201,7 @@ def test_decode_errors_is_required() -> None:
     # distinguishable from a decode failure.
     from pydantic import ValidationError
 
-    from kdive.introspect_helpers import irq, modules, slab
+    from kdive.introspect.helpers import irq, modules, slab
 
     for mod in (irq, modules, slab):
         with pytest.raises(ValidationError):
@@ -204,9 +212,9 @@ def test_schema_snapshots_match_models() -> None:
     import json
     from pathlib import Path
 
-    from kdive.introspect_helpers import built_in_helper_specs
+    from kdive.introspect.helpers import built_in_helper_specs
 
-    schema_dir = Path("src/kdive/introspect_helpers/schemas")
+    schema_dir = Path("src/kdive/introspect/helpers/schemas")
     for spec in built_in_helper_specs():
         snap = schema_dir / f"{spec.name}.v{spec.version}.json"
         assert snap.is_file(), f"missing snapshot for {spec.name} v{spec.version}"
