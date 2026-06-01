@@ -19,7 +19,6 @@ CONFIGURATION_FAILURE_DUPLICATE_SOURCES = [
     ROOT / "src" / "kdive" / "debug" / "operations.py",
     ROOT / "src" / "kdive" / "introspect" / "execution.py",
     ROOT / "src" / "kdive" / "server.py",
-    ROOT / "src" / "kdive" / "target" / "handlers.py",
     ROOT / "src" / "kdive" / "transport" / "handlers.py",
 ]
 
@@ -230,10 +229,9 @@ def test_target_and_kernel_handlers_accept_structured_boundaries_only() -> None:
 def test_target_handlers_are_split_by_workflow() -> None:
     target_handlers_source = ROOT / "src" / "kdive" / "target" / "handlers.py"
 
-    assert target_handlers_source.is_file()
+    assert not target_handlers_source.exists()
     assert TARGET_BOOT_HANDLER_SOURCE.is_file()
     assert TARGET_TEST_HANDLER_SOURCE.is_file()
-    assert _defined_functions(target_handlers_source) == set()
     assert "target_boot_handler" in _defined_functions(TARGET_BOOT_HANDLER_SOURCE)
     assert "target_run_tests_handler" not in _defined_functions(TARGET_BOOT_HANDLER_SOURCE)
     assert "target_run_tests_handler" in _defined_functions(TARGET_TEST_HANDLER_SOURCE)
