@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import contextlib
+import io
+import json
+import os
+
 import pytest
 from pydantic import ValidationError
 
@@ -81,6 +86,31 @@ def test_parse_dump_listing_empty() -> None:
     from kdive.postmortem.dumps import parse_dump_listing
 
     assert parse_dump_listing({"dump_dir": "/var/crash", "exists": False, "dumps": []}) == []
+
+
+def test_dump_listing_script_reports_unexpected_record_errors(tmp_path, monkeypatch) -> None:
+    from kdive.postmortem.dumps import render_dump_list_script
+
+    dump_dir = tmp_path / "crash"
+    failed_dir = dump_dir / "bad-record"
+    failed_dir.mkdir(parents=True)
+    original_isfile = os.path.isfile
+
+    def raising_isfile(path: str) -> bool:
+        if str(path).startswith(str(failed_dir)):
+            raise RuntimeError("probe failed")
+        return original_isfile(path)
+
+    monkeypatch.setattr(os.path, "isfile", raising_isfile)
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        exec(render_dump_list_script(dump_dir=str(dump_dir)), {})  # noqa: S102 - execute rendered probe script.
+
+    payload = json.loads(stdout.getvalue())
+    assert payload["dumps"] == []
+    assert payload["enumeration_errors"] == [
+        {"code": "record_failed", "path": str(failed_dir), "exception": "RuntimeError"}
+    ]
 
 
 def test_parse_dump_listing_one() -> None:

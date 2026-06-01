@@ -239,7 +239,8 @@ if exists:
             continue
         try:
             rec = _record(sub)
-        except Exception:
+        except Exception as exc:
+            enumeration_errors.append(_error("record_failed", sub, exc))
             rec = None
         if rec is not None:
             dumps.append(rec)
