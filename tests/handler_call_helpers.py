@@ -38,19 +38,18 @@ from kdive.providers.local.test.local_ssh_tests import LocalSshTestProvider
 from kdive.target.boot_handler import target_boot_handler as _target_boot_handler
 from kdive.target.test_handler import target_run_tests_handler as _target_run_tests_handler
 from kdive.target.tools import TargetBootHandlerRequest, TargetRunTestsHandlerRequest, TargetToolRuntime
-from kdive.transport.core.base import BreakPlan, TransportSession
-from kdive.transport.core.break_inject import BreakRequestMethod
+from kdive.transport.core.base import TransportSession
 from kdive.transport.handlers import transport_close_handler as _transport_close_handler
 from kdive.transport.handlers import transport_inject_break_handler as _transport_inject_break_handler
 from kdive.transport.handlers import transport_open_handler as _transport_open_handler
 from kdive.transport.tools import (
+    BreakMechanism,
     TransportCloseHandlerRequest,
     TransportInjectBreakHandlerRequest,
     TransportOpenHandlerRequest,
     TransportToolContext,
 )
 
-BreakMechanism = Callable[[BreakRequestMethod, BreakPlan | None], None]
 ProbeHalted = Callable[[TransportSession], bool]
 
 
@@ -178,24 +177,14 @@ def debug_evaluate_handler(
     )
 
 
-def _debug_symbol_control_handler(operation_request, *, artifact_root, run_id, runtime, debug_session_id=None):
+def debug_set_breakpoint_handler(
+    *, artifact_root: Path, run_id: str, symbol: str, runtime: DebugRuntime, debug_session_id: str | None = None
+):
     return _debug_operation(
         artifact_root=artifact_root,
         run_id=run_id,
         runtime=runtime,
-        operation_request=operation_request,
-        debug_session_id=debug_session_id,
-    )
-
-
-def debug_set_breakpoint_handler(
-    *, artifact_root: Path, run_id: str, symbol: str, runtime: DebugRuntime, debug_session_id: str | None = None
-):
-    return _debug_symbol_control_handler(
-        DebugSetBreakpointRequest(symbol=symbol),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        runtime=runtime,
+        operation_request=DebugSetBreakpointRequest(symbol=symbol),
         debug_session_id=debug_session_id,
     )
 
@@ -203,21 +192,11 @@ def debug_set_breakpoint_handler(
 def debug_set_watchpoint_handler(
     *, artifact_root: Path, run_id: str, symbol: str, runtime: DebugRuntime, debug_session_id: str | None = None
 ):
-    return _debug_symbol_control_handler(
-        DebugSetWatchpointRequest(symbol=symbol),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        runtime=runtime,
-        debug_session_id=debug_session_id,
-    )
-
-
-def _debug_breakpoint_id_handler(operation_request, *, artifact_root, run_id, runtime, debug_session_id=None):
     return _debug_operation(
         artifact_root=artifact_root,
         run_id=run_id,
         runtime=runtime,
-        operation_request=operation_request,
+        operation_request=DebugSetWatchpointRequest(symbol=symbol),
         debug_session_id=debug_session_id,
     )
 
@@ -230,11 +209,11 @@ def debug_clear_breakpoint_handler(
     runtime: DebugRuntime,
     debug_session_id: str | None = None,
 ):
-    return _debug_breakpoint_id_handler(
-        DebugClearBreakpointRequest(breakpoint_id=breakpoint_id),
+    return _debug_operation(
         artifact_root=artifact_root,
         run_id=run_id,
         runtime=runtime,
+        operation_request=DebugClearBreakpointRequest(breakpoint_id=breakpoint_id),
         debug_session_id=debug_session_id,
     )
 
@@ -247,21 +226,11 @@ def debug_clear_watchpoint_handler(
     runtime: DebugRuntime,
     debug_session_id: str | None = None,
 ):
-    return _debug_breakpoint_id_handler(
-        DebugClearWatchpointRequest(breakpoint_id=breakpoint_id),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        runtime=runtime,
-        debug_session_id=debug_session_id,
-    )
-
-
-def _debug_session_query_handler(operation_request, *, artifact_root, run_id, runtime, debug_session_id=None):
     return _debug_operation(
         artifact_root=artifact_root,
         run_id=run_id,
         runtime=runtime,
-        operation_request=operation_request,
+        operation_request=DebugClearWatchpointRequest(breakpoint_id=breakpoint_id),
         debug_session_id=debug_session_id,
     )
 
@@ -269,11 +238,11 @@ def _debug_session_query_handler(operation_request, *, artifact_root, run_id, ru
 def debug_list_breakpoints_handler(
     *, artifact_root: Path, run_id: str, runtime: DebugRuntime, debug_session_id: str | None = None
 ):
-    return _debug_session_query_handler(
-        DebugListBreakpointsRequest(),
+    return _debug_operation(
         artifact_root=artifact_root,
         run_id=run_id,
         runtime=runtime,
+        operation_request=DebugListBreakpointsRequest(),
         debug_session_id=debug_session_id,
     )
 
@@ -281,11 +250,11 @@ def debug_list_breakpoints_handler(
 def debug_backtrace_handler(
     *, artifact_root: Path, run_id: str, runtime: DebugRuntime, debug_session_id: str | None = None
 ):
-    return _debug_session_query_handler(
-        DebugBacktraceRequest(),
+    return _debug_operation(
         artifact_root=artifact_root,
         run_id=run_id,
         runtime=runtime,
+        operation_request=DebugBacktraceRequest(),
         debug_session_id=debug_session_id,
     )
 
@@ -293,29 +262,11 @@ def debug_backtrace_handler(
 def debug_list_variables_handler(
     *, artifact_root: Path, run_id: str, runtime: DebugRuntime, debug_session_id: str | None = None
 ):
-    return _debug_session_query_handler(
-        DebugListVariablesRequest(),
-        artifact_root=artifact_root,
-        run_id=run_id,
-        runtime=runtime,
-        debug_session_id=debug_session_id,
-    )
-
-
-def _debug_execution_handler(
-    operation_request,
-    *,
-    artifact_root,
-    run_id,
-    runtime,
-    debug_session_id=None,
-    timeout_seconds=None,
-):
     return _debug_operation(
         artifact_root=artifact_root,
         run_id=run_id,
         runtime=runtime,
-        operation_request=operation_request,
+        operation_request=DebugListVariablesRequest(),
         debug_session_id=debug_session_id,
     )
 
@@ -328,13 +279,12 @@ def debug_continue_handler(
     debug_session_id: str | None = None,
     timeout_seconds: int | None = None,
 ):
-    return _debug_execution_handler(
-        DebugContinueRequest(timeout_seconds=timeout_seconds),
+    return _debug_operation(
         artifact_root=artifact_root,
         run_id=run_id,
         runtime=runtime,
+        operation_request=DebugContinueRequest(timeout_seconds=timeout_seconds),
         debug_session_id=debug_session_id,
-        timeout_seconds=timeout_seconds,
     )
 
 
@@ -346,13 +296,12 @@ def debug_step_handler(
     debug_session_id: str | None = None,
     timeout_seconds: int | None = None,
 ):
-    return _debug_execution_handler(
-        DebugStepRequest(timeout_seconds=timeout_seconds),
+    return _debug_operation(
         artifact_root=artifact_root,
         run_id=run_id,
         runtime=runtime,
+        operation_request=DebugStepRequest(timeout_seconds=timeout_seconds),
         debug_session_id=debug_session_id,
-        timeout_seconds=timeout_seconds,
     )
 
 
@@ -364,13 +313,12 @@ def debug_next_handler(
     debug_session_id: str | None = None,
     timeout_seconds: int | None = None,
 ):
-    return _debug_execution_handler(
-        DebugNextRequest(timeout_seconds=timeout_seconds),
+    return _debug_operation(
         artifact_root=artifact_root,
         run_id=run_id,
         runtime=runtime,
+        operation_request=DebugNextRequest(timeout_seconds=timeout_seconds),
         debug_session_id=debug_session_id,
-        timeout_seconds=timeout_seconds,
     )
 
 
@@ -382,13 +330,12 @@ def debug_finish_handler(
     debug_session_id: str | None = None,
     timeout_seconds: int | None = None,
 ):
-    return _debug_execution_handler(
-        DebugFinishRequest(timeout_seconds=timeout_seconds),
+    return _debug_operation(
         artifact_root=artifact_root,
         run_id=run_id,
         runtime=runtime,
+        operation_request=DebugFinishRequest(timeout_seconds=timeout_seconds),
         debug_session_id=debug_session_id,
-        timeout_seconds=timeout_seconds,
     )
 
 
@@ -400,13 +347,12 @@ def debug_interrupt_handler(
     debug_session_id: str | None = None,
     timeout_seconds: int | None = None,
 ):
-    return _debug_execution_handler(
-        DebugInterruptRequest(timeout_seconds=timeout_seconds),
+    return _debug_operation(
         artifact_root=artifact_root,
         run_id=run_id,
         runtime=runtime,
+        operation_request=DebugInterruptRequest(timeout_seconds=timeout_seconds),
         debug_session_id=debug_session_id,
-        timeout_seconds=timeout_seconds,
     )
 
 
@@ -513,17 +459,24 @@ def _transport_runtime(
     break_mechanism: BreakMechanism | None = None,
     probe_halted: ProbeHalted | None = None,
 ) -> TransportToolContext:
-    kwargs = {
-        "default_artifact_root": default_artifact_root,
-        "transaction": transaction,
-        "admission": admission,
-        "session_registry": session_registry,
-        "debug_profiles": debug_profiles,
-        "break_mechanism": break_mechanism,
-    }
     if probe_halted is not None:
-        kwargs["probe_halted"] = probe_halted
-    return TransportToolContext(**kwargs)
+        return TransportToolContext(
+            default_artifact_root=default_artifact_root,
+            transaction=transaction,
+            admission=admission,
+            session_registry=session_registry,
+            debug_profiles=debug_profiles,
+            break_mechanism=break_mechanism,
+            probe_halted=probe_halted,
+        )
+    return TransportToolContext(
+        default_artifact_root=default_artifact_root,
+        transaction=transaction,
+        admission=admission,
+        session_registry=session_registry,
+        debug_profiles=debug_profiles,
+        break_mechanism=break_mechanism,
+    )
 
 
 def transport_open_handler(
