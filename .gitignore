@@ -5,3 +5,6 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+
+# Local drgn-interface verification scratch (plan/driver kept locally, not committed)
+.kdive-verify/
