@@ -8,8 +8,6 @@ from kdive.model import Model
 
 
 class DebugPostmortemCheckPrereqsRequest(Model):
-    """Request payload for ``debug.postmortem.check_prereqs``. #94 / ADR 0028."""
-
     run_id: str
     manifest_target_profile: str
     timeout_seconds: int = 20
@@ -19,8 +17,6 @@ class DebugPostmortemCheckPrereqsRequest(Model):
 
 
 class DebugPostmortemCrashRequest(Model):
-    """Request payload for ``debug.postmortem.crash``. Spec §3.1."""
-
     run_id: str
     vmcore_ref: str
     vmlinux_ref: str
@@ -30,8 +26,6 @@ class DebugPostmortemCrashRequest(Model):
 
 
 class DebugPostmortemTriageRequest(Model):
-    """Request payload for ``debug.postmortem.triage``. Spec §3.1."""
-
     run_id: str
     vmcore_ref: str
     vmlinux_ref: str
@@ -40,8 +34,6 @@ class DebugPostmortemTriageRequest(Model):
 
 
 class DebugPostmortemListDumpsRequest(Model):
-    """Request payload for ``debug.postmortem.list_dumps``. #95 / ADR 0029."""
-
     run_id: str
     manifest_target_profile: str
     dump_dir: str | None = None
@@ -52,8 +44,6 @@ class DebugPostmortemListDumpsRequest(Model):
 
 
 class DebugPostmortemFetchRequest(Model):
-    """Request payload for ``debug.postmortem.fetch``. #95 / ADR 0029."""
-
     run_id: str
     manifest_target_profile: str
     dump_ref: str
@@ -67,8 +57,6 @@ class DebugPostmortemFetchRequest(Model):
 
 
 class DumpEntry(Model):
-    """One captured vmcore enumerated by ``debug.postmortem.list_dumps``. #95."""
-
     path: str
     kernel: str | None
     capture_time: str | None
@@ -79,8 +67,6 @@ class DumpEntry(Model):
 
 
 class FetchedFile(Model):
-    """One file staged into the run dir by ``debug.postmortem.fetch``. #95."""
-
     name: str
     ref: str
     sha256: str
@@ -88,8 +74,6 @@ class FetchedFile(Model):
 
 
 class _TriageSectionBase(Model):
-    """Shared per-section status. Spec §3.3 / ADR 0027 decision 3."""
-
     status: Literal["ok", "failed"]
     reason: str | None = None
 
@@ -123,8 +107,6 @@ class ModulesSection(_TriageSectionBase):
 
 
 class DebugPostmortemTriageReport(Model):
-    """Composite triage report. Spec §3.3."""
-
     vmcore_build_id: str
     panic_reason: PanicReasonSection
     faulting_task: FaultingTaskSection
