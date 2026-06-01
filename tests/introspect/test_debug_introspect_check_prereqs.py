@@ -10,14 +10,9 @@ from pydantic import ValidationError
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import RootfsProfile
-from kdive.domain import (
-    DebugIntrospectCheckPrerequisitesRequest,
-    ErrorCategory,
-    RunRequest,
-    StepResult,
-    StepStatus,
-)
+from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus
 from kdive.introspect.handlers import debug_introspect_check_prerequisites_handler
+from kdive.introspect.models import DebugIntrospectCheckPrerequisitesRequest
 from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 from kdive.seams.probes import PROBE_STDOUT_CAP
 from kdive.server import create_app

@@ -232,7 +232,7 @@ def test_schema_snapshots_match_models() -> None:
 
 
 def test_helper_request_defaults() -> None:
-    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.introspect.models import DebugIntrospectHelperRequest
 
     r = DebugIntrospectHelperRequest(run_id="r", manifest_target_profile="t", name="sysinfo")
     assert r.args == {}
@@ -242,7 +242,7 @@ def test_helper_request_defaults() -> None:
 def test_helper_request_forbids_extra() -> None:
     from pydantic import ValidationError
 
-    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.introspect.models import DebugIntrospectHelperRequest
 
     with pytest.raises(ValidationError):
         DebugIntrospectHelperRequest(run_id="r", manifest_target_profile="t", name="sysinfo", bogus=1)

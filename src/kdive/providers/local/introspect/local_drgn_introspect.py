@@ -5,7 +5,7 @@ Spec: docs/superpowers/specs/2026-05-28-debug-introspect-run-design.md
 
 from __future__ import annotations
 
-from kdive.domain import (
+from kdive.providers.models import (
     ImplementationState,
     OperationSemantics,
     ProviderCapability,

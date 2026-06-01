@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import Field, model_validator
+from pydantic import Field
 
 from kdive.config import BootOverrides, BuildOverrides
 from kdive.model import Model
@@ -30,19 +30,6 @@ class ErrorCategory(StrEnum):
     NOT_IMPLEMENTED = "not_implemented"
     STALE_HANDLE = "stale_handle"
     TRANSPORT_CONFLICT = "transport_conflict"
-
-
-class TargetKind(StrEnum):
-    LOCAL = "local"
-    REMOTE = "remote"
-    VIRTUAL = "virtual"
-    PHYSICAL = "physical"
-
-
-class ImplementationState(StrEnum):
-    IMPLEMENTED = "implemented"
-    STUB = "stub"
-    EXTERNAL_RESERVED = "external_reserved"
 
 
 class PrerequisiteStatus(StrEnum):
@@ -89,102 +76,6 @@ class RunRequest(Model):
     boot_overrides: BootOverrides | None = None
 
 
-class DebugIntrospectRunRequest(Model):
-    """Request payload for ``debug.introspect.run``. Spec §3.1.
-
-    ``script`` is the user-supplied drgn Python source. The handler
-    base64-encodes it for transport and substitutes it into a
-    ``string.Template``-rendered wrapper on the target (spec §4.2).
-    ``call_id`` is server-minted, not part of the request.
-
-    The ``[5, 300]`` timeout band and the script-non-empty / ≤256 KiB
-    invariants are enforced by the handler (not Pydantic) so they surface
-    as ``ToolResponse.failure(...)`` with the spec's exact codes from §3.3.
-    """
-
-    run_id: str
-    manifest_target_profile: str
-    script: str
-    timeout_seconds: int = 30
-    allow_write: bool = False
-    acknowledged_permissions: list[str] = Field(default_factory=list)
-    debug_profile: str | None = None
-    target_profile: str | None = None
-    rootfs_profile: str | None = None
-    args: dict[str, Any] = Field(default_factory=dict)
-
-
-class DebugIntrospectCheckPrerequisitesRequest(Model):
-    """Request payload for ``debug.introspect.check_prerequisites``. Spec §3.
-
-    Run-scoped, read-only target probe. ``timeout_seconds`` defaults to 20 and
-    is bounded to [5, 60] by the handler (not Pydantic) so an out-of-range
-    value surfaces as ``ToolResponse.failure(CONFIGURATION_ERROR)`` per §6.
-    """
-
-    run_id: str
-    manifest_target_profile: str
-    timeout_seconds: int = 20
-    debug_profile: str | None = None
-    target_profile: str | None = None
-    rootfs_profile: str | None = None
-
-
-class DebugIntrospectHelperRequest(Model):
-    """Request payload for ``debug.introspect.helper``. Spec §6.1.
-
-    ``args`` is validated against the resolved helper's ``args_model`` by the
-    handler (not Pydantic) so an unknown helper / bad args surface as the
-    spec's exact failure codes. The ``[5, 300]`` timeout band and
-    manifest-immutability of profile fields are enforced by the handler.
-    """
-
-    run_id: str
-    manifest_target_profile: str
-    name: str
-    args: dict[str, Any] = Field(default_factory=dict)
-    timeout_seconds: int = 30
-    debug_profile: str | None = None
-    target_profile: str | None = None
-    rootfs_profile: str | None = None
-
-
-class DebugIntrospectFromVmcoreRequest(Model):
-    """Request payload for ``debug.introspect.from_vmcore``. Spec §3.1.
-
-    No ``target_ref``/``*_profile``: the offline path names no live target.
-    ``vmcore_ref``/``vmlinux_ref``/``modules_ref`` are run-relative and confined
-    to the run dir. The ``[5, 300]`` timeout band and the script non-empty /
-    ≤256 KiB invariants are enforced by the handler (not Pydantic) so they
-    surface as ``ToolResponse.failure(...)`` with the spec's exact codes.
-    """
-
-    run_id: str
-    vmcore_ref: str
-    vmlinux_ref: str
-    modules_ref: str | None = None
-    script: str
-    timeout_seconds: int = 30
-    allow_write: bool = False
-    args: dict[str, Any] = Field(default_factory=dict)
-
-
-class DebugIntrospectFromVmcoreHelperRequest(Model):
-    """Request payload for ``debug.introspect.from_vmcore_helper``. Spec §3.1.
-
-    Runs a curated helper from ``get_helper_registry()`` against the vmcore.
-    ``args`` is validated against the resolved helper's ``args_model`` by the handler.
-    """
-
-    run_id: str
-    vmcore_ref: str
-    vmlinux_ref: str
-    modules_ref: str | None = None
-    name: str
-    args: dict[str, Any] = Field(default_factory=dict)
-    timeout_seconds: int = 30
-
-
 class RunStep(Model):
     name: str
     status: StepStatus = StepStatus.PENDING
@@ -203,86 +94,6 @@ class RunRecord(Model):
     run_id: str
     request: RunRequest
     steps: list[RunStep] = Field(default_factory=list)
-
-
-class OperationSemantics(Model):
-    idempotent: bool
-    retryable: bool
-    destructive: bool
-    cancelable: bool
-    concurrent_safe: bool
-
-
-class ProviderDependency(Model):
-    name: str
-    kind: str = "host_tool"
-    required: bool = True
-
-
-class ProviderOperationCapability(Model):
-    operation: str
-    semantics: OperationSemantics
-    implementation_state: ImplementationState | None = None
-    required_host_tools: list[str] = Field(default_factory=list)
-    destructive_permissions: list[str] = Field(default_factory=list)
-    limitations: list[str] = Field(default_factory=list)
-
-
-class ProviderCapability(Model):
-    provider_name: str
-    provider_version: str
-    provider_family: str = "local"
-    implementation_state: ImplementationState = ImplementationState.IMPLEMENTED
-    architectures: list[str]
-    target_kinds: list[TargetKind]
-    transports: list[str] = Field(default_factory=list)
-    documentation_paths: list[str] = Field(default_factory=list)
-    limitations: list[str] = Field(default_factory=list)
-    operations: list[str]
-    required_host_tools: list[str]
-    destructive_permissions: list[str]
-    access_methods: list[str]
-    semantics: OperationSemantics
-    operation_capabilities: list[ProviderOperationCapability] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def fill_operation_capabilities(self) -> ProviderCapability:
-        if not self.operation_capabilities:
-            object.__setattr__(
-                self,
-                "operation_capabilities",
-                [
-                    ProviderOperationCapability(
-                        operation=operation,
-                        semantics=self.semantics,
-                        implementation_state=self.implementation_state,
-                        required_host_tools=list(self.required_host_tools),
-                        destructive_permissions=list(self.destructive_permissions),
-                        limitations=list(self.limitations),
-                    )
-                    for operation in self.operations
-                ],
-            )
-            return self
-
-        operation_names = [capability.operation for capability in self.operation_capabilities]
-        if operation_names != self.operations:
-            raise ValueError("operations must match operation_capabilities in order")
-        if all(capability.implementation_state is not None for capability in self.operation_capabilities):
-            return self
-        object.__setattr__(
-            self,
-            "operation_capabilities",
-            [
-                capability.model_copy(
-                    update={
-                        "implementation_state": capability.implementation_state or self.implementation_state,
-                    }
-                )
-                for capability in self.operation_capabilities
-            ],
-        )
-        return self
 
 
 class PrerequisiteCheck(Model):

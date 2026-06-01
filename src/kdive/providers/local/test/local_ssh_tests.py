@@ -8,12 +8,10 @@ from pathlib import Path
 from time import monotonic
 
 from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, RootfsProfile, TestCommand, TestSuiteProfile
-from kdive.domain import (
-    ArtifactRef,
-    ErrorCategory,
+from kdive.domain import ArtifactRef, ErrorCategory, StepStatus
+from kdive.providers.models import (
     OperationSemantics,
     ProviderCapability,
-    StepStatus,
     TargetKind,
 )
 from kdive.providers.ssh import (

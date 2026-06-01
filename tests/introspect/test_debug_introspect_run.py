@@ -21,15 +21,7 @@ from kdive.coordination.admission import (
     AdmissionError,
     TargetSnapshot,
 )
-from kdive.domain import (
-    DebugIntrospectHelperRequest,
-    DebugIntrospectRunRequest,
-    ErrorCategory,
-    RunRequest,
-    StepResult,
-    StepStatus,
-    ToolResponse,
-)
+from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from kdive.introspect import execution as introspect_execution
 from kdive.introspect.execution import RUN_STDOUT_CAP, LiveIntrospectRuntime
 from kdive.introspect.handlers import (
@@ -37,6 +29,10 @@ from kdive.introspect.handlers import (
 )
 from kdive.introspect.handlers import (
     debug_introspect_run_handler as _debug_introspect_run_handler,
+)
+from kdive.introspect.models import (
+    DebugIntrospectHelperRequest,
+    DebugIntrospectRunRequest,
 )
 from kdive.introspect.tools import IntrospectRunOptions, IntrospectTargetContext
 from kdive.providers.local.test.local_ssh_tests import SshCommandResult
@@ -1771,7 +1767,7 @@ def _helper_script_error_ssh_result() -> SshCommandResult:
 
 
 def test_helper_success_returns_typed_result(tmp_path: Path) -> None:
-    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.introspect.models import DebugIntrospectHelperRequest
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1803,7 +1799,7 @@ def test_helper_success_returns_typed_result(tmp_path: Path) -> None:
 
 
 def test_helper_malformed_emit_records_failed_step(tmp_path: Path) -> None:
-    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.introspect.models import DebugIntrospectHelperRequest
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1824,7 +1820,7 @@ def test_helper_malformed_emit_records_failed_step(tmp_path: Path) -> None:
 
 
 def test_helper_script_error_records_failed_step(tmp_path: Path) -> None:
-    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.introspect.models import DebugIntrospectHelperRequest
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1846,7 +1842,7 @@ def test_helper_script_error_records_failed_step(tmp_path: Path) -> None:
 
 def test_helper_gating_enforced(tmp_path: Path) -> None:
     from kdive.config import DebugProfile
-    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.introspect.models import DebugIntrospectHelperRequest
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, _ = _profiles()
@@ -1865,7 +1861,7 @@ def test_helper_gating_enforced(tmp_path: Path) -> None:
 
 
 def test_helper_unknown_name(tmp_path: Path) -> None:
-    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.introspect.models import DebugIntrospectHelperRequest
 
     resp = debug_introspect_helper_handler(
         DebugIntrospectHelperRequest(run_id="missing", manifest_target_profile="t", name="nope"),
@@ -1876,7 +1872,7 @@ def test_helper_unknown_name(tmp_path: Path) -> None:
 
 
 def test_helper_args_invalid(tmp_path: Path) -> None:
-    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.introspect.models import DebugIntrospectHelperRequest
 
     resp = debug_introspect_helper_handler(
         DebugIntrospectHelperRequest(
@@ -1892,7 +1888,7 @@ def test_helper_args_invalid(tmp_path: Path) -> None:
 
 
 def test_helper_passes_cap_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.introspect.models import DebugIntrospectHelperRequest
 
     captured: dict = {}
     orig = introspect_execution.render_wrapper
@@ -1929,7 +1925,7 @@ def test_helper_passes_cap_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 def test_helper_redacts_secret_in_emit(tmp_path: Path) -> None:
-    from kdive.domain import DebugIntrospectHelperRequest
+    from kdive.introspect.models import DebugIntrospectHelperRequest
     from kdive.safety.redaction import REDACTION
 
     _, run_id, _ = _bootstrap_run_with_build(tmp_path)

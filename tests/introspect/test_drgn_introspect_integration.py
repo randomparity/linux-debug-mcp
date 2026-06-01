@@ -24,8 +24,9 @@ from kdive.artifacts.store import ArtifactStore
 from kdive.config import RootfsProfile, TargetProfile
 from kdive.coordination.admission import AdmissionService, SnapshotStore
 from kdive.coordination.registry import SessionRegistry
-from kdive.domain import ArtifactRef, DebugIntrospectRunRequest, ErrorCategory, StepResult, StepStatus
+from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
 from kdive.introspect.handlers import debug_introspect_run_handler
+from kdive.introspect.models import DebugIntrospectRunRequest
 from kdive.providers.local.test.local_ssh_tests import SubprocessSshRunner, build_ssh_argv
 
 MANAGED_DOMAIN_PREFIX = "kdive-"

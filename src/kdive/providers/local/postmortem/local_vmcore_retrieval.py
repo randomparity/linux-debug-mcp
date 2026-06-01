@@ -7,7 +7,7 @@ would over-declare scp for the pure introspect ops).
 
 from __future__ import annotations
 
-from kdive.domain import (
+from kdive.providers.models import (
     ImplementationState,
     OperationSemantics,
     ProviderCapability,

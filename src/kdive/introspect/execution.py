@@ -34,9 +34,10 @@ from kdive.coordination.exec_probe import probe_execution_state
 from kdive.coordination.registry import SessionRegistry
 from kdive.debug.policy import ensure_debug_operation_enabled, resolve_debug_profile
 from kdive.default_profiles import DEFAULT_DEBUG_PROFILES, DEFAULT_ROOTFS_PROFILES
-from kdive.domain import ArtifactRef, DebugIntrospectRunRequest, ErrorCategory, StepResult, StepStatus, ToolResponse
+from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.handlers.shared import configuration_failure_response as _configuration_failure
 from kdive.introspect.helpers import HelperSpec
+from kdive.introspect.models import DebugIntrospectRunRequest
 from kdive.introspect.wrappers import (
     SCRIPT_BYTE_CAP,
     TARGET_PYTHON_ARGV,

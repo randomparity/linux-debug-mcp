@@ -17,12 +17,10 @@ from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as safe_xml_fromstring
 
 from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, RootfsProfile, TargetProfile
-from kdive.domain import (
-    ArtifactRef,
-    ErrorCategory,
+from kdive.domain import ArtifactRef, ErrorCategory, StepStatus
+from kdive.providers.models import (
     OperationSemantics,
     ProviderCapability,
-    StepStatus,
     TargetKind,
 )
 

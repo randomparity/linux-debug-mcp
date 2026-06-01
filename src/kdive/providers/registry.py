@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from kdive.domain import Model, ProviderCapability
+from kdive.domain import Model
+from kdive.providers.models import ProviderCapability
 from kdive.providers.plugins import ProviderPluginSpec, built_in_provider_plugin_specs
 
 

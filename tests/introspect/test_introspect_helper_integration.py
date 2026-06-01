@@ -29,8 +29,8 @@ from test_drgn_introspect_integration import (
     _require_integration_env,
 )
 
-from kdive.domain import DebugIntrospectHelperRequest
 from kdive.introspect.handlers import debug_introspect_helper_handler
+from kdive.introspect.models import DebugIntrospectHelperRequest
 
 pytestmark = pytest.mark.live_vm
 

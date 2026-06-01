@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from kdive.domain import OperationSemantics, ProviderCapability, TargetKind
+from kdive.providers.models import (
+    OperationSemantics,
+    ProviderCapability,
+    TargetKind,
+)
 
 
 def local_provider_capability(

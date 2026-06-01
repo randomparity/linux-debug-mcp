@@ -7,15 +7,15 @@ from mcp.server.fastmcp import FastMCP
 
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
-from kdive.domain import (
+from kdive.domain import ToolResponse
+from kdive.introspect.execution import LiveIntrospectRuntime
+from kdive.introspect.models import (
     DebugIntrospectCheckPrerequisitesRequest,
     DebugIntrospectFromVmcoreHelperRequest,
     DebugIntrospectFromVmcoreRequest,
     DebugIntrospectHelperRequest,
     DebugIntrospectRunRequest,
-    ToolResponse,
 )
-from kdive.introspect.execution import LiveIntrospectRuntime
 from kdive.model import Model
 from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, optional_model_arg
 

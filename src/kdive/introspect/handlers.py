@@ -20,18 +20,7 @@ from kdive.config import MAX_INTROSPECT_CALLS_PER_RUN, RootfsProfile
 from kdive.coordination.admission import AdmissionError, AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES
-from kdive.domain import (
-    ArtifactRef,
-    DebugIntrospectCheckPrerequisitesRequest,
-    DebugIntrospectFromVmcoreHelperRequest,
-    DebugIntrospectFromVmcoreRequest,
-    DebugIntrospectHelperRequest,
-    DebugIntrospectRunRequest,
-    ErrorCategory,
-    StepResult,
-    StepStatus,
-    ToolResponse,
-)
+from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.handlers.shared import _require_value
 from kdive.introspect.execution import (
     HELPER_CAP_PROFILE,
@@ -51,6 +40,13 @@ from kdive.introspect.execution import (
     _utcnow,
 )
 from kdive.introspect.helpers import get_helper_registry
+from kdive.introspect.models import (
+    DebugIntrospectCheckPrerequisitesRequest,
+    DebugIntrospectFromVmcoreHelperRequest,
+    DebugIntrospectFromVmcoreRequest,
+    DebugIntrospectHelperRequest,
+    DebugIntrospectRunRequest,
+)
 from kdive.introspect.probes import assemble_introspect_probe_response
 from kdive.introspect.wrappers import (
     SCRIPT_BYTE_CAP,

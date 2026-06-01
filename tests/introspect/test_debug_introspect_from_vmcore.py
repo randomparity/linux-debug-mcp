@@ -6,15 +6,13 @@ import pytest
 from pydantic import ValidationError
 
 from kdive.artifacts.store import ArtifactStore
-from kdive.domain import (
-    DebugIntrospectFromVmcoreHelperRequest,
-    DebugIntrospectFromVmcoreRequest,
-    ErrorCategory,
-    RunRequest,
-    StepStatus,
-)
+from kdive.domain import ErrorCategory, RunRequest, StepStatus
 from kdive.introspect import handlers as introspect_handlers
 from kdive.introspect.handlers import debug_introspect_from_vmcore_handler, debug_introspect_from_vmcore_helper_handler
+from kdive.introspect.models import (
+    DebugIntrospectFromVmcoreHelperRequest,
+    DebugIntrospectFromVmcoreRequest,
+)
 from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 from kdive.symbols.build_id import BuildIdReadError
 

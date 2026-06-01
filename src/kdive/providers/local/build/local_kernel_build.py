@@ -11,12 +11,10 @@ from pathlib import Path
 from typing import Protocol
 
 from kdive.config import BuildProfile
-from kdive.domain import (
-    ArtifactRef,
-    ErrorCategory,
+from kdive.domain import ArtifactRef, ErrorCategory, StepStatus
+from kdive.providers.models import (
     OperationSemantics,
     ProviderCapability,
-    StepStatus,
     TargetKind,
 )
 from kdive.safety.redaction import Redactor

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from kdive.config import ALLOWED_DEBUG_OPERATIONS, TARGET_DESTRUCTIVE_PERMISSIONS, TRANSPORT_DESTRUCTIVE_PERMISSIONS
-from kdive.domain import (
+from kdive.providers.models import (
     OperationSemantics,
     ProviderCapability,
     ProviderOperationCapability,

@@ -15,14 +15,8 @@ from kdive.config import (
     TRIAGE_DMESG_HELPER,
     TRIAGE_MODULES_HELPER,
 )
-from kdive.domain import (
-    ArtifactRef,
-    DebugIntrospectFromVmcoreHelperRequest,
-    ErrorCategory,
-    StepResult,
-    StepStatus,
-    ToolResponse,
-)
+from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
+from kdive.introspect.models import DebugIntrospectFromVmcoreHelperRequest
 from kdive.postmortem.crash.handler import (
     debug_postmortem_crash_handler,
     resolve_postmortem_vmcore_context,

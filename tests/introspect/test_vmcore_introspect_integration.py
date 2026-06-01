@@ -60,7 +60,7 @@ def _staged_run(tmp_path: Path) -> tuple[ArtifactStore, str, str]:
 
 
 def test_from_vmcore_runs_script_against_real_core(tmp_path: Path) -> None:
-    from kdive.domain import DebugIntrospectFromVmcoreRequest
+    from kdive.introspect.models import DebugIntrospectFromVmcoreRequest
 
     _store, vmcore_ref, vmlinux_ref = _staged_run(tmp_path)
     request = DebugIntrospectFromVmcoreRequest(

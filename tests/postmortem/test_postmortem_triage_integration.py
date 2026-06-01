@@ -8,10 +8,8 @@ from pathlib import Path
 import pytest
 
 from kdive.artifacts.store import ArtifactStore
-from kdive.domain import (
-    DebugIntrospectFromVmcoreRequest,
-    RunRequest,
-)
+from kdive.domain import RunRequest
+from kdive.introspect.models import DebugIntrospectFromVmcoreRequest
 from kdive.postmortem.models import DebugPostmortemTriageRequest
 from kdive.server import (
     debug_introspect_from_vmcore_handler,

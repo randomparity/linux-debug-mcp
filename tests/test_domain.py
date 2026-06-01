@@ -5,17 +5,21 @@ from kdive import __version__, domain
 from kdive.config import BootOverrides, BuildOverrides
 from kdive.domain import (
     ArtifactRef,
+    ErrorCategory,
+    PrerequisiteCheck,
+    PrerequisiteStatus,
+    RunRequest,
+    ToolResponse,
+)
+from kdive.introspect.models import (
     DebugIntrospectCheckPrerequisitesRequest,
     DebugIntrospectHelperRequest,
     DebugIntrospectRunRequest,
-    ErrorCategory,
+)
+from kdive.providers.models import (
     OperationSemantics,
-    PrerequisiteCheck,
-    PrerequisiteStatus,
     ProviderCapability,
-    RunRequest,
     TargetKind,
-    ToolResponse,
 )
 
 
@@ -25,6 +29,24 @@ def test_package_exports_version() -> None:
 
 def test_postmortem_models_live_in_postmortem_package() -> None:
     assert not hasattr(domain, "DebugPostmortemCrashRequest")
+
+
+def test_capability_specific_models_live_outside_shared_domain() -> None:
+    moved_names = {
+        "DebugIntrospectRunRequest",
+        "DebugIntrospectCheckPrerequisitesRequest",
+        "DebugIntrospectHelperRequest",
+        "DebugIntrospectFromVmcoreRequest",
+        "DebugIntrospectFromVmcoreHelperRequest",
+        "OperationSemantics",
+        "ProviderCapability",
+        "ProviderDependency",
+        "ProviderOperationCapability",
+        "ImplementationState",
+        "TargetKind",
+    }
+
+    assert sorted(name for name in moved_names if hasattr(domain, name)) == []
 
 
 @pytest.mark.parametrize(

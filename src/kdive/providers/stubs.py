@@ -4,14 +4,13 @@ from collections.abc import Callable
 from typing import Any
 
 from kdive.config import PROVIDER_DESTRUCTIVE_PERMISSIONS
-from kdive.domain import (
-    ErrorCategory,
+from kdive.domain import ErrorCategory, ToolResponse
+from kdive.providers.models import (
     ImplementationState,
     OperationSemantics,
     ProviderCapability,
     ProviderOperationCapability,
     TargetKind,
-    ToolResponse,
 )
 
 STUB_ARCHITECTURES = ["x86_64", "ppc64le"]

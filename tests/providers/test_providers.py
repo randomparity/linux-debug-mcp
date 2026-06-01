@@ -8,17 +8,17 @@ from kdive.config import (
     TARGET_DESTRUCTIVE_PERMISSIONS,
     TRANSPORT_DESTRUCTIVE_PERMISSIONS,
 )
-from kdive.domain import (
+from kdive.model import Model
+from kdive.providers import debug as debug_contracts
+from kdive.providers.base import local_provider_capability
+from kdive.providers.local.introspect import local_drgn_introspect
+from kdive.providers.models import (
     ImplementationState,
     OperationSemantics,
     ProviderCapability,
     ProviderOperationCapability,
     TargetKind,
 )
-from kdive.model import Model
-from kdive.providers import debug as debug_contracts
-from kdive.providers.base import local_provider_capability
-from kdive.providers.local.introspect import local_drgn_introspect
 from kdive.providers.plugins import ProviderPluginSpec, local_provider_plugin_specs
 from kdive.providers.registry import ProviderRegistry
 
