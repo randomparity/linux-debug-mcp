@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from kdive.config import ALLOWED_DEBUG_OPERATIONS, DebugProfile
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
@@ -27,7 +29,7 @@ def ensure_debug_operation_enabled(profile: DebugProfile, operation: str) -> Non
 def resolve_debug_profile(
     *,
     profile_name: str,
-    debug_profiles: dict[str, DebugProfile] | None,
+    debug_profiles: Mapping[str, DebugProfile] | None,
 ) -> DebugProfile:
     profiles = debug_profiles if debug_profiles is not None else DEFAULT_DEBUG_PROFILES
     try:

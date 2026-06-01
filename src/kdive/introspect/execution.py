@@ -9,7 +9,7 @@ import shutil
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -249,9 +249,9 @@ IntrospectPostValidator = Callable[[dict[str, Any]], "PostValidatorVerdict | Non
 @dataclass(frozen=True)
 class LiveIntrospectRuntime:
     artifact_root: Path
-    target_profiles: dict[str, TargetProfile] | None = None
-    rootfs_profiles: dict[str, RootfsProfile] | None = None
-    debug_profiles: dict[str, DebugProfile] | None = None
+    target_profiles: Mapping[str, TargetProfile] | None = None
+    rootfs_profiles: Mapping[str, RootfsProfile] | None = None
+    debug_profiles: Mapping[str, DebugProfile] | None = None
     ssh_runner: SshRunner | None = None
     admission: AdmissionService | None = None
     session_registry: SessionRegistry | None = None
@@ -476,8 +476,8 @@ def _resolve_live_introspect_context(
     *,
     request: DebugIntrospectRunRequest,
     manifest_context: _LiveManifestContext,
-    rootfs_profiles: dict[str, RootfsProfile],
-    debug_profiles: dict[str, DebugProfile],
+    rootfs_profiles: Mapping[str, RootfsProfile],
+    debug_profiles: Mapping[str, DebugProfile],
 ) -> tuple[_LiveIntrospectContext | None, ToolResponse | None]:
     manifest = manifest_context.manifest
     run_id = request.run_id
@@ -623,8 +623,8 @@ def _resolve_pre_admission_introspect_context(
     *,
     request: DebugIntrospectRunRequest,
     artifact_root: Path,
-    rootfs_profiles: dict[str, RootfsProfile],
-    debug_profiles: dict[str, DebugProfile],
+    rootfs_profiles: Mapping[str, RootfsProfile],
+    debug_profiles: Mapping[str, DebugProfile],
     operation_name: str,
 ) -> tuple[_LiveIntrospectPreAdmissionContext | None, ToolResponse | None]:
     manifest_context, manifest_failure = _load_validate_manifest_context(
@@ -1322,6 +1322,32 @@ def _build_introspect_success_response(
     return response_data
 
 
+def _introspect_runner_failure_tuple(
+    *,
+    raw_stdout: str,
+    raw_stderr: str,
+    ssh_exit: int,
+    fail: Callable[..., ToolResponse],
+    category: ErrorCategory,
+    code: str,
+    message: str,
+) -> tuple[str, str, dict[str, Any], int, ToolResponse]:
+    return (
+        raw_stdout,
+        raw_stderr,
+        {},
+        ssh_exit,
+        fail(
+            category=category,
+            code=code,
+            message=message,
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
+            outcome_status_for_forensics=None,
+        ),
+    )
+
+
 def _triage_introspect_runner_output(
     *,
     ssh_result: SshCommandResult,
@@ -1342,107 +1368,130 @@ def _triage_introspect_runner_output(
     ssh_exit = ssh_result.exit_status
 
     if ssh_result.oversized_output or raw_stdout is None:
-        return (
-            "",
-            raw_stderr,
-            {},
-            ssh_exit,
-            fail(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                code="oversized_output",
-                message=f"introspect stdout exceeded {RUN_STDOUT_CAP} bytes",
-                raw_stderr=raw_stderr,
-                ssh_exit=ssh_exit,
-                outcome_status_for_forensics=None,
-            ),
+        return _introspect_runner_failure_tuple(
+            raw_stdout="",
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
+            fail=fail,
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            code="oversized_output",
+            message=f"introspect stdout exceeded {RUN_STDOUT_CAP} bytes",
         )
 
     if ssh_result.cancelled:
-        return (
-            raw_stdout,
-            raw_stderr,
-            {},
-            ssh_exit,
-            fail(
-                category=ErrorCategory.READINESS_FAILURE,
-                code="introspect_cancelled",
-                message="introspect call cancelled by admission fence",
-                raw_stderr=raw_stderr,
-                ssh_exit=ssh_exit,
-                outcome_status_for_forensics=None,
-            ),
+        return _introspect_runner_failure_tuple(
+            raw_stdout=raw_stdout,
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
+            fail=fail,
+            category=ErrorCategory.READINESS_FAILURE,
+            code="introspect_cancelled",
+            message="introspect call cancelled by admission fence",
         )
 
     if ssh_result.stdin_failed:
         # Wrapper payload was truncated mid-write (BrokenPipe / OSError). The
         # interpreter saw an incomplete script — any exit code or stdout it
         # produced is meaningless. Classify as transport failure.
-        return (
-            raw_stdout,
-            raw_stderr,
-            {},
-            ssh_exit,
-            fail(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                code="ssh_stdin_failure",
-                message="wrapper payload was not fully written to the runner stdin",
-                raw_stderr=raw_stderr,
-                ssh_exit=ssh_exit,
-                outcome_status_for_forensics=None,
-            ),
+        return _introspect_runner_failure_tuple(
+            raw_stdout=raw_stdout,
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
+            fail=fail,
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            code="ssh_stdin_failure",
+            message="wrapper payload was not fully written to the runner stdin",
         )
 
     if ssh_result.timed_out:
-        return (
-            raw_stdout,
-            raw_stderr,
-            {},
-            ssh_exit,
-            fail(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                code="ssh_timeout",
-                message="runner round trip exceeded host-side timeout margin",
-                raw_stderr=raw_stderr,
-                ssh_exit=ssh_exit,
-                outcome_status_for_forensics=None,
-            ),
+        return _introspect_runner_failure_tuple(
+            raw_stdout=raw_stdout,
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
+            fail=fail,
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            code="ssh_timeout",
+            message="runner round trip exceeded host-side timeout margin",
         )
 
     if ssh_exit == 124 and parsed is None:
-        return (
-            raw_stdout,
-            raw_stderr,
-            {},
-            ssh_exit,
-            fail(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                code="introspect_timeout",
-                message="timeout(1) fired",
-                raw_stderr=raw_stderr,
-                ssh_exit=ssh_exit,
-                outcome_status_for_forensics=None,
-            ),
+        return _introspect_runner_failure_tuple(
+            raw_stdout=raw_stdout,
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
+            fail=fail,
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            code="introspect_timeout",
+            message="timeout(1) fired",
         )
 
     if parsed is None:
         # Stdout was non-empty but not JSON; raw bytes are already under
         # sensitive/stdout.raw with a tightened mode.
-        return (
-            raw_stdout,
-            raw_stderr,
-            {},
-            ssh_exit,
-            fail(
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                code="wrapper_crash",
-                message=f"wrapper exited {ssh_exit} without a parseable JSON document",
-                raw_stderr=raw_stderr,
-                ssh_exit=ssh_exit,
-                outcome_status_for_forensics=None,
-            ),
+        return _introspect_runner_failure_tuple(
+            raw_stdout=raw_stdout,
+            raw_stderr=raw_stderr,
+            ssh_exit=ssh_exit,
+            fail=fail,
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            code="wrapper_crash",
+            message=f"wrapper exited {ssh_exit} without a parseable JSON document",
         )
 
     return raw_stdout, raw_stderr, parsed, ssh_exit, None
+
+
+def _introspect_wrapper_failure_by_status(
+    drgn_open_message: str,
+) -> dict[str, tuple[ErrorCategory, str, str, str]]:
+    return {
+        "drgn_open_failure": (
+            ErrorCategory.INFRASTRUCTURE_FAILURE,
+            "drgn_open_failure",
+            drgn_open_message,
+            "drgn_open_failure",
+        ),
+        "drgn_version_skew": (
+            ErrorCategory.INFRASTRUCTURE_FAILURE,
+            "drgn_version_skew",
+            "drgn lacks main_module().build_id (version skew)",
+            "drgn_version_skew",
+        ),
+        "provenance_unverifiable": (
+            ErrorCategory.CONFIGURATION_ERROR,
+            "provenance_unverifiable",
+            "vmcore carries no embedded build-id; provenance cannot be verified",
+            "provenance_unverifiable",
+        ),
+        "provenance_mismatch": (
+            ErrorCategory.CONFIGURATION_ERROR,
+            "provenance_mismatch",
+            "kernel build_id does not match the expected build_id",
+            "provenance_mismatch",
+        ),
+        "script_compile_error": (
+            ErrorCategory.CONFIGURATION_ERROR,
+            "script_compile_error",
+            "user script failed to compile",
+            "script_compile_error",
+        ),
+        # ADR 0011 / #56: the wrapper guard refused a drgn write under allow_write=false.
+        # Must be mapped — an unmatched outcome status falls through to the success path below
+        # (`status="ok"`), which would report a blocked write as success.
+        "write_mode_disabled": (
+            ErrorCategory.CONFIGURATION_ERROR,
+            "write_mode_disabled",
+            "script attempted a drgn write API but allow_write is false",
+            "write_mode_disabled",
+        ),
+        # R4-F3: forensic-only on disk; agent-facing collapses to wrapper_crash.
+        "wrapper_internal_error": (
+            ErrorCategory.INFRASTRUCTURE_FAILURE,
+            "wrapper_crash",
+            "wrapper exited 6 with a minimal-recovery JSON document",
+            "wrapper_internal_error",
+        ),
+    }
 
 
 def _map_introspect_wrapper_failure(
@@ -1457,85 +1506,20 @@ def _map_introspect_wrapper_failure(
     fail: Callable[..., ToolResponse],
 ) -> ToolResponse | None:
     rp = redacted_payload if isinstance(redacted_payload, dict) else None
-
-    if outcome_status == "drgn_open_failure":
+    failure_spec = (
+        _introspect_wrapper_failure_by_status(drgn_open_message).get(outcome_status)
+        if isinstance(outcome_status, str)
+        else None
+    )
+    if failure_spec is not None:
+        category, code, message, forensic_status = failure_spec
         return fail(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            code="drgn_open_failure",
-            message=drgn_open_message,
+            category=category,
+            code=code,
+            message=message,
             raw_stderr=raw_stderr,
             ssh_exit=ssh_exit,
-            outcome_status_for_forensics=outcome_status,
-            include_stdout_json=True,
-            redacted_payload=rp,
-        )
-    if outcome_status == "drgn_version_skew":
-        return fail(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            code="drgn_version_skew",
-            message="drgn lacks main_module().build_id (version skew)",
-            raw_stderr=raw_stderr,
-            ssh_exit=ssh_exit,
-            outcome_status_for_forensics=outcome_status,
-            include_stdout_json=True,
-            redacted_payload=rp,
-        )
-    if outcome_status == "provenance_unverifiable":
-        return fail(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            code="provenance_unverifiable",
-            message="vmcore carries no embedded build-id; provenance cannot be verified",
-            raw_stderr=raw_stderr,
-            ssh_exit=ssh_exit,
-            outcome_status_for_forensics=outcome_status,
-            include_stdout_json=True,
-            redacted_payload=rp,
-        )
-    if outcome_status == "provenance_mismatch":
-        return fail(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            code="provenance_mismatch",
-            message="kernel build_id does not match the expected build_id",
-            raw_stderr=raw_stderr,
-            ssh_exit=ssh_exit,
-            outcome_status_for_forensics=outcome_status,
-            include_stdout_json=True,
-            redacted_payload=rp,
-        )
-    if outcome_status == "script_compile_error":
-        return fail(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            code="script_compile_error",
-            message="user script failed to compile",
-            raw_stderr=raw_stderr,
-            ssh_exit=ssh_exit,
-            outcome_status_for_forensics=outcome_status,
-            include_stdout_json=True,
-            redacted_payload=rp,
-        )
-    if outcome_status == "write_mode_disabled":
-        # ADR 0011 / #56: the wrapper guard refused a drgn write under allow_write=false.
-        # Must be an explicit branch — an unmatched outcome status falls through to the
-        # success path below (`status="ok"`), which would report a blocked write as success.
-        return fail(
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            code="write_mode_disabled",
-            message="script attempted a drgn write API but allow_write is false",
-            raw_stderr=raw_stderr,
-            ssh_exit=ssh_exit,
-            outcome_status_for_forensics=outcome_status,
-            include_stdout_json=True,
-            redacted_payload=rp,
-        )
-    if outcome_status == "wrapper_internal_error":
-        # R4-F3: forensic-only on disk; agent-facing collapses to wrapper_crash.
-        return fail(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            code="wrapper_crash",
-            message="wrapper exited 6 with a minimal-recovery JSON document",
-            raw_stderr=raw_stderr,
-            ssh_exit=ssh_exit,
-            outcome_status_for_forensics="wrapper_internal_error",
+            outcome_status_for_forensics=forensic_status,
             include_stdout_json=True,
             redacted_payload=rp,
         )
