@@ -25,6 +25,21 @@ def test_fetch_request_defaults() -> None:
     assert req.max_bytes is None
 
 
+@pytest.mark.parametrize(
+    ("request_type", "payload"),
+    [
+        (DebugPostmortemListDumpsRequest, {"run_id": "r1", "target_ref": "local-qemu"}),
+        (DebugPostmortemFetchRequest, {"run_id": "r1", "target_ref": "local-qemu", "dump_ref": "/var/crash/d1"}),
+    ],
+)
+def test_postmortem_dump_requests_reject_deprecated_target_ref_alias(
+    request_type: type[DebugPostmortemListDumpsRequest | DebugPostmortemFetchRequest],
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        request_type(**payload)
+
+
 def test_models_forbid_extra() -> None:
     with pytest.raises(ValidationError):
         DebugPostmortemListDumpsRequest(run_id="r1", manifest_target_profile="x", bogus=1)

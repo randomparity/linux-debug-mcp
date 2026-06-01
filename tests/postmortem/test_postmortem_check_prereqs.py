@@ -33,6 +33,11 @@ def test_request_rejects_extra_fields() -> None:
         DebugPostmortemCheckPrereqsRequest(run_id="r1", manifest_target_profile="x", bogus=1)
 
 
+def test_request_rejects_deprecated_target_ref_alias() -> None:
+    with pytest.raises(ValidationError):
+        DebugPostmortemCheckPrereqsRequest(run_id="r1", target_ref="local-qemu")
+
+
 class _FakeSnapshot:
     generation = 1
     platform = None

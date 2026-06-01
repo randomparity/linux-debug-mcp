@@ -5,6 +5,8 @@ from kdive import __version__, domain
 from kdive.config import BootOverrides, BuildOverrides
 from kdive.domain import (
     ArtifactRef,
+    DebugIntrospectCheckPrerequisitesRequest,
+    DebugIntrospectHelperRequest,
     DebugIntrospectRunRequest,
     ErrorCategory,
     OperationSemantics,
@@ -25,9 +27,22 @@ def test_postmortem_models_live_in_postmortem_package() -> None:
     assert not hasattr(domain, "DebugPostmortemCrashRequest")
 
 
-def test_debug_request_rejects_deprecated_target_ref_alias() -> None:
+@pytest.mark.parametrize(
+    ("request_type", "payload"),
+    [
+        (DebugIntrospectRunRequest, {"run_id": "r1", "target_ref": "local-qemu", "script": "print(1)"}),
+        (DebugIntrospectHelperRequest, {"run_id": "r1", "target_ref": "local-qemu", "name": "sysinfo"}),
+        (DebugIntrospectCheckPrerequisitesRequest, {"run_id": "r1", "target_ref": "local-qemu"}),
+    ],
+)
+def test_live_introspect_requests_reject_deprecated_target_ref_alias(
+    request_type: type[
+        DebugIntrospectRunRequest | DebugIntrospectHelperRequest | DebugIntrospectCheckPrerequisitesRequest
+    ],
+    payload: dict[str, object],
+) -> None:
     with pytest.raises(ValidationError):
-        DebugIntrospectRunRequest(run_id="r1", target_ref="local-qemu", script="print(1)")
+        request_type(**payload)
 
 
 def test_success_response_serializes_with_shared_envelope() -> None:
