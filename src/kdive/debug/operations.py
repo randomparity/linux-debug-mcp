@@ -36,6 +36,7 @@ from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, Too
 from kdive.providers.debug import (
     MAX_INTERACTIVE_WAIT_SEC,
     MAX_MEMORY_READ_BYTES,
+    DebugAttachStatus,
     DebugSession,
     DebugSessionState,
     GdbMiAttachment,
@@ -280,7 +281,7 @@ def _load_active_debug_session(
             details={"session_path": str(session_path), "session_id": session.session_id},
         )
     ended_state_refused = not allow_ended and session.current_execution_state is DebugSessionState.ENDED
-    if ended_state_refused or session.attach_status != "attached":
+    if ended_state_refused or session.attach_status is not DebugAttachStatus.ATTACHED:
         raise ProviderDebugError(
             "active debug session required",
             category=ErrorCategory.CONFIGURATION_ERROR,

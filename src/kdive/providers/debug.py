@@ -23,6 +23,10 @@ class DebugSessionState(StrEnum):
     ENDED = "ended"
 
 
+class DebugAttachStatus(StrEnum):
+    ATTACHED = "attached"
+
+
 class DebugSession(Model):
     """Persisted debug-session record shared by debug providers and feature handlers."""
 
@@ -32,7 +36,7 @@ class DebugSession(Model):
     gdbstub_endpoint: dict[str, object]
     vmlinux_path: str
     selected_debug_profile: str
-    attach_status: str
+    attach_status: DebugAttachStatus
     started_at: str
     ended_at: str | None = None
     current_execution_state: DebugSessionState = DebugSessionState.UNKNOWN

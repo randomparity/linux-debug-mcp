@@ -26,6 +26,7 @@ from kdive.debug.operations import (
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.handlers.shared import _require_value
 from kdive.providers.debug import (
+    DebugAttachStatus,
     DebugSession,
     DebugSessionState,
     GdbMiEngine,
@@ -206,7 +207,7 @@ def _build_mi_debug_session(
         gdbstub_endpoint=gdbstub_endpoint,
         vmlinux_path=str(vmlinux_path),
         selected_debug_profile=profile_name,
-        attach_status="attached",
+        attach_status=DebugAttachStatus.ATTACHED,
         started_at=started_at,
         ended_at=None,
         current_execution_state=DebugSessionState.STOPPED,

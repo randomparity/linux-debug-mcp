@@ -175,6 +175,36 @@ def test_debug_session_state_is_typed_and_serializes_as_string() -> None:
         )
 
 
+def test_debug_attach_status_is_typed_and_rejects_unknown_values() -> None:
+    DebugAttachStatus = debug_contracts.DebugAttachStatus
+    hints = get_type_hints(DebugSession)
+
+    session = DebugSession(
+        session_id="debug-1",
+        run_id="run-1",
+        provider_name="local-qemu-gdbstub",
+        gdbstub_endpoint={"host": "127.0.0.1", "port": 1234},
+        vmlinux_path="/tmp/vmlinux",
+        selected_debug_profile="qemu-gdbstub-default",
+        attach_status="attached",
+        started_at="2026-01-01T00:00:00+00:00",
+        transcript_path="/tmp/transcript.log",
+        command_metadata_path="/tmp/commands.jsonl",
+        latest_summary_path="/tmp/debug-summary.json",
+    )
+
+    assert hints["attach_status"] is DebugAttachStatus
+    assert session.attach_status is DebugAttachStatus.ATTACHED
+    assert session.model_dump(mode="json")["attach_status"] == "attached"
+    with pytest.raises(ValueError, match="attach_status"):
+        DebugSession.model_validate(
+            {
+                **session.model_dump(mode="json"),
+                "attach_status": "detached",
+            }
+        )
+
+
 def test_registry_get_unknown_provider_has_contextual_error() -> None:
     registry = ProviderRegistry()
 
