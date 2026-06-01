@@ -3,7 +3,7 @@ from typing import Any, get_args, get_type_hints
 
 import pytest
 
-from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS
+from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, TRANSPORT_DESTRUCTIVE_PERMISSIONS
 from kdive.domain import (
     ImplementationState,
     OperationSemantics,
@@ -213,7 +213,12 @@ def test_default_registry_exposes_sprint_1_providers() -> None:
 
     qemu_gdbstub = providers["local-qemu-gdbstub"]
     assert qemu_gdbstub.destructive_permissions == []
-    assert all(capability.destructive_permissions == [] for capability in qemu_gdbstub.operation_capabilities)
+    operation_permissions = {
+        capability.operation: capability.destructive_permissions for capability in qemu_gdbstub.operation_capabilities
+    }
+    assert (
+        operation_permissions["transport.inject_break"] == TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"]
+    )
 
 
 def test_default_providers_expose_richer_metadata() -> None:
@@ -435,7 +440,21 @@ def test_registry_advertises_local_qemu_gdbstub_and_removes_sprint_4_stubs() -> 
     # the drgn-only introspect op stays excluded (it is served by local-drgn-introspect).
     assert "debug.load_module_symbols" in debug_provider.operations
     assert "debug.introspect.run" not in debug_provider.operations
+    assert "debug.introspect.write" not in debug_provider.operations
     assert debug_provider.semantics.destructive is True
     assert debug_provider.semantics.cancelable is True
     assert debug_provider.semantics.concurrent_safe is False
+    operation_capabilities = {
+        operation_capability.operation: operation_capability
+        for operation_capability in debug_provider.operation_capabilities
+    }
+    assert (
+        operation_capabilities["transport.inject_break"].destructive_permissions
+        == TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"]
+    )
+    assert all(
+        operation_capabilities[operation].destructive_permissions == []
+        for operation in debug_provider.operations
+        if operation != "transport.inject_break"
+    )
     assert "stub-workflows" not in providers or "debug.start_session" not in providers["stub-workflows"].operations

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from kdive.config import ALLOWED_DEBUG_OPERATIONS
+from kdive.config import ALLOWED_DEBUG_OPERATIONS, TRANSPORT_DESTRUCTIVE_PERMISSIONS
 from kdive.domain import (
     OperationSemantics,
     ProviderCapability,
+    ProviderOperationCapability,
     TargetKind,
 )
 from kdive.providers.debug import (
@@ -21,11 +22,18 @@ from kdive.providers.debug import (
 # list must reflect what this provider actually serves.
 QEMU_GDBSTUB_OPERATIONS = [
     "workflow.build_boot_debug",
-    *[op for op in ALLOWED_DEBUG_OPERATIONS if op != "debug.introspect.run"],
+    *[op for op in ALLOWED_DEBUG_OPERATIONS if op not in {"debug.introspect.run", "debug.introspect.write"}],
 ]
 
 
 def local_qemu_gdbstub_capability() -> ProviderCapability:
+    semantics = OperationSemantics(
+        idempotent=False,
+        retryable=True,
+        destructive=True,
+        cancelable=True,
+        concurrent_safe=False,
+    )
     return ProviderCapability(
         provider_name="local-qemu-gdbstub",
         provider_version="0.1.0",
@@ -37,11 +45,14 @@ def local_qemu_gdbstub_capability() -> ProviderCapability:
         required_host_tools=["gdb"],
         destructive_permissions=[],
         access_methods=["gdbstub", "filesystem", "subprocess"],
-        semantics=OperationSemantics(
-            idempotent=False,
-            retryable=True,
-            destructive=True,
-            cancelable=True,
-            concurrent_safe=False,
-        ),
+        semantics=semantics,
+        operation_capabilities=[
+            ProviderOperationCapability(
+                operation=operation,
+                semantics=semantics,
+                required_host_tools=["gdb"],
+                destructive_permissions=list(TRANSPORT_DESTRUCTIVE_PERMISSIONS.get(operation, [])),
+            )
+            for operation in QEMU_GDBSTUB_OPERATIONS
+        ],
     )
