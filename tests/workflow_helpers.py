@@ -7,10 +7,10 @@ from kdive.debug.tools import DebugStartSessionRequest
 from kdive.domain import ToolResponse
 from kdive.kernel.tools import CreateRunHandlerRequest
 from kdive.target.tools import TargetBootHandlerRequest, TargetRunTestsHandlerRequest
-from kdive.workflow.handlers import WorkflowHandlerDependencies
-from kdive.workflow.tools import (
+from kdive.workflow.contracts import (
     WorkflowBuildBootDebugHandlerRequest,
     WorkflowBuildBootTestHandlerRequest,
+    WorkflowHandlerDependencies,
     WorkflowToolRuntime,
 )
 

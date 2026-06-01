@@ -7,7 +7,6 @@ from typing import Any, Protocol
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
-from kdive.config import BootOverrides, BuildOverrides
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
@@ -17,7 +16,12 @@ from kdive.model import Model
 from kdive.providers.debug import GdbMiEngine, GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard
 from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, optional_model_arg
-from kdive.workflow.handlers import WorkflowHandlerDependencies
+from kdive.workflow.contracts import (
+    WorkflowBuildBootDebugHandlerRequest,
+    WorkflowBuildBootTestHandlerRequest,
+    WorkflowHandlerDependencies,
+    WorkflowToolRuntime,
+)
 
 
 class BuildBootTestHandler(Protocol):
@@ -49,60 +53,6 @@ class WorkflowToolContext:
     gdb_mi_engine: GdbMiEngine
     gdb_mi_sessions: GdbMiSessionRegistry
     dependencies: WorkflowHandlerDependencies
-
-
-@dataclass(frozen=True)
-class WorkflowToolRuntime:
-    sensitive_paths: list[Path]
-    admission: AdmissionService
-    session_registry: SessionRegistry
-    transaction: TransportTransaction
-    session_guard: SessionGuard
-    gdb_mi_engine: GdbMiEngine
-    gdb_mi_sessions: GdbMiSessionRegistry
-    dependencies: WorkflowHandlerDependencies
-
-
-@dataclass(frozen=True)
-class WorkflowBuildBootTestHandlerRequest:
-    artifact_root: Path
-    source_path: str
-    build_profile: str
-    target_profile: str
-    rootfs_profile: str
-    run_id: str | None
-    test_suite: str | None
-    commands: list[list[str]] | None
-    force_rebuild: bool
-    force_reboot: bool
-    force_rerun_tests: bool
-    force_recollect: bool
-    build_overrides: BuildOverrides | None
-    boot_overrides: BootOverrides | None
-    build_profile_spec: dict[str, Any] | None
-    target_profile_spec: dict[str, Any] | None
-    rootfs_profile_spec: dict[str, Any] | None
-    acknowledged_permissions: list[str] | None
-
-
-@dataclass(frozen=True)
-class WorkflowBuildBootDebugHandlerRequest:
-    artifact_root: Path
-    source_path: str
-    build_profile: str
-    target_profile: str
-    rootfs_profile: str
-    run_id: str | None
-    debug_profile: str | None
-    force_rebuild: bool
-    force_reboot: bool
-    new_session: bool
-    build_overrides: BuildOverrides | None
-    boot_overrides: BootOverrides | None
-    build_profile_spec: dict[str, Any] | None
-    target_profile_spec: dict[str, Any] | None
-    rootfs_profile_spec: dict[str, Any] | None
-    acknowledged_permissions: list[str] | None
 
 
 class WorkflowRunContext(Model):

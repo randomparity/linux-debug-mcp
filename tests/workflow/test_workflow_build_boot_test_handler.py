@@ -37,7 +37,7 @@ from kdive.server import (
     workflow_build_boot_test_handler,
 )
 from kdive.workflow import handlers as workflow_handlers
-from kdive.workflow.handlers import WorkflowHandlerDependencies
+from kdive.workflow.contracts import WorkflowHandlerDependencies
 
 
 def test_workflow_handlers_accept_structured_request_and_runtime_only() -> None:

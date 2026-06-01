@@ -109,8 +109,8 @@ from kdive.transport.handlers import (
 )
 from kdive.transport.tools import TransportToolContext, TransportToolHandlers, register_transport_tools
 from kdive.workflow import tools as workflow_tools
+from kdive.workflow.contracts import WorkflowHandlerDependencies
 from kdive.workflow.handlers import (
-    WorkflowHandlerDependencies,
     workflow_build_boot_debug_handler,
     workflow_build_boot_test_handler,
 )

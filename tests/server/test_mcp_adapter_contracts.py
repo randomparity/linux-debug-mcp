@@ -79,17 +79,19 @@ from kdive.transport.tools import (
     TransportToolHandlers,
     register_transport_tools,
 )
-from kdive.workflow.handlers import WorkflowHandlerDependencies
-from kdive.workflow.tools import (
+from kdive.workflow.contracts import (
     WorkflowBuildBootDebugHandlerRequest,
-    WorkflowBuildBootDebugOptions,
     WorkflowBuildBootTestHandlerRequest,
+    WorkflowHandlerDependencies,
+    WorkflowToolRuntime,
+)
+from kdive.workflow.tools import (
+    WorkflowBuildBootDebugOptions,
     WorkflowBuildBootTestOptions,
     WorkflowProfileInputs,
     WorkflowRunContext,
     WorkflowToolContext,
     WorkflowToolHandlers,
-    WorkflowToolRuntime,
     register_workflow_tools,
 )
 

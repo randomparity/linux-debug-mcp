@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import Literal
 
 from kdive.artifacts.manifest import RunManifest
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
@@ -11,51 +11,22 @@ from kdive.coordination.admission import AdmissionService
 from kdive.debug.tools import DebugStartSessionRequest, DebugToolContext
 from kdive.domain import ErrorCategory, ToolResponse
 from kdive.kernel.tools import (
-    CreateRunHandler,
     CreateRunHandlerRequest,
-    KernelBuildHandler,
     KernelBuildHandlerRequest,
     KernelToolRuntime,
 )
 from kdive.safety.paths import PathSafetyError, validate_source_path
 from kdive.target.tools import (
-    TargetBootHandler,
     TargetBootHandlerRequest,
-    TargetRunTestsHandler,
     TargetRunTestsHandlerRequest,
     TargetToolRuntime,
 )
-
-if TYPE_CHECKING:
-    from kdive.workflow.tools import (
-        WorkflowBuildBootDebugHandlerRequest,
-        WorkflowBuildBootTestHandlerRequest,
-        WorkflowToolRuntime,
-    )
-
-
-class DebugStartSessionHandler(Protocol):
-    def __call__(self, *, request: DebugStartSessionRequest, runtime: DebugToolContext) -> ToolResponse: ...
-
-
-class ArtifactsCollectHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        force_recollect: bool = False,
-    ) -> ToolResponse: ...
-
-
-@dataclass(frozen=True)
-class WorkflowHandlerDependencies:
-    create_run_handler: CreateRunHandler
-    kernel_build_handler: KernelBuildHandler
-    target_boot_handler: TargetBootHandler
-    target_run_tests_handler: TargetRunTestsHandler
-    debug_start_session_handler: DebugStartSessionHandler
-    artifacts_collect_handler: ArtifactsCollectHandler
+from kdive.workflow.contracts import (
+    WorkflowBuildBootDebugHandlerRequest,
+    WorkflowBuildBootTestHandlerRequest,
+    WorkflowHandlerDependencies,
+    WorkflowToolRuntime,
+)
 
 
 @dataclass(frozen=True)

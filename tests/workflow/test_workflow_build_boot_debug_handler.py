@@ -11,7 +11,7 @@ from kdive.server import (
     create_run_handler,
     workflow_build_boot_debug_handler,
 )
-from kdive.workflow.handlers import WorkflowHandlerDependencies
+from kdive.workflow.contracts import WorkflowHandlerDependencies
 
 
 def success(summary: str, *, run_id: str = "run-abc123") -> ToolResponse:
