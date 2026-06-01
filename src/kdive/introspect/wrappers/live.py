@@ -35,8 +35,10 @@ _li_result = {"call_id": "${CALL_ID}", "build_id": None, "outcome": None,
 import time as _li_time
 _li_t_prelude_start = _li_time.monotonic()
 
+_li_drgn_version = None
 try:
     import drgn  # noqa: E402  -- module attribute, exposed to user namespace
+    _li_drgn_version = getattr(drgn, "__version__", None)
 
     _li_pre_helpers = set(globals().keys()) | {
         "_li_pre_helpers", "_li_drgn_helper_names",
@@ -53,7 +55,8 @@ except Exception as exc:
     etype, _ = _li_truncate(type(exc).__name__, _li_caps["error_message"])
     _li_result["outcome"] = {"status": "drgn_open_failure",
                              "error_type": etype,
-                             "error_message": msg}
+                             "error_message": msg,
+                             "drgn_version": _li_drgn_version}
     _li_result["truncated"]["error_message"] = msg_trunc
     try:
         _li_json.dump(_li_result, _li_sys.stdout)
@@ -62,19 +65,47 @@ except Exception as exc:
 
 _li_result["prelude_ms"] = int((_li_time.monotonic() - _li_t_prelude_start) * 1000)
 
+# ADR 0039: resolve the build-id first, then split the failure modes. An
+# AttributeError is a genuine drgn module-API/version gap (drgn_version_skew);
+# any other exception is drgn raising while resolving the module
+# (drgn_api_incompatible -- e.g. the drgn >= 0.2 LookupError before discovery).
+# A resolved-but-None build-id is provenance_unverifiable, not a .hex()-on-None
+# AttributeError misreported as version skew.
 try:
-    _li_result["build_id"] = prog.main_module().build_id.hex()
-except Exception as exc:
+    _li_build_id = prog.main_module().build_id
+    _li_result["build_id"] = _li_build_id.hex() if _li_build_id else None
+except AttributeError as exc:
     msg, msg_trunc = _li_truncate(str(exc), _li_caps["error_message"])
     etype, _ = _li_truncate(type(exc).__name__, _li_caps["error_message"])
     _li_result["outcome"] = {"status": "drgn_version_skew",
                              "error_type": etype,
-                             "error_message": msg}
+                             "error_message": msg,
+                             "drgn_version": _li_drgn_version}
     _li_result["truncated"]["error_message"] = msg_trunc
     try:
         _li_json.dump(_li_result, _li_sys.stdout)
     finally:
         _li_sys.exit(3)
+except Exception as exc:
+    msg, msg_trunc = _li_truncate(str(exc), _li_caps["error_message"])
+    etype, _ = _li_truncate(type(exc).__name__, _li_caps["error_message"])
+    _li_result["outcome"] = {"status": "drgn_api_incompatible",
+                             "error_type": etype,
+                             "error_message": msg,
+                             "drgn_version": _li_drgn_version}
+    _li_result["truncated"]["error_message"] = msg_trunc
+    try:
+        _li_json.dump(_li_result, _li_sys.stdout)
+    finally:
+        _li_sys.exit(3)
+
+if _li_result["build_id"] is None:
+    _li_result["outcome"] = {"status": "provenance_unverifiable",
+                             "detail": "target reports no build-id"}
+    try:
+        _li_json.dump(_li_result, _li_sys.stdout)
+    finally:
+        _li_sys.exit(4)
 
 if _li_result["build_id"] != "${EXPECTED_BUILD_ID}":
     _li_result["outcome"] = {"status": "provenance_mismatch",

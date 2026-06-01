@@ -455,13 +455,24 @@ def _introspect_wrapper_failure_by_status(
         "drgn_version_skew": (
             ErrorCategory.INFRASTRUCTURE_FAILURE,
             "drgn_version_skew",
-            "drgn lacks main_module().build_id (version skew)",
+            "drgn's module API lacks main_module().build_id (version skew); see outcome.drgn_version",
             "drgn_version_skew",
+        ),
+        # ADR 0039: drgn opened the program but raised (non-AttributeError) while
+        # resolving the main module / build-id -- e.g. the drgn >= 0.2 LookupError
+        # before module discovery (#139). Distinct from drgn_version_skew so an
+        # agent does not misread an API incompatibility as a too-old drgn.
+        "drgn_api_incompatible": (
+            ErrorCategory.INFRASTRUCTURE_FAILURE,
+            "drgn_api_incompatible",
+            "drgn raised resolving main_module().build_id; the installed drgn is incompatible "
+            "with the introspect wrapper (see outcome.error_type and outcome.drgn_version)",
+            "drgn_api_incompatible",
         ),
         "provenance_unverifiable": (
             ErrorCategory.CONFIGURATION_ERROR,
             "provenance_unverifiable",
-            "vmcore carries no embedded build-id; provenance cannot be verified",
+            "target reports no embedded build-id; provenance cannot be verified",
             "provenance_unverifiable",
         ),
         "provenance_mismatch": (
