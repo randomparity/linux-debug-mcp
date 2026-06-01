@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
-from kdive.config import BootOverrides, RootfsProfile, TargetProfile, TestSuiteProfile
-from kdive.coordination.admission import AdmissionService
+from kdive.config import BootOverrides, DebugProfile, RootfsProfile, TargetProfile, TestSuiteProfile
+from kdive.coordination.admission import AdmissionService, SnapshotStore
 from kdive.coordination.registry import SessionRegistry
+from kdive.coordination.transaction import TransportTransaction
 from kdive.kernel.handlers import kernel_build_handler as _kernel_build_handler
 from kdive.kernel.tools import KernelBuildHandlerRequest, KernelToolRuntime
 from kdive.providers.local.build.local_kernel_build import LocalKernelBuildProvider
@@ -13,6 +15,20 @@ from kdive.providers.local.test.local_ssh_tests import LocalSshTestProvider
 from kdive.target.handlers import target_boot_handler as _target_boot_handler
 from kdive.target.handlers import target_run_tests_handler as _target_run_tests_handler
 from kdive.target.tools import TargetBootHandlerRequest, TargetRunTestsHandlerRequest, TargetToolRuntime
+from kdive.transport.core.base import BreakPlan, TransportSession
+from kdive.transport.core.break_inject import BreakRequestMethod
+from kdive.transport.handlers import transport_close_handler as _transport_close_handler
+from kdive.transport.handlers import transport_inject_break_handler as _transport_inject_break_handler
+from kdive.transport.handlers import transport_open_handler as _transport_open_handler
+from kdive.transport.tools import (
+    TransportCloseHandlerRequest,
+    TransportInjectBreakHandlerRequest,
+    TransportOpenHandlerRequest,
+    TransportToolContext,
+)
+
+BreakMechanism = Callable[[BreakRequestMethod, BreakPlan | None], None]
+ProbeHalted = Callable[[TransportSession], bool]
 
 
 def kernel_build_handler(
@@ -104,5 +120,98 @@ def target_run_tests_handler(
             test_provider=provider,
             rootfs_profiles=rootfs_profiles,
             test_suites=test_suites,
+        ),
+    )
+
+
+def _transport_runtime(
+    *,
+    default_artifact_root: Path,
+    transaction: TransportTransaction,
+    admission: AdmissionService,
+    session_registry: SessionRegistry,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+    break_mechanism: BreakMechanism | None = None,
+    probe_halted: ProbeHalted | None = None,
+) -> TransportToolContext:
+    kwargs = {
+        "default_artifact_root": default_artifact_root,
+        "transaction": transaction,
+        "admission": admission,
+        "session_registry": session_registry,
+        "debug_profiles": debug_profiles,
+        "break_mechanism": break_mechanism,
+    }
+    if probe_halted is not None:
+        kwargs["probe_halted"] = probe_halted
+    return TransportToolContext(**kwargs)
+
+
+def transport_open_handler(
+    *,
+    run_id: str,
+    transaction: TransportTransaction,
+    admission: AdmissionService,
+    session_registry: SessionRegistry,
+    recovery: bool = False,
+):
+    return _transport_open_handler(
+        request=TransportOpenHandlerRequest(run_id=run_id, recovery=recovery),
+        runtime=_transport_runtime(
+            default_artifact_root=Path("."),
+            transaction=transaction,
+            admission=admission,
+            session_registry=session_registry,
+        ),
+    )
+
+
+def transport_close_handler(
+    *,
+    run_id: str,
+    session_id: str,
+    transaction: TransportTransaction,
+    session_registry: SessionRegistry,
+    admission: AdmissionService | None = None,
+):
+    return _transport_close_handler(
+        request=TransportCloseHandlerRequest(run_id=run_id, session_id=session_id),
+        runtime=_transport_runtime(
+            default_artifact_root=Path("."),
+            transaction=transaction,
+            admission=admission or AdmissionService(SnapshotStore()),
+            session_registry=session_registry,
+        ),
+    )
+
+
+def transport_inject_break_handler(
+    *,
+    run_id: str,
+    session_id: str,
+    transaction: TransportTransaction,
+    admission: AdmissionService,
+    session_registry: SessionRegistry,
+    acknowledged_permissions: list[str] | None = None,
+    artifact_root: Path | None = None,
+    break_mechanism: BreakMechanism | None = None,
+    probe_halted: ProbeHalted | None = None,
+    debug_profiles: dict[str, DebugProfile] | None = None,
+):
+    return _transport_inject_break_handler(
+        request=TransportInjectBreakHandlerRequest(
+            run_id=run_id,
+            session_id=session_id,
+            acknowledged_permissions=acknowledged_permissions,
+            artifact_root=artifact_root,
+        ),
+        runtime=_transport_runtime(
+            default_artifact_root=artifact_root or Path("."),
+            transaction=transaction,
+            admission=admission,
+            session_registry=session_registry,
+            debug_profiles=debug_profiles,
+            break_mechanism=break_mechanism,
+            probe_halted=probe_halted,
         ),
     )

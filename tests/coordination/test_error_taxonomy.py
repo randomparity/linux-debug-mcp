@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from _layer4_fakes import (
     KEY,
     FakeBrokeredTransport,
@@ -7,28 +5,13 @@ from _layer4_fakes import (
     build_txn,
 )
 from _secrets_helpers import make_env_secrets as EnvSecretsResolver
+from handler_call_helpers import transport_open_handler
 
 from kdive.coordination.lease import ConsoleLeaseManager
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ErrorCategory
 from kdive.seams.guard import InProcessStopCapableGuard
-from kdive.server import transport_open_handler
-from kdive.transport.tools import TransportOpenHandlerRequest, TransportToolContext
-
-_real_transport_open_handler = transport_open_handler
-
-
-def transport_open_handler(*, run_id, transaction, admission, session_registry, recovery=False):
-    return _real_transport_open_handler(
-        request=TransportOpenHandlerRequest(run_id=run_id, recovery=recovery),
-        runtime=TransportToolContext(
-            default_artifact_root=Path("."),
-            transaction=transaction,
-            admission=admission,
-            session_registry=session_registry,
-        ),
-    )
 
 
 def test_stale_handle_category_value():

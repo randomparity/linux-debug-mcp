@@ -202,6 +202,27 @@ def test_target_and_kernel_handlers_accept_structured_boundaries_only() -> None:
         assert list(inspect.signature(handler).parameters) == ["request", "runtime"]
 
 
+def test_transport_tests_do_not_recreate_public_handler_call_shapes() -> None:
+    transport_test_sources = [
+        ROOT / "tests" / "server" / "test_server_transport_tools.py",
+        ROOT / "tests" / "server" / "test_layer4_conformance.py",
+        ROOT / "tests" / "coordination" / "test_error_taxonomy.py",
+    ]
+    forbidden_helpers = {
+        "transport_open_handler",
+        "transport_close_handler",
+        "transport_inject_break_handler",
+    }
+
+    offenders = {
+        str(source.relative_to(ROOT)): sorted(forbidden_helpers & _defined_functions(source))
+        for source in transport_test_sources
+        if forbidden_helpers & _defined_functions(source)
+    }
+
+    assert offenders == {}
+
+
 def test_server_does_not_reexport_private_feature_helpers() -> None:
     import kdive.server as server
 
