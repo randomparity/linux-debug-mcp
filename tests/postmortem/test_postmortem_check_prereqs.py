@@ -17,6 +17,7 @@ from kdive.domain import (
 )
 from kdive.postmortem.dumps.handlers import debug_postmortem_check_prereqs_handler
 from kdive.postmortem.models import DebugPostmortemCheckPrereqsRequest
+from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 from kdive.seams.probes import reject_if_target_halted
 from kdive.transport.core.base import ExecutionState
@@ -179,11 +180,26 @@ def _runner(facts: dict[str, Any] | None = None, *, exit_status: int = 0, stdout
     return _FakeRunner(results=[SshCommandResult(exit_status=exit_status, stdout=payload)])
 
 
+def _runtime(
+    tmp_path,
+    *,
+    ssh_runner=None,
+    rootfs_profiles=None,
+    admission=None,
+    session_registry=None,
+) -> PostmortemToolRuntime:
+    return PostmortemToolRuntime(
+        artifact_root=tmp_path,
+        rootfs_profiles=_rootfs() if rootfs_profiles is None else rootfs_profiles,
+        ssh_runner=ssh_runner,
+        admission=admission,
+        session_registry=session_registry,
+    )
+
+
 def test_handler_success_three_checks(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
-    resp = debug_postmortem_check_prereqs_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=_runner()
-    )
+    resp = debug_postmortem_check_prereqs_handler(_req(run_id), runtime=_runtime(tmp_path, ssh_runner=_runner()))
     assert resp.ok is True
     assert resp.data["kdump_ready"] is True
     assert resp.data["mechanism"] == "kdump"
@@ -192,9 +208,7 @@ def test_handler_success_three_checks(tmp_path) -> None:
 
 
 def test_handler_run_not_found(tmp_path) -> None:
-    resp = debug_postmortem_check_prereqs_handler(
-        _req("nope"), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=_runner()
-    )
+    resp = debug_postmortem_check_prereqs_handler(_req("nope"), runtime=_runtime(tmp_path, ssh_runner=_runner()))
     assert resp.ok is False
     assert resp.error is not None
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
@@ -202,9 +216,7 @@ def test_handler_run_not_found(tmp_path) -> None:
 
 def test_handler_not_booted_is_readiness_failure(tmp_path) -> None:
     run_id = _booted_run(tmp_path, booted=False)
-    resp = debug_postmortem_check_prereqs_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=_runner()
-    )
+    resp = debug_postmortem_check_prereqs_handler(_req(run_id), runtime=_runtime(tmp_path, ssh_runner=_runner()))
     assert resp.ok is False
     assert resp.error.details["code"] == "target_not_booted"
 
@@ -212,7 +224,7 @@ def test_handler_not_booted_is_readiness_failure(tmp_path) -> None:
 def test_handler_bad_timeout_is_configuration_error(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_postmortem_check_prereqs_handler(
-        _req(run_id, timeout_seconds=1), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=_runner()
+        _req(run_id, timeout_seconds=1), runtime=_runtime(tmp_path, ssh_runner=_runner())
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "invalid_timeout"
@@ -221,7 +233,8 @@ def test_handler_bad_timeout_is_configuration_error(tmp_path) -> None:
 def test_handler_non_ssh_rootfs_is_configuration_error(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_postmortem_check_prereqs_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(access_method="serial"), ssh_runner=_runner()
+        _req(run_id),
+        runtime=_runtime(tmp_path, rootfs_profiles=_rootfs(access_method="serial"), ssh_runner=_runner()),
     )
     assert resp.ok is False
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
@@ -231,9 +244,7 @@ def test_handler_python_absent(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_postmortem_check_prereqs_handler(
         _req(run_id),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(),
-        ssh_runner=_runner(stdout="", exit_status=127),
+        runtime=_runtime(tmp_path, ssh_runner=_runner(stdout="", exit_status=127)),
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "probe_no_python"
@@ -242,7 +253,7 @@ def test_handler_python_absent(tmp_path) -> None:
 def test_handler_unparseable(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_postmortem_check_prereqs_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=_runner(stdout="not json")
+        _req(run_id), runtime=_runtime(tmp_path, ssh_runner=_runner(stdout="not json"))
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "probe_unparseable"
@@ -252,11 +263,12 @@ def test_handler_halted_fast_reject(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_postmortem_check_prereqs_handler(
         _req(run_id),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(),
-        ssh_runner=_runner(),
-        admission=_FakeAdmission(),
-        session_registry=_FakeRegistry(ExecutionState.HALTED),
+        runtime=_runtime(
+            tmp_path,
+            ssh_runner=_runner(),
+            admission=_FakeAdmission(),
+            session_registry=_FakeRegistry(ExecutionState.HALTED),
+        ),
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "target_halted"
@@ -265,9 +277,7 @@ def test_handler_halted_fast_reject(tmp_path) -> None:
 def test_handler_redacts_secret_in_probe(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
     facts = _ready_facts(service_units={"kdump": f"active {SECRET_KEY_REF}"})
-    resp = debug_postmortem_check_prereqs_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=_runner(facts)
-    )
+    resp = debug_postmortem_check_prereqs_handler(_req(run_id), runtime=_runtime(tmp_path, ssh_runner=_runner(facts)))
     assert resp.ok is True
     assert SECRET_KEY_REF not in _json.dumps(resp.data)
 
@@ -277,9 +287,7 @@ def test_handler_fadump_target_ready(tmp_path) -> None:
     facts = _ready_facts(
         arch="ppc64le", cmdline_has_crashkernel=False, kexec_crash_size=0, fadump_enabled=1, fadump_registered=1
     )
-    resp = debug_postmortem_check_prereqs_handler(
-        _req(run_id), artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=_runner(facts)
-    )
+    resp = debug_postmortem_check_prereqs_handler(_req(run_id), runtime=_runtime(tmp_path, ssh_runner=_runner(facts)))
     assert resp.ok is True
     assert resp.data["mechanism"] == "fadump"
     assert resp.data["kdump_ready"] is True

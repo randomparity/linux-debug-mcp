@@ -19,20 +19,24 @@ from kdive.postmortem.dumps.handlers import (
     debug_postmortem_list_dumps_handler,
 )
 from kdive.postmortem.models import DebugPostmortemFetchRequest, DebugPostmortemListDumpsRequest
+from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.providers.local.test.local_ssh_tests import SubprocessSshRunner
 
 
 def test_real_target_list_then_fetch(tmp_path: Path) -> None:
     _require_integration_env()
     ctx = _bootstrap_booted_run(tmp_path)
-
-    listed = debug_postmortem_list_dumps_handler(
-        DebugPostmortemListDumpsRequest(run_id=ctx.run_id, manifest_target_profile="pilot-libvirt"),
+    runtime = PostmortemToolRuntime(
         artifact_root=tmp_path / "runs",
         rootfs_profiles=ctx.rootfs_profiles,
         ssh_runner=SubprocessSshRunner(),
         admission=ctx.admission,
         session_registry=ctx.session_registry,
+    )
+
+    listed = debug_postmortem_list_dumps_handler(
+        DebugPostmortemListDumpsRequest(run_id=ctx.run_id, manifest_target_profile="pilot-libvirt"),
+        runtime=runtime,
     )
     assert listed.ok is True, listed.model_dump(mode="json")
     if not listed.data["dumps"]:
@@ -41,11 +45,7 @@ def test_real_target_list_then_fetch(tmp_path: Path) -> None:
     dump_ref = listed.data["dumps"][0]["path"]
     fetched = debug_postmortem_fetch_handler(
         DebugPostmortemFetchRequest(run_id=ctx.run_id, manifest_target_profile="pilot-libvirt", dump_ref=dump_ref),
-        artifact_root=tmp_path / "runs",
-        rootfs_profiles=ctx.rootfs_profiles,
-        ssh_runner=SubprocessSshRunner(),
-        admission=ctx.admission,
-        session_registry=ctx.session_registry,
+        runtime=runtime,
     )
     assert fetched.ok is True, fetched.model_dump(mode="json")
     assert fetched.data["vmcore_ref"].endswith("/vmcore")

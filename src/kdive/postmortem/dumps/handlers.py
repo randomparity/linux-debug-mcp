@@ -5,7 +5,6 @@ import json
 import shutil
 import time
 import uuid
-from collections.abc import Mapping
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -17,8 +16,7 @@ from kdive.config import (
     FETCH_TIMEOUT_BAND,
     RootfsProfile,
 )
-from kdive.coordination.admission import AdmissionError, AdmissionService
-from kdive.coordination.registry import SessionRegistry
+from kdive.coordination.admission import AdmissionError
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES
 from kdive.domain import (
     ArtifactRef,
@@ -61,34 +59,6 @@ from kdive.seams.probes import (
 )
 
 SSH_TIMEOUT_GRACE_SECONDS = 10
-
-
-def _runtime_value(
-    *,
-    runtime: PostmortemToolRuntime | None,
-    artifact_root: Path | None,
-    rootfs_profiles: Mapping[str, RootfsProfile] | None,
-    ssh_runner: SshRunner | None,
-    admission: AdmissionService | None,
-    session_registry: SessionRegistry | None,
-) -> PostmortemToolRuntime:
-    if runtime is None:
-        if artifact_root is None:
-            raise TypeError("artifact_root is required when runtime is not provided")
-        return PostmortemToolRuntime(
-            artifact_root=artifact_root,
-            admission=admission,
-            session_registry=session_registry,
-            rootfs_profiles=rootfs_profiles,
-            ssh_runner=ssh_runner,
-        )
-    return PostmortemToolRuntime(
-        artifact_root=runtime.artifact_root,
-        admission=runtime.admission if admission is None else admission,
-        session_registry=runtime.session_registry if session_registry is None else session_registry,
-        rootfs_profiles=runtime.rootfs_profiles if rootfs_profiles is None else rootfs_profiles,
-        ssh_runner=runtime.ssh_runner if ssh_runner is None else ssh_runner,
-    )
 
 
 def build_scp_argv(
@@ -349,21 +319,8 @@ def _fetch_success_response(run_id: str, details: dict[str, object], *, already_
 def debug_postmortem_check_prereqs_handler(
     request: DebugPostmortemCheckPrereqsRequest,
     *,
-    runtime: PostmortemToolRuntime | None = None,
-    artifact_root: Path | None = None,
-    rootfs_profiles: Mapping[str, RootfsProfile] | None = None,
-    ssh_runner: SshRunner | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
+    runtime: PostmortemToolRuntime,
 ) -> ToolResponse:
-    runtime = _runtime_value(
-        runtime=runtime,
-        artifact_root=artifact_root,
-        rootfs_profiles=rootfs_profiles,
-        ssh_runner=ssh_runner,
-        admission=admission,
-        session_registry=session_registry,
-    )
     profiles = runtime.rootfs_profiles if runtime.rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
     resolved_ctx, failure = resolve_probe_context(
         request,
@@ -577,21 +534,8 @@ def _fetch_under_lock(
 def debug_postmortem_list_dumps_handler(
     request: DebugPostmortemListDumpsRequest,
     *,
-    runtime: PostmortemToolRuntime | None = None,
-    artifact_root: Path | None = None,
-    rootfs_profiles: Mapping[str, RootfsProfile] | None = None,
-    ssh_runner: SshRunner | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
+    runtime: PostmortemToolRuntime,
 ) -> ToolResponse:
-    runtime = _runtime_value(
-        runtime=runtime,
-        artifact_root=artifact_root,
-        rootfs_profiles=rootfs_profiles,
-        ssh_runner=ssh_runner,
-        admission=admission,
-        session_registry=session_registry,
-    )
     profiles = runtime.rootfs_profiles if runtime.rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
     resolved_ctx, failure = resolve_probe_context(
         request,
@@ -647,21 +591,8 @@ def debug_postmortem_list_dumps_handler(
 def debug_postmortem_fetch_handler(
     request: DebugPostmortemFetchRequest,
     *,
-    runtime: PostmortemToolRuntime | None = None,
-    artifact_root: Path | None = None,
-    rootfs_profiles: Mapping[str, RootfsProfile] | None = None,
-    ssh_runner: SshRunner | None = None,
-    admission: AdmissionService | None = None,
-    session_registry: SessionRegistry | None = None,
+    runtime: PostmortemToolRuntime,
 ) -> ToolResponse:
-    runtime = _runtime_value(
-        runtime=runtime,
-        artifact_root=artifact_root,
-        rootfs_profiles=rootfs_profiles,
-        ssh_runner=ssh_runner,
-        admission=admission,
-        session_registry=session_registry,
-    )
     profiles = runtime.rootfs_profiles if runtime.rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
     resolved_ctx, failure = resolve_probe_context(
         request, artifact_root=runtime.artifact_root, rootfs_profiles=profiles, timeout_band=FETCH_TIMEOUT_BAND

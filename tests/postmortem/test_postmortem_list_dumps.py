@@ -13,6 +13,7 @@ from kdive.domain import (
 )
 from kdive.postmortem.dumps.handlers import build_scp_argv, debug_postmortem_list_dumps_handler
 from kdive.postmortem.models import DebugPostmortemListDumpsRequest
+from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 
 SECRET_KEY_REF = "s3cr3t-key"  # pragma: allowlist secret
@@ -49,12 +50,15 @@ def _booted_run(tmp_path) -> str:
     return manifest.run_id
 
 
+def _runtime(tmp_path: Path, *, ssh_runner=None) -> PostmortemToolRuntime:
+    return PostmortemToolRuntime(artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=ssh_runner)
+
+
 def test_list_dumps_rejects_out_of_band_timeout(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_postmortem_list_dumps_handler(
         DebugPostmortemListDumpsRequest(run_id=run_id, manifest_target_profile="local-qemu", timeout_seconds=120),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(),
+        runtime=_runtime(tmp_path),
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "invalid_timeout"
@@ -83,9 +87,7 @@ def test_list_dumps_empty_is_success(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_postmortem_list_dumps_handler(
         DebugPostmortemListDumpsRequest(run_id=run_id, manifest_target_profile="local-qemu"),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(),
-        ssh_runner=_list_runner('{"dump_dir": "/var/crash", "exists": false, "dumps": []}'),
+        runtime=_runtime(tmp_path, ssh_runner=_list_runner('{"dump_dir": "/var/crash", "exists": false, "dumps": []}')),
     )
     assert resp.ok is True
     assert resp.data["dumps"] == []
@@ -101,9 +103,7 @@ def test_list_dumps_one_entry(tmp_path) -> None:
     )
     resp = debug_postmortem_list_dumps_handler(
         DebugPostmortemListDumpsRequest(run_id=run_id, manifest_target_profile="local-qemu"),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(),
-        ssh_runner=_list_runner(stdout),
+        runtime=_runtime(tmp_path, ssh_runner=_list_runner(stdout)),
     )
     assert resp.ok is True
     assert resp.data["dumps"][0]["path"] == "/var/crash/d1"
@@ -117,9 +117,7 @@ def test_list_dumps_returns_typed_failure_for_malformed_record(tmp_path) -> None
 
     resp = debug_postmortem_list_dumps_handler(
         DebugPostmortemListDumpsRequest(run_id=run_id, manifest_target_profile="local-qemu"),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(),
-        ssh_runner=_list_runner(stdout),
+        runtime=_runtime(tmp_path, ssh_runner=_list_runner(stdout)),
     )
 
     assert resp.ok is False
@@ -135,9 +133,7 @@ def test_list_dumps_reports_target_enumeration_errors(tmp_path) -> None:
 
     resp = debug_postmortem_list_dumps_handler(
         DebugPostmortemListDumpsRequest(run_id=run_id, manifest_target_profile="local-qemu"),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(),
-        ssh_runner=_list_runner(stdout),
+        runtime=_runtime(tmp_path, ssh_runner=_list_runner(stdout)),
     )
 
     assert resp.ok is False
@@ -150,9 +146,7 @@ def test_list_dumps_bad_dump_dir(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_postmortem_list_dumps_handler(
         DebugPostmortemListDumpsRequest(run_id=run_id, manifest_target_profile="local-qemu", dump_dir="relative/path"),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(),
-        ssh_runner=_list_runner("{}"),
+        runtime=_runtime(tmp_path, ssh_runner=_list_runner("{}")),
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "invalid_dump_dir"
@@ -162,9 +156,7 @@ def test_list_dumps_no_python(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_postmortem_list_dumps_handler(
         DebugPostmortemListDumpsRequest(run_id=run_id, manifest_target_profile="local-qemu"),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(),
-        ssh_runner=_list_runner("", exit_status=127),
+        runtime=_runtime(tmp_path, ssh_runner=_list_runner("", exit_status=127)),
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "probe_no_python"

@@ -14,6 +14,7 @@ from pathlib import Path
 from kdive.domain import PrerequisiteStatus
 from kdive.postmortem.dumps.handlers import debug_postmortem_check_prereqs_handler
 from kdive.postmortem.models import DebugPostmortemCheckPrereqsRequest
+from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.providers.local.test.local_ssh_tests import SubprocessSshRunner
 from tests.introspect.test_drgn_introspect_integration import _bootstrap_booted_run, _require_integration_env
 
@@ -24,11 +25,13 @@ def test_real_target_reports_consistent_kdump_readiness(tmp_path: Path) -> None:
 
     resp = debug_postmortem_check_prereqs_handler(
         DebugPostmortemCheckPrereqsRequest(run_id=ctx.run_id, manifest_target_profile="pilot-libvirt"),
-        artifact_root=tmp_path / "runs",
-        rootfs_profiles=ctx.rootfs_profiles,
-        ssh_runner=SubprocessSshRunner(),
-        admission=ctx.admission,
-        session_registry=ctx.session_registry,
+        runtime=PostmortemToolRuntime(
+            artifact_root=tmp_path / "runs",
+            rootfs_profiles=ctx.rootfs_profiles,
+            ssh_runner=SubprocessSshRunner(),
+            admission=ctx.admission,
+            session_registry=ctx.session_registry,
+        ),
     )
 
     assert resp.ok is True, resp.model_dump(mode="json")

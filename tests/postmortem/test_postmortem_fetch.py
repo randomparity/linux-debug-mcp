@@ -13,6 +13,7 @@ from kdive.domain import (
 )
 from kdive.postmortem.dumps.handlers import debug_postmortem_fetch_handler
 from kdive.postmortem.models import DebugPostmortemFetchRequest
+from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 from kdive.transport.core.base import ExecutionState
 
@@ -125,9 +126,7 @@ def _fetch(tmp_path, runner, **over):
     base.update(over)
     return debug_postmortem_fetch_handler(
         DebugPostmortemFetchRequest(**base),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(),
-        ssh_runner=runner,
+        runtime=PostmortemToolRuntime(artifact_root=tmp_path, rootfs_profiles=_rootfs(), ssh_runner=runner),
     )
 
 
@@ -265,11 +264,13 @@ def test_fetch_halted_target_rejected(tmp_path) -> None:
     _booted(tmp_path)
     resp = debug_postmortem_fetch_handler(
         DebugPostmortemFetchRequest(run_id="r1", manifest_target_profile="local-qemu", dump_ref="/var/crash/d1"),
-        artifact_root=tmp_path,
-        rootfs_profiles=_rootfs(),
-        ssh_runner=_FetchRunner(),
-        admission=_FakeAdmission(),
-        session_registry=_FakeRegistry(ExecutionState.HALTED),
+        runtime=PostmortemToolRuntime(
+            artifact_root=tmp_path,
+            rootfs_profiles=_rootfs(),
+            ssh_runner=_FetchRunner(),
+            admission=_FakeAdmission(),
+            session_registry=_FakeRegistry(ExecutionState.HALTED),
+        ),
     )
     assert resp.ok is False
     assert resp.error.category == ErrorCategory.READINESS_FAILURE
