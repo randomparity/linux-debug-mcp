@@ -27,7 +27,7 @@ import pytest
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.domain import RunRequest, StepStatus
-from kdive.server import debug_introspect_from_vmcore_handler
+from kdive.introspect.handlers import debug_introspect_from_vmcore_handler
 
 pytest.importorskip("drgn")
 VMCORE = os.environ.get("KDIVE_VMCORE")

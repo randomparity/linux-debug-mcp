@@ -3,11 +3,12 @@ from pathlib import Path
 
 from conftest import make_source_tree
 
+from kdive.artifacts.handlers import create_run_handler
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, RootfsProfile, TargetProfile
 from kdive.domain import ArtifactRef, StepResult, StepStatus
 from kdive.providers.local.target.libvirt_qemu import BootExecutionResult
-from kdive.server import create_run_handler, target_boot_handler
+from kdive.target.handlers import target_boot_handler
 
 
 def build_spec() -> dict[str, object]:

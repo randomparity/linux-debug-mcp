@@ -28,7 +28,7 @@ from kdive.seams.target import (
     PlatformMetadata,
     TargetKey,
 )
-from kdive.server import target_run_tests_handler
+from kdive.target.handlers import target_run_tests_handler
 from kdive.transport.core.base import ExecutionState, LineRole, TransportRef
 
 # build_txn seeds the snapshot for TargetKey("local-qemu", "run-1"); use that run_id so the

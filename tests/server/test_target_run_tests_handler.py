@@ -2,12 +2,13 @@ from pathlib import Path
 
 from conftest import FakeTestProvider, create_booted_run, make_source_tree, rootfs
 
+from kdive.artifacts.handlers import create_run_handler
 from kdive.artifacts.manifest import BootAttempt
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, RootfsProfile, TargetProfile, TestCommand, TestSuiteProfile
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
 from kdive.providers.local.local_ssh_tests import LocalSshTestProvider, TestExecutionResult
-from kdive.server import create_run_handler, target_run_tests_handler
+from kdive.target.handlers import target_run_tests_handler
 
 
 class PlanRejectingProvider(FakeTestProvider):

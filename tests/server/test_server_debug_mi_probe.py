@@ -29,7 +29,7 @@ from kdive.seams.target import (
     PlatformMetadata,
     TargetKey,
 )
-from kdive.server import target_run_tests_handler
+from kdive.target.handlers import target_run_tests_handler
 from kdive.transport.core.base import ExecutionState, LineRole, TransportRef
 
 RUN_ID = "run-1"

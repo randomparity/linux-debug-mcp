@@ -11,15 +11,17 @@ from kdive.domain import (
     ToolResponse,
 )
 from kdive.postmortem import handlers as postmortem_handlers
+from kdive.postmortem.handlers import debug_postmortem_triage_handler
 from kdive.postmortem.models import DebugPostmortemTriageRequest
-from kdive.server import debug_postmortem_triage_handler
 
 GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
 
 def test_triage_handler_lives_in_postmortem_package() -> None:
     assert postmortem_handlers.debug_postmortem_triage_handler.__module__ == "kdive.postmortem.handlers"
-    assert server_module.debug_postmortem_triage_handler is postmortem_handlers.debug_postmortem_triage_handler
+    assert server_module.create_app()._tool_manager._tools["debug.postmortem.triage"].fn.__module__ == (
+        "kdive.postmortem.tools"
+    )
 
 
 def test_triage_handler_is_split_into_named_phases() -> None:

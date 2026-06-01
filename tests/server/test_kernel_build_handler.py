@@ -7,14 +7,15 @@ from unittest.mock import patch
 from conftest import NoopBuildRunner as NoopRunner
 from conftest import add_merge_config_script, make_source_tree
 
+from kdive.artifacts.handlers import create_run_handler
 from kdive.kernel import handlers as kernel_handlers
+from kdive.kernel.handlers import kernel_build_handler
 from kdive.providers.local.build.local_kernel_build import (
     LocalKernelBuildProvider,
 )
 from kdive.providers.local.build.local_kernel_build import (
     _extract_build_id as _REAL_EXTRACT_BUILD_ID,
 )
-from kdive.server import create_run_handler, kernel_build_handler
 
 # Task 4 R2-F6: the build success path now extracts and records build_id by
 # running readelf against vmlinux. Most handler/workflow tests in this suite

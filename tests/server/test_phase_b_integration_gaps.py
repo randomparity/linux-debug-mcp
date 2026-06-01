@@ -52,7 +52,8 @@ from kdive.seams.lifecycle import LifecycleEvent, LifecycleKind
 from kdive.seams.target import (
     TargetKey,
 )
-from kdive.server import create_app, target_run_tests_handler
+from kdive.server import create_app
+from kdive.target.handlers import target_run_tests_handler
 from kdive.transport.core.base import (
     ExecutionState,
     LineRole,

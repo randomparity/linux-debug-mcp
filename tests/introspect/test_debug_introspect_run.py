@@ -32,12 +32,16 @@ from kdive.domain import (
 )
 from kdive.introspect import execution as introspect_execution
 from kdive.introspect.execution import LiveIntrospectRuntime
+from kdive.introspect.handlers import (
+    debug_introspect_helper_handler as _debug_introspect_helper_handler,
+)
+from kdive.introspect.handlers import (
+    debug_introspect_run_handler as _debug_introspect_run_handler,
+)
 from kdive.introspect.tools import IntrospectRunOptions, IntrospectTargetContext
 from kdive.providers.local.local_ssh_tests import SshCommandResult
 from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetState
 from kdive.server import RUN_STDOUT_CAP
-from kdive.server import debug_introspect_helper_handler as _debug_introspect_helper_handler
-from kdive.server import debug_introspect_run_handler as _debug_introspect_run_handler
 
 VALID_BUILD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 

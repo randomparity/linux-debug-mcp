@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-import kdive.server as server_module
 from kdive.artifacts.store import ArtifactStore
 from kdive.domain import (
     DebugIntrospectFromVmcoreHelperRequest,
@@ -16,11 +15,8 @@ from kdive.domain import (
     StepStatus,
 )
 from kdive.introspect import handlers as introspect_handlers
+from kdive.introspect.handlers import debug_introspect_from_vmcore_handler, debug_introspect_from_vmcore_helper_handler
 from kdive.providers.local.local_ssh_tests import SshCommandResult
-from kdive.server import (
-    debug_introspect_from_vmcore_handler,
-    debug_introspect_from_vmcore_helper_handler,
-)
 from kdive.symbols.build_id import BuildIdReadError
 
 VALID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
@@ -54,13 +50,7 @@ def test_helper_request_shape() -> None:
 
 def test_vmcore_handlers_live_in_introspect_package() -> None:
     assert introspect_handlers.debug_introspect_from_vmcore_handler.__module__ == "kdive.introspect.handlers"
-    assert (
-        server_module.debug_introspect_from_vmcore_handler is introspect_handlers.debug_introspect_from_vmcore_handler
-    )
-    assert (
-        server_module.debug_introspect_from_vmcore_helper_handler
-        is introspect_handlers.debug_introspect_from_vmcore_helper_handler
-    )
+    assert introspect_handlers.debug_introspect_from_vmcore_helper_handler.__module__ == "kdive.introspect.handlers"
 
 
 def test_vmcore_introspect_handler_uses_explicit_phase_helpers() -> None:

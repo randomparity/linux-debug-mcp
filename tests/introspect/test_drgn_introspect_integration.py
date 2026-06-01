@@ -18,13 +18,15 @@ from typing import NamedTuple
 
 import pytest
 
+from kdive.artifacts.handlers import create_run_handler
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import RootfsProfile, TargetProfile
 from kdive.coordination.admission import AdmissionService, SnapshotStore
 from kdive.coordination.registry import SessionRegistry
 from kdive.domain import ArtifactRef, DebugIntrospectRunRequest, ErrorCategory, StepResult, StepStatus
+from kdive.introspect.handlers import debug_introspect_run_handler
 from kdive.providers.local.local_ssh_tests import SubprocessSshRunner, build_ssh_argv
-from kdive.server import create_run_handler, debug_introspect_run_handler, target_boot_handler
+from kdive.target.handlers import target_boot_handler
 
 MANAGED_DOMAIN_PREFIX = "kdive-"
 

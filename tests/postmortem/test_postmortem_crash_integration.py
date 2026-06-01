@@ -8,8 +8,8 @@ import pytest
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.domain import RunRequest
+from kdive.postmortem.crash_handler import debug_postmortem_crash_handler
 from kdive.postmortem.models import DebugPostmortemCrashRequest
-from kdive.server import debug_postmortem_crash_handler
 
 pytestmark = pytest.mark.skipif(
     shutil.which("crash") is None or not os.environ.get("KDIVE_VMCORE") or not os.environ.get("KDIVE_VMLINUX"),

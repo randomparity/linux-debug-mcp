@@ -30,7 +30,7 @@ from test_drgn_introspect_integration import (
 )
 
 from kdive.domain import DebugIntrospectHelperRequest
-from kdive.server import debug_introspect_helper_handler
+from kdive.introspect.handlers import debug_introspect_helper_handler
 
 pytestmark = pytest.mark.live_vm
 

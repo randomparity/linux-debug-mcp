@@ -109,7 +109,7 @@ def test_legacy_session_converted_to_tombstone_when_not_executing(tmp_path: Path
     # End-to-end: target.run_tests is now blind-fenced (recovery_required), not silently runnable.
     from conftest import FakeTestProvider
 
-    from kdive.server import target_run_tests_handler
+    from kdive.target.handlers import target_run_tests_handler
 
     rootfs_profile: RootfsProfile = rootfs(tmp_path)
     tests = target_run_tests_handler(
@@ -171,7 +171,7 @@ def test_legacy_session_end_session_writes_tombstone_after_detach(tmp_path: Path
     # (c) target.run_tests is now gated, not blind to the just-detached unmanaged stop.
     from conftest import FakeTestProvider
 
-    from kdive.server import target_run_tests_handler
+    from kdive.target.handlers import target_run_tests_handler
 
     rootfs_profile: RootfsProfile = rootfs(tmp_path)
     tests = target_run_tests_handler(

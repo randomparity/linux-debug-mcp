@@ -30,9 +30,10 @@ def test_postmortem_dump_handlers_are_owned_by_postmortem_module() -> None:
     assert postmortem_handlers.debug_postmortem_check_prereqs_handler.__module__ == "kdive.postmortem.handlers"
     assert postmortem_handlers.debug_postmortem_list_dumps_handler.__module__ == "kdive.postmortem.handlers"
     assert postmortem_handlers.debug_postmortem_fetch_handler.__module__ == "kdive.postmortem.handlers"
-    assert server.debug_postmortem_check_prereqs_handler is postmortem_handlers.debug_postmortem_check_prereqs_handler
-    assert server.debug_postmortem_list_dumps_handler is postmortem_handlers.debug_postmortem_list_dumps_handler
-    assert server.debug_postmortem_fetch_handler is postmortem_handlers.debug_postmortem_fetch_handler
+    app = server.create_app()
+    assert app._tool_manager._tools["debug.postmortem.check_prereqs"].fn.__module__ == "kdive.postmortem.tools"
+    assert app._tool_manager._tools["debug.postmortem.list_dumps"].fn.__module__ == "kdive.postmortem.tools"
+    assert app._tool_manager._tools["debug.postmortem.fetch"].fn.__module__ == "kdive.postmortem.tools"
 
 
 def test_debug_start_session_handler_is_owned_by_debug_module() -> None:

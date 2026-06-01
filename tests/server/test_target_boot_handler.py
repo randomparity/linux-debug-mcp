@@ -18,8 +18,8 @@ from kdive.coordination.admission import AdmissionService, SnapshotStore
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.providers.local.target.libvirt_qemu import BootExecutionResult, ProviderBootError
 from kdive.seams.target import TargetKey
-from kdive.server import target_boot_handler
 from kdive.target import handlers as target_handlers
+from kdive.target.handlers import target_boot_handler
 
 
 def boot(

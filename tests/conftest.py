@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from kdive.artifacts.handlers import create_run_handler
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile, RootfsProfile, TargetProfile
 from kdive.coordination.admission import AdmissionService, publish_ready_snapshot
@@ -23,7 +24,6 @@ from kdive.seams.target import (
     PlatformMetadata,
     TargetKey,
 )
-from kdive.server import create_run_handler
 from kdive.transport.core.base import LineRole, TransportRef
 
 

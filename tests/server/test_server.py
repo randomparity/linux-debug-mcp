@@ -224,12 +224,14 @@ def test_debug_operation_handlers_live_outside_server_catch_all() -> None:
 def test_live_introspect_handlers_live_outside_server_catch_all() -> None:
     from kdive.introspect import handlers as introspect_handlers
 
-    assert server.debug_introspect_run_handler.__module__ == "kdive.introspect.handlers"
-    assert server.debug_introspect_helper_handler.__module__ == "kdive.introspect.handlers"
-    assert server.debug_introspect_check_prerequisites_handler is (
-        introspect_handlers.debug_introspect_check_prerequisites_handler
-    )
-    assert server.debug_introspect_check_prerequisites_handler.__module__ == "kdive.introspect.handlers"
+    app = create_app()
+
+    assert introspect_handlers.debug_introspect_run_handler.__module__ == "kdive.introspect.handlers"
+    assert introspect_handlers.debug_introspect_helper_handler.__module__ == "kdive.introspect.handlers"
+    assert introspect_handlers.debug_introspect_check_prerequisites_handler.__module__ == "kdive.introspect.handlers"
+    assert app._tool_manager._tools["debug.introspect.run"].fn.__module__ == "kdive.introspect.tools"
+    assert app._tool_manager._tools["debug.introspect.helper"].fn.__module__ == "kdive.introspect.tools"
+    assert app._tool_manager._tools["debug.introspect.check_prerequisites"].fn.__module__ == "kdive.introspect.tools"
 
 
 def test_prerequisites_handler_readiness_skipped_without_profiles(tmp_path: Path) -> None:
@@ -478,14 +480,15 @@ def test_target_run_tests_tool_and_handler_are_target_owned() -> None:
 
     assert tool.fn.__module__ == "kdive.target.tools"
     assert target_handlers.target_run_tests_handler.__module__ == "kdive.target.handlers"
-    assert server.target_run_tests_handler is target_handlers.target_run_tests_handler
 
 
 def test_target_boot_handler_is_target_owned() -> None:
     from kdive.target import handlers as target_handlers
 
+    tool = create_app()._tool_manager._tools["target.boot"]
+
+    assert tool.fn.__module__ == "kdive.target.tools"
     assert target_handlers.target_boot_handler.__module__ == "kdive.target.handlers"
-    assert server.target_boot_handler is target_handlers.target_boot_handler
 
 
 def test_target_run_tests_handler_response_serializes(tmp_path: Path) -> None:
@@ -584,7 +587,6 @@ def test_kernel_build_tool_and_handler_are_kernel_owned() -> None:
 
     assert tool.fn.__module__ == "kdive.kernel.tools"
     assert kernel_handlers.kernel_build_handler.__module__ == "kdive.kernel.handlers"
-    assert server.kernel_build_handler is kernel_handlers.kernel_build_handler
 
 
 def test_core_tool_adapter_shapes_are_not_server_reexports() -> None:
