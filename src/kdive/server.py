@@ -356,25 +356,25 @@ def _workflow_handler_dependencies() -> WorkflowHandlerDependencies:
 
 
 def not_implemented_handler(tool_name: str, *, run_id: str | None = None) -> ToolResponse:
-    sprint_by_prefix = {
-        "kernel.build": "Sprint 1",
-        "target.boot": "Sprint 2",
-        "target.run_tests": "Sprint 3",
-        "artifacts.collect": "Sprint 3",
-        "workflow.build_boot_test": "Sprint 3",
-        "workflow.build_boot_debug": "Sprint 4",
-        "debug.": "Sprint 4",
+    implementation_phase_by_prefix = {
+        "kernel.build": "kernel build provider path",
+        "target.boot": "target boot provider path",
+        "target.run_tests": "target test provider path",
+        "artifacts.collect": "artifact collection provider path",
+        "workflow.build_boot_test": "build/boot/test workflow path",
+        "workflow.build_boot_debug": "build/boot/debug workflow path",
+        "debug.": "debug provider path",
     }
-    sprint = "a later sprint"
-    for prefix, value in sprint_by_prefix.items():
+    implementation_phase = "future provider availability"
+    for prefix, value in implementation_phase_by_prefix.items():
         if tool_name.startswith(prefix):
-            sprint = value
+            implementation_phase = value
             break
     return ToolResponse.failure(
         category=ErrorCategory.NOT_IMPLEMENTED,
-        message=f"{tool_name} is implemented in {sprint}",
+        message=f"{tool_name} is unavailable in this provider build",
         run_id=run_id,
-        details={"tool": tool_name, "sprint": sprint},
+        details={"tool": tool_name, "implementation_phase": implementation_phase},
         suggested_next_actions=["Use host.check_prerequisites", "Use kernel.create_run"],
     )
 

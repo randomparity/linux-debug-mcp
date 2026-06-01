@@ -15,7 +15,7 @@ from kdive.domain import (
 )
 
 STUB_ARCHITECTURES = ["x86_64", "ppc64le"]
-NO_SIDE_EFFECT_LIMITATION = "Sprint 5 stub only: advertises future capability and performs no external side effects."
+STUB_AVAILABILITY_LIMITATION = "Stub provider only: advertises future capability and performs no external side effects."
 
 
 def _semantics(*, destructive: bool, idempotent: bool = False, retryable: bool = True) -> OperationSemantics:
@@ -41,7 +41,7 @@ def _operation(
         implementation_state=ImplementationState.STUB,
         required_host_tools=required_host_tools,
         destructive_permissions=destructive_permissions or [],
-        limitations=[NO_SIDE_EFFECT_LIMITATION],
+        limitations=[STUB_AVAILABILITY_LIMITATION],
     )
 
 
@@ -63,7 +63,7 @@ def _stub_capability(
         architectures=list(STUB_ARCHITECTURES),
         target_kinds=target_kinds,
         transports=transports,
-        limitations=[NO_SIDE_EFFECT_LIMITATION],
+        limitations=[STUB_AVAILABILITY_LIMITATION],
         operations=[operation.operation for operation in operations],
         operation_capabilities=operations,
         required_host_tools=required_host_tools,

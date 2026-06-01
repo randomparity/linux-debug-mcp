@@ -312,7 +312,7 @@ def test_list_providers_handler_returns_default_capabilities() -> None:
     assert "operation_capabilities" in providers["remote-build-stub"]
 
 
-def test_default_smoke_basic_suite_matches_sprint_3_contract() -> None:
+def test_default_smoke_basic_suite_matches_target_test_contract() -> None:
     suite = DEFAULT_TEST_SUITES["smoke-basic"]
 
     assert [command.argv for command in suite.commands] == [
@@ -332,13 +332,15 @@ def test_not_implemented_handler_returns_structured_error() -> None:
     assert response.error is not None
     assert response.error.category == "not_implemented"
     assert response.error.details["tool"] == "target.run_tests"
+    assert "implementation_phase" in response.error.details
+    assert "sprint" not in response.error.details
 
 
 def test_create_app_constructs_fastmcp_server() -> None:
     assert type(create_app()).__name__ == "FastMCP"
 
 
-def test_create_app_registers_sprint_4_tools_as_real_handlers() -> None:
+def test_create_app_registers_debug_tools_as_real_handlers() -> None:
     app = create_app()
     tools = app._tool_manager._tools
     tool_names = set(tools)

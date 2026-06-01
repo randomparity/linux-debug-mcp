@@ -218,7 +218,7 @@ def test_registry_get_unknown_provider_has_contextual_error() -> None:
     assert isinstance(exc_info.value.__cause__, KeyError)
 
 
-def test_default_registry_exposes_sprint_1_providers() -> None:
+def test_default_registry_exposes_local_provider_capabilities() -> None:
     registry = ProviderRegistry.with_defaults()
 
     providers = {provider.provider_name: provider for provider in registry.list_capabilities()}
@@ -474,7 +474,7 @@ def test_registry_finds_providers_by_operation_and_architecture_deterministicall
     assert [provider.provider_name for provider in providers] == ["remote-build-stub"]
 
 
-def test_registry_advertises_local_qemu_gdbstub_and_removes_sprint_4_stubs() -> None:
+def test_registry_advertises_local_qemu_gdbstub_without_debug_stubs() -> None:
     registry = ProviderRegistry.with_defaults()
     providers = {provider.provider_name: provider for provider in registry.list_capabilities()}
 
