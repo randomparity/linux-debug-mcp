@@ -27,6 +27,7 @@ class InjectBreakError(Exception):
 
 
 _REQUESTABLE = frozenset(method for method in BreakMethod if method is not BreakMethod.GDBSTUB_NATIVE)
+_SYSRQ_G_WRITE_TIMEOUT_SECONDS = 10
 
 
 def _normalize_break_request_method(method: BreakRequestMethod) -> BreakMethod | None:
@@ -106,7 +107,12 @@ def inject_break(
         # sh -c SCRIPT $0 $1 ...: pass "g" as a discrete argv token ($1), not embedded in the
         # script string, so the trigger char is never shell-interpolated. $0 is just a label.
         argv = [*ssh_argv_prefix, "sh", "-c", 'echo "$1" > /proc/sysrq-trigger', "sysrq-g", "g"]
-        result = ssh_runner.run(argv, timeout=10, stdout_path=base / "sysrq.out", stderr_path=base / "sysrq.err")
+        result = ssh_runner.run(
+            argv,
+            timeout=_SYSRQ_G_WRITE_TIMEOUT_SECONDS,
+            stdout_path=base / "sysrq.out",
+            stderr_path=base / "sysrq.err",
+        )
         if _sysrq_g_failed(result):
             raise InjectBreakError(
                 "sysrq-g write failed",

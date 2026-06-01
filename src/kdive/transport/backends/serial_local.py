@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import enum
 import fcntl
+import logging
 import os
 import secrets
 import select
@@ -42,6 +43,8 @@ from kdive.transport.core.base import (
 from kdive.transport.core.bounded import Deadline, await_accept, check_not_cancelled, open_device
 
 OnPartial = Callable[[str, object], None]
+
+logger = logging.getLogger(__name__)
 
 _BRIDGE_BUFFER = 4096
 # Per-direction outbound buffer ceiling. The relay stops reading a source once its outbound
@@ -321,8 +324,10 @@ class SerialConsoleBridge:
                 os.rmdir(target)
             else:
                 os.unlink(target)
+        except FileNotFoundError:
+            return
         except OSError:
-            pass
+            logger.debug("failed to remove serial bridge path %s", target, exc_info=True)
 
     @property
     def session_dir(self) -> str:
