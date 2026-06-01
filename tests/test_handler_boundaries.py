@@ -148,6 +148,26 @@ def test_shared_probe_boundary_does_not_import_private_transport_handlers() -> N
     assert "require_target_snapshot" in _imported_names(PROBE_SEAM_SOURCE, "kdive.coordination.admission")
 
 
+def test_debug_features_do_not_import_private_transport_handler_helpers() -> None:
+    feature_sources = [
+        ROOT / "src" / "kdive" / "debug" / "operations.py",
+        ROOT / "src" / "kdive" / "debug" / "session_end.py",
+        ROOT / "src" / "kdive" / "debug" / "session_handlers.py",
+        ROOT / "src" / "kdive" / "debug" / "module_symbols.py",
+        ROOT / "src" / "kdive" / "introspect" / "execution.py",
+    ]
+
+    offenders = {
+        str(path.relative_to(ROOT)): sorted(
+            name for name in _imported_names(path, "kdive.transport.handlers") if name.startswith("_")
+        )
+        for path in feature_sources
+        if any(name.startswith("_") for name in _imported_names(path, "kdive.transport.handlers"))
+    }
+
+    assert offenders == {}
+
+
 def test_server_does_not_reexport_private_feature_helpers() -> None:
     import kdive.server as server
 

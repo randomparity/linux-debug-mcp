@@ -23,6 +23,7 @@ from kdive.debug.operations import (
     _resume_debug_transport,
     _teardown_debug_transport,
 )
+from kdive.debug.policy import ensure_debug_operation_enabled, halt_debug_transport, resolve_debug_profile
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.handlers.shared import _require_value
 from kdive.providers.debug import (
@@ -41,11 +42,6 @@ from kdive.seams.target import ConsoleKind, TargetKey
 from kdive.symbols.build_id import BuildIdReadError, read_elf_build_id
 from kdive.symbols.verify import BUILD_ID_RE, ProvenanceMismatch, verify_vmlinux_provenance
 from kdive.transport.core.base import LineRole, OpenRequest, TransportRef, TransportSession
-from kdive.transport.handlers import (
-    _ensure_debug_operation_enabled,
-    _halt_debug_transport,
-    _resolve_debug_profile,
-)
 
 
 def _find_artifact(result: StepResult, kind: str) -> ArtifactRef | None:
@@ -370,11 +366,11 @@ def _debug_start_session_preflight(
             details={"requested_profile": debug_profile, "manifest_profile": manifest.request.debug_profile},
         )
     try:
-        resolved_debug_profile = _resolve_debug_profile(
+        resolved_debug_profile = resolve_debug_profile(
             profile_name=requested_profile,
             debug_profiles=debug_profiles,
         )
-        _ensure_debug_operation_enabled(resolved_debug_profile, "debug.start_session")
+        ensure_debug_operation_enabled(resolved_debug_profile, "debug.start_session")
     except ProviderDebugError as exc:
         return None, _configuration_failure(run_id=run_id, message=str(exc), details=exc.details)
 
@@ -559,7 +555,7 @@ def _debug_start_session_locked_attach(
             ),
         )
 
-    _halt_debug_transport(session=transport_session, admission=admission, session_registry=session_registry)
+    halt_debug_transport(session=transport_session, admission=admission, session_registry=session_registry)
     session_id = f"debug-{uuid.uuid4().hex}"
     probe_failure, mi_probe_details = _run_mi_attach_probe(
         engine=gdb_mi_engine,

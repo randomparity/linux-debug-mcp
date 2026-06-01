@@ -15,7 +15,7 @@ These tests assert the three correctness fixes that close gaps surfaced by the w
    running an admitted test through a halt and confirming `admission._bindings[KEY]` is empty.
 
 3. debug.start_session must `transaction.close()` the transport on a failed gdb attach AFTER the
-   transaction.open() committed READY + _halt_debug_transport persisted HALTED. Otherwise the
+   transaction.open() committed READY + halt_debug_transport persisted HALTED. Otherwise the
    guard stays held / record stays live / handle stays PROMOTED and run_tests stays gated
    `target_halted` forever. Asserted by failing the gdb attach and observing the durable record is
    GONE and a subsequent recovery=True reattach succeeds.
@@ -44,6 +44,7 @@ from kdive.config import DebugProfile
 from kdive.coordination.admission import AdmissionService, publish_ready_snapshot
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
+from kdive.debug.policy import halt_debug_transport
 from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
@@ -62,7 +63,6 @@ from kdive.transport.core.base import (
     TransportSession,
     new_session_id,
 )
-from kdive.transport.handlers import _halt_debug_transport
 
 RUN_ID = "run-1"
 GDBSTUB_ENDPOINT = {"host": "127.0.0.1", "port": 1234}
@@ -173,9 +173,9 @@ def test_run_tests_halt_during_execute_deregisters_ssh_tier_handle(tmp_path: Pat
     # `bindings_outstanding`. Asserts the live AdmissionService (NOT a spy) records an empty
     # binding list for the target after the halt-cancelled run terminalizes.
     #
-    # The halt is driven through the PRODUCTION helper `_halt_debug_transport`, so the rollback is
+    # The halt is driven through the PRODUCTION helper `halt_debug_transport`, so the rollback is
     # proven against the production code path (a test-thread `cancel_ssh_tier` would still pass
-    # even if `_halt_debug_transport` itself never delivered the cancel — Fix 1 forecloses that).
+    # even if `halt_debug_transport` itself never delivered the cancel — Fix 1 forecloses that).
     artifact_root = create_booted_run(tmp_path)
     test_key = TargetKey(provisioner="local-qemu", target_id="run-abc123")
     reg = _make_test_registry(tmp_path)
@@ -186,7 +186,7 @@ def test_run_tests_halt_during_execute_deregisters_ssh_tier_handle(tmp_path: Pat
     def _halt() -> None:
         assert provider.started.wait(timeout=2)
         record = next(r for r in reg.list_records() if r.target_key == test_key)
-        _halt_debug_transport(session=record, admission=admission, session_registry=reg)
+        halt_debug_transport(session=record, admission=admission, session_registry=reg)
 
     timer = threading.Thread(target=_halt, daemon=True)
     timer.start()

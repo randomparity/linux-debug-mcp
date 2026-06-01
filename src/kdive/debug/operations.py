@@ -32,6 +32,7 @@ from kdive.debug.handlers import (
     DebugSetWatchpointRequest,
     DebugStepRequest,
 )
+from kdive.debug.policy import ensure_debug_operation_enabled, resolve_debug_profile
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.providers.debug import (
     MAX_INTERACTIVE_WAIT_SEC,
@@ -50,7 +51,6 @@ from kdive.seams.guard import SessionGuard, SessionGuardContext
 from kdive.seams.target import TargetKey
 from kdive.transport.core.base import BreakMethod, ExecutionState, TransportSession
 from kdive.transport.core.break_inject import InjectBreakError
-from kdive.transport.handlers import _ensure_debug_operation_enabled, _resolve_debug_profile
 
 
 def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any] | None = None) -> ToolResponse:
@@ -146,7 +146,7 @@ def _resume_debug_transport(
     admission: AdmissionService,
     session_registry: SessionRegistry,
 ) -> None:
-    """Inverse of `_halt_debug_transport` for the guaranteed-resume path: once the MI engine confirms
+    """Inverse of `halt_debug_transport` for the guaranteed-resume path: once the MI engine confirms
     the kernel is EXECUTING again (best-effort continue + RSP disconnect), persist HALTED->EXECUTING
     and bump the execution epoch so a fresh ssh-tier proof at the new epoch is accepted. Writing the
     durable record EXECUTING also makes a subsequent transaction.close() leave NO closed_while_halted
@@ -732,11 +732,11 @@ def _debug_operation_response(
                 admission=runtime.admission,
                 session_registry=runtime.session_registry,
             )
-            profile = _resolve_debug_profile(
+            profile = resolve_debug_profile(
                 profile_name=session.selected_debug_profile,
                 debug_profiles=runtime.debug_profiles,
             )
-            _ensure_debug_operation_enabled(profile, request.profile_operation)
+            ensure_debug_operation_enabled(profile, request.profile_operation)
             attachment = runtime.gdb_mi_sessions.require(session.session_id)
             # Every engine interaction for this op — the op itself AND the post-mutator ledger rebuild
             # (-break-list) — shares one guard (inside debug_lock, no concurrent op can require() a

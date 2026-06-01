@@ -22,12 +22,12 @@ from kdive.debug.operations import (
     _preserved_debug_step_details,
     _recorded_transport_session_id,
 )
+from kdive.debug.policy import ensure_debug_operation_enabled, resolve_debug_profile
 from kdive.domain import ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.providers.debug import DebugSessionState, GdbMiEngine, GdbMiSessionRegistry, ProviderDebugError
 from kdive.safety.redaction import Redactor
 from kdive.seams.guard import SessionGuard, SessionGuardContext
 from kdive.seams.target import TargetKey
-from kdive.transport.handlers import _ensure_debug_operation_enabled, _resolve_debug_profile
 
 _RequiredT = TypeVar("_RequiredT")
 
@@ -55,8 +55,8 @@ def _end_mi_debug_session(
     try:
         with store.debug_lock(run_id):
             session = _load_active_debug_session(store, run_id, debug_session_id, allow_ended=True)
-            profile = _resolve_debug_profile(profile_name=session.selected_debug_profile, debug_profiles=debug_profiles)
-            _ensure_debug_operation_enabled(profile, "debug.end_session")
+            profile = resolve_debug_profile(profile_name=session.selected_debug_profile, debug_profiles=debug_profiles)
+            ensure_debug_operation_enabled(profile, "debug.end_session")
             ended = session.model_copy(
                 update={"current_execution_state": DebugSessionState.ENDED, "ended_at": datetime.now(UTC).isoformat()}
             )

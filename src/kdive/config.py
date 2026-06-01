@@ -131,7 +131,7 @@ ALLOWED_DEBUG_OPERATIONS = [
     "debug.introspect.run",
     "debug.introspect.helper",
     # Offline vmcore introspection (#55). Listed for enumerability/consistency;
-    # the vmcore path does not call `_ensure_debug_operation_enabled` (no
+    # the vmcore path does not call `ensure_debug_operation_enabled` (no
     # DebugProfile in the request) — it is never gated (§5.6 rule 3).
     "debug.introspect.from_vmcore",
     "debug.introspect.from_vmcore_helper",
@@ -151,7 +151,7 @@ ALLOWED_DEBUG_OPERATIONS = [
     "debug.postmortem.list_dumps",
     "debug.postmortem.fetch",
     # ADR 0011 / #56: capability token (NOT an MCP tool) gating allow_write=true on the live
-    # introspect path. Only ever passed to `_ensure_debug_operation_enabled`, never registered
+    # introspect path. Only ever passed to `ensure_debug_operation_enabled`, never registered
     # as a tool. A read-only profile narrows `enabled_operations` to exclude it to refuse writes.
     "debug.introspect.write",
 ]

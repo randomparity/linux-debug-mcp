@@ -5,13 +5,13 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
-from kdive.config import ALLOWED_DEBUG_OPERATIONS, DebugProfile, missing_destructive_permissions
+from kdive.config import DebugProfile, missing_destructive_permissions
 from kdive.coordination.admission import AdmissionError, AdmissionService, require_target_snapshot
 from kdive.coordination.endpoint_safety import EndpointSafetyError
 from kdive.coordination.exec_probe import probe_rsp_halted
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
-from kdive.default_profiles import DEFAULT_DEBUG_PROFILES
+from kdive.debug.policy import ensure_debug_operation_enabled, halt_debug_transport, resolve_debug_profile
 from kdive.domain import ErrorCategory, ToolResponse
 from kdive.providers.debug import ProviderDebugError
 from kdive.safety.redaction import Redactor
@@ -34,48 +34,6 @@ def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any]
         run_id=run_id,
         details=details,
     )
-
-
-def _ensure_debug_operation_enabled(profile: DebugProfile, operation: str) -> None:
-    if operation not in set(ALLOWED_DEBUG_OPERATIONS):
-        raise ProviderDebugError(
-            "unsupported debug operation",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"operation": operation},
-        )
-    if operation not in profile.enabled_operations:
-        raise ProviderDebugError(
-            "debug operation is disabled by selected profile",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"debug_profile": profile.name, "operation": operation},
-        )
-
-
-def _resolve_debug_profile(
-    *,
-    profile_name: str,
-    debug_profiles: dict[str, DebugProfile] | None,
-) -> DebugProfile:
-    profiles = debug_profiles if debug_profiles is not None else DEFAULT_DEBUG_PROFILES
-    try:
-        return profiles[profile_name]
-    except KeyError as exc:
-        raise ProviderDebugError(
-            "unknown debug profile",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"debug_profile": profile_name},
-        ) from exc
-
-
-def _halt_debug_transport(
-    *,
-    session: TransportSession,
-    admission: AdmissionService,
-    session_registry: SessionRegistry,
-) -> None:
-    session_registry.write_record(session.model_copy(update={"execution_state": ExecutionState.HALTED}))
-    halt_epoch = admission.note_execution_transition(session.target_key, session.generation)
-    admission.cancel_ssh_tier(session.target_key, session.generation, halt_epoch=halt_epoch)
 
 
 def _transport_disabled_failure(*, run_id: str) -> ToolResponse:
@@ -339,8 +297,8 @@ def transport_inject_break_handler(
                 details={"code": "manifest_load_failed"},
             )
     try:
-        resolved_profile = _resolve_debug_profile(profile_name=requested_profile, debug_profiles=debug_profiles)
-        _ensure_debug_operation_enabled(resolved_profile, "transport.inject_break")
+        resolved_profile = resolve_debug_profile(profile_name=requested_profile, debug_profiles=debug_profiles)
+        ensure_debug_operation_enabled(resolved_profile, "transport.inject_break")
     except ProviderDebugError as exc:
         return _configuration_failure(run_id=run_id, message=str(exc), details=exc.details)
     try:
@@ -361,7 +319,7 @@ def transport_inject_break_handler(
             message=f"no open transport session for break injection: {session_id}",
             details={"code": "unknown_session"},
         )
-    _halt_debug_transport(session=record, admission=admission, session_registry=session_registry)
+    halt_debug_transport(session=record, admission=admission, session_registry=session_registry)
     redactor = Redactor()
     try:
         if break_mechanism is None:

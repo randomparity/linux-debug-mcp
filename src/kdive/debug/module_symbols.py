@@ -20,6 +20,7 @@ from kdive.debug.operations import (
     _preserved_debug_step_details,
     _teardown_stalled_debug_session,
 )
+from kdive.debug.policy import ensure_debug_operation_enabled, resolve_debug_profile
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES
 from kdive.domain import ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.providers.debug import (
@@ -32,7 +33,6 @@ from kdive.providers.debug import (
 from kdive.providers.ssh import SshRunner, SubprocessSshRunner, build_ssh_argv
 from kdive.safety.paths import PathSafetyError
 from kdive.safety.redaction import Redactor
-from kdive.transport.handlers import _ensure_debug_operation_enabled, _resolve_debug_profile
 
 SSH_TIMEOUT_GRACE_SECONDS = 10
 
@@ -224,8 +224,8 @@ def _resolve_module_symbol_load_request(
         admission=runtime.admission,
         session_registry=runtime.session_registry,
     )
-    profile = _resolve_debug_profile(profile_name=session.selected_debug_profile, debug_profiles=runtime.debug_profiles)
-    _ensure_debug_operation_enabled(profile, "debug.load_module_symbols")
+    profile = resolve_debug_profile(profile_name=session.selected_debug_profile, debug_profiles=runtime.debug_profiles)
+    ensure_debug_operation_enabled(profile, "debug.load_module_symbols")
     module = options.module
     if not _MODULE_NAME_RE.match(module):
         return _configuration_failure(

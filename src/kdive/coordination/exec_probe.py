@@ -46,7 +46,7 @@ def probe_rsp_halted(
     within `deadline_s`. False on any I/O error, timeout, malformed frame, or non-stop reply.
 
     This is the `transport.inject_break` post-break confirmation. The handler's earlier
-    `_halt_debug_transport` writes HALTED to the durable record BEFORE the break runs (so the
+    `halt_debug_transport` writes HALTED to the durable record BEFORE the break runs (so the
     ssh-tier admit gate sees HALTED for the whole break window), and reading that cached flag
     back in the post-probe would be circular — `break_unconfirmed` could never fire on a kernel
     that silently kept running. A real RSP `?` against the gdbstub catches exactly that case:

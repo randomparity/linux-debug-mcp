@@ -69,6 +69,7 @@ from kdive.coordination.registry import (
 from kdive.coordination.transaction import TransportTransaction
 from kdive.debug.bound_handlers import debug_continue_handler, debug_read_registers_handler
 from kdive.debug.handlers import DebugRuntime
+from kdive.debug.policy import halt_debug_transport
 from kdive.domain import ErrorCategory, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
 from kdive.safety.redaction import REDACTION, Redactor
@@ -98,7 +99,6 @@ from kdive.transport.core.base import (
     TransportSession,
     new_session_id,
 )
-from kdive.transport.handlers import _halt_debug_transport
 
 RUN_ID_FRESH = "run-abc123"  # matches conftest.create_booted_run default
 FRESH_KEY = TargetKey(provisioner="local-qemu", target_id=RUN_ID_FRESH)
@@ -582,7 +582,7 @@ def test_async_halt_cancels_in_flight_run_tests(tmp_path: Path) -> None:
     watcher, (b) terminalize its run_tests step to FAILED, (c) leave NO leftover watcher thread,
     AND (d) deregister its promoted ssh-tier handle (B-punch Fix 2).
 
-    The halt is driven through the PRODUCTION helper `_halt_debug_transport`, not via a manual
+    The halt is driven through the PRODUCTION helper `halt_debug_transport`, not via a manual
     `note_execution_transition` + `cancel_ssh_tier` from the test thread."""
     artifact_root = create_booted_run(tmp_path)
     reg = _make_fresh_registry(tmp_path)
@@ -595,7 +595,7 @@ def test_async_halt_cancels_in_flight_run_tests(tmp_path: Path) -> None:
         # Read the executing record back so the helper writes HALTED over the SAME row the
         # run_tests probe is reading; matches the production caller (which has the live session).
         record = next(r for r in reg.list_records() if r.target_key == FRESH_KEY)
-        _halt_debug_transport(session=record, admission=admission, session_registry=reg)
+        halt_debug_transport(session=record, admission=admission, session_registry=reg)
 
     live_before = set(threading.enumerate())
     timer = threading.Thread(target=_halt, daemon=True)
@@ -624,7 +624,7 @@ def test_inject_break_cancels_in_flight_run_tests_end_to_end(tmp_path: Path) -> 
     """End-to-end async-halt cancel via the PRODUCTION inject_break path: open a transport session
     through `transport.open`, race `transport.inject_break` against an in-flight
     `target.run_tests`, and assert the run is cancelled. This is the integration assertion
-    the suite was missing — `test_async_halt_cancels_in_flight_run_tests` drives `_halt_debug_transport`
+    the suite was missing — `test_async_halt_cancels_in_flight_run_tests` drives `halt_debug_transport`
     directly; this drives it through the actual inject_break tool handler, so a regression in the
     handler's call site (Fix 1's `cancel_ssh_tier` invocation) is detected here even if the helper
     itself stays correct in isolation.
@@ -1209,7 +1209,7 @@ def test_inject_break_silent_failure_falls_to_unknown(tmp_path: Path) -> None:
     (bounded RSP `?` exchange — `probe_rsp_halted`) does NOT observe a stop reply, the handler
     MUST dual-write UNKNOWN to the durable record and return DEBUG_ATTACH_FAILURE/
     break_unconfirmed — never leave a falsely optimistic HALTED in the record. (The cached-flag
-    `probe_execution_state` was rejected for this path: `_halt_debug_transport` writes HALTED to
+    `probe_execution_state` was rejected for this path: `halt_debug_transport` writes HALTED to
     the very flag, so reading it back was circular — see ADR 0001.)"""
     reg, txn, admission, session_id = _seed_executing_session_for_break(tmp_path)
 

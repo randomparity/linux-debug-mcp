@@ -31,6 +31,7 @@ from kdive.config import (
 from kdive.coordination.admission import AdmissionError, AdmissionHandle, AdmissionService, TargetSnapshot
 from kdive.coordination.exec_probe import probe_execution_state
 from kdive.coordination.registry import SessionRegistry
+from kdive.debug.policy import ensure_debug_operation_enabled, resolve_debug_profile
 from kdive.default_profiles import DEFAULT_DEBUG_PROFILES, DEFAULT_ROOTFS_PROFILES
 from kdive.domain import ArtifactRef, DebugIntrospectRunRequest, ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.introspect.helpers import HelperSpec
@@ -47,7 +48,6 @@ from kdive.providers.ssh import SshCommandResult, SshRunner, SubprocessSshRunner
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import TargetKey
 from kdive.symbols.verify import BUILD_ID_RE, ProvenanceMismatch, verify_build_id
-from kdive.transport.handlers import _ensure_debug_operation_enabled, _resolve_debug_profile
 
 logger = logging.getLogger(__name__)
 
@@ -481,7 +481,7 @@ def _resolve_live_introspect_context(
 
     debug_name = request.debug_profile or manifest.request.debug_profile or "qemu-gdbstub-default"
     try:
-        resolved_debug = _resolve_debug_profile(profile_name=debug_name, debug_profiles=debug_profiles)
+        resolved_debug = resolve_debug_profile(profile_name=debug_name, debug_profiles=debug_profiles)
     except ProviderDebugError as exc:
         return None, ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id, details=exc.details)
 
@@ -510,7 +510,7 @@ def _enforce_live_introspect_policy(
 ) -> tuple[_LiveIntrospectPolicy | None, ToolResponse | None]:
     run_id = request.run_id
     try:
-        _ensure_debug_operation_enabled(context.resolved_debug, operation_name)
+        ensure_debug_operation_enabled(context.resolved_debug, operation_name)
     except ProviderDebugError as exc:
         return None, ToolResponse.failure(
             category=exc.category,
@@ -521,7 +521,7 @@ def _enforce_live_introspect_policy(
 
     if request.allow_write:
         try:
-            _ensure_debug_operation_enabled(context.resolved_debug, "debug.introspect.write")
+            ensure_debug_operation_enabled(context.resolved_debug, "debug.introspect.write")
         except ProviderDebugError as exc:
             return None, ToolResponse.failure(
                 category=exc.category,

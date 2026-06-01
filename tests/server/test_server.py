@@ -50,10 +50,10 @@ def tool_names() -> set[str]:
 
 
 def test_transport_halt_helper_is_not_reexported_by_server() -> None:
-    from kdive.transport import handlers as transport_handlers
+    from kdive.debug import policy
 
-    assert hasattr(transport_handlers, "_halt_debug_transport")
-    assert not hasattr(server, "_halt_debug_transport")
+    assert hasattr(policy, "halt_debug_transport")
+    assert not hasattr(server, "halt_debug_transport")
 
 
 def test_create_run_handler_creates_manifest(tmp_path: Path) -> None:

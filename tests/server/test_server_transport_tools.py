@@ -371,7 +371,7 @@ def test_inject_break_post_probe_rejects_when_kernel_did_not_halt(tmp_path):
     """F2: when the break mechanism returns success but the bounded RSP `?` probe does NOT
     observe a stop reply, the handler MUST dual-write UNKNOWN and return DEBUG_ATTACH_FAILURE/
     break_unconfirmed. The prior cached-flag implementation was unreachable here because
-    `_halt_debug_transport` writes HALTED to the flag the probe would have read."""
+    `halt_debug_transport` writes HALTED to the flag the probe would have read."""
     response, txn, admission, reg = _open(tmp_path)
     session_id = response.data["session_id"]
 
@@ -402,7 +402,7 @@ def test_inject_break_post_probe_rejects_when_kernel_did_not_halt(tmp_path):
 
 def test_inject_break_rejects_session_from_different_run(tmp_path):
     """F7: a caller cannot halt run-B's kernel by passing its session_id under run_id=run-A.
-    Refused as session_run_mismatch BEFORE `_halt_debug_transport` writes HALTED, so the
+    Refused as session_run_mismatch BEFORE `halt_debug_transport` writes HALTED, so the
     other run's durable record stays EXECUTING."""
     response, txn, admission, reg = _open(tmp_path)
     session_id = response.data["session_id"]
