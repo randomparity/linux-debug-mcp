@@ -23,6 +23,7 @@ from kdive.coordination.admission import (
 )
 from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from kdive.introspect import execution as introspect_execution
+from kdive.introspect import result as introspect_result
 from kdive.introspect import runner as introspect_runner
 from kdive.introspect.execution import RUN_STDOUT_CAP, LiveIntrospectRuntime
 from kdive.introspect.handlers import (
@@ -37,6 +38,7 @@ from kdive.introspect.models import (
 )
 from kdive.introspect.tools import IntrospectRunOptions, IntrospectTargetContext
 from kdive.providers.local.test.local_ssh_tests import SshCommandResult
+from kdive.safety.redaction import Redactor
 from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetState
 
 VALID_BUILD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
@@ -1086,6 +1088,52 @@ def test_ssh_timeout_propagates(tmp_path: Path) -> None:
         session_registry=FakeSessionRegistry(),
     )
     assert response.error.details["code"] == "ssh_timeout"
+
+
+def test_failure_artifact_write_error_preserves_original_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    agent_dir = tmp_path / "agent"
+    sensitive_dir = tmp_path / "sensitive"
+    agent_dir.mkdir()
+    sensitive_dir.mkdir()
+    original_write_text = Path.write_text
+
+    def fail_stderr_write(path: Path, *args, **kwargs) -> int:
+        if path == agent_dir / "stderr.log":
+            raise OSError("disk full")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_stderr_write)
+
+    response = introspect_result._record_introspect_failure(
+        store=store,
+        run_id=run_id,
+        call_id="call-1",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        code="ssh_failure",
+        message="live introspect runner failed: boom",
+        agent_dir=agent_dir,
+        sensitive_dir=sensitive_dir,
+        redactor=Redactor(),
+        raw_stderr="stderr",
+        ssh_exit=-1,
+        request_timeout_seconds=30,
+        duration_ms=1,
+        ssh_user="root",
+        outcome_status_for_forensics=None,
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.details == {
+        "code": "artifact_write_failed",
+        "call_id": "call-1",
+        "artifact_error": "disk full",
+        "original_code": "ssh_failure",
+        "original_message": "live introspect runner failed: boom",
+    }
 
 
 @pytest.mark.parametrize(

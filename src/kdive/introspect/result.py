@@ -84,9 +84,24 @@ def _record_introspect_failure(
     no stderr/stdout text to redact. That path writes the FAILED
     ``StepResult`` directly.
     """
-    (agent_dir / "stderr.log").write_text(redactor.redact_text(raw_stderr), encoding="utf-8")
-    if include_stdout_json and redacted_payload is not None:
-        (agent_dir / "stdout.json").write_text(json.dumps(redacted_payload), encoding="utf-8")
+    try:
+        (agent_dir / "stderr.log").write_text(redactor.redact_text(raw_stderr), encoding="utf-8")
+        if include_stdout_json and redacted_payload is not None:
+            (agent_dir / "stdout.json").write_text(json.dumps(redacted_payload), encoding="utf-8")
+    except OSError as exc:
+        return ToolResponse.failure(
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            run_id=run_id,
+            message="failed to write introspect failure artifacts",
+            details={
+                "code": "artifact_write_failed",
+                "call_id": call_id,
+                "artifact_error": str(exc),
+                "original_code": code,
+                "original_message": message,
+            },
+            suggested_next_actions=["artifacts.get_manifest"],
+        )
     artifacts: list[ArtifactRef] = [
         ArtifactRef(path=str(agent_dir / "request.json"), kind="application/json"),
         ArtifactRef(path=str(agent_dir / "wrapper.skeleton.py"), kind="text/x-python"),
