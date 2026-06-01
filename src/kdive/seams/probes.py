@@ -13,21 +13,13 @@ from kdive.coordination.admission import AdmissionService, require_target_snapsh
 from kdive.coordination.exec_probe import probe_execution_state
 from kdive.coordination.registry import SessionRegistry
 from kdive.domain import ErrorCategory, StepStatus, ToolResponse
+from kdive.handlers.shared import configuration_failure_response as configuration_failure
 from kdive.providers.ssh import SshCommandResult
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import TargetKey
 from kdive.transport.core.base import ExecutionState
 
 PROBE_STDOUT_CAP = 256 * 1024
-
-
-def configuration_failure(*, run_id: str, message: str, details: dict[str, Any] | None = None) -> ToolResponse:
-    return ToolResponse.failure(
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        message=message,
-        run_id=run_id,
-        details=details,
-    )
 
 
 def target_python_remote_argv(*, timeout_seconds: int, use_sudo: bool) -> list[str]:
