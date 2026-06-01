@@ -107,6 +107,53 @@ def _end_mi_debug_session(
     )
 
 
+def _close_bound_transport_session(
+    *,
+    run_id: str,
+    transport_session_id: str | None,
+    transaction: TransportTransaction | None,
+    session_registry: SessionRegistry | None,
+    session_guard: SessionGuard | None,
+) -> None:
+    if transaction is None or transport_session_id is None:
+        return
+    if session_guard is None or session_registry is None:
+        transaction.close(transport_session_id, force=True)
+        return
+
+    target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
+    ended_record = session_registry.read_record(target_key)
+    ended_generation = ended_record.generation if ended_record is not None else 0
+    session_guard.teardown(
+        SessionGuardContext(
+            target_key=target_key,
+            generation=ended_generation,
+            session_id=transport_session_id,
+            reason="ended",
+        ),
+        close=lambda: transaction.close(transport_session_id, force=True),
+        read_record=lambda: session_registry.read_record(target_key),
+        force_reap=lambda: transaction.force_release(transport_session_id),
+    )
+
+
+def _mark_legacy_recovery_if_needed(
+    *,
+    run_id: str,
+    is_legacy_session: bool,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+) -> None:
+    if not is_legacy_session:
+        return
+    admission = _require_value(admission, "admission service missing for legacy session recovery marker")
+    session_registry = _require_value(
+        session_registry,
+        "session registry missing for legacy session recovery marker",
+    )
+    mark_legacy_session_recovery_required(run_id=run_id, admission=admission, session_registry=session_registry)
+
+
 def _end_session(
     *,
     artifact_root: Path,
@@ -137,31 +184,20 @@ def _end_session(
         gdb_mi_engine=gdb_mi_engine,
         gdb_mi_sessions=gdb_mi_sessions,
     )
-    if response.ok and transaction is not None and transport_session_id is not None:
-        if session_guard is not None and session_registry is not None:
-            tkey = TargetKey(provisioner="local-qemu", target_id=run_id)
-            ended_record = session_registry.read_record(tkey)
-            ended_generation = ended_record.generation if ended_record is not None else 0
-            session_guard.teardown(
-                SessionGuardContext(
-                    target_key=tkey,
-                    generation=ended_generation,
-                    session_id=transport_session_id,
-                    reason="ended",
-                ),
-                close=lambda: transaction.close(transport_session_id, force=True),
-                read_record=lambda: session_registry.read_record(tkey),
-                force_reap=lambda: transaction.force_release(transport_session_id),
-            )
-        else:
-            transaction.close(transport_session_id, force=True)
-    if response.ok and is_legacy_session:
-        admission = _require_value(admission, "admission service missing for legacy session recovery marker")
-        session_registry = _require_value(
-            session_registry,
-            "session registry missing for legacy session recovery marker",
+    if response.ok:
+        _close_bound_transport_session(
+            run_id=run_id,
+            transport_session_id=transport_session_id,
+            transaction=transaction,
+            session_registry=session_registry,
+            session_guard=session_guard,
         )
-        mark_legacy_session_recovery_required(run_id=run_id, admission=admission, session_registry=session_registry)
+        _mark_legacy_recovery_if_needed(
+            run_id=run_id,
+            is_legacy_session=is_legacy_session,
+            admission=admission,
+            session_registry=session_registry,
+        )
     return response
 
 
