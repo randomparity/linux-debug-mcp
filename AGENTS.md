@@ -4,10 +4,10 @@ This file provides guidance to all coding agents when working with code in this 
 
 ## Project
 
-`kdive` is a stdio MCP server (FastMCP / `mcp>=1.9`) that exposes Linux kernel build, boot, smoke-test, artifact, and QEMU gdbstub debug workflows to coding agents. Today's implementation is local-only (x86_64 + libvirt/QEMU); ppc64le, remote build, reservation, BMC console, and real-hardware boot exist only as discoverable future-provider stubs.
+`kdive` is a stdio MCP server (FastMCP / `mcp>=1.9`) that exposes Linux kernel build, boot, smoke-test, artifact, QEMU gdbstub debug, drgn programmatic introspection (live-kernel and vmcore), and crash-based postmortem workflows to coding agents. Today's implementation is local-only (x86_64 + libvirt/QEMU); ppc64le, remote build, reservation, BMC console, and real-hardware boot exist only as discoverable future-provider stubs.
 
 Architecture spec: `docs/specs/2026-05-22-kdive-architecture-design.md`.
-Future-work epics (remote interactive debug, transports, drgn/KDB/KGDB/postmortem tiers): `00-epic-remote-interactive-debug.md` and `01-…08-…md` at repo root.
+The drgn introspect tier (`debug.introspect.*`) and the postmortem tier (`debug.postmortem.*`) are implemented (see "Providers and capabilities" below). Future-work epics (remote interactive debug, transports, KDB/KGDB tiers): `00-epic-remote-interactive-debug.md` and `01-…08-…md` at repo root.
 
 ## Common commands
 
@@ -53,7 +53,7 @@ Steps (`build`, `boot`, `run_tests`, `debug`, plus `collect`) are **idempotent b
 
 Providers live under `src/kdive/providers/` and are discovered through `ProviderRegistry.with_defaults()`, which loads `built_in_provider_plugin_specs()`. Each `ProviderPluginSpec` produces one or more `ProviderCapability` objects via factories — that is what `providers.list` returns.
 
-- Implemented (`builtins.local`): `local-artifacts`, `local-prereqs`, `local-kernel-build`, `local-libvirt-qemu`, `local-ssh-tests`, `local-qemu-gdbstub`.
+- Implemented (`builtins.local`): `local-artifacts`, `local-prereqs`, `local-kernel-build`, `local-libvirt-qemu`, `local-ssh-tests`, `local-qemu-gdbstub`, `local-drgn-introspect` (`debug.introspect.run`/`.helper`/`.check_prerequisites`/`.from_vmcore`/`.from_vmcore_helper`), `local-crash-postmortem` (`debug.postmortem.crash`/`.triage`), `local-vmcore-retrieval` (`debug.postmortem.list_dumps`/`.fetch`).
 - Stubs (`builtins.future-stubs`): remote/reservation/provision/hardware/console/workflow tools. Routed through `_future_stub_handler`, which validates the request against the matching `ProviderRequest` Pydantic contract, picks a provider via `select_future_provider`, and returns `not_implemented` for valid requests / `configuration_error` for malformed ones. Stubs must not open network, serial, or power-control resources.
 
 When adding a tool, also add it to the relevant capability's `operations` list (and `operation_capabilities` if you need per-op overrides), or `providers.list` won't advertise it.
