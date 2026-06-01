@@ -445,6 +445,23 @@ def test_debug_operation_handlers_accept_runtime_instead_of_dependency_bundle() 
     assert not hasattr(debug_tools, "_gated_debug_runtime_kwargs")
 
 
+def test_debug_bound_handlers_use_request_forwarding_factories() -> None:
+    source = Path(debug_bound_handlers.__file__).read_text(encoding="utf-8")
+
+    for helper_name in (
+        "_make_symbol_bound_handler",
+        "_make_breakpoint_id_bound_handler",
+        "_make_session_query_bound_handler",
+        "_make_execution_control_bound_handler",
+    ):
+        assert f"def {helper_name}(" in source
+
+    assert source.count("request = request or DebugSymbolRequest(") == 1
+    assert source.count("request = request or DebugBreakpointIdRequest(") == 1
+    assert source.count("request = request or DebugSessionRequest(") == 1
+    assert source.count("request = request or DebugExecutionRequest(") == 1
+
+
 def test_debug_operation_leaf_handlers_require_explicit_operation_core(tmp_path: Path) -> None:
     with pytest.raises(TypeError, match="operation_core"):
         debug_handlers.debug_read_registers_handler(

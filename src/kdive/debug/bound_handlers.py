@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
@@ -69,8 +70,10 @@ from kdive.debug.tools import (
     DebugToolContext,
     DebugToolHandlers,
 )
+from kdive.domain import ToolResponse
 
 _RequiredT = TypeVar("_RequiredT")
+_LeafHandler = Callable[..., ToolResponse]
 
 
 def _required(value: _RequiredT | None, name: str) -> _RequiredT:
@@ -79,7 +82,7 @@ def _required(value: _RequiredT | None, name: str) -> _RequiredT:
     return value
 
 
-def debug_start_session_handler(*, request: DebugStartSessionRequest, runtime: DebugToolContext):
+def debug_start_session_handler(*, request: DebugStartSessionRequest, runtime: DebugToolContext) -> ToolResponse:
     return _debug_start_session_handler(
         artifact_root=request.artifact_root,
         run_id=request.run_id,
@@ -102,7 +105,7 @@ def debug_read_registers_handler(
     run_id: str | None = None,
     registers: list[str] | None = None,
     debug_session_id: str | None = None,
-):
+) -> ToolResponse:
     request = request or DebugRegistersRequest(
         artifact_root=_required(artifact_root, "artifact_root"),
         run_id=_required(run_id, "run_id"),
@@ -119,29 +122,120 @@ def debug_read_registers_handler(
     )
 
 
-def debug_read_symbol_handler(
-    *,
-    request: DebugSymbolRequest | None = None,
-    runtime: DebugRuntime,
-    artifact_root: Path | None = None,
-    run_id: str | None = None,
-    symbol: str | None = None,
-    debug_session_id: str | None = None,
-):
-    request = request or DebugSymbolRequest(
-        artifact_root=_required(artifact_root, "artifact_root"),
-        run_id=_required(run_id, "run_id"),
-        symbol=_required(symbol, "symbol"),
-        debug_session_id=debug_session_id,
-    )
-    return _debug_read_symbol_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        symbol=request.symbol,
-        debug_session_id=request.debug_session_id,
-        runtime=runtime,
-        operation_core=_debug_operation_response,
-    )
+def _make_symbol_bound_handler(name: str, leaf_handler: _LeafHandler) -> Callable[..., ToolResponse]:
+    def handler(
+        *,
+        request: DebugSymbolRequest | None = None,
+        runtime: DebugRuntime,
+        artifact_root: Path | None = None,
+        run_id: str | None = None,
+        symbol: str | None = None,
+        debug_session_id: str | None = None,
+    ) -> ToolResponse:
+        request = request or DebugSymbolRequest(
+            artifact_root=_required(artifact_root, "artifact_root"),
+            run_id=_required(run_id, "run_id"),
+            symbol=_required(symbol, "symbol"),
+            debug_session_id=debug_session_id,
+        )
+        return leaf_handler(
+            artifact_root=request.artifact_root,
+            run_id=request.run_id,
+            symbol=request.symbol,
+            debug_session_id=request.debug_session_id,
+            runtime=runtime,
+            operation_core=_debug_operation_response,
+        )
+
+    handler.__name__ = name
+    return handler
+
+
+def _make_breakpoint_id_bound_handler(name: str, leaf_handler: _LeafHandler) -> Callable[..., ToolResponse]:
+    def handler(
+        *,
+        request: DebugBreakpointIdRequest | None = None,
+        runtime: DebugRuntime,
+        artifact_root: Path | None = None,
+        run_id: str | None = None,
+        breakpoint_id: str | None = None,
+        debug_session_id: str | None = None,
+    ) -> ToolResponse:
+        request = request or DebugBreakpointIdRequest(
+            artifact_root=_required(artifact_root, "artifact_root"),
+            run_id=_required(run_id, "run_id"),
+            breakpoint_id=_required(breakpoint_id, "breakpoint_id"),
+            debug_session_id=debug_session_id,
+        )
+        return leaf_handler(
+            artifact_root=request.artifact_root,
+            run_id=request.run_id,
+            breakpoint_id=request.breakpoint_id,
+            debug_session_id=request.debug_session_id,
+            runtime=runtime,
+            operation_core=_debug_operation_response,
+        )
+
+    handler.__name__ = name
+    return handler
+
+
+def _make_session_query_bound_handler(name: str, leaf_handler: _LeafHandler) -> Callable[..., ToolResponse]:
+    def handler(
+        *,
+        request: DebugSessionRequest | None = None,
+        runtime: DebugRuntime,
+        artifact_root: Path | None = None,
+        run_id: str | None = None,
+        debug_session_id: str | None = None,
+    ) -> ToolResponse:
+        request = request or DebugSessionRequest(
+            artifact_root=_required(artifact_root, "artifact_root"),
+            run_id=_required(run_id, "run_id"),
+            debug_session_id=debug_session_id,
+        )
+        return leaf_handler(
+            artifact_root=request.artifact_root,
+            run_id=request.run_id,
+            debug_session_id=request.debug_session_id,
+            runtime=runtime,
+            operation_core=_debug_operation_response,
+        )
+
+    handler.__name__ = name
+    return handler
+
+
+def _make_execution_control_bound_handler(name: str, leaf_handler: _LeafHandler) -> Callable[..., ToolResponse]:
+    def handler(
+        *,
+        request: DebugExecutionRequest | None = None,
+        runtime: DebugRuntime,
+        artifact_root: Path | None = None,
+        run_id: str | None = None,
+        debug_session_id: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> ToolResponse:
+        request = request or DebugExecutionRequest(
+            artifact_root=_required(artifact_root, "artifact_root"),
+            run_id=_required(run_id, "run_id"),
+            debug_session_id=debug_session_id,
+            timeout_seconds=timeout_seconds,
+        )
+        return leaf_handler(
+            artifact_root=request.artifact_root,
+            run_id=request.run_id,
+            debug_session_id=request.debug_session_id,
+            timeout_seconds=request.timeout_seconds,
+            runtime=runtime,
+            operation_core=_debug_operation_response,
+        )
+
+    handler.__name__ = name
+    return handler
+
+
+debug_read_symbol_handler = _make_symbol_bound_handler("debug_read_symbol_handler", _debug_read_symbol_handler)
 
 
 def debug_read_memory_handler(
@@ -153,7 +247,7 @@ def debug_read_memory_handler(
     address: int | None = None,
     byte_count: int | None = None,
     debug_session_id: str | None = None,
-):
+) -> ToolResponse:
     request = request or DebugMemoryRequest(
         artifact_root=_required(artifact_root, "artifact_root"),
         run_id=_required(run_id, "run_id"),
@@ -181,7 +275,7 @@ def debug_evaluate_handler(
     inspector: str | None = None,
     arguments: dict[str, object] | None = None,
     debug_session_id: str | None = None,
-):
+) -> ToolResponse:
     request = request or DebugEvaluateRequest(
         artifact_root=_required(artifact_root, "artifact_root"),
         run_id=_required(run_id, "run_id"),
@@ -200,7 +294,9 @@ def debug_evaluate_handler(
     )
 
 
-def debug_load_module_symbols_handler(*, request: DebugLoadModuleSymbolsRequest, runtime: DebugToolContext):
+def debug_load_module_symbols_handler(
+    *, request: DebugLoadModuleSymbolsRequest, runtime: DebugToolContext
+) -> ToolResponse:
     return _debug_load_module_symbols_handler(
         artifact_root=request.artifact_root,
         run_id=request.run_id,
@@ -217,298 +313,29 @@ def debug_load_module_symbols_handler(*, request: DebugLoadModuleSymbolsRequest,
     )
 
 
-def debug_set_breakpoint_handler(
-    *,
-    request: DebugSymbolRequest | None = None,
-    runtime: DebugRuntime,
-    artifact_root: Path | None = None,
-    run_id: str | None = None,
-    symbol: str | None = None,
-    debug_session_id: str | None = None,
-):
-    request = request or DebugSymbolRequest(
-        artifact_root=_required(artifact_root, "artifact_root"),
-        run_id=_required(run_id, "run_id"),
-        symbol=_required(symbol, "symbol"),
-        debug_session_id=debug_session_id,
-    )
-    return _debug_set_breakpoint_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        symbol=request.symbol,
-        debug_session_id=request.debug_session_id,
-        runtime=runtime,
-        operation_core=_debug_operation_response,
-    )
+debug_set_breakpoint_handler = _make_symbol_bound_handler("debug_set_breakpoint_handler", _debug_set_breakpoint_handler)
+debug_set_watchpoint_handler = _make_symbol_bound_handler("debug_set_watchpoint_handler", _debug_set_watchpoint_handler)
+debug_clear_breakpoint_handler = _make_breakpoint_id_bound_handler(
+    "debug_clear_breakpoint_handler", _debug_clear_breakpoint_handler
+)
+debug_clear_watchpoint_handler = _make_breakpoint_id_bound_handler(
+    "debug_clear_watchpoint_handler", _debug_clear_watchpoint_handler
+)
+debug_list_breakpoints_handler = _make_session_query_bound_handler(
+    "debug_list_breakpoints_handler", _debug_list_breakpoints_handler
+)
+debug_backtrace_handler = _make_session_query_bound_handler("debug_backtrace_handler", _debug_backtrace_handler)
+debug_list_variables_handler = _make_session_query_bound_handler(
+    "debug_list_variables_handler", _debug_list_variables_handler
+)
+debug_continue_handler = _make_execution_control_bound_handler("debug_continue_handler", _debug_continue_handler)
+debug_step_handler = _make_execution_control_bound_handler("debug_step_handler", _debug_step_handler)
+debug_next_handler = _make_execution_control_bound_handler("debug_next_handler", _debug_next_handler)
+debug_finish_handler = _make_execution_control_bound_handler("debug_finish_handler", _debug_finish_handler)
+debug_interrupt_handler = _make_execution_control_bound_handler("debug_interrupt_handler", _debug_interrupt_handler)
 
 
-def debug_set_watchpoint_handler(
-    *,
-    request: DebugSymbolRequest | None = None,
-    runtime: DebugRuntime,
-    artifact_root: Path | None = None,
-    run_id: str | None = None,
-    symbol: str | None = None,
-    debug_session_id: str | None = None,
-):
-    request = request or DebugSymbolRequest(
-        artifact_root=_required(artifact_root, "artifact_root"),
-        run_id=_required(run_id, "run_id"),
-        symbol=_required(symbol, "symbol"),
-        debug_session_id=debug_session_id,
-    )
-    return _debug_set_watchpoint_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        symbol=request.symbol,
-        debug_session_id=request.debug_session_id,
-        runtime=runtime,
-        operation_core=_debug_operation_response,
-    )
-
-
-def debug_clear_breakpoint_handler(
-    *,
-    request: DebugBreakpointIdRequest | None = None,
-    runtime: DebugRuntime,
-    artifact_root: Path | None = None,
-    run_id: str | None = None,
-    breakpoint_id: str | None = None,
-    debug_session_id: str | None = None,
-):
-    request = request or DebugBreakpointIdRequest(
-        artifact_root=_required(artifact_root, "artifact_root"),
-        run_id=_required(run_id, "run_id"),
-        breakpoint_id=_required(breakpoint_id, "breakpoint_id"),
-        debug_session_id=debug_session_id,
-    )
-    return _debug_clear_breakpoint_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        breakpoint_id=request.breakpoint_id,
-        debug_session_id=request.debug_session_id,
-        runtime=runtime,
-        operation_core=_debug_operation_response,
-    )
-
-
-def debug_clear_watchpoint_handler(
-    *,
-    request: DebugBreakpointIdRequest | None = None,
-    runtime: DebugRuntime,
-    artifact_root: Path | None = None,
-    run_id: str | None = None,
-    breakpoint_id: str | None = None,
-    debug_session_id: str | None = None,
-):
-    request = request or DebugBreakpointIdRequest(
-        artifact_root=_required(artifact_root, "artifact_root"),
-        run_id=_required(run_id, "run_id"),
-        breakpoint_id=_required(breakpoint_id, "breakpoint_id"),
-        debug_session_id=debug_session_id,
-    )
-    return _debug_clear_watchpoint_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        breakpoint_id=request.breakpoint_id,
-        debug_session_id=request.debug_session_id,
-        runtime=runtime,
-        operation_core=_debug_operation_response,
-    )
-
-
-def debug_list_breakpoints_handler(
-    *,
-    request: DebugSessionRequest | None = None,
-    runtime: DebugRuntime,
-    artifact_root: Path | None = None,
-    run_id: str | None = None,
-    debug_session_id: str | None = None,
-):
-    request = request or DebugSessionRequest(
-        artifact_root=_required(artifact_root, "artifact_root"),
-        run_id=_required(run_id, "run_id"),
-        debug_session_id=debug_session_id,
-    )
-    return _debug_list_breakpoints_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        debug_session_id=request.debug_session_id,
-        runtime=runtime,
-        operation_core=_debug_operation_response,
-    )
-
-
-def debug_backtrace_handler(
-    *,
-    request: DebugSessionRequest | None = None,
-    runtime: DebugRuntime,
-    artifact_root: Path | None = None,
-    run_id: str | None = None,
-    debug_session_id: str | None = None,
-):
-    request = request or DebugSessionRequest(
-        artifact_root=_required(artifact_root, "artifact_root"),
-        run_id=_required(run_id, "run_id"),
-        debug_session_id=debug_session_id,
-    )
-    return _debug_backtrace_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        debug_session_id=request.debug_session_id,
-        runtime=runtime,
-        operation_core=_debug_operation_response,
-    )
-
-
-def debug_list_variables_handler(
-    *,
-    request: DebugSessionRequest | None = None,
-    runtime: DebugRuntime,
-    artifact_root: Path | None = None,
-    run_id: str | None = None,
-    debug_session_id: str | None = None,
-):
-    request = request or DebugSessionRequest(
-        artifact_root=_required(artifact_root, "artifact_root"),
-        run_id=_required(run_id, "run_id"),
-        debug_session_id=debug_session_id,
-    )
-    return _debug_list_variables_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        debug_session_id=request.debug_session_id,
-        runtime=runtime,
-        operation_core=_debug_operation_response,
-    )
-
-
-def debug_continue_handler(
-    *,
-    request: DebugExecutionRequest | None = None,
-    runtime: DebugRuntime,
-    artifact_root: Path | None = None,
-    run_id: str | None = None,
-    debug_session_id: str | None = None,
-    timeout_seconds: int | None = None,
-):
-    request = request or DebugExecutionRequest(
-        artifact_root=_required(artifact_root, "artifact_root"),
-        run_id=_required(run_id, "run_id"),
-        debug_session_id=debug_session_id,
-        timeout_seconds=timeout_seconds,
-    )
-    return _debug_continue_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        debug_session_id=request.debug_session_id,
-        timeout_seconds=request.timeout_seconds,
-        runtime=runtime,
-        operation_core=_debug_operation_response,
-    )
-
-
-def debug_step_handler(
-    *,
-    request: DebugExecutionRequest | None = None,
-    runtime: DebugRuntime,
-    artifact_root: Path | None = None,
-    run_id: str | None = None,
-    debug_session_id: str | None = None,
-    timeout_seconds: int | None = None,
-):
-    request = request or DebugExecutionRequest(
-        artifact_root=_required(artifact_root, "artifact_root"),
-        run_id=_required(run_id, "run_id"),
-        debug_session_id=debug_session_id,
-        timeout_seconds=timeout_seconds,
-    )
-    return _debug_step_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        debug_session_id=request.debug_session_id,
-        timeout_seconds=request.timeout_seconds,
-        runtime=runtime,
-        operation_core=_debug_operation_response,
-    )
-
-
-def debug_next_handler(
-    *,
-    request: DebugExecutionRequest | None = None,
-    runtime: DebugRuntime,
-    artifact_root: Path | None = None,
-    run_id: str | None = None,
-    debug_session_id: str | None = None,
-    timeout_seconds: int | None = None,
-):
-    request = request or DebugExecutionRequest(
-        artifact_root=_required(artifact_root, "artifact_root"),
-        run_id=_required(run_id, "run_id"),
-        debug_session_id=debug_session_id,
-        timeout_seconds=timeout_seconds,
-    )
-    return _debug_next_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        debug_session_id=request.debug_session_id,
-        timeout_seconds=request.timeout_seconds,
-        runtime=runtime,
-        operation_core=_debug_operation_response,
-    )
-
-
-def debug_finish_handler(
-    *,
-    request: DebugExecutionRequest | None = None,
-    runtime: DebugRuntime,
-    artifact_root: Path | None = None,
-    run_id: str | None = None,
-    debug_session_id: str | None = None,
-    timeout_seconds: int | None = None,
-):
-    request = request or DebugExecutionRequest(
-        artifact_root=_required(artifact_root, "artifact_root"),
-        run_id=_required(run_id, "run_id"),
-        debug_session_id=debug_session_id,
-        timeout_seconds=timeout_seconds,
-    )
-    return _debug_finish_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        debug_session_id=request.debug_session_id,
-        timeout_seconds=request.timeout_seconds,
-        runtime=runtime,
-        operation_core=_debug_operation_response,
-    )
-
-
-def debug_interrupt_handler(
-    *,
-    request: DebugExecutionRequest | None = None,
-    runtime: DebugRuntime,
-    artifact_root: Path | None = None,
-    run_id: str | None = None,
-    debug_session_id: str | None = None,
-    timeout_seconds: int | None = None,
-):
-    request = request or DebugExecutionRequest(
-        artifact_root=_required(artifact_root, "artifact_root"),
-        run_id=_required(run_id, "run_id"),
-        debug_session_id=debug_session_id,
-        timeout_seconds=timeout_seconds,
-    )
-    return _debug_interrupt_handler(
-        artifact_root=request.artifact_root,
-        run_id=request.run_id,
-        debug_session_id=request.debug_session_id,
-        timeout_seconds=request.timeout_seconds,
-        runtime=runtime,
-        operation_core=_debug_operation_response,
-    )
-
-
-def debug_end_session_handler(*, request: DebugSessionRequest, runtime: DebugToolContext):
+def debug_end_session_handler(*, request: DebugSessionRequest, runtime: DebugToolContext) -> ToolResponse:
     return _debug_end_session_handler(
         artifact_root=request.artifact_root,
         run_id=request.run_id,
