@@ -3,13 +3,59 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from kdive.debug.tools import DebugStartSessionRequest
 from kdive.domain import ToolResponse
+from kdive.kernel.tools import CreateRunHandlerRequest
+from kdive.target.tools import TargetBootHandlerRequest, TargetRunTestsHandlerRequest
 from kdive.workflow.handlers import WorkflowHandlerDependencies
 from kdive.workflow.tools import (
     WorkflowBuildBootDebugHandlerRequest,
     WorkflowBuildBootTestHandlerRequest,
     WorkflowToolRuntime,
 )
+
+
+def direct_workflow_dependency(handler):
+    def call(*, request: object, runtime: object) -> ToolResponse:
+        kwargs = vars(request).copy()
+        if isinstance(request, CreateRunHandlerRequest):
+            kwargs["sensitive_paths"] = runtime.sensitive_paths
+        elif isinstance(request, TargetBootHandlerRequest):
+            kwargs["sensitive_paths"] = runtime.sensitive_paths
+            kwargs["admission"] = runtime.admission
+        elif isinstance(request, TargetRunTestsHandlerRequest):
+            kwargs["admission"] = runtime.admission
+            kwargs["session_registry"] = runtime.session_registry
+        elif isinstance(request, DebugStartSessionRequest):
+            kwargs.pop("debug_session_id")
+            kwargs["transaction"] = runtime.transaction
+            kwargs["admission"] = runtime.admission
+            kwargs["session_registry"] = runtime.session_registry
+            kwargs["session_guard"] = runtime.session_guard
+            kwargs["gdb_mi_engine"] = runtime.gdb_mi_engine
+            kwargs["gdb_mi_sessions"] = runtime.gdb_mi_sessions
+        return handler(**kwargs)
+
+    return call
+
+
+def direct_workflow_dependencies(
+    *,
+    create_run,
+    kernel_build,
+    target_boot,
+    target_run_tests,
+    debug_start,
+    artifacts_collect,
+) -> WorkflowHandlerDependencies:
+    return WorkflowHandlerDependencies(
+        create_run_handler=direct_workflow_dependency(create_run),
+        kernel_build_handler=direct_workflow_dependency(kernel_build),
+        target_boot_handler=direct_workflow_dependency(target_boot),
+        target_run_tests_handler=direct_workflow_dependency(target_run_tests),
+        debug_start_session_handler=direct_workflow_dependency(debug_start),
+        artifacts_collect_handler=artifacts_collect,
+    )
 
 
 def workflow_runtime(

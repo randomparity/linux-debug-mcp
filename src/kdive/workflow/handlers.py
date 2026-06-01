@@ -8,12 +8,11 @@ from kdive.artifacts.manifest import RunManifest
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import BootOverrides, BuildOverrides
 from kdive.coordination.admission import AdmissionService
-from kdive.coordination.registry import SessionRegistry
-from kdive.coordination.transaction import TransportTransaction
+from kdive.debug.tools import DebugStartSessionRequest, DebugToolContext
 from kdive.domain import ErrorCategory, ToolResponse
-from kdive.providers.debug import GdbMiEngine, GdbMiSessionRegistry
+from kdive.kernel.tools import CreateRunHandlerRequest, KernelBuildHandlerRequest, KernelToolRuntime
 from kdive.safety.paths import PathSafetyError, validate_source_path
-from kdive.seams.guard import SessionGuard
+from kdive.target.tools import TargetBootHandlerRequest, TargetRunTestsHandlerRequest, TargetToolRuntime
 
 if TYPE_CHECKING:
     from kdive.workflow.tools import (
@@ -24,83 +23,23 @@ if TYPE_CHECKING:
 
 
 class CreateRunHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        source_path: str,
-        build_profile: str,
-        target_profile: str,
-        rootfs_profile: str,
-        run_id: str | None = None,
-        debug_profile: str | None = None,
-        test_suite: str | None = None,
-        build_overrides: BuildOverrides | None = None,
-        boot_overrides: BootOverrides | None = None,
-        sensitive_paths: list[Path] | None = None,
-        build_profile_spec: dict[str, object] | None = None,
-        target_profile_spec: dict[str, object] | None = None,
-        rootfs_profile_spec: dict[str, object] | None = None,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: CreateRunHandlerRequest, runtime: KernelToolRuntime) -> ToolResponse: ...
 
 
 class KernelBuildHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        build_profile: str | None = None,
-        force_rebuild: bool = False,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: KernelBuildHandlerRequest, runtime: KernelToolRuntime) -> ToolResponse: ...
 
 
 class TargetBootHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        target_profile: str | None = None,
-        rootfs_profile: str | None = None,
-        force_reboot: bool = False,
-        boot_overrides: BootOverrides | None = None,
-        acknowledged_permissions: list[str] | None = None,
-        sensitive_paths: list[Path] | None = None,
-        admission: AdmissionService | None = None,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: TargetBootHandlerRequest, runtime: TargetToolRuntime) -> ToolResponse: ...
 
 
 class TargetRunTestsHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        test_suite: str | None = None,
-        commands: list[list[str]] | None = None,
-        force_rerun: bool = False,
-        acknowledged_permissions: list[str] | None = None,
-        admission: AdmissionService | None = None,
-        session_registry: SessionRegistry | None = None,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: TargetRunTestsHandlerRequest, runtime: TargetToolRuntime) -> ToolResponse: ...
 
 
 class DebugStartSessionHandler(Protocol):
-    def __call__(
-        self,
-        *,
-        artifact_root: Path,
-        run_id: str,
-        debug_profile: str | None = None,
-        new_session: bool = False,
-        transaction: TransportTransaction | None = None,
-        admission: AdmissionService | None = None,
-        session_registry: SessionRegistry | None = None,
-        session_guard: SessionGuard | None = None,
-        gdb_mi_engine: GdbMiEngine | None = None,
-        gdb_mi_sessions: GdbMiSessionRegistry | None = None,
-    ) -> ToolResponse: ...
+    def __call__(self, *, request: DebugStartSessionRequest, runtime: DebugToolContext) -> ToolResponse: ...
 
 
 class ArtifactsCollectHandler(Protocol):
@@ -305,21 +244,23 @@ def _run_build_boot_workflow(
             requested_optional = validation.resolved_optional
 
     if run_id is None or not (request.artifact_root / run_id / "manifest.json").is_file():
-        create_kwargs = {optional_field: requested_optional}
         create_response = dependencies.create_run_handler(
-            artifact_root=request.artifact_root,
-            source_path=request.source_path,
-            build_profile=request.build_profile,
-            target_profile=request.target_profile,
-            rootfs_profile=request.rootfs_profile,
-            run_id=run_id,
-            build_overrides=request.build_overrides,
-            boot_overrides=request.boot_overrides,
-            sensitive_paths=request.sensitive_paths,
-            build_profile_spec=request.build_profile_spec,
-            target_profile_spec=request.target_profile_spec,
-            rootfs_profile_spec=request.rootfs_profile_spec,
-            **create_kwargs,
+            request=CreateRunHandlerRequest(
+                artifact_root=request.artifact_root,
+                source_path=request.source_path,
+                build_profile=request.build_profile,
+                target_profile=request.target_profile,
+                rootfs_profile=request.rootfs_profile,
+                run_id=run_id,
+                debug_profile=requested_optional if optional_field == "debug_profile" else None,
+                test_suite=requested_optional if optional_field == "test_suite" else None,
+                build_overrides=request.build_overrides,
+                boot_overrides=request.boot_overrides,
+                build_profile_spec=request.build_profile_spec,
+                target_profile_spec=request.target_profile_spec,
+                rootfs_profile_spec=request.rootfs_profile_spec,
+            ),
+            runtime=KernelToolRuntime(sensitive_paths=request.sensitive_paths or []),
         )
         if not create_response.ok:
             return None, create_response
@@ -331,10 +272,13 @@ def _run_build_boot_workflow(
         )
 
     build_response = dependencies.kernel_build_handler(
-        artifact_root=request.artifact_root,
-        run_id=run_id,
-        build_profile=request.build_profile,
-        force_rebuild=request.force_rebuild,
+        request=KernelBuildHandlerRequest(
+            artifact_root=request.artifact_root,
+            run_id=run_id,
+            build_profile=request.build_profile,
+            force_rebuild=request.force_rebuild,
+        ),
+        runtime=KernelToolRuntime(sensitive_paths=request.sensitive_paths or []),
     )
     if not build_response.ok:
         collect_response = _pipeline_failure_collect_response(
@@ -353,15 +297,20 @@ def _run_build_boot_workflow(
         )
 
     boot_response = dependencies.target_boot_handler(
-        artifact_root=request.artifact_root,
-        run_id=run_id,
-        target_profile=request.target_profile,
-        rootfs_profile=request.rootfs_profile,
-        force_reboot=request.force_reboot,
-        boot_overrides=request.boot_overrides,
-        acknowledged_permissions=request.acknowledged_permissions,
-        sensitive_paths=request.sensitive_paths,
-        admission=request.admission,
+        request=TargetBootHandlerRequest(
+            artifact_root=request.artifact_root,
+            run_id=run_id,
+            target_profile=request.target_profile,
+            rootfs_profile=request.rootfs_profile,
+            force_reboot=request.force_reboot,
+            boot_overrides=request.boot_overrides,
+            acknowledged_permissions=request.acknowledged_permissions,
+        ),
+        runtime=TargetToolRuntime(
+            sensitive_paths=request.sensitive_paths or [],
+            admission=request.admission,
+            session_registry=None,
+        ),
     )
     if not boot_response.ok:
         collect_response = _pipeline_failure_collect_response(
@@ -430,14 +379,20 @@ def workflow_build_boot_test_handler(
     boot_response = pipeline.boot_response
 
     test_response = dependencies.target_run_tests_handler(
-        artifact_root=request.artifact_root,
-        run_id=run_id,
-        test_suite=test_suite,
-        commands=request.commands,
-        force_rerun=request.force_rerun_tests,
-        acknowledged_permissions=request.acknowledged_permissions,
-        admission=runtime.admission,
-        session_registry=runtime.session_registry,
+        request=TargetRunTestsHandlerRequest(
+            artifact_root=request.artifact_root,
+            run_id=run_id,
+            test_suite=test_suite,
+            commands=request.commands,
+            force_rerun=request.force_rerun_tests,
+            attempt=None,
+            acknowledged_permissions=request.acknowledged_permissions,
+        ),
+        runtime=TargetToolRuntime(
+            sensitive_paths=runtime.sensitive_paths,
+            admission=runtime.admission,
+            session_registry=runtime.session_registry,
+        ),
     )
     collect_response = dependencies.artifacts_collect_handler(
         artifact_root=request.artifact_root,
@@ -524,16 +479,22 @@ def workflow_build_boot_debug_handler(
     boot_response = pipeline.boot_response
 
     debug_response = dependencies.debug_start_session_handler(
-        artifact_root=request.artifact_root,
-        run_id=run_id,
-        debug_profile=debug_profile,
-        new_session=request.new_session,
-        transaction=runtime.transaction,
-        admission=runtime.admission,
-        session_registry=runtime.session_registry,
-        session_guard=runtime.session_guard,
-        gdb_mi_engine=runtime.gdb_mi_engine,
-        gdb_mi_sessions=runtime.gdb_mi_sessions,
+        request=DebugStartSessionRequest(
+            artifact_root=request.artifact_root,
+            run_id=run_id,
+            debug_session_id=None,
+            debug_profile=debug_profile,
+            new_session=request.new_session,
+        ),
+        runtime=DebugToolContext(
+            default_artifact_root=request.artifact_root,
+            transaction=runtime.transaction,
+            admission=runtime.admission,
+            session_registry=runtime.session_registry,
+            session_guard=runtime.session_guard,
+            gdb_mi_engine=runtime.gdb_mi_engine,
+            gdb_mi_sessions=runtime.gdb_mi_sessions,
+        ),
     )
     if not debug_response.ok:
         return _workflow_failure_response(

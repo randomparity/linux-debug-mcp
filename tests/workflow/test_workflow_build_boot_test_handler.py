@@ -6,7 +6,11 @@ import pytest
 from conftest import NoopBuildRunner as _NoopBuildRunner
 from conftest import make_source_tree
 from handler_call_helpers import kernel_build_handler, target_boot_handler, target_run_tests_handler
-from workflow_helpers import build_boot_test_request, call_workflow_build_boot_test_handler
+from workflow_helpers import (
+    build_boot_test_request,
+    call_workflow_build_boot_test_handler,
+    direct_workflow_dependencies,
+)
 
 import kdive.server as server_module
 from kdive.artifacts.store import ArtifactStore
@@ -72,20 +76,19 @@ def test_workflow_handlers_require_explicit_dependencies(tmp_path: Path) -> None
 def _install_workflow_dependencies(
     *,
     create_run=create_run_handler,
-    kernel_build=server_module.kernel_build_handler,
-    target_boot=server_module.target_boot_handler,
-    target_run_tests=server_module.target_run_tests_handler,
+    kernel_build=kernel_build_handler,
+    target_boot=target_boot_handler,
+    target_run_tests=target_run_tests_handler,
     artifacts_collect=server_module.artifacts_collect_handler,
 ) -> WorkflowHandlerDependencies:
-    dependencies = WorkflowHandlerDependencies(
-        create_run_handler=create_run,
-        kernel_build_handler=kernel_build,
-        target_boot_handler=target_boot,
-        target_run_tests_handler=target_run_tests,
-        debug_start_session_handler=debug_start_session_handler,
-        artifacts_collect_handler=artifacts_collect,
+    return direct_workflow_dependencies(
+        create_run=create_run,
+        kernel_build=kernel_build,
+        target_boot=target_boot,
+        target_run_tests=target_run_tests,
+        debug_start=debug_start_session_handler,
+        artifacts_collect=artifacts_collect,
     )
-    return dependencies
 
 
 def test_workflow_runs_build_boot_tests_and_collects(tmp_path: Path, monkeypatch) -> None:
@@ -160,13 +163,13 @@ def test_workflow_threads_safety_overrides_into_create_and_boot(tmp_path: Path) 
 
 def test_workflow_accepts_explicit_dependencies_without_global_configuration(tmp_path: Path) -> None:
     calls: list[str] = []
-    dependencies = WorkflowHandlerDependencies(
-        create_run_handler=lambda **kwargs: success("created"),
-        kernel_build_handler=lambda **kwargs: calls.append("build") or success("built"),
-        target_boot_handler=lambda **kwargs: calls.append("boot") or success("booted"),
-        target_run_tests_handler=lambda **kwargs: calls.append("tests") or success("tested"),
-        debug_start_session_handler=debug_start_session_handler,
-        artifacts_collect_handler=lambda **kwargs: calls.append("collect") or success("collected"),
+    dependencies = direct_workflow_dependencies(
+        create_run=lambda **kwargs: success("created"),
+        kernel_build=lambda **kwargs: calls.append("build") or success("built"),
+        target_boot=lambda **kwargs: calls.append("boot") or success("booted"),
+        target_run_tests=lambda **kwargs: calls.append("tests") or success("tested"),
+        debug_start=debug_start_session_handler,
+        artifacts_collect=lambda **kwargs: calls.append("collect") or success("collected"),
     )
 
     response = call_workflow_build_boot_test_handler(
@@ -262,14 +265,7 @@ def test_workflow_rejects_existing_run_request_mismatch(tmp_path: Path) -> None:
         rootfs_profile="minimal",
         run_id="run-abc123",
         test_suite="smoke-basic",
-        dependencies=WorkflowHandlerDependencies(
-            create_run_handler=create_run_handler,
-            kernel_build_handler=server_module.kernel_build_handler,
-            target_boot_handler=server_module.target_boot_handler,
-            target_run_tests_handler=server_module.target_run_tests_handler,
-            debug_start_session_handler=debug_start_session_handler,
-            artifacts_collect_handler=server_module.artifacts_collect_handler,
-        ),
+        dependencies=_install_workflow_dependencies(),
     )
 
     assert response.ok is False

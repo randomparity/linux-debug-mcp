@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from workflow_helpers import call_workflow_build_boot_debug_handler
+from handler_call_helpers import kernel_build_handler, target_boot_handler, target_run_tests_handler
+from workflow_helpers import call_workflow_build_boot_debug_handler, direct_workflow_dependencies
 
 import kdive.server as server_module
 from kdive.debug.session_handlers import _start_session as debug_start_session_handler
@@ -24,17 +25,17 @@ def failure(category: ErrorCategory, message: str, *, run_id: str = "run-abc123"
 def _install_workflow_dependencies(
     *,
     create_run=create_run_handler,
-    kernel_build=server_module.kernel_build_handler,
-    target_boot=server_module.target_boot_handler,
+    kernel_build=kernel_build_handler,
+    target_boot=target_boot_handler,
     debug_start=debug_start_session_handler,
 ) -> WorkflowHandlerDependencies:
-    return WorkflowHandlerDependencies(
-        create_run_handler=create_run,
-        kernel_build_handler=kernel_build,
-        target_boot_handler=target_boot,
-        target_run_tests_handler=server_module.target_run_tests_handler,
-        debug_start_session_handler=debug_start,
-        artifacts_collect_handler=server_module.artifacts_collect_handler,
+    return direct_workflow_dependencies(
+        create_run=create_run,
+        kernel_build=kernel_build,
+        target_boot=target_boot,
+        target_run_tests=target_run_tests_handler,
+        debug_start=debug_start,
+        artifacts_collect=server_module.artifacts_collect_handler,
     )
 
 
