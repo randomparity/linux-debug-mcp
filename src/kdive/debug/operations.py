@@ -12,7 +12,7 @@ from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import RecoveryTombstone, SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
-from kdive.debug.handlers import (
+from kdive.debug.contracts import (
     DebugBacktraceRequest,
     DebugClearBreakpointRequest,
     DebugClearWatchpointRequest,

@@ -9,7 +9,7 @@ from typing import Any
 
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import RootfsProfile
-from kdive.debug.handlers import DebugRuntime
+from kdive.debug.contracts import DebugRuntime
 from kdive.debug.operations import (
     _configuration_failure,
     _debug_session_manifest_details,

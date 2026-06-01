@@ -10,6 +10,7 @@ TARGET_BOOT_HANDLER_SOURCE = ROOT / "src" / "kdive" / "target" / "boot_handler.p
 TARGET_TEST_HANDLER_SOURCE = ROOT / "src" / "kdive" / "target" / "test_handler.py"
 INTROSPECT_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "introspect" / "handlers.py"
 INTROSPECT_EXECUTION_SOURCE = ROOT / "src" / "kdive" / "introspect" / "execution.py"
+DEBUG_OPERATIONS_SOURCE = ROOT / "src" / "kdive" / "debug" / "operations.py"
 POSTMORTEM_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "handlers.py"
 POSTMORTEM_DUMP_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "dump_handlers.py"
 SHARED_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "handlers" / "shared.py"
@@ -161,6 +162,11 @@ def test_debug_features_do_not_import_private_transport_handler_helpers() -> Non
     }
 
     assert offenders == {}
+
+
+def test_debug_operations_depend_on_neutral_contracts_not_handlers() -> None:
+    assert "kdive.debug.contracts" in _imported_modules(DEBUG_OPERATIONS_SOURCE)
+    assert "kdive.debug.handlers" not in _imported_modules(DEBUG_OPERATIONS_SOURCE)
 
 
 def test_transport_and_prereq_handlers_accept_structured_boundaries_only() -> None:

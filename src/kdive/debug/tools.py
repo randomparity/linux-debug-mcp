@@ -9,7 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
-from kdive.debug.handlers import DebugRuntime
+from kdive.debug.contracts import DebugRuntime
 from kdive.domain import Model, ToolResponse
 from kdive.providers.debug import GdbMiEngine, GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard

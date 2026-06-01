@@ -29,6 +29,7 @@ from kdive.config import DebugProfile
 from kdive.coordination.admission import AdmissionService, publish_ready_snapshot
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
+from kdive.debug import contracts as debug_contracts
 from kdive.debug import handlers as debug_handlers
 from kdive.debug import operations as debug_operations
 from kdive.debug import session_end as debug_session_end
@@ -256,8 +257,8 @@ def _debug_runtime(
     registry: SessionRegistry | None = None,
     engine: FakeMiEngine | None = None,
     sessions: GdbMiSessionRegistry | None = None,
-) -> debug_handlers.DebugRuntime:
-    return debug_handlers.DebugRuntime(
+) -> debug_contracts.DebugRuntime:
+    return debug_contracts.DebugRuntime(
         debug_profiles=profiles or _profiles(),
         transaction=txn,
         admission=admission,
@@ -307,7 +308,7 @@ def test_debug_operation_handlers_use_typed_operation_requests() -> None:
     assert not hasattr(debug_handlers, "DebugHandlerOperationSpec")
     assert not hasattr(debug_handlers, "debug_operation_arguments")
 
-    request = debug_handlers.DebugReadMemoryRequest(address=0x1000, byte_count=16)
+    request = debug_contracts.DebugReadMemoryRequest(address=0x1000, byte_count=16)
     assert request.profile_operation == "debug.read_memory"
     assert request.summary_name == "read_memory"
     assert request.persist_manifest is False
@@ -350,7 +351,8 @@ def test_debug_tool_registration_is_split_by_operation_family() -> None:
 
 def test_debug_operation_handler_builds_runtime_without_pass_through_layers() -> None:
     assert debug_operations._debug_operation_response.__module__ == "kdive.debug.operations"
-    assert hasattr(debug_handlers, "DebugRuntime")
+    assert debug_contracts.DebugRuntime.__module__ == "kdive.debug.contracts"
+    assert debug_operations.DebugRuntime is debug_contracts.DebugRuntime
     assert not hasattr(debug_handlers, "debug_tool_operation_response")
     assert not hasattr(debug_handlers, "_runtime_from_operation_args")
     assert not hasattr(debug_handlers, "_debug_operation_handler")
@@ -456,7 +458,7 @@ def test_debug_operation_handlers_hide_explicit_operation_core(tmp_path: Path) -
             artifact_root=tmp_path / "runs",
             run_id="run-1",
             registers=["rax"],
-            runtime=debug_handlers.DebugRuntime(),
+            runtime=debug_contracts.DebugRuntime(),
         )
 
 
