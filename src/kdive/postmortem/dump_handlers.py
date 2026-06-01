@@ -5,8 +5,8 @@ import json
 import shutil
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 from pydantic import ValidationError
 
@@ -17,7 +17,8 @@ from kdive.config import (
     FETCH_TIMEOUT_BAND,
     RootfsProfile,
 )
-from kdive.coordination.admission import AdmissionError
+from kdive.coordination.admission import AdmissionError, AdmissionService
+from kdive.coordination.registry import SessionRegistry
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES
 from kdive.domain import (
     ArtifactRef,
@@ -320,10 +321,10 @@ def debug_postmortem_check_prereqs_handler(
     request: DebugPostmortemCheckPrereqsRequest,
     *,
     artifact_root: Path,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    rootfs_profiles: Mapping[str, RootfsProfile] | None = None,
     ssh_runner: SshRunner | None = None,
-    admission: Any | None = None,
-    session_registry: Any | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
     resolved_ctx, failure = resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
@@ -531,10 +532,10 @@ def debug_postmortem_list_dumps_handler(
     request: DebugPostmortemListDumpsRequest,
     *,
     artifact_root: Path,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    rootfs_profiles: Mapping[str, RootfsProfile] | None = None,
     ssh_runner: SshRunner | None = None,
-    admission: Any | None = None,
-    session_registry: Any | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
     resolved_ctx, failure = resolve_probe_context(request, artifact_root=artifact_root, rootfs_profiles=rootfs_profiles)
@@ -588,10 +589,10 @@ def debug_postmortem_fetch_handler(
     request: DebugPostmortemFetchRequest,
     *,
     artifact_root: Path,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    rootfs_profiles: Mapping[str, RootfsProfile] | None = None,
     ssh_runner: SshRunner | None = None,
-    admission: Any | None = None,
-    session_registry: Any | None = None,
+    admission: AdmissionService | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> ToolResponse:
     rootfs_profiles = rootfs_profiles if rootfs_profiles is not None else DEFAULT_ROOTFS_PROFILES
     resolved_ctx, failure = resolve_probe_context(
