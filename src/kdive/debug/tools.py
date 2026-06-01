@@ -212,9 +212,9 @@ def _session_context(
     return _path(artifact_root), context.run_id, context.debug_session_id
 
 
-def _debug_runtime(context: DebugToolContext, *, include_admission: bool) -> DebugRuntime:
+def _debug_runtime(context: DebugToolContext) -> DebugRuntime:
     return DebugRuntime(
-        admission=(context.admission if include_admission else None),
+        admission=context.admission,
         transaction=context.transaction,
         session_registry=context.session_registry,
         session_guard=context.session_guard,
@@ -306,7 +306,7 @@ def _register_registers_query(
                     debug_session_id=debug_session_id,
                     registers=registers,
                 ),
-                runtime=_debug_runtime(tool_context, include_admission=False),
+                runtime=_debug_runtime(tool_context),
             )
         )
 
@@ -341,7 +341,7 @@ def _register_symbol_query(
                     debug_session_id=debug_session_id,
                     symbol=symbol,
                 ),
-                runtime=_debug_runtime(tool_context, include_admission=False),
+                runtime=_debug_runtime(tool_context),
             )
         )
 
@@ -389,7 +389,7 @@ def _register_debug_read_tools(
                     address=address,
                     byte_count=byte_count,
                 ),
-                runtime=_debug_runtime(tool_context, include_admission=False),
+                runtime=_debug_runtime(tool_context),
             )
         )
 
@@ -416,7 +416,7 @@ def _register_debug_read_tools(
                     inspector=inspector,
                     arguments=evaluate_options.arguments,
                 ),
-                runtime=_debug_runtime(tool_context, include_admission=False),
+                runtime=_debug_runtime(tool_context),
             )
         )
 
@@ -480,7 +480,7 @@ def _register_symbol_control(
                     debug_session_id=debug_session_id,
                     symbol=symbol,
                 ),
-                runtime=_debug_runtime(tool_context, include_admission=True),
+                runtime=_debug_runtime(tool_context),
             )
         )
 
@@ -515,7 +515,7 @@ def _register_breakpoint_id_control(
                     debug_session_id=debug_session_id,
                     breakpoint_id=breakpoint_id,
                 ),
-                runtime=_debug_runtime(tool_context, include_admission=True),
+                runtime=_debug_runtime(tool_context),
             )
         )
 
@@ -548,7 +548,7 @@ def _register_gated_query(
                     run_id=run_id,
                     debug_session_id=debug_session_id,
                 ),
-                runtime=_debug_runtime(tool_context, include_admission=True),
+                runtime=_debug_runtime(tool_context),
             )
         )
 
@@ -625,7 +625,7 @@ def _register_execution_control(
                     debug_session_id=debug_session_id,
                     timeout_seconds=execution_options.timeout_seconds,
                 ),
-                runtime=_debug_runtime(tool_context, include_admission=True),
+                runtime=_debug_runtime(tool_context),
             )
         )
 

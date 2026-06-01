@@ -328,6 +328,9 @@ def test_debug_operation_handlers_use_typed_operation_requests() -> None:
     assert request.profile_operation == "debug.read_memory"
     assert request.summary_name == "read_memory"
     assert request.persist_manifest is False
+    assert request.requires_admission_fence is False
+    assert debug_contracts.DebugSetBreakpointRequest("do_sys_open").requires_admission_fence is True
+    assert debug_contracts.DebugListBreakpointsRequest().requires_admission_fence is True
 
 
 def test_debug_tool_registration_uses_typed_context_and_handler_protocols() -> None:
@@ -338,6 +341,7 @@ def test_debug_tool_registration_uses_typed_context_and_handler_protocols() -> N
     assert context_hints["gdb_mi_sessions"] is GdbMiSessionRegistryContract
     assert not hasattr(DebugToolContext, "common_kwargs")
     assert not hasattr(DebugToolContext, "gated_kwargs")
+    assert list(inspect.signature(debug_tools._debug_runtime).parameters) == ["context"]
 
     handler_hints = get_type_hints(DebugToolHandlers)
     assert handler_hints["start_session"] == debug_tools.DebugStartSessionHandler

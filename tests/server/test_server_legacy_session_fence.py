@@ -194,9 +194,11 @@ def test_legacy_session_end_session_writes_tombstone_after_detach(tmp_path: Path
 def test_legacy_session_refused_in_debug_read_when_session_registry_wired(tmp_path: Path) -> None:
     """F8: when `session_registry` is threaded into a `debug.read_*` handler and no durable
     record exists for the run, the handler refuses with `legacy_session_no_ownership` BEFORE the
-    live-attachment lookup."""
+    live-attachment lookup. Even with admission present in the runtime, the typed read request keeps
+    this on the non-mutating assertion path and does not tombstone."""
     artifact_root = _seed_legacy_debug_session(tmp_path)
     registry = _make_registry(tmp_path)
+    _txn, admission = _build_transaction(registry=registry)
     # legacy shape: no ownership record for KEY.
     assert registry.read_record(KEY) is None
 
@@ -204,7 +206,12 @@ def test_legacy_session_refused_in_debug_read_when_session_registry_wired(tmp_pa
         artifact_root=artifact_root,
         run_id=RUN_ID,
         registers=["pc"],
-        runtime=_debug_runtime(registry=registry, engine=FakeMiEngine(), sessions=GdbMiSessionRegistry()),
+        runtime=_debug_runtime(
+            admission=admission,
+            registry=registry,
+            engine=FakeMiEngine(),
+            sessions=GdbMiSessionRegistry(),
+        ),
     )
     assert response.ok is False
     assert response.error.category == ErrorCategory.DEBUG_ATTACH_FAILURE
@@ -212,3 +219,4 @@ def test_legacy_session_refused_in_debug_read_when_session_registry_wired(tmp_pa
     # F8 is read-non-destructive: no tombstone is written on the read path (the mutating-op
     # `_fence_legacy_debug_session` is the one that tombstones — `_assert_layer4_ownership` does not).
     assert registry.read_tombstone(KEY) is None
+    assert admission._recovery_required == {}

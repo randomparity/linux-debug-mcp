@@ -381,15 +381,13 @@ def _debug_operation_response(
     try:
         with store.debug_lock(run_id):
             session = load_active_debug_session(store, run_id, debug_session_id, allow_ended=allow_ended)
-            # Mutating-op fence (tombstones the legacy session) when BOTH admission + registry are
-            # wired; pure-read assertion (no tombstone — reads are non-destructive) when only the
-            # registry is wired. Every debug.* path that connects gdb gets at least the ownership
-            # assertion, so a legacy session can never silently halt the kernel as a side effect of
-            # `target remote` against a run target.run_tests is unaware of. This runs BEFORE the
-            # live-attachment lookup (ADR 0021 fence-then-lookup).
+            admission = runtime.admission if request.requires_admission_fence else None
+            # Operation metadata decides whether the legacy-session fence may tombstone the target.
+            # Pure read operations still assert Layer-4 ownership through the registry, while
+            # mutating/control operations use admission to mark recovery_required on legacy state.
             enforce_debug_ownership_fence(
                 run_id=run_id,
-                admission=runtime.admission,
+                admission=admission,
                 session_registry=runtime.session_registry,
             )
             profile = resolve_debug_profile(
@@ -411,7 +409,7 @@ def _debug_operation_response(
                 artifact_root=artifact_root,
                 run_id=run_id,
                 transaction=runtime.transaction,
-                admission=runtime.admission,
+                admission=admission,
                 session_registry=runtime.session_registry,
                 session_guard=runtime.session_guard,
             )

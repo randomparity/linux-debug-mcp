@@ -17,12 +17,14 @@ class DebugOperationRequest(Protocol):
     profile_operation: str
     summary_name: str
     persist_manifest: bool
+    requires_admission_fence: bool
 
 
 class _DebugOperationMetadata:
     profile_operation: ClassVar[str]
     summary_name: ClassVar[str]
     persist_manifest: ClassVar[bool]
+    requires_admission_fence: ClassVar[bool] = False
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,7 @@ class DebugSetBreakpointRequest(_DebugOperationMetadata):
     profile_operation: ClassVar[str] = "debug.set_breakpoint"
     summary_name: ClassVar[str] = "set_breakpoint"
     persist_manifest: ClassVar[bool] = True
+    requires_admission_fence: ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,7 @@ class DebugSetWatchpointRequest(_DebugOperationMetadata):
     profile_operation: ClassVar[str] = "debug.set_watchpoint"
     summary_name: ClassVar[str] = "set_watchpoint"
     persist_manifest: ClassVar[bool] = True
+    requires_admission_fence: ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,7 @@ class DebugClearBreakpointRequest(_DebugOperationMetadata):
     profile_operation: ClassVar[str] = "debug.clear_breakpoint"
     summary_name: ClassVar[str] = "clear_breakpoint"
     persist_manifest: ClassVar[bool] = True
+    requires_admission_fence: ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
@@ -89,6 +94,7 @@ class DebugClearWatchpointRequest(_DebugOperationMetadata):
     profile_operation: ClassVar[str] = "debug.clear_watchpoint"
     summary_name: ClassVar[str] = "clear_watchpoint"
     persist_manifest: ClassVar[bool] = True
+    requires_admission_fence: ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
@@ -96,6 +102,7 @@ class DebugListBreakpointsRequest(_DebugOperationMetadata):
     profile_operation: ClassVar[str] = "debug.list_breakpoints"
     summary_name: ClassVar[str] = "list_breakpoints"
     persist_manifest: ClassVar[bool] = False
+    requires_admission_fence: ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
@@ -103,6 +110,7 @@ class DebugBacktraceRequest(_DebugOperationMetadata):
     profile_operation: ClassVar[str] = "debug.backtrace"
     summary_name: ClassVar[str] = "backtrace"
     persist_manifest: ClassVar[bool] = False
+    requires_admission_fence: ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
@@ -110,6 +118,7 @@ class DebugListVariablesRequest(_DebugOperationMetadata):
     profile_operation: ClassVar[str] = "debug.list_variables"
     summary_name: ClassVar[str] = "list_variables"
     persist_manifest: ClassVar[bool] = False
+    requires_admission_fence: ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
@@ -118,6 +127,7 @@ class DebugContinueRequest(_DebugOperationMetadata):
     profile_operation: ClassVar[str] = "debug.continue"
     summary_name: ClassVar[str] = "continue_execution"
     persist_manifest: ClassVar[bool] = True
+    requires_admission_fence: ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
@@ -126,6 +136,7 @@ class DebugStepRequest(_DebugOperationMetadata):
     profile_operation: ClassVar[str] = "debug.step"
     summary_name: ClassVar[str] = "step"
     persist_manifest: ClassVar[bool] = True
+    requires_admission_fence: ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
@@ -134,6 +145,7 @@ class DebugNextRequest(_DebugOperationMetadata):
     profile_operation: ClassVar[str] = "debug.next"
     summary_name: ClassVar[str] = "next"
     persist_manifest: ClassVar[bool] = True
+    requires_admission_fence: ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
@@ -142,6 +154,7 @@ class DebugFinishRequest(_DebugOperationMetadata):
     profile_operation: ClassVar[str] = "debug.finish"
     summary_name: ClassVar[str] = "finish"
     persist_manifest: ClassVar[bool] = True
+    requires_admission_fence: ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
@@ -150,6 +163,7 @@ class DebugInterruptRequest(_DebugOperationMetadata):
     profile_operation: ClassVar[str] = "debug.interrupt"
     summary_name: ClassVar[str] = "interrupt"
     persist_manifest: ClassVar[bool] = True
+    requires_admission_fence: ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
