@@ -148,24 +148,6 @@ def _kernel_create_run_tool_handler(
     )
 
 
-def _kernel_build_tool_handler(
-    *, request: kernel_tools.KernelBuildHandlerRequest, runtime: kernel_tools.KernelToolRuntime
-) -> ToolResponse:
-    return kernel_build_handler(request=request, runtime=runtime)
-
-
-def _target_boot_tool_handler(
-    *, request: target_tools.TargetBootHandlerRequest, runtime: target_tools.TargetToolRuntime
-) -> ToolResponse:
-    return target_boot_handler(request=request, runtime=runtime)
-
-
-def _target_run_tests_tool_handler(
-    *, request: target_tools.TargetRunTestsHandlerRequest, runtime: target_tools.TargetToolRuntime
-) -> ToolResponse:
-    return target_run_tests_handler(request=request, runtime=runtime)
-
-
 def _workflow_build_boot_test_tool_handler(
     *, request: workflow_tools.WorkflowBuildBootTestHandlerRequest, runtime: workflow_tools.WorkflowToolRuntime
 ) -> ToolResponse:
@@ -509,7 +491,7 @@ def create_app(
         default_artifact_root=DEFAULT_ARTIFACT_ROOT,
         sensitive_paths=sensitive_paths,
         create_run_handler=_kernel_create_run_tool_handler,
-        kernel_build_handler=_kernel_build_tool_handler,
+        kernel_build_handler=kernel_build_handler,
     )
 
     register_provider_tools(app)
@@ -520,8 +502,8 @@ def create_app(
         sensitive_paths=sensitive_paths,
         admission=admission_service,
         session_registry=durable_registry,
-        target_boot_handler=_target_boot_tool_handler,
-        target_run_tests_handler=_target_run_tests_tool_handler,
+        target_boot_handler=target_boot_handler,
+        target_run_tests_handler=target_run_tests_handler,
     )
 
     register_introspect_tools(

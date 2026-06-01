@@ -10,9 +10,21 @@ from kdive.config import BootOverrides, BuildOverrides
 from kdive.coordination.admission import AdmissionService
 from kdive.debug.tools import DebugStartSessionRequest, DebugToolContext
 from kdive.domain import ErrorCategory, ToolResponse
-from kdive.kernel.tools import CreateRunHandlerRequest, KernelBuildHandlerRequest, KernelToolRuntime
+from kdive.kernel.tools import (
+    CreateRunHandler,
+    CreateRunHandlerRequest,
+    KernelBuildHandler,
+    KernelBuildHandlerRequest,
+    KernelToolRuntime,
+)
 from kdive.safety.paths import PathSafetyError, validate_source_path
-from kdive.target.tools import TargetBootHandlerRequest, TargetRunTestsHandlerRequest, TargetToolRuntime
+from kdive.target.tools import (
+    TargetBootHandler,
+    TargetBootHandlerRequest,
+    TargetRunTestsHandler,
+    TargetRunTestsHandlerRequest,
+    TargetToolRuntime,
+)
 
 if TYPE_CHECKING:
     from kdive.workflow.tools import (
@@ -20,22 +32,6 @@ if TYPE_CHECKING:
         WorkflowBuildBootTestHandlerRequest,
         WorkflowToolRuntime,
     )
-
-
-class CreateRunHandler(Protocol):
-    def __call__(self, *, request: CreateRunHandlerRequest, runtime: KernelToolRuntime) -> ToolResponse: ...
-
-
-class KernelBuildHandler(Protocol):
-    def __call__(self, *, request: KernelBuildHandlerRequest, runtime: KernelToolRuntime) -> ToolResponse: ...
-
-
-class TargetBootHandler(Protocol):
-    def __call__(self, *, request: TargetBootHandlerRequest, runtime: TargetToolRuntime) -> ToolResponse: ...
-
-
-class TargetRunTestsHandler(Protocol):
-    def __call__(self, *, request: TargetRunTestsHandlerRequest, runtime: TargetToolRuntime) -> ToolResponse: ...
 
 
 class DebugStartSessionHandler(Protocol):
