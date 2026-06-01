@@ -484,6 +484,20 @@ def test_debug_bound_handlers_use_request_forwarding_factories() -> None:
     assert source.count("request = request or DebugExecutionRequest(") == 1
 
 
+def test_debug_operation_leaf_handlers_use_request_forwarding_factory() -> None:
+    source = Path(debug_handlers.__file__).read_text(encoding="utf-8")
+
+    assert "def _make_operation_request_handler(" in source
+    for handler_name in (
+        "debug_read_registers_handler",
+        "debug_read_symbol_handler",
+        "debug_read_memory_handler",
+        "debug_evaluate_handler",
+    ):
+        assert f"def {handler_name}(" not in source
+        assert callable(getattr(debug_handlers, handler_name))
+
+
 def test_debug_operation_leaf_handlers_require_explicit_operation_core(tmp_path: Path) -> None:
     with pytest.raises(TypeError, match="operation_core"):
         debug_handlers.debug_read_registers_handler(

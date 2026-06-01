@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Protocol
+from typing import Any, ClassVar, Protocol, cast
 
 from kdive.config import DebugProfile
 from kdive.coordination.admission import AdmissionService
@@ -176,78 +177,138 @@ class DebugOperationCore(Protocol):
     ) -> ToolResponse: ...
 
 
-def debug_read_registers_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    registers: list[str],
-    runtime: DebugRuntime,
-    debug_session_id: str | None = None,
-    operation_core: DebugOperationCore,
-) -> ToolResponse:
-    return operation_core(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        request=DebugReadRegistersRequest(registers=registers),
-        runtime=runtime,
+def _pop_required(kwargs: dict[str, object], name: str) -> object:
+    try:
+        return kwargs.pop(name)
+    except KeyError as exc:
+        raise TypeError(f"{name} is required") from exc
+
+
+def _operation_handler_signature(
+    request_parameters: tuple[tuple[str, object, object], ...],
+) -> inspect.Signature:
+    common_parameters: tuple[tuple[str, object, object], ...] = (
+        ("artifact_root", "Path", inspect.Parameter.empty),
+        ("run_id", "str", inspect.Parameter.empty),
+        *request_parameters,
+        ("runtime", "DebugRuntime", inspect.Parameter.empty),
+        ("debug_session_id", "str | None", None),
+        ("operation_core", "DebugOperationCore", inspect.Parameter.empty),
+    )
+    return inspect.Signature(
+        parameters=[
+            inspect.Parameter(
+                name,
+                inspect.Parameter.KEYWORD_ONLY,
+                default=default,
+                annotation=annotation,
+            )
+            for name, annotation, default in common_parameters
+        ],
+        return_annotation="ToolResponse",
     )
 
 
-def debug_read_symbol_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    symbol: str,
-    runtime: DebugRuntime,
-    debug_session_id: str | None = None,
-    operation_core: DebugOperationCore,
-) -> ToolResponse:
-    return operation_core(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        request=DebugReadSymbolRequest(symbol=symbol),
-        runtime=runtime,
-    )
+def _make_operation_request_handler(
+    name: str,
+    request_factory: Callable[[dict[str, object]], DebugOperationRequest],
+    request_parameters: tuple[tuple[str, object, object], ...],
+) -> Callable[..., ToolResponse]:
+    def handler(**kwargs: object) -> ToolResponse:
+        artifact_root = _pop_required(kwargs, "artifact_root")
+        run_id = _pop_required(kwargs, "run_id")
+        runtime = _pop_required(kwargs, "runtime")
+        operation_core = _pop_required(kwargs, "operation_core")
+        debug_session_id = kwargs.pop("debug_session_id", None)
+        request = request_factory(kwargs)
+        if kwargs:
+            unexpected = next(iter(kwargs))
+            raise TypeError(f"unexpected argument: {unexpected}")
+        if not isinstance(artifact_root, Path):
+            raise TypeError("artifact_root must be a Path")
+        if not isinstance(run_id, str):
+            raise TypeError("run_id must be a string")
+        if not isinstance(runtime, DebugRuntime):
+            raise TypeError("runtime must be DebugRuntime")
+        if not callable(operation_core):
+            raise TypeError("operation_core must be callable")
+        if debug_session_id is not None and not isinstance(debug_session_id, str):
+            raise TypeError("debug_session_id must be a string or None")
+        return cast(DebugOperationCore, operation_core)(
+            artifact_root=artifact_root,
+            run_id=run_id,
+            debug_session_id=debug_session_id,
+            request=request,
+            runtime=runtime,
+        )
+
+    handler.__name__ = name
+    cast(Any, handler).__signature__ = _operation_handler_signature(request_parameters)
+    return handler
 
 
-def debug_read_memory_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    address: int,
-    byte_count: int,
-    runtime: DebugRuntime,
-    debug_session_id: str | None = None,
-    operation_core: DebugOperationCore,
-) -> ToolResponse:
-    return operation_core(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        request=DebugReadMemoryRequest(address=address, byte_count=byte_count),
-        runtime=runtime,
-    )
+def _read_registers_request(kwargs: dict[str, object]) -> DebugOperationRequest:
+    registers = _pop_required(kwargs, "registers")
+    if not isinstance(registers, list) or not all(isinstance(register, str) for register in registers):
+        raise TypeError("registers must be a list of strings")
+    return DebugReadRegistersRequest(registers=cast(list[str], registers))
 
 
-def debug_evaluate_handler(
-    *,
-    artifact_root: Path,
-    run_id: str,
-    inspector: str,
-    runtime: DebugRuntime,
-    arguments: dict[str, object] | None = None,
-    debug_session_id: str | None = None,
-    operation_core: DebugOperationCore,
-) -> ToolResponse:
-    return operation_core(
-        artifact_root=artifact_root,
-        run_id=run_id,
-        debug_session_id=debug_session_id,
-        request=DebugEvaluateRequest(inspector=inspector, arguments=arguments or {}),
-        runtime=runtime,
-    )
+def _read_symbol_request(kwargs: dict[str, object]) -> DebugOperationRequest:
+    symbol = _pop_required(kwargs, "symbol")
+    if not isinstance(symbol, str):
+        raise TypeError("symbol must be a string")
+    return DebugReadSymbolRequest(symbol=symbol)
+
+
+def _read_memory_request(kwargs: dict[str, object]) -> DebugOperationRequest:
+    address = _pop_required(kwargs, "address")
+    byte_count = _pop_required(kwargs, "byte_count")
+    if not isinstance(address, int):
+        raise TypeError("address must be an integer")
+    if not isinstance(byte_count, int):
+        raise TypeError("byte_count must be an integer")
+    return DebugReadMemoryRequest(address=address, byte_count=byte_count)
+
+
+def _evaluate_request(kwargs: dict[str, object]) -> DebugOperationRequest:
+    inspector = _pop_required(kwargs, "inspector")
+    arguments = kwargs.pop("arguments", None)
+    if not isinstance(inspector, str):
+        raise TypeError("inspector must be a string")
+    if arguments is not None and (
+        not isinstance(arguments, dict) or not all(isinstance(key, str) for key in arguments)
+    ):
+        raise TypeError("arguments must be a dict with string keys or None")
+    return DebugEvaluateRequest(inspector=inspector, arguments=cast(dict[str, object], arguments or {}))
+
+
+debug_read_registers_handler = _make_operation_request_handler(
+    "debug_read_registers_handler",
+    _read_registers_request,
+    (("registers", "list[str]", inspect.Parameter.empty),),
+)
+debug_read_symbol_handler = _make_operation_request_handler(
+    "debug_read_symbol_handler",
+    _read_symbol_request,
+    (("symbol", "str", inspect.Parameter.empty),),
+)
+debug_read_memory_handler = _make_operation_request_handler(
+    "debug_read_memory_handler",
+    _read_memory_request,
+    (
+        ("address", "int", inspect.Parameter.empty),
+        ("byte_count", "int", inspect.Parameter.empty),
+    ),
+)
+debug_evaluate_handler = _make_operation_request_handler(
+    "debug_evaluate_handler",
+    _evaluate_request,
+    (
+        ("inspector", "str", inspect.Parameter.empty),
+        ("arguments", "dict[str, object] | None", None),
+    ),
+)
 
 
 def _make_symbol_control_handler(
