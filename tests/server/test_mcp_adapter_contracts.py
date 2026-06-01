@@ -15,7 +15,10 @@ from kdive.config import BootOverrides, BuildOverrides
 from kdive.debug.contracts import DebugRuntime
 from kdive.domain import ToolResponse
 from kdive.introspect.context import LiveIntrospectRuntime
-from kdive.introspect.models import DebugIntrospectFromVmcoreHelperRequest, DebugIntrospectRunRequest
+from kdive.introspect.models import (
+    DebugIntrospectFromVmcoreHelperRequest,
+    DebugIntrospectRunRequest,
+)
 from kdive.introspect.tools import (
     IntrospectRunOptions,
     IntrospectTargetContext,
@@ -36,6 +39,7 @@ from kdive.kernel.tools import (
 )
 from kdive.postmortem.models import DebugPostmortemFetchRequest
 from kdive.postmortem.tools import (
+    DrgnHelperRequest,
     PostmortemFetchOptions,
     PostmortemTargetContext,
     PostmortemToolContext,
@@ -666,19 +670,22 @@ def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators
     assert runtime.drgn_helper_handler is not drgn_helper_handler
     assert callable(runtime.drgn_helper_handler)
 
-    helper_request = DebugIntrospectFromVmcoreHelperRequest(
+    helper_request = DrgnHelperRequest(
         run_id="run-1",
         vmcore_ref="inputs/vmcore",
         vmlinux_ref="build/vmlinux",
         name="dmesg",
     )
     assert runtime.drgn_helper_handler(request=helper_request, runtime=runtime).ok is True
-    assert drgn_calls == [
-        (
-            (helper_request,),
-            {"artifact_root": tmp_path / "runs", "runner": None, "clock": None},
-        )
-    ]
+    assert len(drgn_calls) == 1
+    source_request = drgn_calls[0][0][0]
+    assert source_request == DebugIntrospectFromVmcoreHelperRequest(
+        run_id="run-1",
+        vmcore_ref="inputs/vmcore",
+        vmlinux_ref="build/vmlinux",
+        name="dmesg",
+    )
+    assert drgn_calls[0][1] == {"artifact_root": tmp_path / "runs", "runner": None, "clock": None}
 
 
 def test_postmortem_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_path: Path) -> None:

@@ -11,7 +11,7 @@ from kdive.domain import (
     ToolResponse,
 )
 from kdive.postmortem.models import DebugPostmortemTriageRequest
-from kdive.postmortem.tools import PostmortemToolRuntime
+from kdive.postmortem.tools import DrgnHelperRequest, PostmortemToolRuntime
 from kdive.postmortem.triage import handlers as triage_handlers
 from kdive.postmortem.triage.handlers import debug_postmortem_triage_handler
 
@@ -171,6 +171,8 @@ def test_triage_subcalls_use_runtime_boundary(tmp_path) -> None:
     modules_runtime = modules.calls[0]["kwargs"]["runtime"]
     assert isinstance(dmesg_runtime, PostmortemToolRuntime)
     assert isinstance(modules_runtime, PostmortemToolRuntime)
+    assert isinstance(dmesg.calls[0]["request"], DrgnHelperRequest)
+    assert isinstance(modules.calls[0]["request"], DrgnHelperRequest)
     assert dmesg_runtime.artifact_root == tmp_path
     assert modules_runtime.artifact_root == tmp_path
     assert "artifact_root" not in dmesg.calls[0]["kwargs"]

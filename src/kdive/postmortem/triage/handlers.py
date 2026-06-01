@@ -15,7 +15,6 @@ from kdive.config import (
     TRIAGE_MODULES_HELPER,
 )
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
-from kdive.introspect.models import DebugIntrospectFromVmcoreHelperRequest
 from kdive.postmortem.crash.handler import (
     debug_postmortem_crash_handler,
     resolve_postmortem_vmcore_context,
@@ -25,7 +24,7 @@ from kdive.postmortem.models import (
     DebugPostmortemTriageReport,
     DebugPostmortemTriageRequest,
 )
-from kdive.postmortem.tools import PostmortemToolRuntime
+from kdive.postmortem.tools import DrgnHelperRequest, PostmortemToolRuntime
 from kdive.postmortem.triage import CrashOutcome, DrgnOutcome, any_section_ok, assemble_report
 from kdive.safety.redaction import Redactor
 from kdive.symbols.build_id import read_elf_build_id
@@ -103,7 +102,7 @@ def _run_triage_sources(
     def drgn(name: str) -> ToolResponse:
         try:
             return drgn_helper_handler(
-                request=DebugIntrospectFromVmcoreHelperRequest(
+                request=DrgnHelperRequest(
                     run_id=run_id,
                     vmcore_ref=request.vmcore_ref,
                     vmlinux_ref=request.vmlinux_ref,

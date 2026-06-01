@@ -64,6 +64,17 @@ class PostmortemFetchOptions(Model):
 
 
 @dataclass(frozen=True)
+class DrgnHelperRequest:
+    run_id: str
+    vmcore_ref: str
+    vmlinux_ref: str
+    name: str
+    modules_ref: str | None = None
+    args: dict[str, Any] | None = None
+    timeout_seconds: int = 30
+
+
+@dataclass(frozen=True)
 class PostmortemToolRuntime:
     artifact_root: Path
     admission: AdmissionService | None = None
@@ -90,7 +101,7 @@ class PostmortemDrgnHelperHandler(Protocol):
     def __call__(
         self,
         *,
-        request: DebugIntrospectFromVmcoreHelperRequest,
+        request: DrgnHelperRequest,
         runtime: PostmortemToolRuntime,
     ) -> ToolResponse: ...
 
@@ -185,9 +196,18 @@ def _dump(response: ToolResponse) -> dict[str, Any]:
 def _adapt_triage_drgn_helper(handler: TriageDrgnSourceHandler) -> PostmortemDrgnHelperHandler:
     def wrapped(
         *,
-        request: DebugIntrospectFromVmcoreHelperRequest,
+        request: DrgnHelperRequest,
         runtime: PostmortemToolRuntime,
     ) -> ToolResponse:
+        introspect_request = DebugIntrospectFromVmcoreHelperRequest(
+            run_id=request.run_id,
+            vmcore_ref=request.vmcore_ref,
+            vmlinux_ref=request.vmlinux_ref,
+            modules_ref=request.modules_ref,
+            name=request.name,
+            args=request.args or {},
+            timeout_seconds=request.timeout_seconds,
+        )
         kwargs: dict[str, Any] = {
             "artifact_root": runtime.artifact_root,
             "runner": runtime.ssh_runner,
@@ -195,7 +215,7 @@ def _adapt_triage_drgn_helper(handler: TriageDrgnSourceHandler) -> PostmortemDrg
         }
         if runtime.vmlinux_build_id_reader is not None:
             kwargs["build_id_reader"] = runtime.vmlinux_build_id_reader
-        return handler(request, **kwargs)
+        return handler(introspect_request, **kwargs)
 
     return wrapped
 
