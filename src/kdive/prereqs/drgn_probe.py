@@ -341,7 +341,7 @@ def _elf_build_id(path):
             if e_phnum == 0 or e_phentsize < min_phentsize:
                 return None
             file_size = fh.seek(0, 2)
-            if e_phoff < 0 or e_phoff + e_phnum * e_phentsize > file_size:
+            if e_phoff + e_phnum * e_phentsize > file_size:
                 return None
             for i in range(e_phnum):
                 fh.seek(e_phoff + i * e_phentsize)

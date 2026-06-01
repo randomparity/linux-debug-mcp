@@ -95,7 +95,7 @@ def read_vmcore_build_id(path: Path) -> str:
                 raise VmcoreBuildIdError(f"implausible e_phentsize {e_phentsize} for {'ELF64' if is64 else 'ELF32'}")
             table_bytes = e_phentsize * e_phnum
             file_size = fh.seek(0, 2)
-            if e_phoff < 0 or e_phoff + table_bytes > file_size:
+            if e_phoff + table_bytes > file_size:
                 raise VmcoreBuildIdError(
                     f"program-header table ({table_bytes} bytes at offset {e_phoff}) extends past EOF ({file_size})"
                 )
