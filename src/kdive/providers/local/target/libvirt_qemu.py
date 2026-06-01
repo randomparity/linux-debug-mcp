@@ -35,10 +35,12 @@ QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 QEMU_DOMAIN_MEMORY_MIB = 1024
 QEMU_DOMAIN_VCPU_COUNT = 1
 
-ElementTree.register_namespace("ldmcp", MCP_METADATA_NS)
-ElementTree.register_namespace("qemu", QEMU_NS)
-
 logger = logging.getLogger(__name__)
+
+
+def _register_domain_xml_namespaces() -> None:
+    ElementTree.register_namespace("ldmcp", MCP_METADATA_NS)
+    ElementTree.register_namespace("qemu", QEMU_NS)
 
 
 def parse_domifaddr_ipv4(output: str) -> str | None:
@@ -850,6 +852,7 @@ class LibvirtQemuProvider:
                 {"value": f"tcp:{plan.gdbstub_endpoint.host}:{plan.gdbstub_endpoint.port},server=on,wait={wait}"},
             )
 
+        _register_domain_xml_namespaces()
         return ElementTree.tostring(domain, encoding="unicode")
 
     def validate_existing_domain_ownership(self, plan: BootPlan, domain_xml: str) -> None:

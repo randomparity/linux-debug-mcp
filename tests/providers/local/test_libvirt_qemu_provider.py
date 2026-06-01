@@ -21,6 +21,26 @@ from kdive.providers.local.target.libvirt_qemu import (
 MCP_METADATA_NS = "urn:kdive:domain"
 
 
+def test_libvirt_qemu_import_does_not_register_xml_namespaces(monkeypatch) -> None:
+    import importlib
+    import sys
+
+    module_name = "kdive.providers.local.target.libvirt_qemu"
+    original_module = sys.modules.pop(module_name, None)
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(ElementTree, "register_namespace", lambda prefix, uri: calls.append((prefix, uri)))
+
+    try:
+        importlib.import_module(module_name)
+    finally:
+        if original_module is not None:
+            sys.modules[module_name] = original_module
+        else:
+            sys.modules.pop(module_name, None)
+
+    assert calls == []
+
+
 def make_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
     kernel = tmp_path / "build" / "arch" / "x86" / "boot" / "bzImage"
     rootfs = tmp_path / "images" / "rootfs.qcow2"
