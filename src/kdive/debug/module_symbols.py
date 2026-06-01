@@ -10,20 +10,20 @@ from typing import Any
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import RootfsProfile
 from kdive.debug.contracts import DebugRuntime
-from kdive.debug.operations import (
-    _configuration_failure,
-    _debug_session_manifest_details,
-    _enforce_debug_ownership_fence,
-    _load_active_debug_session,
-    _mi_session_artifacts,
-    _persist_mi_debug_session,
-    _preserved_debug_step_details,
-    _teardown_stalled_debug_session,
-)
 from kdive.debug.policy import ensure_debug_operation_enabled, resolve_debug_profile
+from kdive.debug.session_state import (
+    debug_session_manifest_details,
+    enforce_debug_ownership_fence,
+    load_active_debug_session,
+    mi_session_artifacts,
+    persist_mi_debug_session,
+    preserved_debug_step_details,
+    teardown_stalled_debug_session,
+)
 from kdive.debug.tools import DebugLoadModuleSymbolsRequest, DebugToolContext
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES
 from kdive.domain import ErrorCategory, StepResult, StepStatus, ToolResponse
+from kdive.handlers.shared import configuration_failure_response as _configuration_failure
 from kdive.providers.debug import (
     DebugSession,
     GdbMiError,
@@ -240,8 +240,8 @@ def _resolve_module_symbol_load_request(
     runtime: DebugRuntime,
     gdb_mi_sessions: GdbMiSessionRegistry[Any],
 ) -> _ResolvedModuleSymbolLoadRequest | ToolResponse:
-    session = _load_active_debug_session(store, run_id, debug_session_id)
-    _enforce_debug_ownership_fence(
+    session = load_active_debug_session(store, run_id, debug_session_id)
+    enforce_debug_ownership_fence(
         run_id=run_id,
         admission=runtime.admission,
         session_registry=runtime.session_registry,
@@ -384,7 +384,7 @@ def _cleanup_stalled_module_symbol_load(
     if reaped is not None:
         with contextlib.suppress(Exception):
             gdb_mi_engine.force_resume(reaped)
-    _teardown_stalled_debug_session(
+    teardown_stalled_debug_session(
         run_id=run_id,
         admission=runtime.admission,
         session_registry=runtime.session_registry,
@@ -412,10 +412,10 @@ def _record_module_symbol_load_success(
     ledger[module] = dict(loaded.sections)
     updated_session = session.model_copy(update={"loaded_modules": ledger})
     loaded_payload = loaded.model_dump(mode="json")
-    _persist_mi_debug_session(store=store, run_id=run_id, session=updated_session)
+    persist_mi_debug_session(store=store, run_id=run_id, session=updated_session)
     details = {
-        **_debug_session_manifest_details(store=store, run_id=run_id, session=updated_session),
-        **_preserved_debug_step_details(store, run_id),
+        **debug_session_manifest_details(store=store, run_id=run_id, session=updated_session),
+        **preserved_debug_step_details(store, run_id),
         "loaded_module": loaded_payload,
     }
     store.record_step_result(
@@ -424,7 +424,7 @@ def _record_module_symbol_load_success(
             step_name="debug",
             status=StepStatus.SUCCEEDED,
             summary="debug.load_module_symbols succeeded",
-            artifacts=_mi_session_artifacts(store=store, run_id=run_id, session=updated_session),
+            artifacts=mi_session_artifacts(store=store, run_id=run_id, session=updated_session),
             details=details,
         ),
         replace_succeeded=True,

@@ -16,18 +16,18 @@ from kdive.coordination.admission import AdmissionError, AdmissionService, requi
 from kdive.coordination.endpoint_safety import EndpointSafetyError
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
-from kdive.debug.operations import (
-    _configuration_failure,
-    _debug_session_details_from_result,
-    _debug_session_manifest_details,
-    _persist_mi_debug_session,
-    _resume_debug_transport,
-    _teardown_debug_transport,
-)
 from kdive.debug.policy import ensure_debug_operation_enabled, halt_debug_transport, resolve_debug_profile
+from kdive.debug.session_state import (
+    debug_session_details_from_result,
+    debug_session_manifest_details,
+    persist_mi_debug_session,
+    resume_debug_transport,
+    teardown_debug_transport,
+)
 from kdive.debug.tools import DebugStartSessionRequest, DebugToolContext
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.handlers.shared import _require_value
+from kdive.handlers.shared import configuration_failure_response as _configuration_failure
 from kdive.providers.debug import (
     DebugAttachStatus,
     DebugSession,
@@ -146,10 +146,10 @@ def _run_mi_attach_probe(
             # write fails, teardown's close(force=False) then leaves a closed_while_halted recovery
             # tombstone -- the conservative fallback -- and still releases the guard.
             with contextlib.suppress(Exception):
-                _resume_debug_transport(
+                resume_debug_transport(
                     session=transport_session, admission=admission, session_registry=session_registry
                 )
-        _teardown_debug_transport(
+        teardown_debug_transport(
             transport_session=transport_session,
             transaction=transaction,
             session_registry=session_registry,
@@ -453,8 +453,8 @@ def _cleanup_debug_start_session_attach(
         with contextlib.suppress(Exception):
             gdb_mi_engine.force_resume(reaped)
     with contextlib.suppress(Exception):
-        _resume_debug_transport(session=transport_session, admission=admission, session_registry=session_registry)
-    _teardown_debug_transport(
+        resume_debug_transport(session=transport_session, admission=admission, session_registry=session_registry)
+    teardown_debug_transport(
         transport_session=transport_session,
         transaction=transaction,
         session_registry=session_registry,
@@ -488,7 +488,7 @@ def _debug_start_session_reuse_or_readiness(
     existing = locked_manifest.step_results.get("debug")
     replace_existing_debug = new_session
     if existing and not new_session:
-        active_session = _debug_session_details_from_result(existing)
+        active_session = debug_session_details_from_result(existing)
         if active_session is not None:
             return (
                 None,
@@ -690,12 +690,12 @@ def _debug_start_session_persist_success(
         transcript_path=_mi_probe_transcript_path(store.run_dir(run_id)),
         started_at=preflight.started_at,
     )
-    session_path = _persist_mi_debug_session(store=store, run_id=run_id, session=session)
+    session_path = persist_mi_debug_session(store=store, run_id=run_id, session=session)
     artifacts = [
         ArtifactRef(path=str(session_path), kind="debug-session"),
         ArtifactRef(path=session.transcript_path, kind="debug-transcript", sensitive=True),
     ]
-    details = _debug_session_manifest_details(store=store, run_id=run_id, session=session)
+    details = debug_session_manifest_details(store=store, run_id=run_id, session=session)
     details.update(attach.mi_probe_details)
     details["transport_session_id"] = attach.transport_session.session_id
     if session_guard is not None:

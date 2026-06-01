@@ -332,7 +332,7 @@ def test_non_gdbmi_engine_exception_still_resumes_and_frees_guard(tmp_path: Path
 def test_probe_fault_releases_guard_even_if_unhalt_write_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Guaranteed-resume robustness: if the durable un-halt write (`_resume_debug_transport`) raises
+    """Guaranteed-resume robustness: if the durable un-halt write (`resume_debug_transport`) raises
     (e.g. an OSError on a full disk), the teardown must still run -- the StopCapableGuard is released,
     the kernel is not left HALTED, and the handler returns a failure rather than letting the
     exception escape."""
@@ -341,7 +341,7 @@ def test_probe_fault_releases_guard_even_if_unhalt_write_raises(
     def _boom(**_kwargs):
         raise OSError("disk full while un-halting")
 
-    monkeypatch.setattr(session_handlers, "_resume_debug_transport", _boom)
+    monkeypatch.setattr(session_handlers, "resume_debug_transport", _boom)
     artifact_root = _create_debug_ready_run(tmp_path)
     registry = _make_registry(tmp_path / "reg")
     txn, admission = _build_transaction(registry=registry)

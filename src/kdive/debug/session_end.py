@@ -11,20 +11,20 @@ from kdive.config import DebugProfile
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
-from kdive.debug.operations import (
-    _configuration_failure,
-    _debug_session_manifest_details,
-    _is_legacy_debug_session,
-    _load_active_debug_session,
-    _mark_legacy_session_recovery_required,
-    _mi_session_artifacts,
-    _persist_mi_debug_session,
-    _preserved_debug_step_details,
-    _recorded_transport_session_id,
-)
 from kdive.debug.policy import ensure_debug_operation_enabled, resolve_debug_profile
+from kdive.debug.session_state import (
+    debug_session_manifest_details,
+    is_legacy_debug_session,
+    load_active_debug_session,
+    mark_legacy_session_recovery_required,
+    mi_session_artifacts,
+    persist_mi_debug_session,
+    preserved_debug_step_details,
+    recorded_transport_session_id,
+)
 from kdive.debug.tools import DebugSessionRequest, DebugToolContext
 from kdive.domain import ErrorCategory, StepResult, StepStatus, ToolResponse
+from kdive.handlers.shared import configuration_failure_response as _configuration_failure
 from kdive.providers.debug import DebugSessionState, GdbMiEngine, GdbMiSessionRegistry, ProviderDebugError
 from kdive.safety.redaction import Redactor
 from kdive.seams.guard import SessionGuard, SessionGuardContext
@@ -55,22 +55,22 @@ def _end_mi_debug_session(
     redactor = Redactor()
     try:
         with store.debug_lock(run_id):
-            session = _load_active_debug_session(store, run_id, debug_session_id, allow_ended=True)
+            session = load_active_debug_session(store, run_id, debug_session_id, allow_ended=True)
             profile = resolve_debug_profile(profile_name=session.selected_debug_profile, debug_profiles=debug_profiles)
             ensure_debug_operation_enabled(profile, "debug.end_session")
             ended = session.model_copy(
                 update={"current_execution_state": DebugSessionState.ENDED, "ended_at": datetime.now(UTC).isoformat()}
             )
-            _persist_mi_debug_session(store=store, run_id=run_id, session=ended)
+            persist_mi_debug_session(store=store, run_id=run_id, session=ended)
             details = {
-                **_debug_session_manifest_details(store=store, run_id=run_id, session=ended),
-                **_preserved_debug_step_details(store, run_id),
+                **debug_session_manifest_details(store=store, run_id=run_id, session=ended),
+                **preserved_debug_step_details(store, run_id),
             }
             terminal = StepResult(
                 step_name="debug",
                 status=StepStatus.SUCCEEDED,
                 summary="debug.end_session succeeded",
-                artifacts=_mi_session_artifacts(store=store, run_id=run_id, session=ended),
+                artifacts=mi_session_artifacts(store=store, run_id=run_id, session=ended),
                 details=details,
             )
             store.record_step_result(run_id, terminal, replace_succeeded=True)
@@ -101,7 +101,7 @@ def _end_mi_debug_session(
         summary="debug.end_session succeeded",
         run_id=run_id,
         data=redactor.redact_value(details),
-        artifacts=redacted_artifacts(_mi_session_artifacts(store=store, run_id=run_id, session=ended), redactor),
+        artifacts=redacted_artifacts(mi_session_artifacts(store=store, run_id=run_id, session=ended), redactor),
         suggested_next_actions=["artifacts.get_manifest"],
     )
 
@@ -120,9 +120,9 @@ def _end_session(
     gdb_mi_sessions: GdbMiSessionRegistry | None = None,
 ) -> ToolResponse:
     transport_session_id = (
-        _recorded_transport_session_id(artifact_root=artifact_root, run_id=run_id) if transaction is not None else None
+        recorded_transport_session_id(artifact_root=artifact_root, run_id=run_id) if transaction is not None else None
     )
-    is_legacy_session = _is_legacy_debug_session(
+    is_legacy_session = is_legacy_debug_session(
         admission=admission,
         session_registry=session_registry,
         transport_session_id=transport_session_id,
@@ -160,7 +160,7 @@ def _end_session(
             session_registry,
             "session registry missing for legacy session recovery marker",
         )
-        _mark_legacy_session_recovery_required(run_id=run_id, admission=admission, session_registry=session_registry)
+        mark_legacy_session_recovery_required(run_id=run_id, admission=admission, session_registry=session_registry)
     return response
 
 

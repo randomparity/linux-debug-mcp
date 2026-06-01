@@ -12,8 +12,10 @@ INTROSPECT_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "introspect" / "handlers.p
 INTROSPECT_EXECUTION_SOURCE = ROOT / "src" / "kdive" / "introspect" / "execution.py"
 DEBUG_OPERATIONS_SOURCE = ROOT / "src" / "kdive" / "debug" / "operations.py"
 DEBUG_POLICY_SOURCE = ROOT / "src" / "kdive" / "debug" / "policy.py"
+DEBUG_MODULE_SYMBOLS_SOURCE = ROOT / "src" / "kdive" / "debug" / "module_symbols.py"
+DEBUG_SESSION_END_SOURCE = ROOT / "src" / "kdive" / "debug" / "session_end.py"
 DEBUG_SESSION_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "debug" / "session_handlers.py"
-POSTMORTEM_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "handlers.py"
+POSTMORTEM_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "triage" / "handlers.py"
 POSTMORTEM_DUMP_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "dumps" / "handlers.py"
 SHARED_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "handlers" / "shared.py"
 PROBE_SEAM_SOURCE = ROOT / "src" / "kdive" / "seams" / "probes.py"
@@ -169,6 +171,22 @@ def test_debug_features_do_not_import_private_transport_handler_helpers() -> Non
 def test_debug_operations_depend_on_neutral_contracts_not_handlers() -> None:
     assert "kdive.debug.contracts" in _imported_modules(DEBUG_OPERATIONS_SOURCE)
     assert "kdive.debug.handlers" not in _imported_modules(DEBUG_OPERATIONS_SOURCE)
+
+
+def test_debug_session_modules_do_not_import_operations_private_helpers() -> None:
+    session_sources = [
+        DEBUG_MODULE_SYMBOLS_SOURCE,
+        DEBUG_SESSION_END_SOURCE,
+        DEBUG_SESSION_HANDLERS_SOURCE,
+    ]
+
+    offenders = {
+        str(path.relative_to(ROOT)): sorted(_imported_names(path, "kdive.debug.operations"))
+        for path in session_sources
+        if _imported_names(path, "kdive.debug.operations")
+    }
+
+    assert offenders == {}
 
 
 def test_transport_and_prereq_handlers_accept_structured_boundaries_only() -> None:

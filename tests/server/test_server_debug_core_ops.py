@@ -34,12 +34,14 @@ from kdive.debug import handlers as debug_handlers
 from kdive.debug import operations as debug_operations
 from kdive.debug import session_end as debug_session_end
 from kdive.debug import session_handlers
+from kdive.debug import session_state as debug_session_state
 from kdive.debug import tools as debug_tools
 from kdive.debug.session_end import _end_mi_debug_session, debug_end_session_handler
 from kdive.debug.session_handlers import _start_session as debug_start_session_handler
 from kdive.debug.tools import DebugToolContext, DebugToolHandlers
 from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus
 from kdive.introspect import execution as introspect_execution
+from kdive.introspect import result as introspect_result
 from kdive.providers.debug import GdbMiSessionRegistry as GdbMiSessionRegistryContract
 from kdive.providers.local.debug.gdb_mi import (
     CANONICAL_PROBE_SYMBOL,
@@ -466,21 +468,25 @@ def test_debug_operation_handlers_hide_explicit_operation_core(tmp_path: Path) -
 
 def test_server_no_longer_reexports_private_debug_operation_helpers() -> None:
     for name in (
-        "_debug_session_manifest_details",
-        "_load_active_debug_session",
-        "_persist_mi_debug_session",
-        "_recorded_transport_session_id",
-        "_teardown_stalled_debug_session",
+        "debug_session_manifest_details",
+        "load_active_debug_session",
+        "persist_mi_debug_session",
+        "recorded_transport_session_id",
+        "teardown_stalled_debug_session",
     ):
-        assert hasattr(debug_operations, name)
+        assert hasattr(debug_session_state, name)
+        assert not hasattr(debug_operations, f"_{name}")
         assert not hasattr(server_module, name)
 
-    for name in ("_resume_debug_transport", "_teardown_debug_transport"):
+    for name in ("resume_debug_transport", "teardown_debug_transport"):
+        assert hasattr(debug_session_state, name)
+        assert not hasattr(debug_operations, f"_{name}")
         assert not hasattr(server_module, name)
 
-    for name in ("_target_python_remote_argv", "_record_introspect_failure"):
-        assert hasattr(introspect_execution, name)
-        assert not hasattr(server_module, name)
+    assert hasattr(introspect_execution, "_target_python_remote_argv")
+    assert not hasattr(server_module, "_target_python_remote_argv")
+    assert hasattr(introspect_result, "_record_introspect_failure")
+    assert not hasattr(server_module, "_record_introspect_failure")
 
     assert not hasattr(server_module, "_redact_and_truncate")
 
@@ -691,7 +697,7 @@ def test_end_session_bookkeeping_fault_does_not_resume_before_recording(tmp_path
     def _boom(*_args, **_kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(debug_session_end, "_persist_mi_debug_session", _boom)
+    monkeypatch.setattr(debug_session_end, "persist_mi_debug_session", _boom)
     response = _end_mi_debug_session(
         artifact_root=artifact_root,
         run_id=RUN_ID,
@@ -788,7 +794,7 @@ def test_op_persist_fault_keeps_healthy_session_registered(tmp_path: Path, monke
     def _boom(*_args, **_kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(debug_operations, "_persist_mi_debug_session", _boom)
+    monkeypatch.setattr(debug_operations, "persist_mi_debug_session", _boom)
     response = debug_set_breakpoint_handler(
         artifact_root=artifact_root,
         run_id=RUN_ID,

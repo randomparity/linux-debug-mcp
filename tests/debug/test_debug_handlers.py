@@ -278,7 +278,7 @@ def test_start_session_persist_failure_reaps_and_resumes(tmp_path: Path, monkeyp
     def _boom(**_kwargs):
         raise OSError("disk full while persisting the debug session")
 
-    monkeypatch.setattr(session_handlers, "_persist_mi_debug_session", _boom)
+    monkeypatch.setattr(session_handlers, "persist_mi_debug_session", _boom)
     response = fx.start()
 
     assert response.ok is False
