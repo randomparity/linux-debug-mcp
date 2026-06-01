@@ -26,6 +26,26 @@ def test_postmortem_vmcore_context_resolver_is_shared() -> None:
     assert postmortem_handlers.resolve_postmortem_vmcore_context is crash_handler.resolve_postmortem_vmcore_context
 
 
+def test_postmortem_crash_handler_uses_named_execution_phases() -> None:
+    source = (Path(__file__).parents[2] / "src" / "kdive" / "postmortem" / "crash_handler.py").read_text(
+        encoding="utf-8"
+    )
+    handler_source = source.split("def debug_postmortem_crash_handler(", 1)[1].split("\ndef _finalize_crash_call(", 1)[
+        0
+    ]
+
+    for helper in (
+        "_prepare_crash_call_workspace",
+        "_run_crash_batch",
+        "_record_crash_runner_exception",
+    ):
+        assert f"def {helper}(" in source
+        assert f"{helper}(" in handler_source
+
+    assert "active_runner.run(" not in handler_source
+    assert 'exception_type": type(exc).__name__' not in handler_source
+
+
 def _run(tmp_path: Path) -> ArtifactStore:
     store = ArtifactStore(artifact_root=tmp_path)
     store.create_run(

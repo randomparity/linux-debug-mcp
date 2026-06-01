@@ -55,6 +55,18 @@ class PostmortemVmcoreContext:
     vmcore_build_id: str
 
 
+@dataclass(frozen=True)
+class _CrashCallWorkspace:
+    call_id: str
+    agent_dir: Path
+    sensitive_call_dir: Path
+    stdout_path: Path
+    stderr_path: Path
+    redactor: Redactor
+    commands: list[str]
+    command_script: str
+
+
 def _require_postmortem_context(ctx: PostmortemVmcoreContext | None) -> PostmortemVmcoreContext:
     if ctx is None:
         raise RuntimeError("postmortem vmcore context missing after successful resolution")
@@ -222,6 +234,104 @@ def resolve_postmortem_vmcore_context(
     )
 
 
+def _prepare_crash_call_workspace(
+    ctx: PostmortemVmcoreContext, request: DebugPostmortemCrashRequest
+) -> _CrashCallWorkspace:
+    call_id = uuid.uuid4().hex
+    agent_dir = ctx.run_dir / "debug" / "postmortem" / "crash" / call_id
+    sensitive_call_dir = ctx.run_dir / "sensitive" / "debug" / "postmortem" / "crash" / call_id
+    agent_dir.mkdir(parents=True, mode=0o700)
+    sensitive_call_dir.mkdir(parents=True, mode=0o700)
+    # mkdir(mode=) applies only to the leaf; tighten the intermediate sensitive
+    # dirs to 0700 too so the raw output tree never relies solely on the
+    # sensitive/ ancestor (mirrors _execute_vmcore_introspect_call).
+    sensitive_call_dir.chmod(0o700)
+    sensitive_call_dir.parent.chmod(0o700)
+    sensitive_call_dir.parent.parent.chmod(0o700)
+
+    stripped_commands = [c.strip() for c in request.commands]
+    command_script = build_command_script(stripped_commands, sensitive_call_dir, ctx.modules_path)
+    redactor = Redactor(secret_values=[])
+    (agent_dir / "request.json").write_text(
+        json.dumps(redactor.redact_value(request.model_dump(mode="json"))), encoding="utf-8"
+    )
+    return _CrashCallWorkspace(
+        call_id=call_id,
+        agent_dir=agent_dir,
+        sensitive_call_dir=sensitive_call_dir,
+        stdout_path=sensitive_call_dir / "stdout.raw",
+        stderr_path=sensitive_call_dir / "stderr.raw",
+        redactor=redactor,
+        commands=stripped_commands,
+        command_script=command_script,
+    )
+
+
+def _run_crash_batch(
+    *,
+    ctx: PostmortemVmcoreContext,
+    request: DebugPostmortemCrashRequest,
+    workspace: _CrashCallWorkspace,
+    runner: SshRunner,
+) -> SshCommandResult:
+    argv = [
+        "prlimit",
+        f"--fsize={CRASH_PER_CMD_CAP}",
+        "timeout",
+        "--kill-after=2s",
+        f"{request.timeout_seconds}s",
+        "crash",
+        "-s",
+        str(ctx.vmlinux_path),
+        str(ctx.vmcore_path),
+    ]
+    return runner.run(
+        argv,
+        timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
+        stdout_path=workspace.stdout_path,
+        stderr_path=workspace.stderr_path,
+        cancel=threading.Event(),
+        stdin=workspace.command_script,
+        max_stdout_bytes=CRASH_STDOUT_CAP,
+    )
+
+
+def _record_crash_runner_exception(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    workspace: _CrashCallWorkspace,
+    exc: Exception,
+    duration_ms: int,
+) -> ToolResponse:
+    artifacts = [ArtifactRef(path=str(workspace.agent_dir / "request.json"), kind="application/json")]
+    failed = StepResult(
+        step_name=f"postmortem.crash:{workspace.call_id}",
+        status=StepStatus.FAILED,
+        summary="postmortem crash failed before runner finalization",
+        artifacts=artifacts,
+        details={
+            "call_id": workspace.call_id,
+            "code": "postmortem_crash_failed",
+            "exception_type": type(exc).__name__,
+            "duration_ms": duration_ms,
+        },
+    )
+    _record_terminal_crash_result(store, run_id, failed)
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        run_id=run_id,
+        message="postmortem crash failed before runner finalization",
+        details={
+            "code": "postmortem_crash_failed",
+            "call_id": workspace.call_id,
+            "exception_type": type(exc).__name__,
+        },
+        artifacts=artifacts,
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
 def debug_postmortem_crash_handler(
     request: DebugPostmortemCrashRequest,
     *,
@@ -262,80 +372,30 @@ def debug_postmortem_crash_handler(
     if mode & 0o077:
         return _crash_config_failure(run_id, "sensitive_dir_too_permissive", f"{sensitive_dir} mode is {oct(mode)}")
 
-    call_id = uuid.uuid4().hex
-    agent_dir = run_dir / "debug" / "postmortem" / "crash" / call_id
-    sensitive_call_dir = run_dir / "sensitive" / "debug" / "postmortem" / "crash" / call_id
-    agent_dir.mkdir(parents=True, mode=0o700)
-    sensitive_call_dir.mkdir(parents=True, mode=0o700)
-    # mkdir(mode=) applies only to the leaf; tighten the intermediate sensitive
-    # dirs to 0700 too so the raw output tree never relies solely on the
-    # sensitive/ ancestor (mirrors _execute_vmcore_introspect_call).
-    sensitive_call_dir.chmod(0o700)
-    sensitive_call_dir.parent.chmod(0o700)
-    sensitive_call_dir.parent.parent.chmod(0o700)
-
-    stripped_commands = [c.strip() for c in request.commands]
-    cmd_script = build_command_script(stripped_commands, sensitive_call_dir, ctx.modules_path)
-    redactor = Redactor(secret_values=[])
-    (agent_dir / "request.json").write_text(
-        json.dumps(redactor.redact_value(request.model_dump(mode="json"))), encoding="utf-8"
-    )
-
-    stdout_path = sensitive_call_dir / "stdout.raw"
-    stderr_path = sensitive_call_dir / "stderr.raw"
+    workspace = _prepare_crash_call_workspace(ctx, request)
     active_runner: SshRunner = runner or SubprocessSshRunner()
-    argv = [
-        "prlimit",
-        f"--fsize={CRASH_PER_CMD_CAP}",
-        "timeout",
-        "--kill-after=2s",
-        f"{request.timeout_seconds}s",
-        "crash",
-        "-s",
-        str(ctx.vmlinux_path),
-        str(ctx.vmcore_path),
-    ]
     started_at = now()
     started_monotonic = time.monotonic()
     try:
-        ssh_result = active_runner.run(
-            argv,
-            timeout=request.timeout_seconds + SSH_TIMEOUT_GRACE_SECONDS,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-            cancel=threading.Event(),
-            stdin=cmd_script,
-            max_stdout_bytes=CRASH_STDOUT_CAP,
-        )
+        ssh_result = _run_crash_batch(ctx=ctx, request=request, workspace=workspace, runner=active_runner)
     except Exception as exc:  # noqa: BLE001 - offline boundary: return typed ToolResponse, do not leak raw exceptions
         duration_ms = int((time.monotonic() - started_monotonic) * 1000)
-        artifacts = [ArtifactRef(path=str(agent_dir / "request.json"), kind="application/json")]
-        failed = StepResult(
-            step_name=f"postmortem.crash:{call_id}",
-            status=StepStatus.FAILED,
-            summary="postmortem crash failed before runner finalization",
-            artifacts=artifacts,
-            details={
-                "call_id": call_id,
-                "code": "postmortem_crash_failed",
-                "exception_type": type(exc).__name__,
-                "duration_ms": duration_ms,
-            },
-        )
-        _record_terminal_crash_result(store, run_id, failed)
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        return _record_crash_runner_exception(
+            store=store,
             run_id=run_id,
-            message="postmortem crash failed before runner finalization",
-            details={"code": "postmortem_crash_failed", "call_id": call_id, "exception_type": type(exc).__name__},
-            artifacts=artifacts,
-            suggested_next_actions=["artifacts.get_manifest"],
+            workspace=workspace,
+            exc=exc,
+            duration_ms=duration_ms,
         )
     # The per-command output files are written by the crash child at its own
     # umask (commonly 0644) and carry raw, unredacted guest memory; tighten them
     # (and stdout/stderr) to 0600 so they match the sensitive/ 0700 discipline.
-    raw_files = [stdout_path, stderr_path, *sensitive_call_dir.glob("cmd-*.out")]
-    mod_load_path = sensitive_call_dir / "mod-load.out"
+    raw_files = [
+        workspace.stdout_path,
+        workspace.stderr_path,
+        *workspace.sensitive_call_dir.glob("cmd-*.out"),
+    ]
+    mod_load_path = workspace.sensitive_call_dir / "mod-load.out"
     if mod_load_path.exists():
         raw_files.append(mod_load_path)
     for raw_path in raw_files:
@@ -344,12 +404,12 @@ def debug_postmortem_crash_handler(
     return _finalize_crash_call(
         store=store,
         run_id=run_id,
-        call_id=call_id,
+        call_id=workspace.call_id,
         ssh_result=ssh_result,
-        sensitive_call_dir=sensitive_call_dir,
-        agent_dir=agent_dir,
-        redactor=redactor,
-        commands=stripped_commands,
+        sensitive_call_dir=workspace.sensitive_call_dir,
+        agent_dir=workspace.agent_dir,
+        redactor=workspace.redactor,
+        commands=workspace.commands,
         modules_requested=ctx.modules_path is not None,
         vmcore_build_id=ctx.vmcore_build_id,
         started_at=started_at,
