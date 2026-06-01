@@ -53,6 +53,15 @@ def _best_effort_reap(transport: Transport, state: _OpenState) -> None:
         )
 
 
+def _raise_close_failures(close_error: Exception | None, cleanup_errors: list[Exception]) -> None:
+    if close_error is not None:
+        if cleanup_errors:
+            raise ExceptionGroup("transport close failed after cleanup errors", [close_error, *cleanup_errors])
+        raise close_error
+    if cleanup_errors:
+        raise ExceptionGroup("transport close cleanup failed", cleanup_errors)
+
+
 def _write_backend_partial(
     registry: SessionRegistry, record: TransportSession, resource: object
 ) -> tuple[int, str | None] | None:
@@ -260,6 +269,9 @@ class TransportTransaction:
         if self._dispatcher is None:
             return
         self._dispatcher.subscribe(session.target_key, session.session_id, _SessionSubscriber(self, session, state))
+
+    def _record_by_session_id(self, session_id: str) -> TransportSession | None:
+        return next((record for record in self._registry.list_records() if record.session_id == session_id), None)
 
     def _write_opening_record(
         self,
@@ -557,9 +569,7 @@ class TransportTransaction:
                 True, that close-while-halted tombstone is skipped and the record is deleted
                 cleanly — the caller asserts the target needs no recovery gating.
         """
-        # load the durable record by scanning (close is keyed by session_id; the record is by
-        # TargetKey, so resolve via list_records — small set).
-        record = next((r for r in self._registry.list_records() if r.session_id == session_id), None)
+        record = self._record_by_session_id(session_id)
         if record is None:
             return
         transport = self._transports[record.provider]
@@ -608,12 +618,7 @@ class TransportTransaction:
         if dispatcher is not None:
             cleanup(lambda: dispatcher.unsubscribe(record.target_key, session_id))
 
-        if close_error is not None:
-            if cleanup_errors:
-                raise ExceptionGroup("transport close failed after cleanup errors", [close_error, *cleanup_errors])
-            raise close_error
-        if cleanup_errors:
-            raise ExceptionGroup("transport close cleanup failed", cleanup_errors)
+        _raise_close_failures(close_error, cleanup_errors)
 
     def force_release(self, session_id: str) -> None:
         """Last-resort remediation when close() failed and stranded a HALTED record (SessionGuard
@@ -624,7 +629,7 @@ class TransportTransaction:
         path does not guarantee a later SessionRegistry.reconcile() can identify or reap a still-live
         backend; callers use it only as a coordination unblock when the normal close/reap path has
         already failed. Idempotent; an unknown session_id is a no-op."""
-        record = next((r for r in self._registry.list_records() if r.session_id == session_id), None)
+        record = self._record_by_session_id(session_id)
         if record is None:
             self._tokens.pop(session_id, None)
             self._handles.pop(session_id, None)
