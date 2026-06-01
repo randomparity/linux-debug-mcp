@@ -3,11 +3,9 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import re
 import shlex
 import tempfile
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -19,8 +17,6 @@ from kdive.artifacts.handlers import (
     create_run_handler,
     get_manifest_handler,
 )
-from kdive.artifacts.manifest import RunManifest
-from kdive.artifacts.store import ArtifactStore, record_step_with_retry
 from kdive.artifacts.tools import register_artifact_tools
 from kdive.config import ServerConfig
 from kdive.coordination.admission import (
@@ -41,11 +37,7 @@ from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES as _DEFAULT_ROOTFS_PR
 from kdive.default_profiles import (
     DEFAULT_TARGET_PROFILES as _DEFAULT_TARGET_PROFILES,
 )
-from kdive.domain import (
-    ErrorCategory,
-    StepResult,
-    ToolResponse,
-)
+from kdive.domain import ErrorCategory, ToolResponse
 from kdive.introspect.handlers import (
     debug_introspect_check_prerequisites_handler,
     debug_introspect_from_vmcore_handler,
@@ -207,15 +199,6 @@ DEFAULT_ARTIFACT_ROOT = Path(".kdive/runs")
 SERVER_CONFIG_ENV_VAR = "KDIVE_CONFIG"
 RUNNING_BOOT_MESSAGE = "previous boot is still recorded as running"
 RUNNING_TESTS_MESSAGE = "previous test run is still recorded as running"
-# debug.introspect.run stdout cap. Sized above the wrapper's 1 MiB total_json
-# payload (local_drgn_introspect.py) so a legitimate run is never killed, while
-# still bounding a hostile target that ignores the wrapper.
-RUN_STDOUT_CAP = 2 * 1024 * 1024
-
-# Seconds added to a caller's command timeout when bounding the outer SSH transport. The remote
-# command is killed at its own deadline; this grace lets the transport observe that exit and return
-# a clean result before the SSH layer itself times out.
-SSH_TIMEOUT_GRACE_SECONDS = 10
 
 __all__ = (
     "DEFAULT_ARTIFACT_ROOT",
@@ -224,48 +207,11 @@ __all__ = (
     "DEFAULT_ROOTFS_PROFILES",
     "DEFAULT_TARGET_PROFILES",
     "DEFAULT_TEST_SUITES",
-    "RUN_STDOUT_CAP",
     "SERVER_CONFIG_ENV_VAR",
-    "SSH_TIMEOUT_GRACE_SECONDS",
     "create_app",
     "load_server_config",
     "main",
 )
-
-
-_INTROSPECT_STEP_NAME_RE = re.compile(r"^introspect:")
-_POSTMORTEM_CRASH_STEP_RE = re.compile(r"^postmortem\.crash:[0-9a-f]{32}$")
-
-
-def _count_introspect_calls(manifest: RunManifest) -> int:
-    """Spec §5.2 step 4a / R3-F5. Named so tests can monkey-patch it."""
-    return sum(1 for name in manifest.step_results if _INTROSPECT_STEP_NAME_RE.match(name))
-
-
-def _head_tail(s: str, *, head: int, tail: int) -> str:
-    """Spec §3.2: snippet helper — head N + middle marker + tail N."""
-    if len(s) <= head + tail:
-        return s
-    return f"{s[:head]}\n…[truncated]…\n{s[-tail:]}"
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
-
-
-def _chmod_best_effort(path: Path, mode: int) -> None:
-    """chmod that tolerates concurrent deletion (TD-15). A path removed between its enumeration
-    (e.g. a ``glob``) and this call raises FileNotFoundError — the expected benign race on the
-    sensitive/ tree — which is suppressed; any other OSError still propagates. Centralizing the
-    TOCTOU handling here keeps the several sensitive-file tightening sites from each re-deriving it."""
-    with contextlib.suppress(FileNotFoundError):
-        path.chmod(mode)
-
-
-def _record_terminal_introspect_result(store: ArtifactStore, run_id: str, result: StepResult) -> None:
-    # Spec §5.2 step 13: every introspect:<call_id> is a fresh entry (UUIDv4) — append, never replace.
-    record_step_with_retry(store, run_id, result, append=True)
-
 
 # Live and vmcore introspection handlers live in kdive.introspect.handlers/execution.
 

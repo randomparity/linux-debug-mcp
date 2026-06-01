@@ -9,6 +9,7 @@ SERVER_SOURCE = ROOT / "src" / "kdive" / "server.py"
 INTROSPECT_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "introspect" / "handlers.py"
 INTROSPECT_EXECUTION_SOURCE = ROOT / "src" / "kdive" / "introspect" / "execution.py"
 POSTMORTEM_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "handlers.py"
+POSTMORTEM_DUMP_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "dump_handlers.py"
 SHARED_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "handlers" / "shared.py"
 PROBE_SEAM_SOURCE = ROOT / "src" / "kdive" / "seams" / "probes.py"
 CONFIGURATION_FAILURE_DUPLICATE_SOURCES = [
@@ -97,9 +98,9 @@ def test_server_does_not_own_probe_substrate_constants() -> None:
 def test_shared_probe_helpers_live_in_public_boundary_module() -> None:
     assert PROBE_SEAM_SOURCE.is_file()
     assert _imported_names(INTROSPECT_HANDLERS_SOURCE, "kdive.seams.probes")
-    assert _imported_names(POSTMORTEM_HANDLERS_SOURCE, "kdive.seams.probes")
+    assert _imported_names(POSTMORTEM_DUMP_HANDLERS_SOURCE, "kdive.seams.probes")
     assert "kdive.target.probes" not in _imported_modules(INTROSPECT_HANDLERS_SOURCE)
-    assert "kdive.target.probes" not in _imported_modules(POSTMORTEM_HANDLERS_SOURCE)
+    assert "kdive.target.probes" not in _imported_modules(POSTMORTEM_DUMP_HANDLERS_SOURCE)
 
 
 def test_target_probe_substrate_does_not_own_feature_response_assembly() -> None:
@@ -114,11 +115,13 @@ def test_target_probe_substrate_does_not_own_feature_response_assembly() -> None
     assert "assemble_introspect_probe_response" in _imported_names(
         INTROSPECT_HANDLERS_SOURCE, "kdive.introspect.probes"
     )
-    assert "assemble_kdump_probe_response" in _imported_names(POSTMORTEM_HANDLERS_SOURCE, "kdive.postmortem.probes")
+    assert "assemble_kdump_probe_response" in _imported_names(
+        POSTMORTEM_DUMP_HANDLERS_SOURCE, "kdive.postmortem.probes"
+    )
 
 
 def test_feature_probe_handlers_import_public_target_probe_substrate() -> None:
-    for source_path in (INTROSPECT_HANDLERS_SOURCE, POSTMORTEM_HANDLERS_SOURCE):
+    for source_path in (INTROSPECT_HANDLERS_SOURCE, POSTMORTEM_DUMP_HANDLERS_SOURCE):
         seam_imports = _imported_names(source_path, "kdive.seams.probes")
         assert seam_imports
         assert not any(name.startswith("_") for name in seam_imports)
@@ -289,6 +292,23 @@ def test_coordination_session_state_imports_use_neutral_seam() -> None:
     assert offenders == {}
 
 
+def test_server_does_not_own_introspect_execution_helpers() -> None:
+    forbidden_functions = {
+        "_chmod_best_effort",
+        "_count_introspect_calls",
+        "_head_tail",
+        "_record_terminal_introspect_result",
+        "_utcnow",
+    }
+    forbidden_assignments = {
+        "RUN_STDOUT_CAP",
+        "SSH_TIMEOUT_GRACE_SECONDS",
+    }
+
+    assert sorted(forbidden_functions & _defined_functions(SERVER_SOURCE)) == []
+    assert sorted(forbidden_assignments & _assigned_names(SERVER_SOURCE)) == []
+
+
 def test_server_public_api_is_explicit_and_composition_scoped() -> None:
     import kdive.server as server
 
@@ -299,9 +319,7 @@ def test_server_public_api_is_explicit_and_composition_scoped() -> None:
         "DEFAULT_ROOTFS_PROFILES",
         "DEFAULT_TARGET_PROFILES",
         "DEFAULT_TEST_SUITES",
-        "RUN_STDOUT_CAP",
         "SERVER_CONFIG_ENV_VAR",
-        "SSH_TIMEOUT_GRACE_SECONDS",
         "create_app",
         "load_server_config",
         "main",
