@@ -6,7 +6,7 @@
 
 #51 shipped `debug.introspect.run` (live drgn-over-SSH) and `debug.introspect.from_vmcore` (#55, offline). Both **hard-reject** `allow_write=true` with `CONFIGURATION_ERROR` / `allow_write_not_supported`. #56 replaces that stub with a real opt-in so power users can run scripts that mutate kernel state.
 
-The #51 design (`docs/superpowers/specs/2026-05-28-debug-introspect-run-design.md` §3.5, risk #0) is the load-bearing prior decision: **`allow_write` is not a sandbox.** The user script runs via `exec()` with full Python builtins; with `allow_write=false` it can already `import os`, `import ctypes`, open `/dev/mem`, etc. The blast radius equals `ssh <user>@<host> sudo python3 -c <script>`. The established trust boundary is *"an agent already authorised to call `debug.introspect.run` against this target."* #51 explicitly rejected AST write-detection and restricted-builtins as security theater against a fully-trusted, Turing-complete script and deferred the *capability* to #56.
+The #51 design (`docs/archive/superpowers/specs/2026-05-28-debug-introspect-run-design.md` §3.5, risk #0) is the load-bearing prior decision: **`allow_write` is not a sandbox.** The user script runs via `exec()` with full Python builtins; with `allow_write=false` it can already `import os`, `import ctypes`, open `/dev/mem`, etc. The blast radius equals `ssh <user>@<host> sudo python3 -c <script>`. The established trust boundary is *"an agent already authorised to call `debug.introspect.run` against this target."* #51 explicitly rejected AST write-detection and restricted-builtins as security theater against a fully-trusted, Turing-complete script and deferred the *capability* to #56.
 
 The spec leaves these open, decided here:
 
@@ -94,8 +94,8 @@ When `allow_write=true`, `details["acknowledged_permissions"]` records the **sat
 
 ## References
 
-spec `docs/superpowers/specs/2026-05-29-debug-introspect-write-mode-design.md`;
-#51 spec `docs/superpowers/specs/2026-05-28-debug-introspect-run-design.md` §3.5 + risk #0 (the "not a sandbox" decision this builds on);
+spec `docs/archive/superpowers/specs/2026-05-29-debug-introspect-write-mode-design.md`;
+#51 spec `docs/archive/superpowers/specs/2026-05-28-debug-introspect-run-design.md` §3.5 + risk #0 (the "not a sandbox" decision this builds on);
 ADR 0009 (shared executor), ADR 0010 (vmcore execution model, §5.6 rule 3);
 `config.py` `TRANSPORT_DESTRUCTIVE_PERMISSIONS` / `missing_destructive_permissions` (the ack pattern mirrored);
 `server.py` `transport_inject_break_handler` (Finding F14 profile-op gate), `_execute_introspect_call`, `_finalize_introspect_call`;

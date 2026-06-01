@@ -29,4 +29,4 @@ Place both units in a new `src/kdive/symbols/` package as pure functions (`verif
 
 ## References
 
-design `docs/superpowers/specs/2026-05-28-kernelprovenance-verification-symbol-resolution-design.md`; plan `docs/superpowers/plans/2026-05-28-kernelprovenance-verification-symbol-resolution.md`; interface contract `docs/specs/interface-contracts.md` §4.2; `src/kdive/symbols/verify.py`, `resolve.py`; `safety/paths.py` (`confine_run_relative`); `server.py` (`_capture_kernel_provenance`, `debug.introspect.run`); `seams/target.py` (`KernelProvenance`).
+design `docs/archive/superpowers/specs/2026-05-28-kernelprovenance-verification-symbol-resolution-design.md`; plan `docs/archive/superpowers/plans/2026-05-28-kernelprovenance-verification-symbol-resolution.md`; interface contract `docs/specs/interface-contracts.md` §4.2; `src/kdive/symbols/verify.py`, `resolve.py`; `safety/paths.py` (`confine_run_relative`); `server.py` (`_capture_kernel_provenance`, `debug.introspect.run`); `seams/target.py` (`KernelProvenance`).

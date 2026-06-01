@@ -1,6 +1,6 @@
 """local-drgn-introspect: live drgn-over-SSH introspection provider.
 
-Spec: docs/superpowers/specs/2026-05-28-debug-introspect-run-design.md
+Spec: docs/archive/superpowers/specs/2026-05-28-debug-introspect-run-design.md
 """
 
 from __future__ import annotations

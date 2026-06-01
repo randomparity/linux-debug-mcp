@@ -9,7 +9,7 @@ helper layer (#54). `interface-contracts.md` §5.6 rule 3 makes vmcore analysis
 **always concurrent-safe** (no live dependency, never gated); §4.2 requires a
 build_id fail-loud before symbols load. ADR 0008 deliberately left the vmcore trust
 boundary ("a vmcore with an externally-supplied vmlinux outside any run") to #55.
-The spec (`docs/superpowers/specs/2026-05-29-debug-introspect-from-vmcore-design.md`)
+The spec (`docs/archive/superpowers/specs/2026-05-29-debug-introspect-from-vmcore-design.md`)
 left four decisions open that needed settling before implementation: the call's
 scoping/identity, where the fail-loud reference build_id comes from, how the vmcore
 wrapper relates to the live wrapper, and how to invoke drgn locally.
@@ -188,7 +188,7 @@ vmcore orchestrators keep their own pre-runner setup.
 
 ## References
 
-spec `docs/superpowers/specs/2026-05-29-debug-introspect-from-vmcore-design.md`;
+spec `docs/archive/superpowers/specs/2026-05-29-debug-introspect-from-vmcore-design.md`;
 interface contract `docs/specs/interface-contracts.md` §4.2, §5.6 rule 3;
 ADR 0008 (symbols package + run-relative confinement boundary), ADR 0009
 (shared executor + typed-result convention); `src/kdive/symbols/verify.py`

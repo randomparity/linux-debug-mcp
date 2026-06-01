@@ -167,7 +167,7 @@ class TeardownStep(Protocol):
 
 class SessionGuard:
     """Stateless lifecycle policy for interactive stop-capable debug sessions (spec
-    docs/superpowers/specs/2026-05-29-session-guard-design.md, ADR 0013). Composes the existing
+    docs/archive/superpowers/specs/2026-05-29-session-guard-design.md, ADR 0013). Composes the existing
     guard/lease/transaction primitives; holds no per-session state. #66 ships empty slots; #69
     adds a TeardownStep, #70 adds pre/post-attach Preconditions."""
 

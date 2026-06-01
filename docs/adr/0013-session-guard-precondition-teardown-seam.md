@@ -221,4 +221,4 @@ dispatcher); [ADR 0002](0002-stop-controller-execution-authority-is-the-guard-to
 (guard token is the stop-controller authority, owned by 08's SessionGuard);
 [ADR 0003](0003-layer3-backend-attachment-vs-transport-session-ownership.md)
 (Layer-4 owns the `TransportSession`); spec
-`docs/superpowers/specs/2026-05-29-session-guard-design.md`.
+`docs/archive/superpowers/specs/2026-05-29-session-guard-design.md`.

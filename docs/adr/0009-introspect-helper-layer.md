@@ -4,7 +4,7 @@
 
 ## Context
 
-#54 introduces `debug.introspect.helper`, a family of typed, agent-consumable introspection queries (sysinfo, tasks, dmesg, modules, slab, irq) that run drgn scripts on the live target and return validated, structured output. The helper tool shares the same admission, SSH, caps, provenance, redaction, and manifest pipeline as the existing `debug.introspect.run`. Three design points were left open by the spec (`docs/superpowers/specs/2026-05-28-debug-introspect-helper-design.md`) and needed explicit decisions before implementation: where the shared execution pipeline lives, how helper output is validated and bounded, and how per-call arguments reach the drgn script.
+#54 introduces `debug.introspect.helper`, a family of typed, agent-consumable introspection queries (sysinfo, tasks, dmesg, modules, slab, irq) that run drgn scripts on the live target and return validated, structured output. The helper tool shares the same admission, SSH, caps, provenance, redaction, and manifest pipeline as the existing `debug.introspect.run`. Three design points were left open by the spec (`docs/archive/superpowers/specs/2026-05-28-debug-introspect-helper-design.md`) and needed explicit decisions before implementation: where the shared execution pipeline lives, how helper output is validated and bounded, and how per-call arguments reach the drgn script.
 
 ## Decision
 
@@ -58,4 +58,4 @@ Per-call arguments are injected into the shared drgn wrapper via a `${ARGS_B64}`
 
 ## References
 
-spec `docs/superpowers/specs/2026-05-28-debug-introspect-helper-design.md`; `src/kdive/server.py` (`_execute_introspect_call`, `_make_helper_post_validator`, `HELPER_CAP_PROFILE`); `src/kdive/introspect_helpers/` (package); `src/kdive/config.py` (`ALLOWED_DEBUG_OPERATIONS`); `tests/test_introspect_helpers.py` (`test_default_list_helpers_fit_helper_cap_profile`).
+spec `docs/archive/superpowers/specs/2026-05-28-debug-introspect-helper-design.md`; `src/kdive/server.py` (`_execute_introspect_call`, `_make_helper_post_validator`, `HELPER_CAP_PROFILE`); `src/kdive/introspect_helpers/` (package); `src/kdive/config.py` (`ALLOWED_DEBUG_OPERATIONS`); `tests/test_introspect_helpers.py` (`test_default_list_helpers_fit_helper_cap_profile`).

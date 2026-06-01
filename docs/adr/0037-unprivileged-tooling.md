@@ -6,7 +6,7 @@
 (`host.check_prerequisites` handler wiring), `justfile` (`check-no-sudo` recipe),
 `tests/test_no_privilege_escalation.py` + `tests/test_unprivileged_build_integration.py` (new),
 `docs/fedora-libvirt-user-guide.md` §5.
-Spec: [2026-05-30-unprivileged-tooling-design.md](../superpowers/specs/2026-05-30-unprivileged-tooling-design.md).
+Spec: [2026-05-30-unprivileged-tooling-design.md](../archive/superpowers/specs/2026-05-30-unprivileged-tooling-design.md).
 **Supersedes:** the build-recipe (`scripts/build-rootfs.sh`) privilege-model portion of
 [ADR 0031](0031-rootfs-image-source-abstraction.md) (decision 2's "the builder is a human-run host-prep
 script" stands; the *how* — `sudo dnf --installroot` — is replaced). The `source_kind` abstraction,

@@ -124,7 +124,7 @@ actually assert when no `ipmitool` invocation exists yet?**
 ## References
 
 Issue #67; spec
-`docs/superpowers/specs/2026-05-29-ipmi-cipher-policy-design.md`;
+`docs/archive/superpowers/specs/2026-05-29-ipmi-cipher-policy-design.md`;
 [ADR 0012](0012-secrets-store-backends-and-redaction.md) (credential redaction posture);
 `docs/specs/interface-contracts.md` (`ipmi-sol` is `brokered_required`); IPMI v2.0 /
 RMCP+ cipher suite definitions (suite 0 = no auth; suite 3 = RAKP-HMAC-SHA1 /
