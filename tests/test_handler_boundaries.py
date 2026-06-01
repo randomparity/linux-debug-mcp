@@ -91,6 +91,15 @@ def test_server_does_not_reexport_private_feature_helpers() -> None:
     assert leaked == []
 
 
+def test_generic_tools_package_only_contains_shared_adapter_boundary() -> None:
+    import kdive.tools as tools
+
+    package_dir = Path(tools.__file__).parent
+    module_names = {path.stem for path in package_dir.glob("*.py")}
+
+    assert module_names == {"__init__", "adapter_boundary"}
+
+
 def test_server_public_api_is_explicit_and_composition_scoped() -> None:
     import kdive.server as server
 

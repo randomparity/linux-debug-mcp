@@ -10,6 +10,7 @@ import pytest
 from kdive.artifacts.store import ArtifactStore
 from kdive.domain import ToolResponse
 from kdive.providers import handlers as provider_handlers
+from kdive.providers import tools as provider_tools
 from kdive.providers.contracts.models import (
     ConsoleReadRequest,
     ConsoleSessionRequest,
@@ -31,7 +32,6 @@ from kdive.providers.local.target.libvirt_qemu import LibvirtQemuProvider
 from kdive.providers.registry import ProviderRegistry
 from kdive.providers.stubs import remote_build_stub_capability
 from kdive.server import create_app
-from kdive.tools import providers as provider_tools
 
 VALID_CALLS = [
     (
@@ -237,7 +237,7 @@ def test_create_app_registers_stub_provider_tools_through_shared_helper() -> Non
 
     for operation, _, _, _ in VALID_CALLS:
         tool = app._tool_manager._tools[operation]
-        assert tool.fn.__module__ == "kdive.tools.providers"
+        assert tool.fn.__module__ == "kdive.providers.tools"
 
 
 def test_provider_tools_registration_uses_stub_operation_table() -> None:

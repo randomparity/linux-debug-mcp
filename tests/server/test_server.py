@@ -541,8 +541,8 @@ def test_artifact_tools_use_grouped_context_and_package_module() -> None:
     assert {"context"}.issubset(manifest_properties)
     assert {"run_id", "artifact_root"}.isdisjoint(manifest_properties)
 
-    assert collect_tool.fn.__module__ == "kdive.tools.artifacts"
-    assert manifest_tool.fn.__module__ == "kdive.tools.artifacts"
+    assert collect_tool.fn.__module__ == "kdive.artifacts.tools"
+    assert manifest_tool.fn.__module__ == "kdive.artifacts.tools"
 
 
 def test_workflow_build_boot_test_tool_uses_grouped_options() -> None:

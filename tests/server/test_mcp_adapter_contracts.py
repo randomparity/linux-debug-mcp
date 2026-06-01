@@ -5,6 +5,12 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from kdive.artifacts.tools import (
+    ArtifactCollectContext,
+    ArtifactCollectOptions,
+    ArtifactManifestContext,
+    register_artifact_tools,
+)
 from kdive.config import BootOverrides, BuildOverrides
 from kdive.domain import DebugIntrospectRunRequest, ToolResponse
 from kdive.introspect.execution import LiveIntrospectRuntime
@@ -42,12 +48,6 @@ from kdive.target.tools import (
     TargetRunTestsHandlerRequest,
     TargetToolRuntime,
     register_target_tools,
-)
-from kdive.tools.artifacts import (
-    ArtifactCollectContext,
-    ArtifactCollectOptions,
-    ArtifactManifestContext,
-    register_artifact_tools,
 )
 from kdive.transport.tools import (
     TransportBreakOptions,

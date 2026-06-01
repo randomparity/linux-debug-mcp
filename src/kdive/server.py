@@ -21,6 +21,7 @@ from kdive.artifacts.handlers import (
 )
 from kdive.artifacts.manifest import RunManifest
 from kdive.artifacts.store import ArtifactStore, record_step_with_retry
+from kdive.artifacts.tools import register_artifact_tools
 from kdive.config import ServerConfig
 from kdive.coordination.admission import (
     AdmissionService,
@@ -71,6 +72,7 @@ from kdive.providers.local.debug.gdb_mi import (
 from kdive.providers.local.debug.gdb_mi import (
     GdbMiSessionRegistry as LocalGdbMiSessionRegistry,
 )
+from kdive.providers.tools import register_provider_tools
 from kdive.safety.logging import SECRET_REGISTRY, configure_logging
 from kdive.safety.runtime_locks import private_runtime_registry_dir
 from kdive.safety.secrets import SecretReferenceKind
@@ -96,8 +98,6 @@ from kdive.seams.secrets import (
 from kdive.target import tools as target_tools
 from kdive.target.handlers import DEFAULT_TEST_SUITES as _DEFAULT_TEST_SUITES
 from kdive.target.handlers import target_boot_handler, target_run_tests_handler
-from kdive.tools.artifacts import register_artifact_tools
-from kdive.tools.providers import register_provider_tools
 from kdive.transport.backends.proxy import AgentProxyBackend
 from kdive.transport.backends.qemu_gdbstub import QemuGdbstubTransport
 from kdive.transport.core.base import (
