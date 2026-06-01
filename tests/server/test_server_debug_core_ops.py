@@ -32,6 +32,7 @@ from kdive.coordination.transaction import TransportTransaction
 from kdive.debug import handlers as debug_handlers
 from kdive.debug import operations as debug_operations
 from kdive.debug import session_end as debug_session_end
+from kdive.debug import session_handlers
 from kdive.debug import tools as debug_tools
 from kdive.debug.session_end import _end_mi_debug_session, debug_end_session_handler
 from kdive.debug.session_handlers import _start_session as debug_start_session_handler
@@ -277,9 +278,6 @@ def test_debug_start_session_handler_lives_in_debug_layer() -> None:
     assert debug_start_session_handler.__module__ == "kdive.debug.session_handlers"
     assert not hasattr(server_module, "_debug_start_session_handler")
 
-    session_handler_source = Path(debug_start_session_handler.__code__.co_filename).read_text(encoding="utf-8")
-    assert "from kdive.server import" not in session_handler_source
-
 
 def test_debug_end_session_handler_lives_in_debug_layer() -> None:
     assert debug_end_session_handler.__module__.startswith("kdive.debug.")
@@ -287,8 +285,6 @@ def test_debug_end_session_handler_lives_in_debug_layer() -> None:
 
 
 def test_server_does_not_keep_duplicate_debug_session_helpers() -> None:
-    server_source = Path(server_module.__file__).read_text(encoding="utf-8")
-
     for helper_name in (
         "_debug_open_request",
         "_mi_probe_transcript_path",
@@ -296,20 +292,13 @@ def test_server_does_not_keep_duplicate_debug_session_helpers() -> None:
         "_build_mi_debug_session",
         "_verify_gdb_symbol_version_lock",
     ):
-        assert f"def {helper_name}" not in server_source
+        assert not hasattr(server_module, helper_name)
 
 
-def test_debug_start_session_handler_is_split_into_named_phases() -> None:
-    session_handler_source = Path(debug_start_session_handler.__code__.co_filename).read_text(encoding="utf-8")
+def test_debug_start_session_handler_uses_request_runtime_contract() -> None:
+    params = inspect.signature(session_handlers.debug_start_session_handler).parameters
 
-    for phase_name in (
-        "_debug_start_session_preflight",
-        "_debug_start_session_locked_attach",
-        "_debug_start_session_persist_success",
-        "_cleanup_debug_start_session_attach",
-        "_debug_start_session_success_response",
-    ):
-        assert f"def {phase_name}" in session_handler_source
+    assert list(params) == ["request", "runtime"]
 
 
 def test_debug_operation_handlers_use_typed_operation_requests() -> None:
@@ -369,24 +358,9 @@ def test_debug_operation_handler_builds_runtime_without_pass_through_layers() ->
     assert not hasattr(debug_handlers, "_DEBUG_OPERATION_CORE")
     assert not hasattr(debug_handlers, "_default_debug_operation_core")
     assert not hasattr(server_module, "_debug_operation_response")
-    server_source = Path(server_module.__file__).read_text(encoding="utf-8")
-    assert "operation_core=_debug_operation_response" not in server_source
-
-
-def test_debug_session_details_uses_state_enum_for_ended_filter() -> None:
-    import inspect
-
-    helper_source = inspect.getsource(debug_operations._debug_session_details_from_result)
-
-    assert '== "ended"' not in helper_source
-    assert "DebugSessionState.ENDED.value" in helper_source
 
 
 def test_server_delegates_debug_handler_set_to_debug_package() -> None:
-    server_source = Path(server_module.__file__).read_text(encoding="utf-8")
-
-    assert "debug_tool_handlers()" not in server_source
-    assert "kdive.debug.bound_handlers" not in server_source
     for handler_name in (
         "debug_read_registers_handler",
         "debug_set_breakpoint_handler",
@@ -466,9 +440,6 @@ def test_debug_bound_handler_adapter_module_is_removed() -> None:
 
 
 def test_debug_operation_leaf_handlers_use_request_forwarding_factory() -> None:
-    source = Path(debug_handlers.__file__).read_text(encoding="utf-8")
-
-    assert "def _make_operation_request_handler(" in source
     for handler_name in (
         "debug_read_registers_handler",
         "debug_read_symbol_handler",

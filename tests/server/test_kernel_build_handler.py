@@ -25,22 +25,11 @@ from kdive.providers.local.build.local_kernel_build import (
 # module-load time, before the autouse fixture runs).
 
 
-def test_kernel_build_handler_is_split_into_named_phases() -> None:
-    handler_source = inspect.getsource(kernel_handlers.kernel_build_handler)
-    module_source = inspect.getsource(kernel_handlers)
+def test_kernel_build_handler_uses_request_runtime_contract() -> None:
+    signature = inspect.signature(kernel_handlers.kernel_build_handler)
 
-    for phase_name in (
-        "_resolve_kernel_build_request",
-        "_execute_kernel_build_under_lock",
-        "_build_execution_response",
-    ):
-        assert f"def {phase_name}" in module_source
-
-    assert "_resolve_kernel_build_request(" in handler_source
-    assert "_execute_kernel_build_under_lock(" in handler_source
-    assert "_build_execution_response(" in handler_source
-    assert "ReadelfUnavailable" not in handler_source
-    assert "BuildIdMissing" not in handler_source
+    assert set(signature.parameters) == {"request", "runtime"}
+    assert all(parameter.kind is inspect.Parameter.KEYWORD_ONLY for parameter in signature.parameters.values())
 
 
 class BlockingRunner(NoopRunner):

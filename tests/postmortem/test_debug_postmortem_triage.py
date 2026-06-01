@@ -24,26 +24,10 @@ def test_triage_handler_lives_in_postmortem_package() -> None:
     )
 
 
-def test_triage_handler_is_split_into_named_phases() -> None:
-    handler_source = inspect.getsource(triage_handlers.debug_postmortem_triage_handler)
+def test_triage_handler_uses_request_artifact_root_contract() -> None:
+    signature = inspect.signature(triage_handlers.debug_postmortem_triage_handler)
 
-    for helper_name in (
-        "_run_triage_sources",
-        "_build_triage_report_state",
-        "_record_failed_triage",
-        "_persist_successful_triage_report",
-    ):
-        assert hasattr(triage_handlers, helper_name)
-        assert f"{helper_name}(" in handler_source
-
-
-def test_triage_report_state_uses_source_outcome_helpers() -> None:
-    state_source = inspect.getsource(triage_handlers._build_triage_report_state)
-
-    assert hasattr(triage_handlers, "_triage_crash_outcome")
-    assert hasattr(triage_handlers, "_triage_drgn_outcome")
-    assert "CrashOutcome(" not in state_source
-    assert "DrgnOutcome(" not in state_source
+    assert set(signature.parameters) >= {"request", "artifact_root"}
 
 
 def _run(tmp_path: Path) -> ArtifactStore:

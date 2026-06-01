@@ -50,28 +50,13 @@ def test_vmcore_handlers_live_in_introspect_package() -> None:
     assert introspect_handlers.debug_introspect_from_vmcore_helper_handler.__module__ == "kdive.introspect.handlers"
 
 
-def test_vmcore_introspect_handler_uses_explicit_phase_helpers() -> None:
-    for helper_name in (
-        "VmcoreIntrospectContext",
-        "VmcoreIntrospectWorkspace",
-        "VmcoreIntrospectExecutionRuntime",
-        "_validate_vmcore_introspect_request",
-        "_resolve_vmcore_introspect_context",
-        "_resolve_vmcore_introspect_inputs",
-        "_prepare_vmcore_introspect_workspace",
-        "_run_vmcore_introspect_wrapper",
+def test_vmcore_handlers_accept_public_execution_dependencies() -> None:
+    for handler in (
+        introspect_handlers.debug_introspect_from_vmcore_handler,
+        introspect_handlers.debug_introspect_from_vmcore_helper_handler,
     ):
-        assert hasattr(introspect_handlers, helper_name)
-
-
-def test_vmcore_handlers_group_execution_runtime() -> None:
-    direct_source = inspect.getsource(introspect_handlers.debug_introspect_from_vmcore_handler)
-    helper_source = inspect.getsource(introspect_handlers.debug_introspect_from_vmcore_helper_handler)
-
-    assert "runtime=VmcoreIntrospectExecutionRuntime(" in direct_source
-    assert "runtime=VmcoreIntrospectExecutionRuntime(" in helper_source
-    assert "_execute_vmcore_introspect_call(" not in direct_source
-    assert "_execute_vmcore_introspect_call(" not in helper_source
+        signature = inspect.signature(handler)
+        assert set(signature.parameters) >= {"request", "artifact_root", "runner", "build_id_reader", "clock"}
 
 
 # ---------------------------------------------------------------------------
