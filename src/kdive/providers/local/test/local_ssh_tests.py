@@ -375,7 +375,7 @@ def local_ssh_tests_capability() -> ProviderCapability:
         transports=["ssh", "filesystem"],
         operations=["target.run_tests"],
         required_host_tools=["ssh"],
-        destructive_permissions=TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"],
+        destructive_permissions=list(TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"]),
         access_methods=["ssh", "filesystem"],
         semantics=OperationSemantics(
             idempotent=True,

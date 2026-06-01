@@ -329,7 +329,7 @@ def test_destructive_stub_provider_tools_require_acknowledgement() -> None:
     assert response.error.category == "configuration_error"
     assert response.error.details == {
         "code": "permission_required",
-        "required_permissions": PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.request_host"],
+        "required_permissions": list(PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.request_host"]),
     }
 
 

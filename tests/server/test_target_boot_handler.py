@@ -77,7 +77,7 @@ def test_target_boot_requires_destructive_permission_ack_before_boot(tmp_path: P
     assert response.error is not None
     assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert response.error.details["code"] == "permission_required"
-    assert response.error.details["required_permissions"] == TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"]
+    assert response.error.details["required_permissions"] == list(TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"])
     assert provider.plans == []
 
 

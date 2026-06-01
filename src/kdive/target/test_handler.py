@@ -4,8 +4,10 @@ import contextlib
 import ipaddress
 import logging
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from kdive.artifacts.manifest import BootAttempt, RunManifest
@@ -34,19 +36,21 @@ from kdive.transport.core.base import ExecutionState
 logger = logging.getLogger(__name__)
 
 RUNNING_TESTS_MESSAGE = "previous test run is still recorded as running"
-DEFAULT_TEST_SUITES = {
-    "smoke-basic": TestSuiteProfile(
-        name="smoke-basic",
-        timeout_seconds=30,
-        stop_on_failure=True,
-        collect_dmesg=True,
-        commands=[
-            TestCommand(name="uname", argv=["uname", "-a"]),
-            TestCommand(name="proc-version", argv=["test", "-r", "/proc/version"]),
-            TestCommand(name="proc-cmdline", argv=["cat", "/proc/cmdline"]),
-        ],
-    )
-}
+DEFAULT_TEST_SUITES = MappingProxyType(
+    {
+        "smoke-basic": TestSuiteProfile(
+            name="smoke-basic",
+            timeout_seconds=30,
+            stop_on_failure=True,
+            collect_dmesg=True,
+            commands=[
+                TestCommand(name="uname", argv=["uname", "-a"]),
+                TestCommand(name="proc-version", argv=["test", "-r", "/proc/version"]),
+                TestCommand(name="proc-cmdline", argv=["cat", "/proc/cmdline"]),
+            ],
+        )
+    }
+)
 
 
 def _recorded_test_success_response(*, run_id: str, result: StepResult) -> ToolResponse:
@@ -219,8 +223,8 @@ def _resolve_run_tests_inputs(
     force_rerun: bool,
     attempt: int | None,
     provider: LocalSshTestProvider | None,
-    rootfs_profiles: dict[str, RootfsProfile] | None,
-    test_suites: dict[str, TestSuiteProfile] | None,
+    rootfs_profiles: Mapping[str, RootfsProfile] | None,
+    test_suites: Mapping[str, TestSuiteProfile] | None,
 ) -> tuple[_RunTestsInputs | None, ToolResponse | None]:
     try:
         adhoc_commands = _validate_adhoc_commands(commands)

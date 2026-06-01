@@ -121,13 +121,13 @@ def reservation_stub_capability() -> ProviderCapability:
                 "reservation.request_host",
                 destructive=True,
                 required_host_tools=tools,
-                destructive_permissions=PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.request_host"],
+                destructive_permissions=list(PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.request_host"]),
             ),
             _operation(
                 "reservation.release_host",
                 destructive=True,
                 required_host_tools=tools,
-                destructive_permissions=PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.release_host"],
+                destructive_permissions=list(PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.release_host"]),
             ),
         ],
     )
@@ -135,7 +135,7 @@ def reservation_stub_capability() -> ProviderCapability:
 
 def provisioning_stub_capability() -> ProviderCapability:
     tools = ["provisioning-cli", "ssh"]
-    permissions = PROVIDER_DESTRUCTIVE_PERMISSIONS["provision.prepare_target"]
+    permissions = list(PROVIDER_DESTRUCTIVE_PERMISSIONS["provision.prepare_target"])
     return _stub_capability(
         name="provisioning-stub",
         family="provisioning",
@@ -156,7 +156,7 @@ def provisioning_stub_capability() -> ProviderCapability:
 
 def hardware_control_stub_capability() -> ProviderCapability:
     tools = ["power-control-cli", "bmc-api-client"]
-    permissions = PROVIDER_DESTRUCTIVE_PERMISSIONS["hardware.power_control"]
+    permissions = list(PROVIDER_DESTRUCTIVE_PERMISSIONS["hardware.power_control"])
     return _stub_capability(
         name="hardware-control-stub",
         family="hardware",
@@ -209,13 +209,13 @@ def boot_orchestration_stub_capability() -> ProviderCapability:
                 "hardware.boot_kernel",
                 destructive=True,
                 required_host_tools=tools,
-                destructive_permissions=PROVIDER_DESTRUCTIVE_PERMISSIONS["hardware.boot_kernel"],
+                destructive_permissions=list(PROVIDER_DESTRUCTIVE_PERMISSIONS["hardware.boot_kernel"]),
             ),
             _operation(
                 "workflow.reserve_provision_boot",
                 destructive=True,
                 required_host_tools=tools,
-                destructive_permissions=PROVIDER_DESTRUCTIVE_PERMISSIONS["workflow.reserve_provision_boot"],
+                destructive_permissions=list(PROVIDER_DESTRUCTIVE_PERMISSIONS["workflow.reserve_provision_boot"]),
             ),
         ],
     )

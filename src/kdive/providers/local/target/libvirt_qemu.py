@@ -1117,7 +1117,7 @@ def local_libvirt_qemu_capability() -> ProviderCapability:
         transports=["libvirt", "serial-console", "filesystem"],
         operations=["target.boot"],
         required_host_tools=["virsh", "qemu-img"],
-        destructive_permissions=TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"],
+        destructive_permissions=list(TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"]),
         access_methods=["libvirt", "serial-console", "filesystem"],
         semantics=OperationSemantics(
             idempotent=True,

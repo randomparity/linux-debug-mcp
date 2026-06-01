@@ -251,7 +251,7 @@ def test_default_registry_exposes_local_provider_capabilities() -> None:
     assert libvirt_qemu.required_host_tools == ["virsh", "qemu-img"]
     assert libvirt_qemu.target_kinds == [TargetKind.VIRTUAL]
     assert libvirt_qemu.access_methods == ["libvirt", "serial-console", "filesystem"]
-    assert libvirt_qemu.destructive_permissions == TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"]
+    assert libvirt_qemu.destructive_permissions == list(TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"])
     assert libvirt_qemu.semantics.idempotent is True
     assert libvirt_qemu.semantics.retryable is True
     assert libvirt_qemu.semantics.destructive is True
@@ -262,7 +262,7 @@ def test_default_registry_exposes_local_provider_capabilities() -> None:
     assert ssh_tests.operations == ["target.run_tests"]
     assert ssh_tests.required_host_tools == ["ssh"]
     assert ssh_tests.target_kinds == [TargetKind.VIRTUAL]
-    assert ssh_tests.destructive_permissions == TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"]
+    assert ssh_tests.destructive_permissions == list(TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"])
     assert ssh_tests.semantics.destructive is True
 
     qemu_gdbstub = providers["local-qemu-gdbstub"]
@@ -270,10 +270,10 @@ def test_default_registry_exposes_local_provider_capabilities() -> None:
     operation_permissions = {
         capability.operation: capability.destructive_permissions for capability in qemu_gdbstub.operation_capabilities
     }
-    assert (
-        operation_permissions["transport.inject_break"] == TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"]
+    assert operation_permissions["transport.inject_break"] == list(
+        TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"]
     )
-    assert operation_permissions["workflow.build_boot_debug"] == TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"]
+    assert operation_permissions["workflow.build_boot_debug"] == list(TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"])
 
 
 def test_default_providers_expose_richer_metadata() -> None:
@@ -471,9 +471,9 @@ def test_default_registry_includes_stub_providers() -> None:
     ]
     assert {capability.operation for capability in operation_capabilities} == destructive_operations
     assert all(capability.destructive_permissions for capability in operation_capabilities)
-    assert {
-        capability.operation: capability.destructive_permissions for capability in operation_capabilities
-    } == PROVIDER_DESTRUCTIVE_PERMISSIONS
+    assert {capability.operation: capability.destructive_permissions for capability in operation_capabilities} == {
+        operation: list(permissions) for operation, permissions in PROVIDER_DESTRUCTIVE_PERMISSIONS.items()
+    }
 
 
 def test_registry_finds_providers_by_operation_and_architecture_deterministically() -> None:
@@ -506,13 +506,11 @@ def test_registry_advertises_local_qemu_gdbstub_without_debug_stubs() -> None:
         operation_capability.operation: operation_capability
         for operation_capability in debug_provider.operation_capabilities
     }
-    assert (
-        operation_capabilities["transport.inject_break"].destructive_permissions
-        == TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"]
+    assert operation_capabilities["transport.inject_break"].destructive_permissions == list(
+        TRANSPORT_DESTRUCTIVE_PERMISSIONS["transport.inject_break"]
     )
-    assert (
-        operation_capabilities["workflow.build_boot_debug"].destructive_permissions
-        == TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"]
+    assert operation_capabilities["workflow.build_boot_debug"].destructive_permissions == list(
+        TARGET_DESTRUCTIVE_PERMISSIONS["target.boot"]
     )
     assert all(
         operation_capabilities[operation].destructive_permissions == []

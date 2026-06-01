@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
@@ -101,7 +103,7 @@ _ALLOWED_SSH_OPTIONS = {
     "LogLevel": {"values": {"ERROR", "QUIET", "VERBOSE"}},
     "StrictHostKeyChecking": {"values": {"accept-new", "yes"}},
 }
-ALLOWED_DEBUG_OPERATIONS = [
+ALLOWED_DEBUG_OPERATIONS = (
     "debug.start_session",
     "debug.interrupt",
     "debug.continue",
@@ -154,7 +156,7 @@ ALLOWED_DEBUG_OPERATIONS = [
     # introspect path. Only ever passed to `ensure_debug_operation_enabled`, never registered
     # as a tool. A read-only profile narrows `enabled_operations` to exclude it to refuse writes.
     "debug.introspect.write",
-]
+)
 
 # Spec §5.2 step 4a: soft cap on introspect step records per run. The handler enforces this
 # once, without holding the manifest lock — see spec §5.3 "Soft-cap semantics".
@@ -215,40 +217,48 @@ TRIAGE_MODULES_HELPER = "modules"
 # Spec §11 open risk 4a: integer-percent threshold for the host-side prelude-cost warning;
 # fires when `prelude_ms * 100 >= PRELUDE_WARNING_FRACTION_PCT * timeout_seconds * 1000`.
 PRELUDE_WARNING_FRACTION_PCT = 40
-TRANSPORT_OPERATIONS = [
+TRANSPORT_OPERATIONS = (
     "transport.open",
     "transport.status",
     "transport.health",
     "transport.inject_break",
     "transport.close",
-]
-TRANSPORT_DESTRUCTIVE_PERMISSIONS = {
-    "transport.inject_break": ["drop target kernel into the debugger"],
-}
+)
+TRANSPORT_DESTRUCTIVE_PERMISSIONS = MappingProxyType(
+    {
+        "transport.inject_break": ("drop target kernel into the debugger",),
+    }
+)
 # ADR 0011 / #56: per-call ack required for live introspect write mode (allow_write=true),
 # mirroring TRANSPORT_DESTRUCTIVE_PERMISSIONS. Only the live `debug.introspect.run` path has a
 # writable target; the vmcore path rejects allow_write upstream and so has no entry here.
-INTROSPECT_DESTRUCTIVE_PERMISSIONS = {
-    "debug.introspect.run": ["mutate live kernel state via drgn write APIs"],
-}
-TARGET_DESTRUCTIVE_PERMISSIONS = {
-    "target.boot": [
-        "define MCP-owned libvirt domains",
-        "update MCP-owned libvirt domains",
-        "start MCP-owned libvirt domains",
-        "stop MCP-owned libvirt domains",
-        "destroy MCP-owned libvirt domains",
-    ],
-    "target.run_tests": ["execute caller-supplied commands over target SSH"],
-}
-PROVIDER_DESTRUCTIVE_PERMISSIONS = {
-    "reservation.request_host": ["reserve shared remote or physical targets"],
-    "reservation.release_host": ["release shared remote or physical targets"],
-    "provision.prepare_target": ["write target storage", "install boot artifacts on target"],
-    "hardware.power_control": ["change target power state"],
-    "hardware.boot_kernel": ["boot physical or remote targets"],
-    "workflow.reserve_provision_boot": ["reserve, provision, and boot target hardware"],
-}
+INTROSPECT_DESTRUCTIVE_PERMISSIONS = MappingProxyType(
+    {
+        "debug.introspect.run": ("mutate live kernel state via drgn write APIs",),
+    }
+)
+TARGET_DESTRUCTIVE_PERMISSIONS = MappingProxyType(
+    {
+        "target.boot": (
+            "define MCP-owned libvirt domains",
+            "update MCP-owned libvirt domains",
+            "start MCP-owned libvirt domains",
+            "stop MCP-owned libvirt domains",
+            "destroy MCP-owned libvirt domains",
+        ),
+        "target.run_tests": ("execute caller-supplied commands over target SSH",),
+    }
+)
+PROVIDER_DESTRUCTIVE_PERMISSIONS = MappingProxyType(
+    {
+        "reservation.request_host": ("reserve shared remote or physical targets",),
+        "reservation.release_host": ("release shared remote or physical targets",),
+        "provision.prepare_target": ("write target storage", "install boot artifacts on target"),
+        "hardware.power_control": ("change target power state",),
+        "hardware.boot_kernel": ("boot physical or remote targets",),
+        "workflow.reserve_provision_boot": ("reserve, provision, and boot target hardware",),
+    }
+)
 
 
 def validate_transport_operation(operation: str) -> str:
@@ -261,7 +271,7 @@ def missing_destructive_permissions(
     operation: str,
     acknowledged: list[str],
     *,
-    registry: dict[str, list[str]] | None = None,
+    registry: Mapping[str, Sequence[str]] | None = None,
 ) -> list[str]:
     """Return the destructive permissions an operation requires that the caller has not
     acknowledged. A non-destructive (or unknown) operation requires nothing, so the list is empty.

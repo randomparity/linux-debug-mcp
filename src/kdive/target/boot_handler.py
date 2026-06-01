@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -462,8 +463,8 @@ def _resolve_boot_inputs(
     run_id: str,
     target_profile: str | None,
     rootfs_profile: str | None,
-    target_profiles: dict[str, TargetProfile] | None,
-    rootfs_profiles: dict[str, RootfsProfile] | None,
+    target_profiles: Mapping[str, TargetProfile] | None,
+    rootfs_profiles: Mapping[str, RootfsProfile] | None,
     default_libvirt_uri: str | None,
     boot_overrides: BootOverrides | None,
     sensitive_paths: list[Path] | None,
