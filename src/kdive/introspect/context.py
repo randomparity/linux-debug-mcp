@@ -25,8 +25,9 @@ from kdive.handlers.shared import configuration_failure_response as _configurati
 from kdive.introspect.models import DebugIntrospectRunRequest
 from kdive.introspect.wrappers import SCRIPT_BYTE_CAP
 from kdive.providers.debug import ProviderDebugError
-from kdive.providers.ssh import SshRunner
+from kdive.providers.ssh import CommandRunner, SshRunner
 from kdive.safety.redaction import Redactor
+from kdive.symbols.build_id import read_elf_build_id
 from kdive.symbols.verify import BUILD_ID_RE
 
 
@@ -53,6 +54,14 @@ class LiveIntrospectRuntime:
     ssh_runner: SshRunner | None = None
     admission: AdmissionService | None = None
     session_registry: SessionRegistry | None = None
+    clock: Callable[[], datetime] | None = None
+
+
+@dataclass(frozen=True)
+class VmcoreIntrospectRuntime:
+    artifact_root: Path
+    runner: CommandRunner | None = None
+    build_id_reader: Callable[[Path], str] = read_elf_build_id
     clock: Callable[[], datetime] | None = None
 
 

@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from kdive.artifacts.store import ArtifactStore
 from kdive.domain import ErrorCategory, RunRequest, StepStatus
 from kdive.introspect import handlers as introspect_handlers
+from kdive.introspect.context import VmcoreIntrospectRuntime
 from kdive.introspect.handlers import debug_introspect_from_vmcore_handler, debug_introspect_from_vmcore_helper_handler
 from kdive.introspect.models import (
     DebugIntrospectFromVmcoreHelperRequest,
@@ -50,13 +51,13 @@ def test_vmcore_handlers_live_in_introspect_package() -> None:
     assert introspect_handlers.debug_introspect_from_vmcore_helper_handler.__module__ == "kdive.introspect.handlers"
 
 
-def test_vmcore_handlers_accept_public_execution_dependencies() -> None:
+def test_vmcore_handlers_accept_runtime_boundary() -> None:
     for handler in (
         introspect_handlers.debug_introspect_from_vmcore_handler,
         introspect_handlers.debug_introspect_from_vmcore_helper_handler,
     ):
         signature = inspect.signature(handler)
-        assert set(signature.parameters) >= {"request", "artifact_root", "runner", "build_id_reader", "clock"}
+        assert list(signature.parameters) == ["request", "runtime"]
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +118,10 @@ def _run(tmp_path: Path) -> ArtifactStore:
     return store
 
 
+def _runtime(tmp_path: Path, runner=None, build_id_reader=lambda _p: VALID) -> VmcoreIntrospectRuntime:
+    return VmcoreIntrospectRuntime(artifact_root=tmp_path, runner=runner, build_id_reader=build_id_reader)
+
+
 def test_from_vmcore_runner_exception_records_failed_step(tmp_path: Path) -> None:
     store = _run(tmp_path)
     resp = debug_introspect_from_vmcore_handler(
@@ -126,9 +131,7 @@ def test_from_vmcore_runner_exception_records_failed_step(tmp_path: Path) -> Non
             vmlinux_ref="build/vmlinux",
             script="print(1)",
         ),
-        artifact_root=tmp_path,
-        runner=RaisingRunner(),
-        build_id_reader=lambda _p: VALID,
+        runtime=_runtime(tmp_path, runner=RaisingRunner()),
     )
 
     assert resp.ok is False
@@ -178,9 +181,7 @@ def _ok_runner() -> FakeRunner:
 
 def test_happy_path_succeeds(tmp_path: Path) -> None:
     store = _run(tmp_path)
-    resp = debug_introspect_from_vmcore_handler(
-        _req(), artifact_root=tmp_path, runner=_ok_runner(), build_id_reader=lambda p: VALID
-    )
+    resp = debug_introspect_from_vmcore_handler(_req(), runtime=_runtime(tmp_path, runner=_ok_runner()))
     assert resp.status == StepStatus.SUCCEEDED
     assert resp.data["emits"] == [{"k": 1}]
     assert resp.suggested_next_actions == ["artifacts.get_manifest", "debug.introspect.from_vmcore"]
@@ -193,9 +194,7 @@ def test_happy_path_succeeds(tmp_path: Path) -> None:
 def test_no_admission_no_boot_still_works(tmp_path: Path) -> None:
     # AC#3: lifecycle independence — no admission service exists in the call path.
     _run(tmp_path)
-    resp = debug_introspect_from_vmcore_handler(
-        _req(), artifact_root=tmp_path, runner=_ok_runner(), build_id_reader=lambda p: VALID
-    )
+    resp = debug_introspect_from_vmcore_handler(_req(), runtime=_runtime(tmp_path, runner=_ok_runner()))
     assert resp.status == StepStatus.SUCCEEDED
 
 
@@ -205,9 +204,7 @@ def test_host_verify_catches_build_id_mismatch(tmp_path: Path) -> None:
     runner = FakeRunner(
         results=[SshCommandResult(exit_status=6, stdout=json.dumps(_wrapper_json(build_id="f" * 40)), stderr="")]
     )
-    resp = debug_introspect_from_vmcore_handler(
-        _req(), artifact_root=tmp_path, runner=runner, build_id_reader=lambda p: VALID
-    )
+    resp = debug_introspect_from_vmcore_handler(_req(), runtime=_runtime(tmp_path, runner=runner))
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert resp.error.details["code"] == "provenance_mismatch"
 
@@ -216,24 +213,20 @@ def test_wrapper_self_abort_provenance_unverifiable(tmp_path: Path) -> None:
     _run(tmp_path)
     body = _wrapper_json(build_id=None, status="provenance_unverifiable")
     runner = FakeRunner(results=[SshCommandResult(exit_status=4, stdout=json.dumps(body), stderr="")])
-    resp = debug_introspect_from_vmcore_handler(
-        _req(), artifact_root=tmp_path, runner=runner, build_id_reader=lambda p: VALID
-    )
+    resp = debug_introspect_from_vmcore_handler(_req(), runtime=_runtime(tmp_path, runner=runner))
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert resp.error.details["code"] == "provenance_unverifiable"
 
 
 def test_missing_run(tmp_path: Path) -> None:
-    resp = debug_introspect_from_vmcore_handler(
-        _req(), artifact_root=tmp_path, runner=FakeRunner(), build_id_reader=lambda p: VALID
-    )
+    resp = debug_introspect_from_vmcore_handler(_req(), runtime=_runtime(tmp_path, runner=FakeRunner()))
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_missing_vmcore(tmp_path: Path) -> None:
     _run(tmp_path)
     resp = debug_introspect_from_vmcore_handler(
-        _req(vmcore_ref="inputs/nope"), artifact_root=tmp_path, runner=FakeRunner(), build_id_reader=lambda p: VALID
+        _req(vmcore_ref="inputs/nope"), runtime=_runtime(tmp_path, runner=FakeRunner())
     )
     assert resp.error.details["code"] == "vmcore_not_found"
 
@@ -242,9 +235,7 @@ def test_escaping_vmcore_ref(tmp_path: Path) -> None:
     _run(tmp_path)
     resp = debug_introspect_from_vmcore_handler(
         _req(vmcore_ref="../../etc/passwd"),
-        artifact_root=tmp_path,
-        runner=FakeRunner(),
-        build_id_reader=lambda p: VALID,
+        runtime=_runtime(tmp_path, runner=FakeRunner()),
     )
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert resp.error.details["code"] == "vmcore_not_found"
@@ -257,7 +248,7 @@ def test_unreadable_vmlinux_is_config_error(tmp_path: Path) -> None:
         raise BuildIdReadError("not elf")
 
     resp = debug_introspect_from_vmcore_handler(
-        _req(), artifact_root=tmp_path, runner=FakeRunner(), build_id_reader=_boom
+        _req(), runtime=_runtime(tmp_path, runner=FakeRunner(), build_id_reader=_boom)
     )
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert resp.error.details["code"] == "vmlinux_build_id_unreadable"
@@ -265,9 +256,7 @@ def test_unreadable_vmlinux_is_config_error(tmp_path: Path) -> None:
 
 def test_allow_write_not_applicable(tmp_path: Path) -> None:
     _run(tmp_path)
-    resp = debug_introspect_from_vmcore_handler(
-        _req(allow_write=True), artifact_root=tmp_path, runner=FakeRunner(), build_id_reader=lambda p: VALID
-    )
+    resp = debug_introspect_from_vmcore_handler(_req(allow_write=True), runtime=_runtime(tmp_path, runner=FakeRunner()))
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert resp.error.details["code"] == "write_mode_not_applicable"
 
@@ -275,25 +264,21 @@ def test_allow_write_not_applicable(tmp_path: Path) -> None:
 def test_bad_timeout(tmp_path: Path) -> None:
     _run(tmp_path)
     resp = debug_introspect_from_vmcore_handler(
-        _req(timeout_seconds=1), artifact_root=tmp_path, runner=FakeRunner(), build_id_reader=lambda p: VALID
+        _req(timeout_seconds=1), runtime=_runtime(tmp_path, runner=FakeRunner())
     )
     assert resp.error.details["code"] == "invalid_timeout"
 
 
 def test_empty_script_rejected(tmp_path: Path) -> None:
     _run(tmp_path)
-    resp = debug_introspect_from_vmcore_handler(
-        _req(script=""), artifact_root=tmp_path, runner=FakeRunner(), build_id_reader=lambda p: VALID
-    )
+    resp = debug_introspect_from_vmcore_handler(_req(script=""), runtime=_runtime(tmp_path, runner=FakeRunner()))
     assert resp.error.details["code"] == "invalid_script"
 
 
 def test_timeout_exit_124(tmp_path: Path) -> None:
     _run(tmp_path)
     runner = FakeRunner(results=[SshCommandResult(exit_status=124, stdout="", stderr="")])
-    resp = debug_introspect_from_vmcore_handler(
-        _req(), artifact_root=tmp_path, runner=runner, build_id_reader=lambda p: VALID
-    )
+    resp = debug_introspect_from_vmcore_handler(_req(), runtime=_runtime(tmp_path, runner=runner))
     assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert resp.error.details["code"] == "introspect_timeout"
 
@@ -301,9 +286,7 @@ def test_timeout_exit_124(tmp_path: Path) -> None:
 def test_unparseable_stdout(tmp_path: Path) -> None:
     _run(tmp_path)
     runner = FakeRunner(results=[SshCommandResult(exit_status=0, stdout="garbage not json", stderr="")])
-    resp = debug_introspect_from_vmcore_handler(
-        _req(), artifact_root=tmp_path, runner=runner, build_id_reader=lambda p: VALID
-    )
+    resp = debug_introspect_from_vmcore_handler(_req(), runtime=_runtime(tmp_path, runner=runner))
     assert resp.error.details["code"] == "wrapper_crash"
 
 
@@ -311,9 +294,7 @@ def test_redaction_masks_secret(tmp_path: Path) -> None:
     _run(tmp_path)
     body = _wrapper_json(user_stdout="api_key=SuperSecretValue123")
     runner = FakeRunner(results=[SshCommandResult(exit_status=6, stdout=json.dumps(body), stderr="")])
-    resp = debug_introspect_from_vmcore_handler(
-        _req(), artifact_root=tmp_path, runner=runner, build_id_reader=lambda p: VALID
-    )
+    resp = debug_introspect_from_vmcore_handler(_req(), runtime=_runtime(tmp_path, runner=runner))
     assert "SuperSecretValue123" not in json.dumps(resp.data)
     rd = ArtifactStore(artifact_root=tmp_path).run_dir("r1")
     call_dirs = list((rd / "debug" / "introspect").iterdir())
@@ -331,9 +312,7 @@ def test_helper_unknown_name(tmp_path: Path) -> None:
     req = DebugIntrospectFromVmcoreHelperRequest(
         run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux", name="nope"
     )
-    resp = debug_introspect_from_vmcore_helper_handler(
-        req, artifact_root=tmp_path, runner=FakeRunner(), build_id_reader=lambda p: VALID
-    )
+    resp = debug_introspect_from_vmcore_helper_handler(req, runtime=_runtime(tmp_path, runner=FakeRunner()))
     assert resp.error.details["code"] == "unknown_helper"
 
 
@@ -370,9 +349,7 @@ def test_helper_happy_path(tmp_path: Path) -> None:
     req = DebugIntrospectFromVmcoreHelperRequest(
         run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux", name="sysinfo"
     )
-    resp = debug_introspect_from_vmcore_helper_handler(
-        req, artifact_root=tmp_path, runner=runner, build_id_reader=lambda p: VALID
-    )
+    resp = debug_introspect_from_vmcore_helper_handler(req, runtime=_runtime(tmp_path, runner=runner))
     assert resp.status == StepStatus.SUCCEEDED
     assert resp.data["helper"] == "sysinfo"
     assert resp.data["result"]["cpus_online"] == 4

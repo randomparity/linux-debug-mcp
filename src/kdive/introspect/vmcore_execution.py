@@ -18,6 +18,7 @@ from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, Too
 from kdive.handlers.shared import _require_value
 from kdive.introspect.context import (
     MAX_INTROSPECT_CALLS_PER_RUN,
+    VmcoreIntrospectRuntime,
     _configuration_failure,
     _count_introspect_calls,
 )
@@ -46,7 +47,7 @@ from kdive.providers.ssh import (
 from kdive.safety.paths import PathSafetyError, confine_run_relative
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import KernelProvenance
-from kdive.symbols.build_id import BuildIdReadError, read_elf_build_id
+from kdive.symbols.build_id import BuildIdReadError
 from kdive.symbols.resolve import SymbolResolutionError, resolve_symbols
 from kdive.symbols.verify import BUILD_ID_RE
 
@@ -427,10 +428,7 @@ def _run_vmcore_introspect_wrapper(
 def _execute_vmcore_introspect_call(
     request: DebugIntrospectFromVmcoreRequest,
     *,
-    artifact_root: Path,
-    runner: CommandRunner | None = None,
-    build_id_reader: Callable[[Path], str] = read_elf_build_id,
-    clock: Callable[[], datetime] | None = None,
+    runtime: VmcoreIntrospectRuntime,
     operation_name: str = "debug.introspect.from_vmcore",
     caps: dict[str, int] | None = None,
     post_validator: IntrospectPostValidator | None = None,
@@ -441,9 +439,9 @@ def _execute_vmcore_introspect_call(
     ``python3`` subprocess. No admission gate, no SSH, no sudo; vmcore analysis is always
     concurrent-safe (interface-contracts §5.6 rule 3).
     """
-    now = clock or _utcnow
+    now = runtime.clock or _utcnow
     ctx, failure = _resolve_vmcore_introspect_context(
-        request, artifact_root=artifact_root, build_id_reader=build_id_reader
+        request, artifact_root=runtime.artifact_root, build_id_reader=runtime.build_id_reader
     )
     if failure is not None:
         return failure
@@ -454,7 +452,7 @@ def _execute_vmcore_introspect_call(
         return failure
     if workspace is None:
         raise RuntimeError("vmcore introspect workspace missing after successful preparation")
-    run, failure = _run_vmcore_introspect_wrapper(ctx, workspace, request, runner=runner, clock=now)
+    run, failure = _run_vmcore_introspect_wrapper(ctx, workspace, request, runner=runtime.runner, clock=now)
     if failure is not None:
         return failure
     if run is None:

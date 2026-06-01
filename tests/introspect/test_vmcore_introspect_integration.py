@@ -27,7 +27,9 @@ import pytest
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.domain import RunRequest, StepStatus
+from kdive.introspect.context import VmcoreIntrospectRuntime
 from kdive.introspect.handlers import debug_introspect_from_vmcore_handler
+from kdive.introspect.models import DebugIntrospectFromVmcoreRequest
 
 pytest.importorskip("drgn")
 VMCORE = os.environ.get("KDIVE_VMCORE")
@@ -60,7 +62,6 @@ def _staged_run(tmp_path: Path) -> tuple[ArtifactStore, str, str]:
 
 
 def test_from_vmcore_runs_script_against_real_core(tmp_path: Path) -> None:
-    from kdive.introspect.models import DebugIntrospectFromVmcoreRequest
 
     _store, vmcore_ref, vmlinux_ref = _staged_run(tmp_path)
     request = DebugIntrospectFromVmcoreRequest(
@@ -70,7 +71,7 @@ def test_from_vmcore_runs_script_against_real_core(tmp_path: Path) -> None:
         script="emit({'comm': prog['init_task'].comm.string_().decode()})",
         timeout_seconds=120,
     )
-    resp = debug_introspect_from_vmcore_handler(request, artifact_root=tmp_path)
+    resp = debug_introspect_from_vmcore_handler(request, runtime=VmcoreIntrospectRuntime(artifact_root=tmp_path))
     assert resp.status == StepStatus.SUCCEEDED, resp.model_dump(mode="json")
     assert resp.data["emits"], "expected at least one emit from the real core"
     assert resp.data["build_id"]

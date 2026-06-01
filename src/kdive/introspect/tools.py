@@ -9,7 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.domain import ToolResponse
-from kdive.introspect.context import LiveIntrospectRuntime
+from kdive.introspect.context import LiveIntrospectRuntime, VmcoreIntrospectRuntime
 from kdive.introspect.models import (
     DebugIntrospectCheckPrerequisitesRequest,
     DebugIntrospectFromVmcoreHelperRequest,
@@ -97,7 +97,7 @@ class VmcoreIntrospectRunHandler(Protocol):
         self,
         *,
         request: DebugIntrospectFromVmcoreRequest,
-        artifact_root: Path,
+        runtime: VmcoreIntrospectRuntime,
     ) -> ToolResponse: ...
 
 
@@ -106,7 +106,7 @@ class VmcoreIntrospectHelperHandler(Protocol):
         self,
         *,
         request: DebugIntrospectFromVmcoreHelperRequest,
-        artifact_root: Path,
+        runtime: VmcoreIntrospectRuntime,
     ) -> ToolResponse: ...
 
 
@@ -141,6 +141,9 @@ class _IntrospectRegistrationContext:
             admission=self.admission,
             session_registry=self.session_registry,
         )
+
+    def vmcore_runtime(self, value: str | None) -> VmcoreIntrospectRuntime:
+        return VmcoreIntrospectRuntime(artifact_root=self.artifact_root_path(value))
 
 
 def _tool_response_json(response: ToolResponse) -> dict[str, Any]:
@@ -281,7 +284,7 @@ def _register_vmcore_introspect_run_tool(
         return _tool_response_json(
             handler(
                 request=request,
-                artifact_root=context.artifact_root_path(vmcore_model.artifact_root),
+                runtime=context.vmcore_runtime(vmcore_model.artifact_root),
             )
         )
 
@@ -315,7 +318,7 @@ def _register_vmcore_introspect_helper_tool(
         return _tool_response_json(
             handler(
                 request=request,
-                artifact_root=context.artifact_root_path(vmcore_model.artifact_root),
+                runtime=context.vmcore_runtime(vmcore_model.artifact_root),
             )
         )
 

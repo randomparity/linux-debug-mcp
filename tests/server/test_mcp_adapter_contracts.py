@@ -15,7 +15,7 @@ from kdive.artifacts.tools import (
 from kdive.config import BootOverrides, BuildOverrides
 from kdive.debug.contracts import DebugRuntime
 from kdive.domain import ToolResponse
-from kdive.introspect.context import LiveIntrospectRuntime
+from kdive.introspect.context import LiveIntrospectRuntime, VmcoreIntrospectRuntime
 from kdive.introspect.models import (
     DebugIntrospectFromVmcoreHelperRequest,
     DebugIntrospectRunRequest,
@@ -694,7 +694,9 @@ def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators
         vmlinux_ref="build/vmlinux",
         name="dmesg",
     )
-    assert drgn_calls[0][1] == {"artifact_root": tmp_path / "runs", "runner": None, "clock": None}
+    assert drgn_calls[0][1] == {
+        "runtime": VmcoreIntrospectRuntime(artifact_root=tmp_path / "runs"),
+    }
 
 
 def test_postmortem_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_path: Path) -> None:

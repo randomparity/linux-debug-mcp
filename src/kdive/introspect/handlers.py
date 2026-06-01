@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
-from datetime import datetime
-from pathlib import Path
 
 from pydantic import ValidationError
 
@@ -13,6 +10,7 @@ from kdive.domain import ErrorCategory, ToolResponse
 from kdive.handlers.shared import _require_value
 from kdive.introspect.context import (
     LiveIntrospectRuntime,
+    VmcoreIntrospectRuntime,
     _configuration_failure,
 )
 from kdive.introspect.execution import _execute_introspect_call
@@ -38,13 +36,11 @@ from kdive.introspect.vmcore_execution import (
 from kdive.prereqs.drgn_probe import PROBE_SCRIPT
 from kdive.providers.ssh import (
     SSH_TIMEOUT_GRACE_SECONDS,
-    CommandRunner,
     SshRunner,
     SubprocessSshRunner,
     build_ssh_argv,
 )
 from kdive.safety.redaction import Redactor
-from kdive.symbols.build_id import read_elf_build_id
 from kdive.target.probes import (
     PROBE_STDOUT_CAP,
     prepare_probe_dirs,
@@ -207,18 +203,12 @@ def debug_introspect_helper_handler(
 def debug_introspect_from_vmcore_handler(
     request: DebugIntrospectFromVmcoreRequest,
     *,
-    artifact_root: Path,
-    runner: CommandRunner | None = None,
-    build_id_reader: Callable[[Path], str] = read_elf_build_id,
-    clock: Callable[[], datetime] | None = None,
+    runtime: VmcoreIntrospectRuntime,
 ) -> ToolResponse:
     """Spec §6 / ADR 0010. Offline vmcore drgn introspection; no admission gate."""
     return _execute_vmcore_introspect_call(
         request,
-        artifact_root=artifact_root,
-        runner=runner,
-        build_id_reader=build_id_reader,
-        clock=clock,
+        runtime=runtime,
         operation_name="debug.introspect.from_vmcore",
         caps=None,
         post_validator=None,
@@ -228,10 +218,7 @@ def debug_introspect_from_vmcore_handler(
 def debug_introspect_from_vmcore_helper_handler(
     request: DebugIntrospectFromVmcoreHelperRequest,
     *,
-    artifact_root: Path,
-    runner: CommandRunner | None = None,
-    build_id_reader: Callable[[Path], str] = read_elf_build_id,
-    clock: Callable[[], datetime] | None = None,
+    runtime: VmcoreIntrospectRuntime,
 ) -> ToolResponse:
     """Spec §3.1. Run a curated helper against a vmcore, reusing the live helper's post-validator
     and cap profile unchanged."""
@@ -267,10 +254,7 @@ def debug_introspect_from_vmcore_helper_handler(
     )
     return _execute_vmcore_introspect_call(
         run_request,
-        artifact_root=artifact_root,
-        runner=runner,
-        build_id_reader=build_id_reader,
-        clock=clock,
+        runtime=runtime,
         operation_name="debug.introspect.from_vmcore_helper",
         caps=HELPER_CAP_PROFILE,
         post_validator=_make_helper_post_validator(spec),

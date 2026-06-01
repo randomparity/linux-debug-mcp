@@ -9,6 +9,7 @@ import pytest
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.domain import RunRequest
+from kdive.introspect.context import VmcoreIntrospectRuntime
 from kdive.introspect.models import DebugIntrospectFromVmcoreRequest
 from kdive.postmortem.models import DebugPostmortemTriageRequest
 from kdive.postmortem.tools import PostmortemToolRuntime
@@ -51,7 +52,9 @@ def test_triage_real_core_consistency(tmp_path) -> None:
     _stage(tmp_path)
 
     def drgn_helper(*, request, runtime):
-        return debug_introspect_from_vmcore_helper_handler(request, artifact_root=runtime.artifact_root)
+        return debug_introspect_from_vmcore_helper_handler(
+            request, runtime=VmcoreIntrospectRuntime(artifact_root=runtime.artifact_root)
+        )
 
     resp = debug_postmortem_triage_handler(
         DebugPostmortemTriageRequest(run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux"),
@@ -72,7 +75,7 @@ def test_triage_real_core_consistency(tmp_path) -> None:
             vmlinux_ref="build/vmlinux",
             script='emit({"build_id": prog.main_module().build_id.hex()})',
         ),
-        artifact_root=tmp_path,
+        runtime=VmcoreIntrospectRuntime(artifact_root=tmp_path),
     )
     assert drgn.ok is True, drgn.error
     assert drgn.data["build_id"] == report["vmcore_build_id"]

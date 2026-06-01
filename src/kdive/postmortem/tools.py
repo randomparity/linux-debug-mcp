@@ -12,6 +12,7 @@ from kdive.config import RootfsProfile
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.domain import ToolResponse
+from kdive.introspect.context import VmcoreIntrospectRuntime
 from kdive.introspect.models import DebugIntrospectFromVmcoreHelperRequest
 from kdive.model import Model
 from kdive.postmortem.models import (
@@ -111,10 +112,7 @@ class RawPostmortemDrgnHelper(Protocol):
         self,
         request: DebugIntrospectFromVmcoreHelperRequest,
         *,
-        artifact_root: Path,
-        runner: SshRunner | None = None,
-        build_id_reader: Callable[[Path], str] = read_elf_build_id,
-        clock: Callable[[], datetime] | None = None,
+        runtime: VmcoreIntrospectRuntime,
     ) -> ToolResponse: ...
 
 
@@ -208,14 +206,16 @@ def _adapt_triage_drgn_helper(handler: RawPostmortemDrgnHelper) -> PostmortemDrg
             args=request.args or {},
             timeout_seconds=request.timeout_seconds,
         )
-        kwargs: dict[str, Any] = {
-            "artifact_root": runtime.artifact_root,
-            "runner": runtime.ssh_runner,
-            "clock": runtime.clock,
-        }
-        if runtime.vmlinux_build_id_reader is not None:
-            kwargs["build_id_reader"] = runtime.vmlinux_build_id_reader
-        return handler(introspect_request, **kwargs)
+        build_id_reader = runtime.vmlinux_build_id_reader or read_elf_build_id
+        return handler(
+            introspect_request,
+            runtime=VmcoreIntrospectRuntime(
+                artifact_root=runtime.artifact_root,
+                runner=runtime.ssh_runner,
+                build_id_reader=build_id_reader,
+                clock=runtime.clock,
+            ),
+        )
 
     return wrapped
 
