@@ -10,6 +10,7 @@ from kdive.artifacts.store import ArtifactStore
 from kdive.domain import RunRequest
 from kdive.postmortem.crash.handler import debug_postmortem_crash_handler
 from kdive.postmortem.models import DebugPostmortemCrashRequest
+from kdive.postmortem.tools import PostmortemToolRuntime
 
 pytestmark = pytest.mark.skipif(
     shutil.which("crash") is None or not os.environ.get("KDIVE_VMCORE") or not os.environ.get("KDIVE_VMLINUX"),
@@ -41,7 +42,7 @@ def test_real_crash_batch(tmp_path: Path) -> None:
             commands=["sys", "log", "bt"],
             timeout_seconds=120,
         ),
-        artifact_root=tmp_path,
+        runtime=PostmortemToolRuntime(artifact_root=tmp_path),
     )
     assert resp.ok is True, resp.error
     assert resp.data["vmcore_build_id"]

@@ -13,6 +13,7 @@ from kdive.domain import (
 )
 from kdive.postmortem.crash.handler import debug_postmortem_crash_handler
 from kdive.postmortem.models import DebugPostmortemCrashRequest
+from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 
 GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
@@ -48,7 +49,7 @@ def test_postmortem_vmcore_resolver_has_concrete_request_and_manifest_types() ->
 def test_postmortem_crash_handler_uses_request_artifact_root_contract() -> None:
     signature = inspect.signature(debug_postmortem_crash_handler)
 
-    assert set(signature.parameters) >= {"request", "artifact_root"}
+    assert list(signature.parameters) == ["request", "runtime"]
 
 
 def _run(tmp_path: Path) -> ArtifactStore:
@@ -102,6 +103,23 @@ class _RaisingRunner:
         raise OSError("crash unavailable")
 
 
+def _runtime(
+    tmp_path: Path,
+    *,
+    runner=None,
+    vmcore_build_id_reader=None,
+    vmlinux_build_id_reader=None,
+    clock=None,
+) -> PostmortemToolRuntime:
+    return PostmortemToolRuntime(
+        artifact_root=tmp_path,
+        ssh_runner=runner,
+        vmcore_build_id_reader=vmcore_build_id_reader or (lambda _p: GOOD_ID),
+        vmlinux_build_id_reader=vmlinux_build_id_reader or (lambda _p: GOOD_ID),
+        clock=clock,
+    )
+
+
 def test_happy_path_keys_results_by_command(tmp_path) -> None:
     store = _run(tmp_path)
     runner = _FakeRunner(outputs={0: "KERNEL: vmlinux\nRELEASE: 6.1.0\n", 1: "raw text"})
@@ -112,10 +130,7 @@ def test_happy_path_keys_results_by_command(tmp_path) -> None:
             vmlinux_ref="build/vmlinux",
             commands=["sys", "vtop 0x0"],
         ),
-        artifact_root=tmp_path,
-        runner=runner,
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, runner=runner),
     )
     assert resp.ok is True
     assert resp.data["results"]["sys"]["system"]["RELEASE"] == "6.1.0"
@@ -132,10 +147,7 @@ def test_runner_exception_records_failed_crash_step(tmp_path) -> None:
             vmlinux_ref="build/vmlinux",
             commands=["sys"],
         ),
-        artifact_root=tmp_path,
-        runner=_RaisingRunner(),
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, runner=_RaisingRunner()),
     )
 
     assert resp.ok is False
@@ -161,10 +173,7 @@ def test_raw_output_files_are_mode_0600(tmp_path) -> None:
             vmlinux_ref="build/vmlinux",
             commands=["sys"],
         ),
-        artifact_root=tmp_path,
-        runner=runner,
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, runner=runner),
     )
     crash_dir = store.run_dir("r1") / "sensitive" / "debug" / "postmortem" / "crash"
     call_dir = next(crash_dir.iterdir())
@@ -184,10 +193,12 @@ def test_build_id_mismatch_fails_loud_no_run(tmp_path) -> None:
             vmlinux_ref="build/vmlinux",
             commands=["bt"],
         ),
-        artifact_root=tmp_path,
-        runner=runner,
-        vmcore_build_id_reader=lambda _p: "a" * 40,
-        vmlinux_build_id_reader=lambda _p: "b" * 40,
+        runtime=_runtime(
+            tmp_path,
+            runner=runner,
+            vmcore_build_id_reader=lambda _p: "a" * 40,
+            vmlinux_build_id_reader=lambda _p: "b" * 40,
+        ),
     )
     assert resp.ok is False
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
@@ -228,10 +239,7 @@ def test_vmcore_reader_failures_fail_loud(tmp_path, exc_name, expected_code) -> 
             vmlinux_ref="build/vmlinux",
             commands=["bt"],
         ),
-        artifact_root=tmp_path,
-        runner=runner,
-        vmcore_build_id_reader=_raising_reader(exc),
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, runner=runner, vmcore_build_id_reader=_raising_reader(exc)),
     )
     assert resp.ok is False
     assert resp.error.details["code"] == expected_code
@@ -254,10 +262,7 @@ def test_vmlinux_build_id_unreadable_fails_loud(tmp_path) -> None:
             vmlinux_ref="build/vmlinux",
             commands=["bt"],
         ),
-        artifact_root=tmp_path,
-        runner=runner,
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=_raise,
+        runtime=_runtime(tmp_path, runner=runner, vmlinux_build_id_reader=_raise),
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "vmlinux_build_id_unreadable"
@@ -274,10 +279,7 @@ def test_crash_open_failure_no_output_nonzero_exit(tmp_path) -> None:
             vmlinux_ref="build/vmlinux",
             commands=["bt"],
         ),
-        artifact_root=tmp_path,
-        runner=runner,
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, runner=runner),
     )
     assert resp.ok is False
     assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -302,10 +304,7 @@ def test_input_validation_codes(tmp_path, kwargs, code) -> None:
             vmlinux_ref="build/vmlinux",
             **kwargs,
         ),
-        artifact_root=tmp_path,
-        runner=runner,
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, runner=runner),
     )
     assert resp.ok is False
     assert resp.error.details["code"] == code
@@ -322,10 +321,7 @@ def test_disallowed_command_rejected_no_run(tmp_path) -> None:
             vmlinux_ref="build/vmlinux",
             commands=["bt | sh"],
         ),
-        artifact_root=tmp_path,
-        runner=runner,
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, runner=runner),
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "command_not_permitted"
@@ -344,10 +340,7 @@ def test_lifecycle_independent_no_admission_injected(tmp_path) -> None:
             vmlinux_ref="build/vmlinux",
             commands=["bt"],
         ),
-        artifact_root=tmp_path,
-        runner=runner,
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, runner=runner),
     )
     assert resp.ok is True
 
@@ -362,10 +355,7 @@ def test_timeout_beats_partial_files(tmp_path) -> None:
             vmlinux_ref="build/vmlinux",
             commands=["bt", "ps"],
         ),
-        artifact_root=tmp_path,
-        runner=runner,
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, runner=runner),
     )
     assert resp.ok is False
     assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -385,10 +375,7 @@ def test_redaction_masks_secret_in_output(tmp_path) -> None:
             vmlinux_ref="build/vmlinux",
             commands=["log"],
         ),
-        artifact_root=tmp_path,
-        runner=runner,
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, runner=runner),
     )
     blob = repr(resp.data["results"])
     assert secret_value not in blob
@@ -416,10 +403,7 @@ def test_argv_carries_prlimit_disk_bound(tmp_path) -> None:
             vmlinux_ref="build/vmlinux",
             commands=["bt"],
         ),
-        artifact_root=tmp_path,
-        runner=runner,
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, runner=runner),
     )
     assert runner.argv[:2] == ["prlimit", f"--fsize={CRASH_PER_CMD_CAP}"]
     assert "crash" in runner.argv and "-s" in runner.argv
@@ -450,10 +434,7 @@ def test_modules_path_unsafe_rejected_no_run(tmp_path, monkeypatch) -> None:
             modules_ref="build/mods",
             commands=["bt"],
         ),
-        artifact_root=tmp_path,
-        runner=runner,
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, runner=runner),
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "modules_path_unsafe"
@@ -496,10 +477,7 @@ def test_module_symbols_status_reported(tmp_path, monkeypatch) -> None:
             modules_ref="build/mods",
             commands=["bt"],
         ),
-        artifact_root=tmp_path,
-        runner=runner,
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, runner=runner),
     )
     assert resp.ok is True
     assert resp.data["module_symbols"]["status"] == "loaded"
@@ -537,10 +515,7 @@ def test_module_symbols_load_failed(tmp_path, monkeypatch) -> None:
             modules_ref="build/mods",
             commands=["bt"],
         ),
-        artifact_root=tmp_path,
-        runner=_BadModRunner(outputs={0: "PID: 0\n"}),
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, runner=_BadModRunner(outputs={0: "PID: 0\n"})),
     )
     assert resp.ok is True
     assert resp.data["module_symbols"]["status"] == "load_failed"

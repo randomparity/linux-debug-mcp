@@ -371,29 +371,16 @@ class _CrashParsedOutput:
 def debug_postmortem_crash_handler(
     request: DebugPostmortemCrashRequest,
     *,
-    runtime: PostmortemToolRuntime | None = None,
-    artifact_root: Path | None = None,
-    runner: SshRunner | None = None,
-    vmcore_build_id_reader: Callable[[Path], str] = read_vmcore_build_id,
-    vmlinux_build_id_reader: Callable[[Path], str] = read_elf_build_id,
-    clock: Callable[[], datetime] | None = None,
+    runtime: PostmortemToolRuntime,
 ) -> ToolResponse:
     """Spec §6 / ADR 0026. Host-side crash batch runner; no admission gate."""
-    if runtime is not None:
-        artifact_root = runtime.artifact_root
-        runner = runtime.ssh_runner if runner is None else runner
-        vmcore_build_id_reader = runtime.vmcore_build_id_reader or vmcore_build_id_reader
-        vmlinux_build_id_reader = runtime.vmlinux_build_id_reader or vmlinux_build_id_reader
-        clock = runtime.clock or clock
-    if artifact_root is None:
-        raise TypeError("artifact_root is required when runtime is not provided")
     run_id = request.run_id
-    now = clock or _utcnow
+    now = runtime.clock or _utcnow
     ctx, failure = resolve_postmortem_vmcore_context(
         request,
-        artifact_root=artifact_root,
-        vmcore_build_id_reader=vmcore_build_id_reader,
-        vmlinux_build_id_reader=vmlinux_build_id_reader,
+        artifact_root=runtime.artifact_root,
+        vmcore_build_id_reader=runtime.vmcore_build_id_reader or read_vmcore_build_id,
+        vmlinux_build_id_reader=runtime.vmlinux_build_id_reader or read_elf_build_id,
     )
     if failure is not None:
         return failure
@@ -418,7 +405,7 @@ def debug_postmortem_crash_handler(
         return _crash_config_failure(run_id, "sensitive_dir_too_permissive", f"{sensitive_dir} mode is {oct(mode)}")
 
     workspace = _prepare_crash_call_workspace(ctx, request)
-    active_runner: SshRunner = runner or SubprocessSshRunner()
+    active_runner: SshRunner = runtime.ssh_runner or SubprocessSshRunner()
     started_at = now()
     started_monotonic = time.monotonic()
     try:
