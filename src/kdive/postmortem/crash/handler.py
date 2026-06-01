@@ -525,7 +525,7 @@ def _persist_crash_artifacts(context: _CrashFinalizationContext, parsed: _CrashP
     parsed_path = context.agent_dir / "parsed.json"
     transcript_path.write_text(context.redactor.redact_text(parsed.transcript), encoding="utf-8")
     parsed_path.write_text(json.dumps(parsed.results), encoding="utf-8")
-    artifacts = [
+    return [
         ArtifactRef(
             path=str(transcript_path.relative_to(context.store.run_dir(context.run_id))),
             kind="crash_transcript",
@@ -535,7 +535,6 @@ def _persist_crash_artifacts(context: _CrashFinalizationContext, parsed: _CrashP
             kind="crash_parsed_json",
         ),
     ]
-    return artifacts
 
 
 def _crash_success_response(
