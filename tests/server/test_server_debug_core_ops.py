@@ -345,11 +345,10 @@ def test_debug_tool_registration_uses_typed_context_and_handler_protocols() -> N
 
     handler_hints = get_type_hints(DebugToolHandlers)
     assert handler_hints["start_session"] == debug_tools.DebugStartSessionHandler
-    assert handler_hints["read_registers"] == debug_tools.DebugReadRegistersHandler
-    assert handler_hints["read_symbol"] == debug_tools.DebugReadSymbolHandler
-    assert handler_hints["set_breakpoint"] == debug_tools.DebugSymbolControlHandler
-    assert handler_hints["continue_execution"] == debug_tools.DebugExecutionControlHandler
+    assert handler_hints["operation"] == debug_contracts.DebugOperationCore
     assert handler_hints["end_session"] == debug_tools.DebugEndSessionHandler
+    assert "read_registers" not in handler_hints
+    assert "set_breakpoint" not in handler_hints
     assert not hasattr(debug_tools, "DebugToolHandler")
     assert not hasattr(debug_tools, "DebugUngatedHandler")
 
@@ -370,7 +369,8 @@ def test_debug_tool_registration_is_split_by_operation_family() -> None:
 
 
 def test_debug_operation_handler_builds_runtime_without_pass_through_layers() -> None:
-    assert debug_operations._debug_operation_response.__module__ == "kdive.debug.operations"
+    assert debug_operations.debug_operation_response.__module__ == "kdive.debug.operations"
+    assert debug_operations._debug_operation_response is debug_operations.debug_operation_response
     assert debug_contracts.DebugRuntime.__module__ == "kdive.debug.contracts"
     assert debug_operations.DebugRuntime is debug_contracts.DebugRuntime
     assert not hasattr(debug_handlers, "debug_tool_operation_response")
@@ -379,6 +379,7 @@ def test_debug_operation_handler_builds_runtime_without_pass_through_layers() ->
     assert not hasattr(debug_handlers, "configure_debug_operation_core")
     assert not hasattr(debug_handlers, "_DEBUG_OPERATION_CORE")
     assert not hasattr(debug_handlers, "_default_debug_operation_core")
+    assert not hasattr(server_module, "debug_handlers")
     assert not hasattr(server_module, "_debug_operation_response")
 
 

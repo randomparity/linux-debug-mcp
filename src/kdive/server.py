@@ -26,8 +26,8 @@ from kdive.coordination.admission import (
 from kdive.coordination.lease import ConsoleLeaseManager
 from kdive.coordination.registry import OrphanReap, SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
-from kdive.debug import handlers as debug_handlers
 from kdive.debug import module_symbols as debug_module_symbols
+from kdive.debug import operations as debug_operations
 from kdive.debug import session_end as debug_session_end
 from kdive.debug import session_handlers as debug_session_handlers
 from kdive.debug.tools import DebugToolContext, DebugToolHandlers, register_debug_tools
@@ -539,23 +539,8 @@ def create_app(
         ),
         handlers=DebugToolHandlers(
             start_session=debug_session_handlers.debug_start_session_handler,
-            read_registers=debug_handlers.debug_read_registers_handler,
-            read_symbol=debug_handlers.debug_read_symbol_handler,
-            read_memory=debug_handlers.debug_read_memory_handler,
-            evaluate=debug_handlers.debug_evaluate_handler,
             load_module_symbols=debug_module_symbols.debug_load_module_symbols_handler,
-            set_breakpoint=debug_handlers.debug_set_breakpoint_handler,
-            set_watchpoint=debug_handlers.debug_set_watchpoint_handler,
-            clear_breakpoint=debug_handlers.debug_clear_breakpoint_handler,
-            clear_watchpoint=debug_handlers.debug_clear_watchpoint_handler,
-            list_breakpoints=debug_handlers.debug_list_breakpoints_handler,
-            backtrace=debug_handlers.debug_backtrace_handler,
-            list_variables=debug_handlers.debug_list_variables_handler,
-            continue_execution=debug_handlers.debug_continue_handler,
-            step=debug_handlers.debug_step_handler,
-            next=debug_handlers.debug_next_handler,
-            finish=debug_handlers.debug_finish_handler,
-            interrupt=debug_handlers.debug_interrupt_handler,
+            operation=debug_operations.debug_operation_response,
             end_session=debug_session_end.debug_end_session_handler,
         ),
     )

@@ -353,7 +353,7 @@ def _map_debug_op_exception(
     )
 
 
-def _debug_operation_response(
+def debug_operation_response(
     *,
     artifact_root: Path,
     run_id: str,
@@ -434,3 +434,6 @@ def _debug_operation_response(
         artifacts=redacted_artifacts(op_artifacts, redactor),
         suggested_next_actions=["artifacts.get_manifest"],
     )
+
+
+_debug_operation_response = debug_operation_response

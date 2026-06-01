@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -9,7 +10,59 @@ from mcp.server.fastmcp import FastMCP
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
-from kdive.debug.contracts import DebugRuntime
+from kdive.debug.contracts import (
+    DebugBacktraceRequest as DebugBacktraceOperationRequest,
+)
+from kdive.debug.contracts import (
+    DebugClearBreakpointRequest as DebugClearBreakpointOperationRequest,
+)
+from kdive.debug.contracts import (
+    DebugClearWatchpointRequest as DebugClearWatchpointOperationRequest,
+)
+from kdive.debug.contracts import (
+    DebugContinueRequest as DebugContinueOperationRequest,
+)
+from kdive.debug.contracts import (
+    DebugEvaluateRequest as DebugEvaluateOperationRequest,
+)
+from kdive.debug.contracts import (
+    DebugFinishRequest as DebugFinishOperationRequest,
+)
+from kdive.debug.contracts import (
+    DebugInterruptRequest as DebugInterruptOperationRequest,
+)
+from kdive.debug.contracts import (
+    DebugListBreakpointsRequest as DebugListBreakpointsOperationRequest,
+)
+from kdive.debug.contracts import (
+    DebugListVariablesRequest as DebugListVariablesOperationRequest,
+)
+from kdive.debug.contracts import (
+    DebugNextRequest as DebugNextOperationRequest,
+)
+from kdive.debug.contracts import (
+    DebugOperationCore,
+    DebugOperationRequest,
+    DebugRuntime,
+)
+from kdive.debug.contracts import (
+    DebugReadMemoryRequest as DebugReadMemoryOperationRequest,
+)
+from kdive.debug.contracts import (
+    DebugReadRegistersRequest as DebugReadRegistersOperationRequest,
+)
+from kdive.debug.contracts import (
+    DebugReadSymbolRequest as DebugReadSymbolOperationRequest,
+)
+from kdive.debug.contracts import (
+    DebugSetBreakpointRequest as DebugSetBreakpointOperationRequest,
+)
+from kdive.debug.contracts import (
+    DebugSetWatchpointRequest as DebugSetWatchpointOperationRequest,
+)
+from kdive.debug.contracts import (
+    DebugStepRequest as DebugStepOperationRequest,
+)
 from kdive.domain import Model, ToolResponse
 from kdive.providers.debug import GdbMiEngine, GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard
@@ -20,66 +73,25 @@ class DebugStartSessionHandler(Protocol):
     def __call__(self, *, request: DebugStartSessionRequest, runtime: DebugToolContext) -> ToolResponse: ...
 
 
-class DebugReadRegistersHandler(Protocol):
-    def __call__(self, *, request: DebugRegistersRequest, runtime: DebugRuntime) -> ToolResponse: ...
-
-
-class DebugReadSymbolHandler(Protocol):
-    def __call__(self, *, request: DebugSymbolRequest, runtime: DebugRuntime) -> ToolResponse: ...
-
-
-class DebugReadMemoryHandler(Protocol):
-    def __call__(self, *, request: DebugMemoryRequest, runtime: DebugRuntime) -> ToolResponse: ...
-
-
-class DebugEvaluateHandler(Protocol):
-    def __call__(self, *, request: DebugEvaluateRequest, runtime: DebugRuntime) -> ToolResponse: ...
-
-
 class DebugLoadModuleSymbolsHandler(Protocol):
     def __call__(self, *, request: DebugLoadModuleSymbolsRequest, runtime: DebugToolContext) -> ToolResponse: ...
-
-
-class DebugSymbolControlHandler(Protocol):
-    def __call__(self, *, request: DebugSymbolRequest, runtime: DebugRuntime) -> ToolResponse: ...
-
-
-class DebugBreakpointIdControlHandler(Protocol):
-    def __call__(self, *, request: DebugBreakpointIdRequest, runtime: DebugRuntime) -> ToolResponse: ...
-
-
-class DebugSessionQueryHandler(Protocol):
-    def __call__(self, *, request: DebugSessionRequest, runtime: DebugRuntime) -> ToolResponse: ...
-
-
-class DebugExecutionControlHandler(Protocol):
-    def __call__(self, *, request: DebugExecutionRequest, runtime: DebugRuntime) -> ToolResponse: ...
 
 
 class DebugEndSessionHandler(Protocol):
     def __call__(self, *, request: DebugSessionRequest, runtime: DebugToolContext) -> ToolResponse: ...
 
 
+class _DebugOperationToolRequest(Protocol):
+    artifact_root: Path
+    run_id: str
+    debug_session_id: str | None
+
+
 @dataclass(frozen=True)
 class DebugToolHandlers:
     start_session: DebugStartSessionHandler
-    read_registers: DebugReadRegistersHandler
-    read_symbol: DebugReadSymbolHandler
-    read_memory: DebugReadMemoryHandler
-    evaluate: DebugEvaluateHandler
     load_module_symbols: DebugLoadModuleSymbolsHandler
-    set_breakpoint: DebugSymbolControlHandler
-    set_watchpoint: DebugSymbolControlHandler
-    clear_breakpoint: DebugBreakpointIdControlHandler
-    clear_watchpoint: DebugBreakpointIdControlHandler
-    list_breakpoints: DebugSessionQueryHandler
-    backtrace: DebugSessionQueryHandler
-    list_variables: DebugSessionQueryHandler
-    continue_execution: DebugExecutionControlHandler
-    step: DebugExecutionControlHandler
-    next: DebugExecutionControlHandler
-    finish: DebugExecutionControlHandler
-    interrupt: DebugExecutionControlHandler
+    operation: DebugOperationCore
     end_session: DebugEndSessionHandler
 
 
@@ -223,6 +235,22 @@ def _debug_runtime(context: DebugToolContext) -> DebugRuntime:
     )
 
 
+def _run_debug_operation(
+    *,
+    operation: DebugOperationCore,
+    request: _DebugOperationToolRequest,
+    operation_request: DebugOperationRequest,
+    runtime: DebugRuntime,
+) -> ToolResponse:
+    return operation(
+        artifact_root=request.artifact_root,
+        run_id=request.run_id,
+        debug_session_id=request.debug_session_id,
+        request=operation_request,
+        runtime=runtime,
+    )
+
+
 def _tool_function_name(tool_name: str) -> str:
     return tool_name.replace(".", "_")
 
@@ -285,7 +313,7 @@ def _register_registers_query(
     tool_context: DebugToolContext,
     default_artifact_root: str,
     tool_name: str,
-    handler: DebugReadRegistersHandler,
+    operation: DebugOperationCore,
 ) -> None:
     def debug_registers_query(
         context: DebugSessionContext | dict[str, Any],
@@ -299,13 +327,15 @@ def _register_registers_query(
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
-            handler(
+            _run_debug_operation(
+                operation=operation,
                 request=DebugRegistersRequest(
                     artifact_root=artifact_root,
                     run_id=run_id,
                     debug_session_id=debug_session_id,
                     registers=registers,
                 ),
+                operation_request=DebugReadRegistersOperationRequest(registers=registers),
                 runtime=_debug_runtime(tool_context),
             )
         )
@@ -320,7 +350,7 @@ def _register_symbol_query(
     tool_context: DebugToolContext,
     default_artifact_root: str,
     tool_name: str,
-    handler: DebugReadSymbolHandler,
+    operation: DebugOperationCore,
 ) -> None:
     def debug_symbol_query(
         context: DebugSessionContext | dict[str, Any],
@@ -334,13 +364,15 @@ def _register_symbol_query(
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
-            handler(
+            _run_debug_operation(
+                operation=operation,
                 request=DebugSymbolRequest(
                     artifact_root=artifact_root,
                     run_id=run_id,
                     debug_session_id=debug_session_id,
                     symbol=symbol,
                 ),
+                operation_request=DebugReadSymbolOperationRequest(symbol=symbol),
                 runtime=_debug_runtime(tool_context),
             )
         )
@@ -357,14 +389,14 @@ def _register_debug_read_tools(
         tool_context=tool_context,
         default_artifact_root=default_artifact_root,
         tool_name="debug.read_registers",
-        handler=handlers.read_registers,
+        operation=handlers.operation,
     )
     _register_symbol_query(
         app,
         tool_context=tool_context,
         default_artifact_root=default_artifact_root,
         tool_name="debug.read_symbol",
-        handler=handlers.read_symbol,
+        operation=handlers.operation,
     )
 
     @app.tool(name="debug.read_memory")
@@ -381,7 +413,8 @@ def _register_debug_read_tools(
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
-            handlers.read_memory(
+            _run_debug_operation(
+                operation=handlers.operation,
                 request=DebugMemoryRequest(
                     artifact_root=artifact_root,
                     run_id=run_id,
@@ -389,6 +422,7 @@ def _register_debug_read_tools(
                     address=address,
                     byte_count=byte_count,
                 ),
+                operation_request=DebugReadMemoryOperationRequest(address=address, byte_count=byte_count),
                 runtime=_debug_runtime(tool_context),
             )
         )
@@ -408,13 +442,18 @@ def _register_debug_read_tools(
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
-            handlers.evaluate(
+            _run_debug_operation(
+                operation=handlers.operation,
                 request=DebugEvaluateRequest(
                     artifact_root=artifact_root,
                     run_id=run_id,
                     debug_session_id=debug_session_id,
                     inspector=inspector,
                     arguments=evaluate_options.arguments,
+                ),
+                operation_request=DebugEvaluateOperationRequest(
+                    inspector=inspector,
+                    arguments=evaluate_options.arguments or {},
                 ),
                 runtime=_debug_runtime(tool_context),
             )
@@ -459,7 +498,8 @@ def _register_symbol_control(
     tool_context: DebugToolContext,
     default_artifact_root: str,
     tool_name: str,
-    handler: DebugSymbolControlHandler,
+    operation: DebugOperationCore,
+    request_factory: Callable[[str], DebugOperationRequest],
 ) -> None:
     def debug_symbol_control(
         context: DebugSessionContext | dict[str, Any],
@@ -473,13 +513,15 @@ def _register_symbol_control(
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
-            handler(
+            _run_debug_operation(
+                operation=operation,
                 request=DebugSymbolRequest(
                     artifact_root=artifact_root,
                     run_id=run_id,
                     debug_session_id=debug_session_id,
                     symbol=symbol,
                 ),
+                operation_request=request_factory(symbol),
                 runtime=_debug_runtime(tool_context),
             )
         )
@@ -494,7 +536,8 @@ def _register_breakpoint_id_control(
     tool_context: DebugToolContext,
     default_artifact_root: str,
     tool_name: str,
-    handler: DebugBreakpointIdControlHandler,
+    operation: DebugOperationCore,
+    request_factory: Callable[[str], DebugOperationRequest],
 ) -> None:
     def debug_breakpoint_id_control(
         context: DebugSessionContext | dict[str, Any],
@@ -508,13 +551,15 @@ def _register_breakpoint_id_control(
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
-            handler(
+            _run_debug_operation(
+                operation=operation,
                 request=DebugBreakpointIdRequest(
                     artifact_root=artifact_root,
                     run_id=run_id,
                     debug_session_id=debug_session_id,
                     breakpoint_id=breakpoint_id,
                 ),
+                operation_request=request_factory(breakpoint_id),
                 runtime=_debug_runtime(tool_context),
             )
         )
@@ -529,7 +574,8 @@ def _register_gated_query(
     tool_context: DebugToolContext,
     default_artifact_root: str,
     tool_name: str,
-    handler: DebugSessionQueryHandler,
+    operation: DebugOperationCore,
+    operation_request: DebugOperationRequest,
 ) -> None:
     def debug_session_query(
         context: DebugSessionContext | dict[str, Any],
@@ -542,12 +588,14 @@ def _register_gated_query(
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
-            handler(
+            _run_debug_operation(
+                operation=operation,
                 request=DebugSessionRequest(
                     artifact_root=artifact_root,
                     run_id=run_id,
                     debug_session_id=debug_session_id,
                 ),
+                operation_request=operation_request,
                 runtime=_debug_runtime(tool_context),
             )
         )
@@ -559,41 +607,44 @@ def _register_gated_query(
 def _register_debug_breakpoint_tools(
     app: FastMCP, *, tool_context: DebugToolContext, default_artifact_root: str, handlers: DebugToolHandlers
 ) -> None:
-    for tool_name, handler in (
-        ("debug.set_breakpoint", handlers.set_breakpoint),
-        ("debug.set_watchpoint", handlers.set_watchpoint),
+    for tool_name, request_factory in (
+        ("debug.set_breakpoint", DebugSetBreakpointOperationRequest),
+        ("debug.set_watchpoint", DebugSetWatchpointOperationRequest),
     ):
         _register_symbol_control(
             app,
             tool_context=tool_context,
             default_artifact_root=default_artifact_root,
             tool_name=tool_name,
-            handler=handler,
+            operation=handlers.operation,
+            request_factory=request_factory,
         )
 
-    for tool_name, handler in (
-        ("debug.clear_breakpoint", handlers.clear_breakpoint),
-        ("debug.clear_watchpoint", handlers.clear_watchpoint),
+    for tool_name, request_factory in (
+        ("debug.clear_breakpoint", DebugClearBreakpointOperationRequest),
+        ("debug.clear_watchpoint", DebugClearWatchpointOperationRequest),
     ):
         _register_breakpoint_id_control(
             app,
             tool_context=tool_context,
             default_artifact_root=default_artifact_root,
             tool_name=tool_name,
-            handler=handler,
+            operation=handlers.operation,
+            request_factory=request_factory,
         )
 
-    for tool_name, handler in (
-        ("debug.list_breakpoints", handlers.list_breakpoints),
-        ("debug.backtrace", handlers.backtrace),
-        ("debug.list_variables", handlers.list_variables),
+    for tool_name, operation_request in (
+        ("debug.list_breakpoints", DebugListBreakpointsOperationRequest()),
+        ("debug.backtrace", DebugBacktraceOperationRequest()),
+        ("debug.list_variables", DebugListVariablesOperationRequest()),
     ):
         _register_gated_query(
             app,
             tool_context=tool_context,
             default_artifact_root=default_artifact_root,
             tool_name=tool_name,
-            handler=handler,
+            operation=handlers.operation,
+            operation_request=operation_request,
         )
 
 
@@ -603,7 +654,8 @@ def _register_execution_control(
     tool_context: DebugToolContext,
     default_artifact_root: str,
     tool_name: str,
-    handler: DebugExecutionControlHandler,
+    operation: DebugOperationCore,
+    request_factory: Callable[[int | None], DebugOperationRequest],
 ) -> None:
     def debug_execution_control(
         context: DebugSessionContext | dict[str, Any],
@@ -618,13 +670,15 @@ def _register_execution_control(
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
         return _dump(
-            handler(
+            _run_debug_operation(
+                operation=operation,
                 request=DebugExecutionRequest(
                     artifact_root=artifact_root,
                     run_id=run_id,
                     debug_session_id=debug_session_id,
                     timeout_seconds=execution_options.timeout_seconds,
                 ),
+                operation_request=request_factory(execution_options.timeout_seconds),
                 runtime=_debug_runtime(tool_context),
             )
         )
@@ -636,19 +690,20 @@ def _register_execution_control(
 def _register_debug_execution_tools(
     app: FastMCP, *, tool_context: DebugToolContext, default_artifact_root: str, handlers: DebugToolHandlers
 ) -> None:
-    for tool_name, handler in (
-        ("debug.continue", handlers.continue_execution),
-        ("debug.step", handlers.step),
-        ("debug.next", handlers.next),
-        ("debug.finish", handlers.finish),
-        ("debug.interrupt", handlers.interrupt),
+    for tool_name, request_factory in (
+        ("debug.continue", DebugContinueOperationRequest),
+        ("debug.step", DebugStepOperationRequest),
+        ("debug.next", DebugNextOperationRequest),
+        ("debug.finish", DebugFinishOperationRequest),
+        ("debug.interrupt", DebugInterruptOperationRequest),
     ):
         _register_execution_control(
             app,
             tool_context=tool_context,
             default_artifact_root=default_artifact_root,
             tool_name=tool_name,
-            handler=handler,
+            operation=handlers.operation,
+            request_factory=request_factory,
         )
 
 
