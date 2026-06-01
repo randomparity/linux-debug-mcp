@@ -106,7 +106,7 @@ class PostmortemDrgnHelperHandler(Protocol):
     ) -> ToolResponse: ...
 
 
-class TriageDrgnSourceHandler(Protocol):
+class RawPostmortemDrgnHelper(Protocol):
     def __call__(
         self,
         request: DebugIntrospectFromVmcoreHelperRequest,
@@ -158,7 +158,7 @@ class PostmortemFetchHandler(Protocol):
 class PostmortemToolHandlers:
     crash: PostmortemCrashHandler
     triage: PostmortemTriageHandler
-    triage_drgn_helper: TriageDrgnSourceHandler
+    triage_drgn_helper: RawPostmortemDrgnHelper
     check_prereqs: PostmortemCheckPrereqsHandler
     list_dumps: PostmortemListDumpsHandler
     fetch: PostmortemFetchHandler
@@ -193,7 +193,7 @@ def _tool_response_json(response: ToolResponse) -> dict[str, Any]:
     return response.model_dump(mode="json")
 
 
-def _adapt_triage_drgn_helper(handler: TriageDrgnSourceHandler) -> PostmortemDrgnHelperHandler:
+def _adapt_triage_drgn_helper(handler: RawPostmortemDrgnHelper) -> PostmortemDrgnHelperHandler:
     def wrapped(
         *,
         request: DrgnHelperRequest,
