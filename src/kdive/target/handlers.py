@@ -32,6 +32,7 @@ from kdive.coordination.exec_probe import probe_execution_state
 from kdive.coordination.registry import SessionRegistry
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES, DEFAULT_TARGET_PROFILES
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
+from kdive.handlers.shared import configuration_failure_response as _configuration_failure
 from kdive.providers.local.target.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
 from kdive.providers.local.test.local_ssh_tests import LocalSshTestProvider, TestPlan
 from kdive.providers.ssh import TestExecutionResult
@@ -74,15 +75,6 @@ def _require_value(value: _RequiredT | None, message: str) -> _RequiredT:
     if value is None:
         raise RuntimeError(message)
     return value
-
-
-def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any] | None = None) -> ToolResponse:
-    return ToolResponse.failure(
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        message=message,
-        run_id=run_id,
-        details=details,
-    )
 
 
 def _configuration_handler_failure(

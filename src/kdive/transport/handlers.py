@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import missing_destructive_permissions
 from kdive.coordination.admission import AdmissionError, AdmissionService, require_target_snapshot
@@ -9,6 +7,7 @@ from kdive.coordination.endpoint_safety import EndpointSafetyError
 from kdive.coordination.registry import SessionRegistry
 from kdive.debug.policy import ensure_debug_operation_enabled, halt_debug_transport, resolve_debug_profile
 from kdive.domain import ErrorCategory, ToolResponse
+from kdive.handlers.shared import configuration_failure_response as _configuration_failure
 from kdive.providers.debug import ProviderDebugError
 from kdive.safety.redaction import Redactor
 from kdive.seams.guard import GuardConflict
@@ -21,15 +20,6 @@ from kdive.transport.tools import (
     TransportOpenHandlerRequest,
     TransportToolContext,
 )
-
-
-def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any] | None = None) -> ToolResponse:
-    return ToolResponse.failure(
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        message=message,
-        run_id=run_id,
-        details=details,
-    )
 
 
 def _transport_disabled_failure(*, run_id: str) -> ToolResponse:

@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import TypeVar
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
@@ -327,15 +327,6 @@ def _chmod_best_effort(path: Path, mode: int) -> None:
 def _record_terminal_introspect_result(store: ArtifactStore, run_id: str, result: StepResult) -> None:
     # Spec §5.2 step 13: every introspect:<call_id> is a fresh entry (UUIDv4) — append, never replace.
     record_step_with_retry(store, run_id, result, append=True)
-
-
-def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any] | None = None) -> ToolResponse:
-    return ToolResponse.failure(
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        message=message,
-        run_id=run_id,
-        details=details,
-    )
 
 
 # Live and vmcore introspection handlers live in kdive.introspect.handlers/execution.

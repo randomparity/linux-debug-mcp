@@ -11,6 +11,14 @@ INTROSPECT_EXECUTION_SOURCE = ROOT / "src" / "kdive" / "introspect" / "execution
 POSTMORTEM_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "handlers.py"
 SHARED_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "handlers" / "shared.py"
 PROBE_SEAM_SOURCE = ROOT / "src" / "kdive" / "seams" / "probes.py"
+CONFIGURATION_FAILURE_DUPLICATE_SOURCES = [
+    ROOT / "src" / "kdive" / "artifacts" / "handlers.py",
+    ROOT / "src" / "kdive" / "debug" / "operations.py",
+    ROOT / "src" / "kdive" / "introspect" / "execution.py",
+    ROOT / "src" / "kdive" / "server.py",
+    ROOT / "src" / "kdive" / "target" / "handlers.py",
+    ROOT / "src" / "kdive" / "transport" / "handlers.py",
+]
 
 
 def _module_ast(path: Path) -> ast.Module:
@@ -250,6 +258,30 @@ def test_transport_tests_do_not_recreate_public_handler_call_shapes() -> None:
     }
 
     assert offenders == {}
+
+
+def test_configuration_failure_response_is_shared() -> None:
+    from kdive.handlers.shared import configuration_failure_response
+
+    response = configuration_failure_response(
+        run_id="run-1",
+        message="bad input",
+        details={"code": "bad_input"},
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert response.error.message == "bad input"
+    assert response.error.details == {"code": "bad_input"}
+
+    offenders = [
+        str(source.relative_to(ROOT))
+        for source in CONFIGURATION_FAILURE_DUPLICATE_SOURCES
+        if "_configuration_failure" in _defined_functions(source)
+    ]
+
+    assert offenders == []
 
 
 def test_server_does_not_reexport_private_feature_helpers() -> None:

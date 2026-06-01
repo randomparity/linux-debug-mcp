@@ -21,17 +21,9 @@ from kdive.config import (
 )
 from kdive.default_profiles import DEFAULT_BUILD_PROFILES, DEFAULT_ROOTFS_PROFILES, DEFAULT_TARGET_PROFILES
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
+from kdive.handlers.shared import configuration_failure_response as _configuration_failure
 from kdive.safety.paths import PathSafetyError, validate_rootfs_source, validate_source_path
 from kdive.safety.redaction import Redactor
-
-
-def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any] | None = None) -> ToolResponse:
-    return ToolResponse.failure(
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        message=message,
-        run_id=run_id,
-        details=details,
-    )
 
 
 def _recorded_collect_success_response(*, run_id: str, result: StepResult) -> ToolResponse:

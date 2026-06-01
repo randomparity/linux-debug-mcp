@@ -34,6 +34,7 @@ from kdive.debug.handlers import (
 )
 from kdive.debug.policy import ensure_debug_operation_enabled, resolve_debug_profile
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
+from kdive.handlers.shared import configuration_failure_response as _configuration_failure
 from kdive.providers.debug import (
     MAX_INTERACTIVE_WAIT_SEC,
     MAX_MEMORY_READ_BYTES,
@@ -51,15 +52,6 @@ from kdive.seams.guard import SessionGuard, SessionGuardContext
 from kdive.seams.target import TargetKey
 from kdive.transport.core.base import BreakMethod, ExecutionState, TransportSession
 from kdive.transport.core.break_inject import InjectBreakError
-
-
-def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any] | None = None) -> ToolResponse:
-    return ToolResponse.failure(
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        message=message,
-        run_id=run_id,
-        details=details,
-    )
 
 
 @dataclass(frozen=True)

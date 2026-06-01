@@ -34,6 +34,7 @@ from kdive.coordination.registry import SessionRegistry
 from kdive.debug.policy import ensure_debug_operation_enabled, resolve_debug_profile
 from kdive.default_profiles import DEFAULT_DEBUG_PROFILES, DEFAULT_ROOTFS_PROFILES
 from kdive.domain import ArtifactRef, DebugIntrospectRunRequest, ErrorCategory, StepResult, StepStatus, ToolResponse
+from kdive.handlers.shared import configuration_failure_response as _configuration_failure
 from kdive.introspect.helpers import HelperSpec
 from kdive.introspect.wrappers import (
     SCRIPT_BYTE_CAP,
@@ -233,15 +234,6 @@ def _record_introspect_failure(
         details={"code": code, "call_id": call_id, "outcome_status": outcome_status_for_forensics},
         artifacts=public,
         suggested_next_actions=["artifacts.get_manifest"],
-    )
-
-
-def _configuration_failure(*, run_id: str, message: str, details: dict[str, Any] | None = None) -> ToolResponse:
-    return ToolResponse.failure(
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        message=message,
-        run_id=run_id,
-        details=details,
     )
 
 
