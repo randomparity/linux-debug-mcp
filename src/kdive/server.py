@@ -51,16 +51,16 @@ from kdive.kernel.handlers import kernel_build_handler
 from kdive.postmortem.crash.handler import (
     debug_postmortem_crash_handler,
 )
-from kdive.postmortem.handlers import (
+from kdive.postmortem.dump_handlers import (
     debug_postmortem_check_prereqs_handler,
     debug_postmortem_fetch_handler,
     debug_postmortem_list_dumps_handler,
 )
-from kdive.postmortem.handlers import (
-    debug_postmortem_triage_handler as _debug_postmortem_triage_handler,
-)
 from kdive.postmortem.models import DebugPostmortemTriageRequest
 from kdive.postmortem.tools import register_postmortem_tools
+from kdive.postmortem.triage_handlers import (
+    debug_postmortem_triage_handler as _debug_postmortem_triage_handler,
+)
 from kdive.prereqs.handlers import prerequisites_handler
 from kdive.prereqs.tools import register_prereq_tools
 from kdive.providers.local.debug.gdb_mi import (
@@ -199,7 +199,7 @@ __all__ = (
 # Live and vmcore introspection handlers live in kdive.introspect.handlers/execution.
 
 
-# Postmortem triage composition lives in kdive.postmortem.handlers.
+# Postmortem triage composition lives in kdive.postmortem.triage_handlers.
 
 
 # Debug operation response and persistence live in kdive.debug.operations.
