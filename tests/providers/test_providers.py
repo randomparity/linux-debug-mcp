@@ -495,6 +495,23 @@ def test_readme_stub_provider_table_matches_default_registry() -> None:
     assert documented_stub_names == registry_stub_names
 
 
+def test_readme_implemented_provider_table_matches_default_registry() -> None:
+    documented_implemented_names = set(
+        re.findall(
+            r"^\| [^|]+ \| ([^|]+) \| implemented \|",
+            README.read_text(encoding="utf-8"),
+            flags=re.MULTILINE,
+        )
+    )
+    registry_implemented_names = {
+        provider.provider_name
+        for provider in ProviderRegistry.with_defaults().list_capabilities()
+        if provider.implementation_state is ImplementationState.IMPLEMENTED
+    }
+
+    assert documented_implemented_names == registry_implemented_names
+
+
 def test_registry_finds_providers_by_operation_and_architecture_deterministically() -> None:
     registry = ProviderRegistry.with_defaults()
 

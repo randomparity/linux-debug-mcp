@@ -80,6 +80,9 @@ are not working features.
 | boot | local-libvirt-qemu | implemented | x86_64 | target.boot | virtual |
 | test | local-ssh-tests | implemented | x86_64 | target.run_tests | virtual |
 | debug | local-qemu-gdbstub | implemented | x86_64 | workflow.build_boot_debug + 11 debug.* ops | virtual |
+| debug | local-drgn-introspect | implemented | x86_64 | debug.introspect.run, debug.introspect.from_vmcore | virtual |
+| debug | local-crash-postmortem | implemented | x86_64 | debug.postmortem.crash, debug.postmortem.triage | virtual |
+| debug | local-vmcore-retrieval | implemented | x86_64 | debug.postmortem.list_dumps, debug.postmortem.fetch | virtual |
 
 The debug row's `workflow.build_boot_debug` is advertised in the
 `local-qemu-gdbstub` metadata, but it runs as a server-orchestrated workflow that
