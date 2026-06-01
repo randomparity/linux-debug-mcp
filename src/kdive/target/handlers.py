@@ -26,8 +26,8 @@ from kdive.coordination.exec_probe import probe_execution_state
 from kdive.coordination.registry import SessionRegistry
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES, DEFAULT_TARGET_PROFILES
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
-from kdive.providers.local.local_ssh_tests import LocalSshTestProvider, TestPlan
 from kdive.providers.local.target.libvirt_qemu import LibvirtQemuProvider, ProviderBootError
+from kdive.providers.local.test.local_ssh_tests import LocalSshTestProvider, TestPlan
 from kdive.providers.ssh import TestExecutionResult
 from kdive.rootfs.sources import RootfsSourceError, resolve_rootfs_source
 from kdive.safety.paths import PathSafetyError, validate_rootfs_source

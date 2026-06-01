@@ -39,7 +39,7 @@ from kdive.introspect.handlers import (
     debug_introspect_run_handler as _debug_introspect_run_handler,
 )
 from kdive.introspect.tools import IntrospectRunOptions, IntrospectTargetContext
-from kdive.providers.local.local_ssh_tests import SshCommandResult
+from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 from kdive.seams.target import ConsoleKind, PlatformMetadata, TargetState
 from kdive.server import RUN_STDOUT_CAP
 

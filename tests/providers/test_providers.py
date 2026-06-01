@@ -26,8 +26,8 @@ def test_local_provider_modules_are_grouped_by_capability_family() -> None:
     local_root = Path(__file__).parents[2] / "src" / "kdive" / "providers" / "local"
     flat_modules = {path.name for path in local_root.glob("*.py")}
 
-    assert flat_modules == {"__init__.py", "local_ssh_tests.py"}
-    for family in ("build", "debug", "introspect", "postmortem", "target"):
+    assert flat_modules == {"__init__.py"}
+    for family in ("build", "debug", "introspect", "postmortem", "target", "test"):
         assert (local_root / family / "__init__.py").is_file()
 
 

@@ -16,7 +16,7 @@ from kdive.domain import (
 )
 from kdive.introspect import handlers as introspect_handlers
 from kdive.introspect.handlers import debug_introspect_from_vmcore_handler, debug_introspect_from_vmcore_helper_handler
-from kdive.providers.local.local_ssh_tests import SshCommandResult
+from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 from kdive.symbols.build_id import BuildIdReadError
 
 VALID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret

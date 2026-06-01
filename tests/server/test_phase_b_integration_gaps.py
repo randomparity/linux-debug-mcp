@@ -47,7 +47,7 @@ from kdive.coordination.transaction import TransportTransaction
 from kdive.debug.session_handlers import debug_start_session_handler
 from kdive.domain import ArtifactRef, ErrorCategory, RunRequest, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
-from kdive.providers.local.local_ssh_tests import TestExecutionResult
+from kdive.providers.local.test.local_ssh_tests import TestExecutionResult
 from kdive.seams.lifecycle import LifecycleEvent, LifecycleKind
 from kdive.seams.target import (
     TargetKey,

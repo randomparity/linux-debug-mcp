@@ -197,7 +197,7 @@ class FakeSshRunner:
         self.started = threading.Event()
 
     def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None, max_stdout_bytes=None):
-        from kdive.providers.local.local_ssh_tests import SshCommandResult
+        from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 
         self.started.set()
         if cancel is not None:

@@ -12,7 +12,7 @@ from kdive.domain import (
 )
 from kdive.postmortem.crash_handler import debug_postmortem_crash_handler
 from kdive.postmortem.models import DebugPostmortemCrashRequest
-from kdive.providers.local.local_ssh_tests import SshCommandResult
+from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 
 GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 

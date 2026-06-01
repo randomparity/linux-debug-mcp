@@ -6,7 +6,7 @@ import pytest
 
 from kdive.config import RootfsProfile, TestCommand, TestSuiteProfile
 from kdive.domain import ErrorCategory, StepStatus
-from kdive.providers.local.local_ssh_tests import (
+from kdive.providers.local.test.local_ssh_tests import (
     _SNIPPET_LIMIT,
     LocalSshTestProvider,
     SshCommandResult,

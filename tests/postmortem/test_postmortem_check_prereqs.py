@@ -17,7 +17,7 @@ from kdive.domain import (
 )
 from kdive.postmortem.handlers import debug_postmortem_check_prereqs_handler
 from kdive.postmortem.models import DebugPostmortemCheckPrereqsRequest
-from kdive.providers.local.local_ssh_tests import SshCommandResult
+from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 from kdive.target.probes import reject_if_target_halted
 from kdive.transport.core.base import ExecutionState
 

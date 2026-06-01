@@ -18,7 +18,7 @@ from kdive.domain import (
     StepStatus,
 )
 from kdive.introspect.handlers import debug_introspect_check_prerequisites_handler
-from kdive.providers.local.local_ssh_tests import SshCommandResult
+from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 from kdive.server import create_app
 from kdive.target.probes import PROBE_STDOUT_CAP
 from kdive.transport.core.base import ExecutionState

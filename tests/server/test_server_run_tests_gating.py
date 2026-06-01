@@ -8,7 +8,7 @@ from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS
 from kdive.coordination.admission import AdmissionService, SnapshotStore, publish_ready_snapshot
 from kdive.coordination.registry import SessionRegistry
 from kdive.domain import ErrorCategory, StepResult, StepStatus
-from kdive.providers.local.local_ssh_tests import TestExecutionResult
+from kdive.providers.local.test.local_ssh_tests import TestExecutionResult
 from kdive.seams.target import (
     BreakHint,
     ConsoleKind,
