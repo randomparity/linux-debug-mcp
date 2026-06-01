@@ -103,6 +103,49 @@ def test_workflow_runs_build_boot_tests_and_collects(tmp_path: Path, monkeypatch
     assert response.data["latest_successful_step"] == "collect_artifacts"
 
 
+def test_workflow_threads_safety_overrides_into_create_and_boot(tmp_path: Path) -> None:
+    build_overrides = BuildOverrides(make_variables={"KCFLAGS": "-O2"})
+    boot_overrides = BootOverrides(kernel_args=["panic=1"])
+    sensitive_paths = [tmp_path / "sensitive"]
+    build_profile_spec = {"name": "inline-build"}
+    target_profile_spec = {"name": "inline-target"}
+    rootfs_profile_spec = {"name": "inline-rootfs"}
+    captured: dict[str, dict[str, object]] = {}
+
+    dependencies = _install_workflow_dependencies(
+        create_run=lambda **kwargs: captured.setdefault("create", kwargs) and success("created"),
+        kernel_build=lambda **kwargs: success("built"),
+        target_boot=lambda **kwargs: captured.setdefault("boot", kwargs) and success("booted"),
+        target_run_tests=lambda **kwargs: success("tested"),
+        artifacts_collect=lambda **kwargs: success("collected"),
+    )
+
+    response = workflow_build_boot_test_handler(
+        artifact_root=tmp_path / "runs",
+        source_path=str(tmp_path),
+        build_profile="x86_64-default",
+        target_profile="local-qemu",
+        rootfs_profile="minimal",
+        build_overrides=build_overrides,
+        boot_overrides=boot_overrides,
+        sensitive_paths=sensitive_paths,
+        build_profile_spec=build_profile_spec,
+        target_profile_spec=target_profile_spec,
+        rootfs_profile_spec=rootfs_profile_spec,
+        dependencies=dependencies,
+    )
+
+    assert response.ok is True
+    assert captured["create"]["build_overrides"] == build_overrides
+    assert captured["create"]["boot_overrides"] == boot_overrides
+    assert captured["create"]["sensitive_paths"] == sensitive_paths
+    assert captured["create"]["build_profile_spec"] == build_profile_spec
+    assert captured["create"]["target_profile_spec"] == target_profile_spec
+    assert captured["create"]["rootfs_profile_spec"] == rootfs_profile_spec
+    assert captured["boot"]["boot_overrides"] == boot_overrides
+    assert captured["boot"]["sensitive_paths"] == sensitive_paths
+
+
 def test_workflow_accepts_explicit_dependencies_without_global_configuration(tmp_path: Path) -> None:
     calls: list[str] = []
     dependencies = WorkflowHandlerDependencies(

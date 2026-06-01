@@ -5,11 +5,14 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import ValidationError
 
+from kdive.config import BootOverrides, BuildOverrides
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.domain import ToolResponse
+from kdive.kernel.tools import create_run_shapes_from_tool_args
 from kdive.model import Model
 from kdive.providers.debug import GdbMiEngine, GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard
@@ -31,6 +34,7 @@ class BuildBootDebugHandler(Protocol):
 
 @dataclass(frozen=True)
 class WorkflowToolRuntime:
+    sensitive_paths: list[Path]
     admission: AdmissionService
     session_registry: SessionRegistry
     transaction: TransportTransaction
@@ -54,6 +58,11 @@ class WorkflowBuildBootTestHandlerRequest:
     force_reboot: bool
     force_rerun_tests: bool
     force_recollect: bool
+    build_overrides: BuildOverrides | None
+    boot_overrides: BootOverrides | None
+    build_profile_spec: dict[str, Any] | None
+    target_profile_spec: dict[str, Any] | None
+    rootfs_profile_spec: dict[str, Any] | None
     acknowledged_permissions: list[str] | None
 
 
@@ -69,6 +78,11 @@ class WorkflowBuildBootDebugHandlerRequest:
     force_rebuild: bool
     force_reboot: bool
     new_session: bool
+    build_overrides: BuildOverrides | None
+    boot_overrides: BootOverrides | None
+    build_profile_spec: dict[str, Any] | None
+    target_profile_spec: dict[str, Any] | None
+    rootfs_profile_spec: dict[str, Any] | None
     acknowledged_permissions: list[str] | None
 
 
@@ -91,6 +105,9 @@ class WorkflowBuildBootTestOptions(Model):
     force_reboot: bool = False
     force_rerun_tests: bool = False
     force_recollect: bool = False
+    build_overrides: dict[str, Any] | None = None
+    boot_overrides: dict[str, Any] | None = None
+    profile_specs: dict[str, dict[str, Any]] | None = None
     acknowledged_permissions: list[str] | None = None
 
 
@@ -99,6 +116,9 @@ class WorkflowBuildBootDebugOptions(Model):
     force_rebuild: bool = False
     force_reboot: bool = False
     new_session: bool = False
+    build_overrides: dict[str, Any] | None = None
+    boot_overrides: dict[str, Any] | None = None
+    profile_specs: dict[str, dict[str, Any]] | None = None
     acknowledged_permissions: list[str] | None = None
 
 
@@ -106,6 +126,7 @@ def register_workflow_tools(
     app: FastMCP,
     *,
     default_artifact_root: Path,
+    sensitive_paths: list[Path],
     admission: AdmissionService,
     session_registry: SessionRegistry,
     transaction: TransportTransaction,
@@ -118,6 +139,7 @@ def register_workflow_tools(
 ) -> None:
     default_artifact_root_text = str(default_artifact_root)
     runtime = WorkflowToolRuntime(
+        sensitive_paths=sensitive_paths,
         admission=admission,
         session_registry=session_registry,
         transaction=transaction,
@@ -137,7 +159,14 @@ def register_workflow_tools(
             profiles_model = model_arg(profiles, WorkflowProfileInputs)
             context_model = optional_model_arg(context, WorkflowRunContext)
             options_model = optional_model_arg(options, WorkflowBuildBootTestOptions)
-        except (TypeError, ValueError) as exc:
+            resolved_build_overrides, resolved_boot_overrides, build_spec, target_spec, rootfs_spec = (
+                create_run_shapes_from_tool_args(
+                    build_overrides=options_model.build_overrides,
+                    boot_overrides=options_model.boot_overrides,
+                    profile_specs=options_model.profile_specs,
+                )
+            )
+        except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
         return build_boot_test_handler(
             request=WorkflowBuildBootTestHandlerRequest(
@@ -153,6 +182,11 @@ def register_workflow_tools(
                 force_reboot=options_model.force_reboot,
                 force_rerun_tests=options_model.force_rerun_tests,
                 force_recollect=options_model.force_recollect,
+                build_overrides=resolved_build_overrides,
+                boot_overrides=resolved_boot_overrides,
+                build_profile_spec=build_spec,
+                target_profile_spec=target_spec,
+                rootfs_profile_spec=rootfs_spec,
                 acknowledged_permissions=options_model.acknowledged_permissions,
             ),
             runtime=runtime,
@@ -168,7 +202,14 @@ def register_workflow_tools(
             profiles_model = model_arg(profiles, WorkflowProfileInputs)
             context_model = optional_model_arg(context, WorkflowRunContext)
             options_model = optional_model_arg(options, WorkflowBuildBootDebugOptions)
-        except (TypeError, ValueError) as exc:
+            resolved_build_overrides, resolved_boot_overrides, build_spec, target_spec, rootfs_spec = (
+                create_run_shapes_from_tool_args(
+                    build_overrides=options_model.build_overrides,
+                    boot_overrides=options_model.boot_overrides,
+                    profile_specs=options_model.profile_specs,
+                )
+            )
+        except (TypeError, ValueError, ValidationError) as exc:
             return adapter_validation_failure(exc)
         return build_boot_debug_handler(
             request=WorkflowBuildBootDebugHandlerRequest(
@@ -182,6 +223,11 @@ def register_workflow_tools(
                 force_rebuild=options_model.force_rebuild,
                 force_reboot=options_model.force_reboot,
                 new_session=options_model.new_session,
+                build_overrides=resolved_build_overrides,
+                boot_overrides=resolved_boot_overrides,
+                build_profile_spec=build_spec,
+                target_profile_spec=target_spec,
+                rootfs_profile_spec=rootfs_spec,
                 acknowledged_permissions=options_model.acknowledged_permissions,
             ),
             runtime=runtime,

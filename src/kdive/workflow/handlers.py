@@ -6,6 +6,7 @@ from typing import Literal, Protocol
 
 from kdive.artifacts.manifest import RunManifest
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
+from kdive.config import BootOverrides, BuildOverrides
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
@@ -27,6 +28,12 @@ class CreateRunHandler(Protocol):
         run_id: str | None = None,
         debug_profile: str | None = None,
         test_suite: str | None = None,
+        build_overrides: BuildOverrides | None = None,
+        boot_overrides: BootOverrides | None = None,
+        sensitive_paths: list[Path] | None = None,
+        build_profile_spec: dict[str, object] | None = None,
+        target_profile_spec: dict[str, object] | None = None,
+        rootfs_profile_spec: dict[str, object] | None = None,
     ) -> ToolResponse: ...
 
 
@@ -50,7 +57,9 @@ class TargetBootHandler(Protocol):
         target_profile: str | None = None,
         rootfs_profile: str | None = None,
         force_reboot: bool = False,
+        boot_overrides: BootOverrides | None = None,
         acknowledged_permissions: list[str] | None = None,
+        sensitive_paths: list[Path] | None = None,
         admission: AdmissionService | None = None,
     ) -> ToolResponse: ...
 
@@ -118,6 +127,12 @@ class BuildBootWorkflowRequest:
     force_rebuild: bool = False
     force_reboot: bool = False
     force_recollect: bool = False
+    build_overrides: BuildOverrides | None = None
+    boot_overrides: BootOverrides | None = None
+    sensitive_paths: list[Path] | None = None
+    build_profile_spec: dict[str, object] | None = None
+    target_profile_spec: dict[str, object] | None = None
+    rootfs_profile_spec: dict[str, object] | None = None
     acknowledged_permissions: list[str] | None = None
     admission: AdmissionService | None = None
 
@@ -291,6 +306,12 @@ def _run_build_boot_workflow(
             target_profile=request.target_profile,
             rootfs_profile=request.rootfs_profile,
             run_id=run_id,
+            build_overrides=request.build_overrides,
+            boot_overrides=request.boot_overrides,
+            sensitive_paths=request.sensitive_paths,
+            build_profile_spec=request.build_profile_spec,
+            target_profile_spec=request.target_profile_spec,
+            rootfs_profile_spec=request.rootfs_profile_spec,
             **create_kwargs,
         )
         if not create_response.ok:
@@ -330,7 +351,9 @@ def _run_build_boot_workflow(
         target_profile=request.target_profile,
         rootfs_profile=request.rootfs_profile,
         force_reboot=request.force_reboot,
+        boot_overrides=request.boot_overrides,
         acknowledged_permissions=request.acknowledged_permissions,
+        sensitive_paths=request.sensitive_paths,
         admission=request.admission,
     )
     if not boot_response.ok:
@@ -374,6 +397,12 @@ def workflow_build_boot_test_handler(
     force_reboot: bool = False,
     force_rerun_tests: bool = False,
     force_recollect: bool = False,
+    build_overrides: BuildOverrides | None = None,
+    boot_overrides: BootOverrides | None = None,
+    sensitive_paths: list[Path] | None = None,
+    build_profile_spec: dict[str, object] | None = None,
+    target_profile_spec: dict[str, object] | None = None,
+    rootfs_profile_spec: dict[str, object] | None = None,
     acknowledged_permissions: list[str] | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
@@ -391,6 +420,12 @@ def workflow_build_boot_test_handler(
             force_rebuild=force_rebuild,
             force_reboot=force_reboot,
             force_recollect=force_recollect,
+            build_overrides=build_overrides,
+            boot_overrides=boot_overrides,
+            sensitive_paths=sensitive_paths,
+            build_profile_spec=build_profile_spec,
+            target_profile_spec=target_profile_spec,
+            rootfs_profile_spec=rootfs_profile_spec,
             acknowledged_permissions=acknowledged_permissions,
             admission=admission,
         ),
@@ -476,6 +511,12 @@ def workflow_build_boot_debug_handler(
     force_rebuild: bool = False,
     force_reboot: bool = False,
     new_session: bool = False,
+    build_overrides: BuildOverrides | None = None,
+    boot_overrides: BootOverrides | None = None,
+    sensitive_paths: list[Path] | None = None,
+    build_profile_spec: dict[str, object] | None = None,
+    target_profile_spec: dict[str, object] | None = None,
+    rootfs_profile_spec: dict[str, object] | None = None,
     acknowledged_permissions: list[str] | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
@@ -496,6 +537,12 @@ def workflow_build_boot_debug_handler(
             run_id=run_id,
             force_rebuild=force_rebuild,
             force_reboot=force_reboot,
+            build_overrides=build_overrides,
+            boot_overrides=boot_overrides,
+            sensitive_paths=sensitive_paths,
+            build_profile_spec=build_profile_spec,
+            target_profile_spec=target_profile_spec,
+            rootfs_profile_spec=rootfs_profile_spec,
             acknowledged_permissions=acknowledged_permissions,
             admission=admission,
         ),

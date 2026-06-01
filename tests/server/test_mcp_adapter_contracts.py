@@ -60,6 +60,8 @@ from kdive.workflow.handlers import WorkflowHandlerDependencies
 from kdive.workflow.tools import (
     WorkflowBuildBootDebugHandlerRequest,
     WorkflowBuildBootDebugOptions,
+    WorkflowBuildBootTestHandlerRequest,
+    WorkflowBuildBootTestOptions,
     WorkflowProfileInputs,
     WorkflowRunContext,
     WorkflowToolRuntime,
@@ -594,6 +596,7 @@ def test_workflow_adapter_forwards_debug_collaborators_and_converts_artifact_roo
     register_workflow_tools(
         app,
         default_artifact_root=tmp_path / "default",
+        sensitive_paths=[],
         admission=admission,
         session_registry=registry,
         transaction=transaction,
@@ -636,9 +639,15 @@ def test_workflow_adapter_forwards_debug_collaborators_and_converts_artifact_roo
                 force_rebuild=True,
                 force_reboot=True,
                 new_session=True,
+                build_overrides=None,
+                boot_overrides=None,
+                build_profile_spec=None,
+                target_profile_spec=None,
+                rootfs_profile_spec=None,
                 acknowledged_permissions=["start MCP-owned libvirt domains"],
             ),
             WorkflowToolRuntime(
+                sensitive_paths=[],
                 admission=admission,
                 session_registry=registry,
                 transaction=transaction,
@@ -649,3 +658,61 @@ def test_workflow_adapter_forwards_debug_collaborators_and_converts_artifact_roo
             ),
         )
     ]
+
+
+def test_workflow_adapter_forwards_safety_override_inputs(tmp_path: Path) -> None:
+    app = FastMCP("adapter-test")
+    sensitive_paths = [tmp_path / "secret"]
+    calls: list[tuple[WorkflowBuildBootTestHandlerRequest, WorkflowToolRuntime]] = []
+
+    def build_boot_test_handler(
+        *, request: WorkflowBuildBootTestHandlerRequest, runtime: WorkflowToolRuntime
+    ) -> ToolResponse:
+        calls.append((request, runtime))
+        return _success(run_id=request.run_id)
+
+    dependencies = WorkflowHandlerDependencies(
+        create_run_handler=lambda **_kwargs: _success(),
+        kernel_build_handler=lambda **_kwargs: _success(),
+        target_boot_handler=lambda **_kwargs: _success(),
+        target_run_tests_handler=lambda **_kwargs: _success(),
+        debug_start_session_handler=lambda **_kwargs: _success(),
+        artifacts_collect_handler=lambda **_kwargs: _success(),
+    )
+    register_workflow_tools(
+        app,
+        default_artifact_root=tmp_path / "default",
+        sensitive_paths=sensitive_paths,
+        admission=object(),
+        session_registry=object(),
+        transaction=object(),
+        session_guard=object(),
+        gdb_mi_engine=object(),
+        gdb_mi_sessions=object(),
+        dependencies=dependencies,
+        build_boot_test_handler=build_boot_test_handler,
+        build_boot_debug_handler=lambda **_kwargs: _success(),
+    )
+
+    raw = _tool_fn(app, "workflow.build_boot_test")(
+        profiles=WorkflowProfileInputs(
+            source_path="/src",
+            build_profile="x86_64-default",
+            target_profile="local-qemu",
+            rootfs_profile="minimal",
+        ),
+        options=WorkflowBuildBootTestOptions(
+            build_overrides={"make_variables": {"KCFLAGS": "-O2"}},
+            boot_overrides={"kernel_args": ["panic=1"]},
+            profile_specs={"build": {"name": "inline-build"}, "rootfs": {"name": "inline-rootfs"}},
+        ),
+    )
+
+    assert raw["ok"] is True
+    request, runtime = calls[0]
+    assert request.build_overrides == BuildOverrides(make_variables={"KCFLAGS": "-O2"})
+    assert request.boot_overrides == BootOverrides(kernel_args=["panic=1"])
+    assert request.build_profile_spec == {"name": "inline-build"}
+    assert request.target_profile_spec is None
+    assert request.rootfs_profile_spec == {"name": "inline-rootfs"}
+    assert runtime.sensitive_paths == sensitive_paths
