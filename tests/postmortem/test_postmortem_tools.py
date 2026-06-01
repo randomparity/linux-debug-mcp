@@ -6,9 +6,15 @@ from kdive.server import create_app
 
 
 def test_postmortem_handlers_do_not_import_server_privates() -> None:
-    source = (Path(__file__).parents[2] / "src" / "kdive" / "postmortem" / "handlers.py").read_text(encoding="utf-8")
+    postmortem_root = Path(__file__).parents[2] / "src" / "kdive" / "postmortem"
+    handler_sources = (
+        postmortem_root / "crash" / "handler.py",
+        postmortem_root / "dumps" / "handlers.py",
+        postmortem_root / "triage" / "handlers.py",
+    )
 
-    assert "from kdive.server import" not in source
+    for source_path in handler_sources:
+        assert "from kdive.server import" not in source_path.read_text(encoding="utf-8")
 
 
 def test_create_app_registers_postmortem_tools_through_package_module() -> None:

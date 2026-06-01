@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from kdive.domain import PrerequisiteStatus
-from kdive.postmortem.handlers import debug_postmortem_check_prereqs_handler
+from kdive.postmortem.dumps.handlers import debug_postmortem_check_prereqs_handler
 from kdive.postmortem.models import DebugPostmortemCheckPrereqsRequest
 from kdive.providers.local.test.local_ssh_tests import SubprocessSshRunner
 from tests.introspect.test_drgn_introspect_integration import _bootstrap_booted_run, _require_integration_env

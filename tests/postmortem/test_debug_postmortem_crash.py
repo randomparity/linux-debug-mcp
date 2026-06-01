@@ -20,11 +20,9 @@ GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
 def test_postmortem_vmcore_context_resolver_is_shared() -> None:
     import kdive.postmortem.crash.handler as crash_handler
-    import kdive.postmortem.handlers as postmortem_handlers
 
     assert hasattr(crash_handler, "PostmortemVmcoreContext")
     assert hasattr(crash_handler, "resolve_postmortem_vmcore_context")
-    assert postmortem_handlers.resolve_postmortem_vmcore_context is crash_handler.resolve_postmortem_vmcore_context
 
 
 def test_postmortem_vmcore_resolver_has_concrete_request_and_manifest_types() -> None:

@@ -10,9 +10,9 @@ from kdive.domain import (
     RunRequest,
     ToolResponse,
 )
-from kdive.postmortem import triage_handlers
 from kdive.postmortem.models import DebugPostmortemTriageRequest
-from kdive.postmortem.triage_handlers import debug_postmortem_triage_handler
+from kdive.postmortem.triage import handlers as triage_handlers
+from kdive.postmortem.triage.handlers import debug_postmortem_triage_handler
 
 GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 

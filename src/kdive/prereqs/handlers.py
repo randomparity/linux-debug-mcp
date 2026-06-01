@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ _READINESS_CHECK_IDS = {"build": "kernel.config", "target": "gdbstub.port", "roo
 
 
 def _resolve_readiness_profile(
-    kind: str, name: str | None, registry: dict[str, Any]
+    kind: str, name: str | None, registry: Mapping[str, Any]
 ) -> tuple[Any, PrerequisiteCheck | None]:
     """Resolve a readiness profile name to its object, or to a FAILED check for an unknown name."""
     if name is None:

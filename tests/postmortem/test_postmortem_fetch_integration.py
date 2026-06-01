@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from introspect.test_drgn_introspect_integration import _bootstrap_booted_run, _require_integration_env
 
-from kdive.postmortem.dump_handlers import (
+from kdive.postmortem.dumps.handlers import (
     debug_postmortem_fetch_handler,
     debug_postmortem_list_dumps_handler,
 )

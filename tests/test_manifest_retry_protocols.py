@@ -7,7 +7,6 @@ import pytest
 from kdive.artifacts import store as artifact_store
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.domain import StepResult, StepStatus
-from kdive.postmortem import handlers as postmortem_handlers
 
 
 class _FlakyManifestStore:
@@ -67,15 +66,13 @@ def test_manifest_step_retry_surfaces_non_lock_manifest_errors() -> None:
         )
 
 
-def test_postmortem_dump_handlers_are_owned_by_postmortem_module() -> None:
+def test_postmortem_dump_handlers_are_owned_by_dumps_package() -> None:
     from kdive import server
-    from kdive.postmortem import dump_handlers
+    from kdive.postmortem.dumps import handlers as dump_handlers
 
-    assert postmortem_handlers.debug_postmortem_check_prereqs_handler is (
-        dump_handlers.debug_postmortem_check_prereqs_handler
-    )
-    assert postmortem_handlers.debug_postmortem_list_dumps_handler is dump_handlers.debug_postmortem_list_dumps_handler
-    assert postmortem_handlers.debug_postmortem_fetch_handler is dump_handlers.debug_postmortem_fetch_handler
+    assert dump_handlers.debug_postmortem_check_prereqs_handler.__module__ == "kdive.postmortem.dumps.handlers"
+    assert dump_handlers.debug_postmortem_list_dumps_handler.__module__ == "kdive.postmortem.dumps.handlers"
+    assert dump_handlers.debug_postmortem_fetch_handler.__module__ == "kdive.postmortem.dumps.handlers"
     app = server.create_app()
     assert app._tool_manager._tools["debug.postmortem.check_prereqs"].fn.__module__ == "kdive.postmortem.tools"
     assert app._tool_manager._tools["debug.postmortem.list_dumps"].fn.__module__ == "kdive.postmortem.tools"

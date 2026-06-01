@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -52,7 +53,7 @@ def _resolve_base_profile(
     *,
     name: str | None,
     spec: dict[str, Any] | None,
-    registry: dict[str, _ProfileT],
+    registry: Mapping[str, _ProfileT],
     model: type[_ProfileT],
 ) -> _ProfileT:
     if name is not None and spec is not None:

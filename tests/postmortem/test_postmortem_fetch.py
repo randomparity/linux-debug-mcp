@@ -11,7 +11,7 @@ from kdive.domain import (
     StepResult,
     StepStatus,
 )
-from kdive.postmortem.dump_handlers import debug_postmortem_fetch_handler
+from kdive.postmortem.dumps.handlers import debug_postmortem_fetch_handler
 from kdive.postmortem.models import DebugPostmortemFetchRequest
 from kdive.providers.local.test.local_ssh_tests import SshCommandResult
 from kdive.transport.core.base import ExecutionState
