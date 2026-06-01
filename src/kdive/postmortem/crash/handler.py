@@ -342,6 +342,33 @@ def _record_crash_runner_exception(
     )
 
 
+@dataclass(frozen=True)
+class _CrashFinalizationContext:
+    store: ArtifactStore
+    run_id: str
+    call_id: str
+    sensitive_call_dir: Path
+    agent_dir: Path
+    redactor: Redactor
+    modules_requested: bool
+    vmcore_build_id: str
+    started_at: datetime
+    finished_at: datetime
+    duration_ms: int
+
+    @property
+    def step_name(self) -> str:
+        return f"postmortem.crash:{self.call_id}"
+
+
+@dataclass(frozen=True)
+class _CrashParsedOutput:
+    results: dict[str, Any]
+    transcript: str
+    truncated: bool
+    all_not_captured: bool
+
+
 def debug_postmortem_crash_handler(
     request: DebugPostmortemCrashRequest,
     *,
@@ -418,74 +445,58 @@ def debug_postmortem_crash_handler(
         _chmod_best_effort(raw_path, 0o600)
     duration_ms = int((time.monotonic() - started_monotonic) * 1000)
     return _finalize_crash_call(
-        store=store,
-        run_id=run_id,
-        call_id=workspace.call_id,
+        context=_CrashFinalizationContext(
+            store=store,
+            run_id=run_id,
+            call_id=workspace.call_id,
+            sensitive_call_dir=workspace.sensitive_call_dir,
+            agent_dir=workspace.agent_dir,
+            redactor=workspace.redactor,
+            modules_requested=ctx.modules_path is not None,
+            vmcore_build_id=ctx.vmcore_build_id,
+            started_at=started_at,
+            finished_at=now(),
+            duration_ms=duration_ms,
+        ),
         ssh_result=ssh_result,
-        sensitive_call_dir=workspace.sensitive_call_dir,
-        agent_dir=workspace.agent_dir,
-        redactor=workspace.redactor,
         commands=workspace.commands,
-        modules_requested=ctx.modules_path is not None,
-        vmcore_build_id=ctx.vmcore_build_id,
-        started_at=started_at,
-        finished_at=now(),
-        duration_ms=duration_ms,
     )
 
 
-def _finalize_crash_call(
-    *,
-    store: ArtifactStore,
-    run_id: str,
-    call_id: str,
-    ssh_result: SshCommandResult,
-    sensitive_call_dir: Path,
-    agent_dir: Path,
-    redactor: Redactor,
-    commands: list[str],
-    modules_requested: bool,
-    vmcore_build_id: str,
-    started_at: datetime,
-    finished_at: datetime,
-    duration_ms: int,
-) -> ToolResponse:
-    """Spec §4.1 / §6 step 9. Runner-terminal failures win over the file-count
-    rule; a clean run with >=1 output file is a success with per-command markers."""
-    step_name = f"postmortem.crash:{call_id}"
-
-    def _infra_fail(code: str, message: str) -> ToolResponse:
-        store_step = StepResult(
-            step_name=step_name,
-            status=StepStatus.FAILED,
-            summary=message,
-            artifacts=[],
-            details={"call_id": call_id, "code": code, "duration_ms": duration_ms},
-        )
-        _record_terminal_crash_result(store, run_id, store_step)
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=message,
-            details={"code": code, "call_id": call_id},
-            suggested_next_actions=["artifacts.get_manifest"],
-        )
-
+def _crash_runner_terminal_failure(ssh_result: SshCommandResult) -> tuple[str, str] | None:
     if ssh_result.oversized_output:
-        return _infra_fail("oversized_output", "crash session stdout exceeded the cap")
+        return "oversized_output", "crash session stdout exceeded the cap"
     if ssh_result.cancelled:
-        return _infra_fail("crash_cancelled", "crash call cancelled")
+        return "crash_cancelled", "crash call cancelled"
     if ssh_result.stdin_failed:
-        return _infra_fail("crash_stdin_failure", "crash command script not fully written")
+        return "crash_stdin_failure", "crash command script not fully written"
     if ssh_result.timed_out or ssh_result.exit_status == 124:
-        return _infra_fail("crash_timeout", "crash run exceeded the timeout")
+        return "crash_timeout", "crash run exceeded the timeout"
+    return None
 
+
+def _record_crash_infra_failure(context: _CrashFinalizationContext, *, code: str, message: str) -> ToolResponse:
+    store_step = StepResult(
+        step_name=context.step_name,
+        status=StepStatus.FAILED,
+        summary=message,
+        artifacts=[],
+        details={"call_id": context.call_id, "code": code, "duration_ms": context.duration_ms},
+    )
+    _record_terminal_crash_result(context.store, context.run_id, store_step)
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        run_id=context.run_id,
+        message=message,
+        details={"code": code, "call_id": context.call_id},
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
+def _parse_crash_outputs(*, sensitive_call_dir: Path, commands: list[str], redactor: Redactor) -> _CrashParsedOutput:
     segments, truncated = collect_command_outputs(
         sensitive_call_dir, commands, per_cmd_cap=CRASH_PER_CMD_CAP, total_cap=CRASH_STDOUT_CAP
     )
-    if all(seg["capture"] == "not_captured" for seg in segments) and ssh_result.exit_status != 0:
-        return _infra_fail("crash_open_failure", "crash produced no command output (could not open the pair)")
-
     results: dict[str, Any] = {}
     transcript_parts: list[str] = []
     for seg in segments:
@@ -500,46 +511,122 @@ def _finalize_crash_call(
             continue
         parsed = parse_command(command, raw)
         results[command] = redactor.redact_value(parsed)
+    return _CrashParsedOutput(
+        results=results,
+        transcript="\n\n".join(transcript_parts),
+        truncated=truncated,
+        all_not_captured=all(seg["capture"] == "not_captured" for seg in segments),
+    )
 
+
+def _crash_module_symbol_status(
+    *, sensitive_call_dir: Path, redactor: Redactor, modules_requested: bool
+) -> dict[str, Any] | None:
     module_symbols = None
     if modules_requested:
         mod_file = sensitive_call_dir / "mod-load.out"
         mod_text = mod_file.read_text(encoding="utf-8", errors="replace") if mod_file.is_file() else ""
         status = "loaded" if mod_file.is_file() and "cannot" not in mod_text.lower() else "load_failed"
         module_symbols = {"requested": True, "status": status, "detail": redactor.redact_text(mod_text[:512])}
+    return module_symbols
 
-    transcript_path = agent_dir / "transcript.txt"
-    parsed_path = agent_dir / "parsed.json"
-    transcript_path.write_text(redactor.redact_text("\n\n".join(transcript_parts)), encoding="utf-8")
-    parsed_path.write_text(json.dumps(results), encoding="utf-8")
+
+def _persist_crash_artifacts(context: _CrashFinalizationContext, parsed: _CrashParsedOutput) -> list[ArtifactRef]:
+    transcript_path = context.agent_dir / "transcript.txt"
+    parsed_path = context.agent_dir / "parsed.json"
+    transcript_path.write_text(context.redactor.redact_text(parsed.transcript), encoding="utf-8")
+    parsed_path.write_text(json.dumps(parsed.results), encoding="utf-8")
     artifacts = [
-        ArtifactRef(path=str(transcript_path.relative_to(store.run_dir(run_id))), kind="crash_transcript"),
-        ArtifactRef(path=str(parsed_path.relative_to(store.run_dir(run_id))), kind="crash_parsed_json"),
+        ArtifactRef(
+            path=str(transcript_path.relative_to(context.store.run_dir(context.run_id))),
+            kind="crash_transcript",
+        ),
+        ArtifactRef(
+            path=str(parsed_path.relative_to(context.store.run_dir(context.run_id))),
+            kind="crash_parsed_json",
+        ),
     ]
+    return artifacts
+
+
+def _crash_success_response(
+    *,
+    context: _CrashFinalizationContext,
+    ssh_result: SshCommandResult,
+    commands: list[str],
+    parsed: _CrashParsedOutput,
+    artifacts: list[ArtifactRef],
+    module_symbols: dict[str, Any] | None,
+) -> ToolResponse:
     step = StepResult(
-        step_name=step_name,
+        step_name=context.step_name,
         status=StepStatus.SUCCEEDED,
         summary=f"crash batch: {len(commands)} command(s)",
         artifacts=artifacts,
-        details={"call_id": call_id, "vmcore_build_id": vmcore_build_id, "duration_ms": duration_ms},
+        details={
+            "call_id": context.call_id,
+            "vmcore_build_id": context.vmcore_build_id,
+            "duration_ms": context.duration_ms,
+        },
     )
-    _record_terminal_crash_result(store, run_id, step)
+    _record_terminal_crash_result(context.store, context.run_id, step)
     data: dict[str, Any] = {
-        "call_id": call_id,
-        "vmcore_build_id": vmcore_build_id,
-        "results": results,
-        "truncated": truncated,
+        "call_id": context.call_id,
+        "vmcore_build_id": context.vmcore_build_id,
+        "results": parsed.results,
+        "truncated": parsed.truncated,
         "crash_exit_code": ssh_result.exit_status,
-        "started_at": started_at.isoformat(),
-        "finished_at": finished_at.isoformat(),
-        "duration_ms": duration_ms,
+        "started_at": context.started_at.isoformat(),
+        "finished_at": context.finished_at.isoformat(),
+        "duration_ms": context.duration_ms,
     }
     if module_symbols is not None:
         data["module_symbols"] = module_symbols
     return ToolResponse.success(
         summary=f"crash batch over {len(commands)} command(s)",
-        run_id=run_id,
+        run_id=context.run_id,
         data=data,
         artifacts=artifacts,
         suggested_next_actions=["artifacts.get_manifest", "debug.postmortem.crash"],
+    )
+
+
+def _finalize_crash_call(
+    *,
+    context: _CrashFinalizationContext,
+    ssh_result: SshCommandResult,
+    commands: list[str],
+) -> ToolResponse:
+    """Spec §4.1 / §6 step 9. Runner-terminal failures win over the file-count
+    rule; a clean run with >=1 output file is a success with per-command markers."""
+    terminal_failure = _crash_runner_terminal_failure(ssh_result)
+    if terminal_failure is not None:
+        code, message = terminal_failure
+        return _record_crash_infra_failure(context, code=code, message=message)
+
+    parsed = _parse_crash_outputs(
+        sensitive_call_dir=context.sensitive_call_dir,
+        commands=commands,
+        redactor=context.redactor,
+    )
+    if parsed.all_not_captured and ssh_result.exit_status != 0:
+        return _record_crash_infra_failure(
+            context,
+            code="crash_open_failure",
+            message="crash produced no command output (could not open the pair)",
+        )
+
+    module_symbols = _crash_module_symbol_status(
+        sensitive_call_dir=context.sensitive_call_dir,
+        redactor=context.redactor,
+        modules_requested=context.modules_requested,
+    )
+    artifacts = _persist_crash_artifacts(context, parsed)
+    return _crash_success_response(
+        context=context,
+        ssh_result=ssh_result,
+        commands=commands,
+        parsed=parsed,
+        artifacts=artifacts,
+        module_symbols=module_symbols,
     )
