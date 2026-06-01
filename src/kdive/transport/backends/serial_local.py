@@ -372,21 +372,20 @@ class SerialLocalTransport(Transport):
         request: OpenRequest,
         *,
         cancel: threading.Event,
-        deadline,
+        deadline: Deadline,
         on_partial: OnPartial,
         secrets: Mapping[str, str] = MappingProxyType({}),
     ) -> BackendAttachment:
         check_not_cancelled(cancel)
-        bounded = deadline if isinstance(deadline, Deadline) else Deadline.after(float(deadline))
         device = self._validate_source(request)
         on_partial("source_open", {"path": device})
         lock_fd = self._acquire_source_lock(device)
         try:
             if request.transport_ref.line_role in (LineRole.DEDICATED_DEBUG, LineRole.RSP):
                 return self._attach_demux(
-                    request, device, lock_fd, cancel=cancel, deadline=bounded, on_partial=on_partial
+                    request, device, lock_fd, cancel=cancel, deadline=deadline, on_partial=on_partial
                 )
-            return self._attach_console_only(device, lock_fd, cancel=cancel, deadline=bounded, on_partial=on_partial)
+            return self._attach_console_only(device, lock_fd, cancel=cancel, deadline=deadline, on_partial=on_partial)
         except BaseException:
             self._close_fd(lock_fd)
             raise

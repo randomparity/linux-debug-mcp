@@ -49,7 +49,7 @@ class QemuGdbstubTransport(Transport):
         request: OpenRequest,
         *,
         cancel: threading.Event,
-        deadline: float,
+        deadline: Deadline,
         on_partial: Callable[[str, object], None],
         secrets: Mapping[str, str] = MappingProxyType({}),
     ) -> BackendAttachment:
@@ -80,10 +80,9 @@ class QemuGdbstubTransport(Transport):
                 f"qemu-gdbstub host must be a loopback IP literal, got {host!r}",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
-        bounded = deadline if isinstance(deadline, Deadline) else Deadline.after(float(deadline))
         # Decision 5: a minimal bounded RSP-framing exchange, not a bare connect — a stale
         # or non-RSP listener on the port must not be accepted as a healthy gdbstub.
-        if not rsp_reachable(host, port, deadline=bounded, cancel=cancel):
+        if not rsp_reachable(host, port, deadline=deadline, cancel=cancel):
             raise QemuGdbstubAttachError(
                 f"qemu gdbstub at {host}:{port} did not answer RSP framing",
                 category=ErrorCategory.DEBUG_ATTACH_FAILURE,

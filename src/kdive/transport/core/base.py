@@ -27,6 +27,7 @@ from kdive.seams.target import (
     TargetKey,
     TargetState,
 )
+from kdive.transport.core.bounded import Deadline
 from kdive.transport.core.break_types import BreakProxy, BreakSshRunner
 
 DEFAULT_MIN_LEASE_TTL_SECONDS = 300
@@ -375,7 +376,7 @@ class Transport(ABC):
         request: OpenRequest,
         *,
         cancel: threading.Event,
-        deadline: float,
+        deadline: Deadline,
         on_partial: Callable[[str, object], None],
         secrets: Mapping[str, str] = MappingProxyType({}),
     ) -> BackendAttachment:

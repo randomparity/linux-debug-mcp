@@ -498,6 +498,18 @@ def test_transport_registry_register_lookup_and_duplicate():
         registry.require("missing")
 
 
+def test_transport_attach_deadline_contract_uses_deadline_type() -> None:
+    from typing import get_type_hints
+
+    from kdive.transport.backends.qemu_gdbstub import QemuGdbstubTransport
+    from kdive.transport.backends.serial_local import SerialLocalTransport
+    from kdive.transport.core.bounded import Deadline
+
+    for transport_type in (Transport, QemuGdbstubTransport, SerialLocalTransport):
+        hints = get_type_hints(transport_type.attach)
+        assert hints["deadline"] is Deadline
+
+
 def test_registry_rejects_loopback_local_from_non_allowlisted_provider():
     # locality is provider-supplied, so the trust must bottom out at registration: a
     # remote transport that self-certifies locality=LOCAL must still be refused

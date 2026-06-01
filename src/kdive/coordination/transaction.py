@@ -3,7 +3,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import threading
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -29,6 +28,7 @@ from kdive.transport.core.base import (
     TransportSession,
     new_session_id,
 )
+from kdive.transport.core.bounded import Deadline
 from kdive.transport.core.break_inject import BreakRequestMethod, InjectBreakError, inject_break
 
 logger = logging.getLogger(__name__)
@@ -327,7 +327,7 @@ class TransportTransaction:
             request,
             # caller-driven attach cancellation is wired in A9; here the deadline is the only bound.
             cancel=threading.Event(),
-            deadline=time.monotonic() + _ATTACH_DEADLINE_SECONDS,
+            deadline=Deadline.after(_ATTACH_DEADLINE_SECONDS),
             on_partial=on_partial,
             secrets=resolved_secrets,
         )
