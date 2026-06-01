@@ -517,21 +517,21 @@ def test_target_run_tests_tool_options_forward_acknowledged_permissions(tmp_path
 
 
 def test_target_run_tests_tool_and_handler_are_target_owned() -> None:
-    from kdive.target import handlers as target_handlers
+    from kdive.target import test_handler
 
     tool = create_app()._tool_manager._tools["target.run_tests"]
 
     assert tool.fn.__module__ == "kdive.target.tools"
-    assert target_handlers.target_run_tests_handler.__module__ == "kdive.target.handlers"
+    assert test_handler.target_run_tests_handler.__module__ == "kdive.target.test_handler"
 
 
 def test_target_boot_handler_is_target_owned() -> None:
-    from kdive.target import handlers as target_handlers
+    from kdive.target import boot_handler
 
     tool = create_app()._tool_manager._tools["target.boot"]
 
     assert tool.fn.__module__ == "kdive.target.tools"
-    assert target_handlers.target_boot_handler.__module__ == "kdive.target.handlers"
+    assert boot_handler.target_boot_handler.__module__ == "kdive.target.boot_handler"
 
 
 def test_target_run_tests_handler_response_serializes(tmp_path: Path) -> None:

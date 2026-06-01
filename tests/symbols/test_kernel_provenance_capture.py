@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from kdive.domain import ArtifactRef, StepResult, StepStatus
-from kdive.target.handlers import _capture_kernel_provenance
+from kdive.target.boot_handler import _capture_kernel_provenance
 
 FULL = "a" * 40
 

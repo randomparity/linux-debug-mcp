@@ -6,6 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 SERVER_SOURCE = ROOT / "src" / "kdive" / "server.py"
+TARGET_BOOT_HANDLER_SOURCE = ROOT / "src" / "kdive" / "target" / "boot_handler.py"
+TARGET_TEST_HANDLER_SOURCE = ROOT / "src" / "kdive" / "target" / "test_handler.py"
 INTROSPECT_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "introspect" / "handlers.py"
 INTROSPECT_EXECUTION_SOURCE = ROOT / "src" / "kdive" / "introspect" / "execution.py"
 POSTMORTEM_HANDLERS_SOURCE = ROOT / "src" / "kdive" / "postmortem" / "handlers.py"
@@ -83,7 +85,7 @@ def test_extracted_handler_modules_do_not_import_server_module() -> None:
     handler_sources = [
         path
         for path in (ROOT / "src" / "kdive").rglob("*.py")
-        if path.name in {"handlers.py", "session_handlers.py", "handler.py"}
+        if path.name in {"handlers.py", "session_handlers.py", "handler.py", "boot_handler.py", "test_handler.py"}
     ]
 
     offenders = [path.relative_to(ROOT) for path in handler_sources if "kdive.server" in _imported_modules(path)]
@@ -128,11 +130,11 @@ def test_feature_probe_handlers_import_public_target_probe_substrate() -> None:
 
 
 def test_shared_probe_boundary_does_not_import_private_transport_handlers() -> None:
-    target_handlers = ROOT / "src" / "kdive" / "target" / "handlers.py"
     debug_session_handlers = ROOT / "src" / "kdive" / "debug" / "session_handlers.py"
 
     assert "_require_snapshot" not in _imported_names(PROBE_SEAM_SOURCE, "kdive.transport.handlers")
-    assert "_require_snapshot" not in _imported_names(target_handlers, "kdive.transport.handlers")
+    assert "_require_snapshot" not in _imported_names(TARGET_BOOT_HANDLER_SOURCE, "kdive.transport.handlers")
+    assert "_require_snapshot" not in _imported_names(TARGET_TEST_HANDLER_SOURCE, "kdive.transport.handlers")
     assert "_require_snapshot" not in _imported_names(debug_session_handlers, "kdive.transport.handlers")
     assert "require_target_snapshot" in _imported_names(PROBE_SEAM_SOURCE, "kdive.coordination.admission")
 
@@ -212,7 +214,8 @@ def test_debug_handlers_accept_structured_boundaries_only() -> None:
 
 def test_target_and_kernel_handlers_accept_structured_boundaries_only() -> None:
     from kdive.kernel.handlers import kernel_build_handler
-    from kdive.target.handlers import target_boot_handler, target_run_tests_handler
+    from kdive.target.boot_handler import target_boot_handler
+    from kdive.target.test_handler import target_run_tests_handler
 
     handlers = [
         kernel_build_handler,
@@ -222,6 +225,19 @@ def test_target_and_kernel_handlers_accept_structured_boundaries_only() -> None:
 
     for handler in handlers:
         assert list(inspect.signature(handler).parameters) == ["request", "runtime"]
+
+
+def test_target_handlers_are_split_by_workflow() -> None:
+    target_handlers_source = ROOT / "src" / "kdive" / "target" / "handlers.py"
+
+    assert target_handlers_source.is_file()
+    assert TARGET_BOOT_HANDLER_SOURCE.is_file()
+    assert TARGET_TEST_HANDLER_SOURCE.is_file()
+    assert _defined_functions(target_handlers_source) == set()
+    assert "target_boot_handler" in _defined_functions(TARGET_BOOT_HANDLER_SOURCE)
+    assert "target_run_tests_handler" not in _defined_functions(TARGET_BOOT_HANDLER_SOURCE)
+    assert "target_run_tests_handler" in _defined_functions(TARGET_TEST_HANDLER_SOURCE)
+    assert "target_boot_handler" not in _defined_functions(TARGET_TEST_HANDLER_SOURCE)
 
 
 def test_transport_tests_do_not_recreate_public_handler_call_shapes() -> None:

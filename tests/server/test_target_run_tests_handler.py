@@ -6,9 +6,20 @@ from handler_call_helpers import target_run_tests_handler
 from kdive.artifacts.handlers import create_run_handler
 from kdive.artifacts.manifest import BootAttempt
 from kdive.artifacts.store import ArtifactStore
-from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, RootfsProfile, TargetProfile, TestCommand, TestSuiteProfile
+from kdive.config import (
+    TARGET_DESTRUCTIVE_PERMISSIONS,
+    RootfsProfile,
+    TargetProfile,
+)
+from kdive.config import (
+    TestCommand as ConfigTestCommand,
+)
+from kdive.config import (
+    TestSuiteProfile as ConfigTestSuiteProfile,
+)
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
-from kdive.providers.local.test.local_ssh_tests import LocalSshTestProvider, TestExecutionResult
+from kdive.providers.local.test.local_ssh_tests import LocalSshTestProvider
+from kdive.providers.local.test.local_ssh_tests import TestExecutionResult as SshTestExecutionResult
 
 
 class PlanRejectingProvider(FakeTestProvider):
@@ -17,11 +28,11 @@ class PlanRejectingProvider(FakeTestProvider):
         raise ValueError("ConnectTimeout cannot exceed command timeout")
 
 
-def suites() -> dict[str, TestSuiteProfile]:
+def suites() -> dict[str, ConfigTestSuiteProfile]:
     return {
-        "smoke-basic": TestSuiteProfile(
+        "smoke-basic": ConfigTestSuiteProfile(
             name="smoke-basic",
-            commands=[TestCommand(name="uname", argv=["uname", "-a"])],
+            commands=[ConfigTestCommand(name="uname", argv=["uname", "-a"])],
         )
     }
 
@@ -267,7 +278,7 @@ def test_run_tests_force_rerun_replaces_success(tmp_path: Path) -> None:
 def test_run_tests_maps_provider_failure_to_test_failure(tmp_path: Path) -> None:
     artifact_root = create_booted_run(tmp_path)
     provider = FakeTestProvider(
-        result=TestExecutionResult(
+        result=SshTestExecutionResult(
             status=StepStatus.FAILED,
             summary="test suite smoke-basic failed: 0 passed, 1 failed",
             artifacts=[
@@ -355,7 +366,7 @@ def test_run_tests_maps_provider_planning_value_error_to_configuration_error(tmp
 def test_run_tests_response_redacts_secret_like_snippets(tmp_path: Path) -> None:
     artifact_root = create_booted_run(tmp_path)
     provider = FakeTestProvider(
-        result=TestExecutionResult(
+        result=SshTestExecutionResult(
             status=StepStatus.FAILED,
             summary="test failed token=secret-token-value",
             details={
@@ -390,7 +401,7 @@ def test_run_tests_response_redacts_secret_like_snippets(tmp_path: Path) -> None
 def test_run_tests_success_response_redacts_secret_like_snippets(tmp_path: Path) -> None:
     artifact_root = create_booted_run(tmp_path)
     provider = FakeTestProvider(
-        result=TestExecutionResult(
+        result=SshTestExecutionResult(
             status=StepStatus.SUCCEEDED,
             summary="test passed token=secret-token-value",
             details={

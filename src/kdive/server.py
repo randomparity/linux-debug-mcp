@@ -93,8 +93,9 @@ from kdive.seams.secrets import (
     SecretsStore,
 )
 from kdive.target import tools as target_tools
-from kdive.target.handlers import DEFAULT_TEST_SUITES as _DEFAULT_TEST_SUITES
-from kdive.target.handlers import target_boot_handler, target_run_tests_handler
+from kdive.target.boot_handler import target_boot_handler
+from kdive.target.test_handler import DEFAULT_TEST_SUITES as _DEFAULT_TEST_SUITES
+from kdive.target.test_handler import target_run_tests_handler
 from kdive.transport.backends.proxy import AgentProxyBackend
 from kdive.transport.backends.qemu_gdbstub import QemuGdbstubTransport
 from kdive.transport.core.base import (

@@ -1,6 +1,6 @@
 import pytest
 
-from kdive.target.handlers import _ssh_host_is_unset_or_loopback, _validated_guest_ip
+from kdive.target.test_handler import _ssh_host_is_unset_or_loopback, _validated_guest_ip
 
 
 @pytest.mark.parametrize(

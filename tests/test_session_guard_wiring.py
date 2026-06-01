@@ -25,7 +25,7 @@ from kdive.domain import ArtifactRef, RunRequest, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
 from kdive.seams.guard import SessionGuard, SessionGuardContext
 from kdive.seams.lifecycle import InProcessLifecycleDispatcher, LifecycleEvent, LifecycleKind
-from kdive.target.handlers import _admit_run_tests_ssh_tier
+from kdive.target.test_handler import _admit_run_tests_ssh_tier
 from kdive.transport.core.base import LineRole, TransportRef
 
 from kdive.artifacts.store import ArtifactStore  # isort: skip
