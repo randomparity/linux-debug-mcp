@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -349,7 +349,7 @@ def _debug_start_session_preflight(
     artifact_root: Path,
     run_id: str,
     debug_profile: str | None,
-    debug_profiles: dict[str, DebugProfile] | None,
+    debug_profiles: Mapping[str, DebugProfile] | None,
 ) -> tuple[_DebugStartPreflight | None, ToolResponse | None]:
     try:
         store = ArtifactStore(artifact_root, create_root=False)
@@ -760,7 +760,7 @@ def _start_session(
     run_id: str,
     debug_profile: str | None = None,
     new_session: bool = False,
-    debug_profiles: dict[str, DebugProfile] | None = None,
+    debug_profiles: Mapping[str, DebugProfile] | None = None,
     transaction: TransportTransaction | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,

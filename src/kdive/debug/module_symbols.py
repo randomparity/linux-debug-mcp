@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -50,7 +50,7 @@ class ModuleSymbolLoadOptions:
     module: str
     sections: dict[str, str] | None = None
     ko_path: str | None = None
-    rootfs_profiles: dict[str, RootfsProfile] | None = None
+    rootfs_profiles: Mapping[str, RootfsProfile] | None = None
     ssh_runner: SshRunner | None = None
     module_ko_finder: Callable[[Path, str], Path | None] | None = None
 
@@ -439,7 +439,7 @@ def _resolve_module_sections(
     module: str,
     sections: dict[str, str] | None,
     ssh_runner: SshRunner | None,
-    rootfs_profiles: dict[str, RootfsProfile] | None,
+    rootfs_profiles: Mapping[str, RootfsProfile] | None,
 ) -> dict[str, str]:
     if sections is not None:
         return {str(name): str(address) for name, address in sections.items()}

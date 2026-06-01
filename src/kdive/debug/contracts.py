@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Protocol
@@ -168,7 +169,7 @@ class DebugInterruptRequest(_DebugOperationMetadata):
 
 @dataclass(frozen=True)
 class DebugRuntime:
-    debug_profiles: dict[str, DebugProfile] | None = None
+    debug_profiles: Mapping[str, DebugProfile] | None = None
     admission: AdmissionService | None = None
     transaction: TransportTransaction | None = None
     session_registry: SessionRegistry | None = None

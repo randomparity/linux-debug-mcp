@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -35,9 +36,9 @@ class TargetToolRuntime:
     session_registry: SessionRegistry | None
     boot_provider: LibvirtQemuProvider | None = None
     test_provider: LocalSshTestProvider | None = None
-    target_profiles: dict[str, TargetProfile] | None = None
-    rootfs_profiles: dict[str, RootfsProfile] | None = None
-    test_suites: dict[str, TestSuiteProfile] | None = None
+    target_profiles: Mapping[str, TargetProfile] | None = None
+    rootfs_profiles: Mapping[str, RootfsProfile] | None = None
+    test_suites: Mapping[str, TestSuiteProfile] | None = None
     default_libvirt_uri: str | None = None
 
 

@@ -12,6 +12,7 @@ from kdive.artifacts.tools import (
     register_artifact_tools,
 )
 from kdive.config import BootOverrides, BuildOverrides
+from kdive.debug.contracts import DebugRuntime
 from kdive.domain import ToolResponse
 from kdive.introspect.execution import LiveIntrospectRuntime
 from kdive.introspect.models import DebugIntrospectRunRequest
@@ -83,6 +84,14 @@ def _tool_fn(app: FastMCP, name: str):
 
 def _success(**data: Any) -> ToolResponse:
     return ToolResponse.success(summary="ok", data=data)
+
+
+def test_profile_runtime_registries_are_read_only_mappings() -> None:
+    assert TargetToolRuntime.__annotations__["target_profiles"] == "Mapping[str, TargetProfile] | None"
+    assert TargetToolRuntime.__annotations__["rootfs_profiles"] == "Mapping[str, RootfsProfile] | None"
+    assert TargetToolRuntime.__annotations__["test_suites"] == "Mapping[str, TestSuiteProfile] | None"
+    assert TransportToolContext.__annotations__["debug_profiles"] == "Mapping[str, DebugProfile] | None"
+    assert DebugRuntime.__annotations__["debug_profiles"] == "Mapping[str, DebugProfile] | None"
 
 
 def test_kernel_adapters_forward_grouped_payloads_and_override_models(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -51,7 +51,7 @@ class TransportToolContext:
     transaction: TransportTransaction
     admission: AdmissionService
     session_registry: SessionRegistry
-    debug_profiles: dict[str, DebugProfile] | None = None
+    debug_profiles: Mapping[str, DebugProfile] | None = None
     break_mechanism: BreakMechanism | None = None
     probe_halted: Callable[[TransportSession], bool] = probe_rsp_halted
 

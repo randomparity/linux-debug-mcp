@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
@@ -44,7 +45,7 @@ def _end_mi_debug_session(
     artifact_root: Path,
     run_id: str,
     debug_session_id: str | None,
-    debug_profiles: dict[str, DebugProfile] | None,
+    debug_profiles: Mapping[str, DebugProfile] | None,
     gdb_mi_engine: GdbMiEngine | None,
     gdb_mi_sessions: GdbMiSessionRegistry | None,
 ) -> ToolResponse:
@@ -111,7 +112,7 @@ def _end_session(
     artifact_root: Path,
     run_id: str,
     debug_session_id: str | None = None,
-    debug_profiles: dict[str, DebugProfile] | None = None,
+    debug_profiles: Mapping[str, DebugProfile] | None = None,
     transaction: TransportTransaction | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
