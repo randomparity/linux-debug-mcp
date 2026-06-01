@@ -52,6 +52,12 @@ class ProviderExecutionOptions(Model):
     acknowledged_permissions: list[str] | None = None
 
 
+class ProviderOperationInput(Model):
+    architecture: str
+    provider_context: ProviderToolContext | None = None
+    execution_options: ProviderExecutionOptions | None = None
+
+
 class RemoteBuildArtifactOptions(Model):
     output_artifact_ref: str | None = None
 
@@ -96,16 +102,16 @@ def _model_payload(value: Model | dict[str, Any] | None, model_type: type[Model]
     return model.model_dump(exclude_none=True)
 
 
-def _provider_fields(
-    *,
-    architecture: str,
-    provider_context: ProviderToolContext | dict[str, Any] | None,
-    execution_options: ProviderExecutionOptions | dict[str, Any] | None,
-) -> dict[str, Any]:
+def _provider_fields(provider_input: ProviderOperationInput | dict[str, Any]) -> dict[str, Any]:
+    input_model = (
+        provider_input
+        if isinstance(provider_input, ProviderOperationInput)
+        else ProviderOperationInput.model_validate(provider_input)
+    )
     return {
-        "architecture": architecture,
-        **_model_payload(provider_context, ProviderToolContext),
-        **_model_payload(execution_options, ProviderExecutionOptions),
+        "architecture": input_model.architecture,
+        **(input_model.provider_context.model_dump(exclude_none=True) if input_model.provider_context else {}),
+        **(input_model.execution_options.model_dump(exclude_none=True) if input_model.execution_options else {}),
     }
 
 
@@ -168,19 +174,13 @@ def _register_stub_provider_tool(
 
 
 def remote_build_kernel(
-    architecture: str,
+    provider_input: ProviderOperationInput,
     source_ref: str,
     build_profile: str,
-    provider_context: ProviderToolContext | None = None,
-    execution_options: ProviderExecutionOptions | None = None,
     artifact_options: RemoteBuildArtifactOptions | None = None,
 ) -> RemoteBuildRequest:
     return RemoteBuildRequest(
-        **_provider_fields(
-            architecture=architecture,
-            provider_context=provider_context,
-            execution_options=execution_options,
-        ),
+        **_provider_fields(provider_input),
         source_ref=source_ref,
         build_profile=build_profile,
         **_model_payload(artifact_options, RemoteBuildArtifactOptions),
@@ -188,71 +188,47 @@ def remote_build_kernel(
 
 
 def remote_sync_artifacts(
-    architecture: str,
+    provider_input: ProviderOperationInput,
     external_artifact_ref: str,
-    provider_context: ProviderToolContext | None = None,
-    execution_options: ProviderExecutionOptions | None = None,
     artifact_options: RemoteSyncArtifactOptions | None = None,
 ) -> RemoteArtifactSyncRequest:
     return RemoteArtifactSyncRequest(
-        **_provider_fields(
-            architecture=architecture,
-            provider_context=provider_context,
-            execution_options=execution_options,
-        ),
+        **_provider_fields(provider_input),
         external_artifact_ref=external_artifact_ref,
         **_model_payload(artifact_options, RemoteSyncArtifactOptions),
     )
 
 
 def reservation_request_host(
-    architecture: str,
+    provider_input: ProviderOperationInput,
     reservation_pool: str,
-    provider_context: ProviderToolContext | None = None,
-    execution_options: ProviderExecutionOptions | None = None,
     reservation_options: ReservationRequestOptions | None = None,
 ) -> ReservationRequest:
     return ReservationRequest(
-        **_provider_fields(
-            architecture=architecture,
-            provider_context=provider_context,
-            execution_options=execution_options,
-        ),
+        **_provider_fields(provider_input),
         reservation_pool=reservation_pool,
         **_model_payload(reservation_options, ReservationRequestOptions),
     )
 
 
 def reservation_release_host(
-    architecture: str,
+    provider_input: ProviderOperationInput,
     reservation_id: str,
-    provider_context: ProviderToolContext | None = None,
-    execution_options: ProviderExecutionOptions | None = None,
 ) -> ReservationReleaseRequest:
     return ReservationReleaseRequest(
-        **_provider_fields(
-            architecture=architecture,
-            provider_context=provider_context,
-            execution_options=execution_options,
-        ),
+        **_provider_fields(provider_input),
         reservation_id=reservation_id,
     )
 
 
 def provision_prepare_target(
-    architecture: str,
+    provider_input: ProviderOperationInput,
     target_name: str,
     provisioning_profile: str,
-    provider_context: ProviderToolContext | None = None,
-    execution_options: ProviderExecutionOptions | None = None,
     provisioning_options: ProvisioningOptions | None = None,
 ) -> ProvisioningRequest:
     return ProvisioningRequest(
-        **_provider_fields(
-            architecture=architecture,
-            provider_context=provider_context,
-            execution_options=execution_options,
-        ),
+        **_provider_fields(provider_input),
         target_name=target_name,
         provisioning_profile=provisioning_profile,
         **_model_payload(provisioning_options, ProvisioningOptions),
@@ -260,19 +236,13 @@ def provision_prepare_target(
 
 
 def hardware_power_control(
-    architecture: str,
+    provider_input: ProviderOperationInput,
     target_name: str,
     action: PowerAction,
-    provider_context: ProviderToolContext | None = None,
-    execution_options: ProviderExecutionOptions | None = None,
     power_options: HardwarePowerOptions | None = None,
 ) -> HardwareControlRequest:
     return HardwareControlRequest(
-        **_provider_fields(
-            architecture=architecture,
-            provider_context=provider_context,
-            execution_options=execution_options,
-        ),
+        **_provider_fields(provider_input),
         target_name=target_name,
         action=action,
         **_model_payload(power_options, HardwarePowerOptions),
@@ -280,19 +250,13 @@ def hardware_power_control(
 
 
 def hardware_boot_kernel(
-    architecture: str,
+    provider_input: ProviderOperationInput,
     target_name: str,
     kernel_artifact_ref: str,
-    provider_context: ProviderToolContext | None = None,
-    execution_options: ProviderExecutionOptions | None = None,
     boot_options: HardwareBootOptions | None = None,
 ) -> BootOrchestrationRequest:
     return BootOrchestrationRequest(
-        **_provider_fields(
-            architecture=architecture,
-            provider_context=provider_context,
-            execution_options=execution_options,
-        ),
+        **_provider_fields(provider_input),
         target_name=target_name,
         kernel_artifact_ref=kernel_artifact_ref,
         **_model_payload(boot_options, HardwareBootOptions),
@@ -300,19 +264,13 @@ def hardware_boot_kernel(
 
 
 def console_open_session(
-    architecture: str,
+    provider_input: ProviderOperationInput,
     target_name: str,
     access_method: ConsoleAccessMethod,
-    provider_context: ProviderToolContext | None = None,
-    execution_options: ProviderExecutionOptions | None = None,
     console_options: ConsoleOpenOptions | None = None,
 ) -> ConsoleSessionRequest:
     return ConsoleSessionRequest(
-        **_provider_fields(
-            architecture=architecture,
-            provider_context=provider_context,
-            execution_options=execution_options,
-        ),
+        **_provider_fields(provider_input),
         target_name=target_name,
         access_method=access_method,
         **_model_payload(console_options, ConsoleOpenOptions),
@@ -320,57 +278,39 @@ def console_open_session(
 
 
 def console_read(
-    architecture: str,
+    provider_input: ProviderOperationInput,
     console_session_id: str,
     max_bytes: int = 4096,
-    provider_context: ProviderToolContext | None = None,
-    execution_options: ProviderExecutionOptions | None = None,
 ) -> ConsoleReadRequest:
     return ConsoleReadRequest(
-        **_provider_fields(
-            architecture=architecture,
-            provider_context=provider_context,
-            execution_options=execution_options,
-        ),
+        **_provider_fields(provider_input),
         console_session_id=console_session_id,
         max_bytes=max_bytes,
     )
 
 
 def console_write(
-    architecture: str,
+    provider_input: ProviderOperationInput,
     console_session_id: str,
     data: str,
-    provider_context: ProviderToolContext | None = None,
-    execution_options: ProviderExecutionOptions | None = None,
 ) -> ConsoleWriteRequest:
     return ConsoleWriteRequest(
-        **_provider_fields(
-            architecture=architecture,
-            provider_context=provider_context,
-            execution_options=execution_options,
-        ),
+        **_provider_fields(provider_input),
         console_session_id=console_session_id,
         data=data,
     )
 
 
 def workflow_reserve_provision_boot(
-    architecture: str,
+    provider_input: ProviderOperationInput,
     reservation_pool: str,
     target_name: str,
     provisioning_profile: str,
     kernel_artifact_ref: str,
-    provider_context: ProviderToolContext | None = None,
-    execution_options: ProviderExecutionOptions | None = None,
     workflow_options: WorkflowReserveProvisionBootOptions | None = None,
 ) -> ReserveProvisionBootRequest:
     return ReserveProvisionBootRequest(
-        **_provider_fields(
-            architecture=architecture,
-            provider_context=provider_context,
-            execution_options=execution_options,
-        ),
+        **_provider_fields(provider_input),
         reservation_pool=reservation_pool,
         target_name=target_name,
         provisioning_profile=provisioning_profile,

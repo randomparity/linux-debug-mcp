@@ -162,6 +162,12 @@ def _handler_response(operation: str, payload, *, registry=None) -> ToolResponse
 
 
 def _tool_response(tool_name: str, **payload) -> ToolResponse:
+    if "architecture" in payload and "provider_input" not in payload:
+        provider_input = {"architecture": payload.pop("architecture")}
+        for key in ("provider_context", "execution_options"):
+            if key in payload:
+                provider_input[key] = payload.pop(key)
+        payload["provider_input"] = provider_input
     raw = create_app()._tool_manager._tools[tool_name].fn(**payload)
     return ToolResponse.model_validate(raw)
 
@@ -248,13 +254,20 @@ def test_provider_tools_registration_uses_stub_operation_table() -> None:
 
 def test_stub_provider_tool_schema_groups_repeated_provider_metadata() -> None:
     signature = inspect.signature(create_app()._tool_manager._tools["remote.build_kernel"].fn)
-    assert "architecture" in signature.parameters
+    assert "provider_input" in signature.parameters
     assert "source_ref" in signature.parameters
     assert "build_profile" in signature.parameters
-    assert "provider_context" in signature.parameters
-    assert "execution_options" in signature.parameters
     assert "artifact_options" in signature.parameters
-    for repeated in ("provider_name", "timeout_seconds", "operation_label", "run_id", "output_artifact_ref"):
+    for repeated in (
+        "architecture",
+        "provider_context",
+        "execution_options",
+        "provider_name",
+        "timeout_seconds",
+        "operation_label",
+        "run_id",
+        "output_artifact_ref",
+    ):
         assert repeated not in signature.parameters
 
 
@@ -262,9 +275,9 @@ def test_stub_provider_tool_signature_matches_json_response_contract() -> None:
     tool_fn = create_app()._tool_manager._tools["remote.build_kernel"].fn
     signature = inspect.signature(tool_fn)
 
-    assert signature.parameters["provider_context"].annotation == provider_tools.ProviderToolContext | None
+    assert signature.parameters["provider_input"].annotation == provider_tools.ProviderOperationInput
     assert signature.return_annotation == dict[str, Any]
-    assert tool_fn.__annotations__["provider_context"] == provider_tools.ProviderToolContext | None
+    assert tool_fn.__annotations__["provider_input"] == provider_tools.ProviderOperationInput
     assert tool_fn.__annotations__["return"] == dict[str, Any]
 
 

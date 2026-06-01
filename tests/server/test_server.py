@@ -448,18 +448,18 @@ def test_create_app_registers_stub_provider_tools() -> None:
     app = create_app()
     tools = app._tool_manager._tools
     expected_fields = {
-        "remote.build_kernel": {"architecture", "source_ref", "build_profile"},
-        "remote.sync_artifacts": {"architecture", "external_artifact_ref"},
-        "reservation.request_host": {"architecture", "reservation_pool"},
-        "reservation.release_host": {"architecture", "reservation_id"},
-        "provision.prepare_target": {"architecture", "target_name", "provisioning_profile"},
-        "hardware.power_control": {"architecture", "target_name", "action"},
-        "hardware.boot_kernel": {"architecture", "target_name", "kernel_artifact_ref"},
-        "console.open_session": {"architecture", "target_name", "access_method"},
-        "console.read": {"architecture", "console_session_id", "max_bytes"},
-        "console.write": {"architecture", "console_session_id", "data"},
+        "remote.build_kernel": {"provider_input", "source_ref", "build_profile"},
+        "remote.sync_artifacts": {"provider_input", "external_artifact_ref"},
+        "reservation.request_host": {"provider_input", "reservation_pool"},
+        "reservation.release_host": {"provider_input", "reservation_id"},
+        "provision.prepare_target": {"provider_input", "target_name", "provisioning_profile"},
+        "hardware.power_control": {"provider_input", "target_name", "action"},
+        "hardware.boot_kernel": {"provider_input", "target_name", "kernel_artifact_ref"},
+        "console.open_session": {"provider_input", "target_name", "access_method"},
+        "console.read": {"provider_input", "console_session_id", "max_bytes"},
+        "console.write": {"provider_input", "console_session_id", "data"},
         "workflow.reserve_provision_boot": {
-            "architecture",
+            "provider_input",
             "reservation_pool",
             "target_name",
             "provisioning_profile",
@@ -471,7 +471,7 @@ def test_create_app_registers_stub_provider_tools() -> None:
     for tool_name, fields in expected_fields.items():
         properties = tools[tool_name].parameters["properties"]
         assert fields.issubset(properties)
-        assert {"provider_context", "execution_options"}.issubset(properties)
+        assert {"architecture", "provider_context", "execution_options"}.isdisjoint(properties)
         assert {"provider_name", "timeout_seconds", "operation_label"}.isdisjoint(properties)
 
 
