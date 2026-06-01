@@ -225,6 +225,23 @@ def _bundle_for_manifest(
     missing_required: list[dict[str, Any]] = []
     missing_optional: list[dict[str, Any]] = []
     collected_refs: list[ArtifactRef] = []
+
+    def record_artifact(
+        *,
+        step_name: str,
+        result: StepResult,
+        artifact: ArtifactRef,
+        optional_kinds: set[str],
+    ) -> None:
+        exists = Path(artifact.path).is_file()
+        grouped[step_name].append({**artifact.model_dump(mode="json"), "exists": exists})
+        if exists:
+            collected_refs.append(artifact)
+        elif result.status == StepStatus.SUCCEEDED and artifact.kind not in optional_kinds:
+            missing_required.append({"step": step_name, "artifact": artifact.model_dump(mode="json")})
+        else:
+            missing_optional.append({"step": step_name, "artifact": artifact.model_dump(mode="json")})
+
     for step in manifest.steps:
         result = manifest.step_results.get(step.name)
         grouped[step.name] = []
@@ -240,18 +257,9 @@ def _bundle_for_manifest(
                 missing_optional.append(
                     {"step": step.name, "kind": kind, "reason": "optional artifact kind was not recorded"}
                 )
+        optional_kinds = optional_kinds_by_step.get(step.name, set())
         for artifact in result.artifacts:
-            exists = Path(artifact.path).is_file()
-            item = {**artifact.model_dump(mode="json"), "exists": exists}
-            grouped[step.name].append(item)
-            if exists:
-                collected_refs.append(artifact)
-            elif result.status == StepStatus.SUCCEEDED and artifact.kind not in optional_kinds_by_step.get(
-                step.name, set()
-            ):
-                missing_required.append({"step": step.name, "artifact": artifact.model_dump(mode="json")})
-            else:
-                missing_optional.append({"step": step.name, "artifact": artifact.model_dump(mode="json")})
+            record_artifact(step_name=step.name, result=result, artifact=artifact, optional_kinds=optional_kinds)
 
     fixed_step_names = {step.name for step in manifest.steps}
     for step_name, result in manifest.step_results.items():
@@ -259,15 +267,7 @@ def _bundle_for_manifest(
             continue
         grouped[step_name] = []
         for artifact in result.artifacts:
-            exists = Path(artifact.path).is_file()
-            item = {**artifact.model_dump(mode="json"), "exists": exists}
-            grouped[step_name].append(item)
-            if exists:
-                collected_refs.append(artifact)
-            elif result.status == StepStatus.SUCCEEDED:
-                missing_required.append({"step": step_name, "artifact": artifact.model_dump(mode="json")})
-            else:
-                missing_optional.append({"step": step_name, "artifact": artifact.model_dump(mode="json")})
+            record_artifact(step_name=step_name, result=result, artifact=artifact, optional_kinds=set())
     bundle_ref = ArtifactRef(path=str(bundle_path), kind="artifact-bundle")
     bundle = {
         "run_id": manifest.run_id,
