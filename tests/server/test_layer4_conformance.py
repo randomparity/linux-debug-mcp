@@ -47,6 +47,16 @@ from conftest import (
     seed_legacy_debug_session,
     target_profile,
 )
+from coordination_observers import (
+    assert_admission_binding_exists,
+    assert_admission_closed_at,
+    assert_admission_open,
+    assert_lifecycle_unsubscribed,
+    assert_no_admission_binding,
+    assert_no_admission_binding_for_op,
+    assert_no_recovery_required,
+    assert_recovery_required,
+)
 from handler_call_helpers import (
     debug_continue_handler,
     debug_read_registers_handler,
@@ -183,7 +193,7 @@ def test_open_rollback_at_each_crash_point(tmp_path: Path, crash_after: str) -> 
     # NO LEAK at any crash point:
     assert leases.snapshot(KEY)[0] is LeaseOwner.FREE
     assert reg.read_record(KEY) is None
-    assert admission._bindings.get(KEY, []) == []
+    assert_no_admission_binding(admission, KEY)
 
     # …and the guard is free → a fresh transaction over the SAME guard/leases/registry can open.
     txn_ok, _ = build_txn(FakeQemuTransport(), guard=guard, leases=leases, registry=reg)
@@ -210,7 +220,7 @@ def test_brokered_required_open_refused_endpoint_unsafe_pre_attach(tmp_path: Pat
     assert excinfo.value.code == "endpoint_unsafe"
     assert leases.snapshot(KEY)[0] is LeaseOwner.FREE
     assert reg.read_record(KEY) is None
-    assert admission._bindings.get(KEY, []) == []
+    assert_no_admission_binding(admission, KEY)
 
 
 def test_loopback_local_returns_tcp_endpoint(tmp_path: Path) -> None:
@@ -297,7 +307,7 @@ def test_close_releases_owned_lines_when_backend_close_raises(tmp_path: Path) ->
 
     assert transport.closed == [session.session_id]
     assert registry.read_record(KEY) is None
-    assert admission._bindings.get(KEY, []) == []
+    assert_no_admission_binding(admission, KEY)
 
     reopened = txn.open(make_request())
     assert reopened.session_id != session.session_id
@@ -322,7 +332,7 @@ def test_open_rollback_unsubscribes_lifecycle_subscriber_after_subscribe_failure
         txn.open(make_request())
 
     assert registry.read_record(KEY) is None
-    assert dispatcher._subscribers.get(KEY, {}) == {}
+    assert_lifecycle_unsubscribed(dispatcher, KEY)
 
 
 def test_second_server_instance_fails_loud_on_flock(tmp_path: Path) -> None:
@@ -367,7 +377,7 @@ def test_recovery_clearance_recovery_true_attach(tmp_path: Path) -> None:
     session = txn.open(make_request(), recovery=True)
     assert session.record_state is RecordState.READY
     assert reg.read_tombstone(KEY) is None
-    assert admission._recovery_required.get(KEY) is None
+    assert_no_recovery_required(admission, KEY)
     txn.close(session.session_id)
 
 
@@ -376,11 +386,12 @@ def test_stale_generation_tombstone_is_no_op_after_reboot(tmp_path: Path) -> Non
     _, admission = build_txn(FakeQemuTransport(), registry=reg, generation=1)
     _mark_recovery(reg, admission, generation=1)
     reg2 = SessionRegistry(directory=tmp_path)
-    admission2 = AdmissionService(SnapshotStore())
-    seed_snapshot(admission2._store, generation=2)
+    store = SnapshotStore()
+    admission2 = AdmissionService(store)
+    seed_snapshot(store, generation=2)
     reg2.reconcile(proxy=FakeReapProxy(), admission=admission2)
     assert reg2.read_tombstone(KEY) is not None
-    assert admission2._recovery_required.get(KEY) == 1
+    assert_recovery_required(admission2, KEY, generation=1)
 
 
 def test_recovery_cleared_then_restart_admittable(tmp_path: Path) -> None:
@@ -392,7 +403,7 @@ def test_recovery_cleared_then_restart_admittable(tmp_path: Path) -> None:
     admission2 = AdmissionService(SnapshotStore())
     reg2.reconcile(proxy=FakeReapProxy(), admission=admission2)
     assert reg2.read_tombstone(KEY) is None
-    assert admission2._recovery_required.get(KEY) is None
+    assert_no_recovery_required(admission2, KEY)
 
 
 def test_two_restart_durability_of_tombstone(tmp_path: Path) -> None:
@@ -406,14 +417,14 @@ def test_two_restart_durability_of_tombstone(tmp_path: Path) -> None:
     admission1 = AdmissionService(SnapshotStore())
     reg1.reconcile(proxy=FakeReapProxy(), admission=admission1)
     assert reg1.read_tombstone(KEY) is not None
-    assert admission1._recovery_required.get(KEY) == 1
+    assert_recovery_required(admission1, KEY, generation=1)
 
     # restart #2 — fresh registry + fresh admission cache again; tombstone survives:
     reg2 = SessionRegistry(directory=tmp_path)
     admission2 = AdmissionService(SnapshotStore())
     reg2.reconcile(proxy=FakeReapProxy(), admission=admission2)
     assert reg2.read_tombstone(KEY) is not None
-    assert admission2._recovery_required.get(KEY) == 1
+    assert_recovery_required(admission2, KEY, generation=1)
 
 
 def test_tombstone_generation_idempotency_fail_closed_at_bare_startup(tmp_path: Path) -> None:
@@ -423,7 +434,7 @@ def test_tombstone_generation_idempotency_fail_closed_at_bare_startup(tmp_path: 
     reg = SessionRegistry(directory=tmp_path)
     admission = AdmissionService(SnapshotStore())
     reg.reconcile(proxy=FakeReapProxy(), admission=admission)
-    assert admission._recovery_required.get(KEY) is None
+    assert_no_recovery_required(admission, KEY)
 
     # write a tombstone, then "restart" twice — admission is re-marked each time at gen 1.
     reg.write_tombstone(RecoveryTombstone(target_key=KEY, generation=1, reason="halted"))
@@ -431,7 +442,7 @@ def test_tombstone_generation_idempotency_fail_closed_at_bare_startup(tmp_path: 
         fresh_reg = SessionRegistry(directory=tmp_path)
         fresh_admission = AdmissionService(SnapshotStore())
         fresh_reg.reconcile(proxy=FakeReapProxy(), admission=fresh_admission)
-        assert fresh_admission._recovery_required.get(KEY) == 1
+        assert_recovery_required(fresh_admission, KEY, generation=1)
 
 
 def test_abandoned_attach_epoch_fence(tmp_path: Path) -> None:
@@ -497,12 +508,12 @@ def test_invalidation_cancels_pending_and_promoted_bindings(tmp_path: Path) -> N
     txn.bind_lifecycle(dispatcher)
     txn.open(make_request())
     assert reg.read_record(KEY) is not None
-    assert admission._bindings.get(KEY, []) != []
+    assert_admission_binding_exists(admission, KEY)
 
     admission.invalidate_lifecycle(LifecycleEvent(target_key=KEY, kind=LifecycleKind.CRASHED), dispatcher, generation=1)
 
     assert reg.read_record(KEY) is None
-    assert admission._bindings.get(KEY, []) == []
+    assert_no_admission_binding(admission, KEY)
 
 
 def test_invalidation_awaited_blocks_until_teardown(tmp_path: Path) -> None:
@@ -536,7 +547,7 @@ def test_invalidation_awaited_blocks_until_teardown(tmp_path: Path) -> None:
     assert teardown_observed.is_set()
     # …and the session's teardown is observable as state.
     assert reg.read_record(KEY) is None
-    assert admission._bindings.get(KEY, []) == []
+    assert_no_admission_binding(admission, KEY)
 
 
 # ---------------------------------------------------------------------------
@@ -618,7 +629,7 @@ def test_async_halt_cancels_in_flight_run_tests(tmp_path: Path) -> None:
     step = ArtifactStore(artifact_root, create_root=False).load_manifest(RUN_ID_FRESH).step_results.get("run_tests")
     assert step is not None and step.status is StepStatus.FAILED
     # B-punch Fix 2: the promoted ssh-tier handle is reaped, so reopen()/admit isn't blocked.
-    assert admission._bindings.get(FRESH_KEY, []) == []
+    assert_no_admission_binding(admission, FRESH_KEY)
 
 
 def test_inject_break_cancels_in_flight_run_tests_end_to_end(tmp_path: Path) -> None:
@@ -697,8 +708,7 @@ def test_inject_break_cancels_in_flight_run_tests_end_to_end(tmp_path: Path) -> 
     assert step is not None and step.status is StepStatus.FAILED
     # The SSH_TIER binding was cancelled and reaped; the TRANSPORT_OPEN binding remains live
     # (inject_break does NOT close the transport — that's transport.close's job).
-    ssh_tier_bindings = [h for h in admission._bindings.get(FRESH_KEY, ()) if h.op is AdmissionOp.SSH_TIER]
-    assert ssh_tier_bindings == []
+    assert_no_admission_binding_for_op(admission, FRESH_KEY, AdmissionOp.SSH_TIER)
 
 
 def test_cancel_bridge_watcher_torn_down_no_leak(tmp_path: Path) -> None:
@@ -897,8 +907,8 @@ def test_close_while_halted_tombstones_then_revokes_never_false_executing(tmp_pa
     assert reg.read_tombstone(KEY) is not None
     assert reg.read_tombstone(KEY).reason == "closed_while_halted"
     assert reg.read_record(KEY) is None
-    assert admission._bindings.get(KEY, []) == []
-    assert admission._recovery_required.get(KEY) is not None
+    assert_no_admission_binding(admission, KEY)
+    assert_recovery_required(admission, KEY)
 
 
 def test_legacy_debug_session_refused_on_load(tmp_path: Path) -> None:
@@ -928,7 +938,7 @@ def test_legacy_debug_session_refused_on_load(tmp_path: Path) -> None:
     # dual-write: durable tombstone + admission cache.
     tombstone = registry.read_tombstone(LEGACY_FENCE_KEY)
     assert tombstone is not None
-    assert admission._recovery_required.get(LEGACY_FENCE_KEY) == tombstone.generation
+    assert_recovery_required(admission, LEGACY_FENCE_KEY, generation=tombstone.generation)
 
 
 # ---------------------------------------------------------------------------
@@ -1120,7 +1130,7 @@ def test_target_boot_short_circuit_republish_is_idempotent(tmp_path: Path) -> No
     assert snapshot_after_third.generation == snapshot_after_first.generation
     # No phantom transport bindings were registered by the republish — short-circuit republishes
     # the snapshot but does not admit anything.
-    assert admission._bindings.get(target_key, []) == []
+    assert_no_admission_binding(admission, target_key)
 
 
 # ---------------------------------------------------------------------------
@@ -1143,7 +1153,7 @@ def test_reconcile_orphan_backend_emits_lifecycle_event(tmp_path: Path) -> None:
     # binding the reaper's invalidate_lifecycle will deregister via force_drop.
     session = txn.open(make_request())
     assert reg.read_record(KEY) is not None
-    assert admission._bindings.get(KEY, []) != []
+    assert_admission_binding_exists(admission, KEY)
 
     # Wire the production reap-callback the same way `_build_transport_machinery` does it.
     from kdive.coordination.registry import OrphanReap
@@ -1170,7 +1180,7 @@ def test_reconcile_orphan_backend_emits_lifecycle_event(tmp_path: Path) -> None:
     assert invalidated[0].reason == "backend_died"
     # End-to-end: durable record deleted, promoted binding deregistered.
     assert reg.read_record(KEY) is None
-    assert admission._bindings.get(KEY, []) == []
+    assert_no_admission_binding(admission, KEY)
 
 
 def test_reconcile_no_records_emits_no_lifecycle_event(tmp_path: Path) -> None:
@@ -1332,7 +1342,7 @@ def test_reconcile_with_dead_backend_does_not_lock_admission(tmp_path: Path) -> 
 
     assert len(seen) == 1 and seen[0].close_admission_required is False
     # admission was NOT closed — _closed_at is empty for the target.
-    assert KEY not in admission._closed_at
+    assert_admission_open(admission, KEY)
     # the record was still deleted by reconcile.
     assert reaper_reg.read_record(KEY) is None
 
@@ -1379,12 +1389,12 @@ def test_reconcile_with_live_orphan_closes_admission_and_recovers_via_reopen(tmp
 
     assert len(seen) == 1 and seen[0].close_admission_required is True
     # admission IS closed at the record's generation — a live orphan was reaped.
-    assert admission._closed_at.get(KEY) == 1
+    assert_admission_closed_at(admission, KEY, 1)
     # Publish a fresh snapshot at a higher generation (the production target.boot path), then
     # reopen() succeeds — the target is admittable again.
     seed_snapshot(store, generation=2, state=TargetState.READY)
     admission.reopen(KEY)
-    assert KEY not in admission._closed_at
+    assert_admission_open(admission, KEY)
 
 
 def test_crash_recovery_round_trip_admits_after_restart(tmp_path: Path) -> None:
@@ -1427,7 +1437,7 @@ def test_crash_recovery_round_trip_admits_after_restart(tmp_path: Path) -> None:
     reg.reconcile(proxy=FakeReapProxy(kills_live_backend=False), admission=admission)
     # The stale record is gone and admission is NOT closed (no live backend was reaped).
     assert reg.read_record(KEY) is None
-    assert KEY not in admission._closed_at
+    assert_admission_open(admission, KEY)
 
     # Now wire a fresh transaction over the cleaned-up state — transport.open admits cleanly.
     transport = FakeQemuTransport()
