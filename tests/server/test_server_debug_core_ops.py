@@ -441,7 +441,7 @@ def test_debug_bound_handler_adapter_module_is_removed() -> None:
     assert importlib.util.find_spec("kdive.debug.bound_handlers") is None
 
 
-def test_debug_operation_leaf_handlers_use_request_forwarding_factory() -> None:
+def test_debug_operation_handlers_accept_request_runtime_boundary() -> None:
     for handler_name in (
         "debug_read_registers_handler",
         "debug_read_symbol_handler",
@@ -450,6 +450,8 @@ def test_debug_operation_leaf_handlers_use_request_forwarding_factory() -> None:
     ):
         assert callable(getattr(debug_handlers, handler_name))
         assert list(inspect.signature(getattr(debug_handlers, handler_name)).parameters) == ["request", "runtime"]
+    assert not hasattr(debug_handlers, "_make_operation_request_handler")
+    assert not hasattr(debug_handlers, "_debug_read_registers_leaf_handler")
 
 
 def test_debug_operation_handlers_hide_explicit_operation_core(tmp_path: Path) -> None:
