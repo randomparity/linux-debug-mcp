@@ -15,7 +15,7 @@ from kdive.config import BootOverrides, BuildOverrides
 from kdive.debug.contracts import DebugRuntime
 from kdive.domain import ToolResponse
 from kdive.introspect.execution import LiveIntrospectRuntime
-from kdive.introspect.models import DebugIntrospectRunRequest
+from kdive.introspect.models import DebugIntrospectFromVmcoreHelperRequest, DebugIntrospectRunRequest
 from kdive.introspect.tools import IntrospectRunOptions, IntrospectTargetContext, register_introspect_tools
 from kdive.kernel.tools import (
     CreateRunContext,
@@ -573,11 +573,13 @@ def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators
     admission = object()
     registry = object()
     calls: list[tuple[DebugPostmortemFetchRequest, dict[str, Any]]] = []
+    drgn_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
     def crash_handler(*_args: Any, **_kwargs: Any) -> ToolResponse:
         return _success()
 
     def drgn_helper_handler(*_args: Any, **_kwargs: Any) -> ToolResponse:
+        drgn_calls.append((_args, _kwargs))
         return _success()
 
     def fetch_handler(*, request: DebugPostmortemFetchRequest, **kwargs: Any) -> ToolResponse:
@@ -623,15 +625,28 @@ def test_postmortem_adapter_builds_fetch_request_and_forwards_gate_collaborators
         max_bytes=123,
         timeout_seconds=17,
     )
-    assert kwargs == {
-        "runtime": PostmortemToolRuntime(
-            artifact_root=tmp_path / "runs",
-            admission=admission,
-            session_registry=registry,
-            crash_handler=crash_handler,
-            drgn_helper_handler=drgn_helper_handler,
+    runtime = kwargs["runtime"]
+    assert isinstance(runtime, PostmortemToolRuntime)
+    assert runtime.artifact_root == tmp_path / "runs"
+    assert runtime.admission is admission
+    assert runtime.session_registry is registry
+    assert runtime.crash_handler is crash_handler
+    assert runtime.drgn_helper_handler is not drgn_helper_handler
+    assert callable(runtime.drgn_helper_handler)
+
+    helper_request = DebugIntrospectFromVmcoreHelperRequest(
+        run_id="run-1",
+        vmcore_ref="inputs/vmcore",
+        vmlinux_ref="build/vmlinux",
+        name="dmesg",
+    )
+    assert runtime.drgn_helper_handler(request=helper_request, runtime=runtime).ok is True
+    assert drgn_calls == [
+        (
+            (helper_request,),
+            {"artifact_root": tmp_path / "runs", "runner": None, "clock": None},
         )
-    }
+    ]
 
 
 def test_postmortem_adapter_maps_invalid_grouped_payload_to_tool_response(tmp_path: Path) -> None:

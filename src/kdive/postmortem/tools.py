@@ -12,6 +12,7 @@ from kdive.config import RootfsProfile
 from kdive.coordination.admission import AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.domain import ToolResponse
+from kdive.introspect.models import DebugIntrospectFromVmcoreHelperRequest
 from kdive.model import Model
 from kdive.postmortem.models import (
     DebugPostmortemCheckPrereqsRequest,
@@ -69,7 +70,7 @@ class PostmortemToolRuntime:
     rootfs_profiles: Mapping[str, RootfsProfile] | None = None
     ssh_runner: SshRunner | None = None
     crash_handler: Callable[..., ToolResponse] | None = None
-    drgn_helper_handler: Callable[..., ToolResponse] | None = None
+    drgn_helper_handler: PostmortemDrgnHelperHandler | None = None
     vmcore_build_id_reader: Callable[[Path], str] | None = None
     vmlinux_build_id_reader: Callable[[Path], str] | None = None
     clock: Callable[[], datetime] | None = None
@@ -80,6 +81,15 @@ class PostmortemCrashHandler(Protocol):
         self,
         *,
         request: DebugPostmortemCrashRequest,
+        runtime: PostmortemToolRuntime,
+    ) -> ToolResponse: ...
+
+
+class PostmortemDrgnHelperHandler(Protocol):
+    def __call__(
+        self,
+        *,
+        request: DebugIntrospectFromVmcoreHelperRequest,
         runtime: PostmortemToolRuntime,
     ) -> ToolResponse: ...
 
@@ -126,7 +136,7 @@ class _PostmortemRegistrationContext:
     admission: AdmissionService
     session_registry: SessionRegistry
     crash_handler: PostmortemCrashHandler
-    drgn_helper_handler: Callable[..., ToolResponse]
+    drgn_helper_handler: PostmortemDrgnHelperHandler
 
     def runtime(self, value: str | None) -> PostmortemToolRuntime:
         return PostmortemToolRuntime(
@@ -140,6 +150,24 @@ class _PostmortemRegistrationContext:
 
 def _dump(response: ToolResponse) -> dict[str, Any]:
     return response.model_dump(mode="json")
+
+
+def _adapt_triage_drgn_helper(handler: Callable[..., ToolResponse]) -> PostmortemDrgnHelperHandler:
+    def wrapped(
+        *,
+        request: DebugIntrospectFromVmcoreHelperRequest,
+        runtime: PostmortemToolRuntime,
+    ) -> ToolResponse:
+        kwargs: dict[str, Any] = {
+            "artifact_root": runtime.artifact_root,
+            "runner": runtime.ssh_runner,
+            "clock": runtime.clock,
+        }
+        if runtime.vmlinux_build_id_reader is not None:
+            kwargs["build_id_reader"] = runtime.vmlinux_build_id_reader
+        return handler(request, **kwargs)
+
+    return wrapped
 
 
 def _register_postmortem_crash_tool(
@@ -326,7 +354,7 @@ def register_postmortem_tools(
         admission=admission,
         session_registry=session_registry,
         crash_handler=crash_handler,
-        drgn_helper_handler=triage_drgn_helper_handler,
+        drgn_helper_handler=_adapt_triage_drgn_helper(triage_drgn_helper_handler),
     )
     _register_postmortem_crash_tool(
         app,

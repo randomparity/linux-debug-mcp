@@ -11,8 +11,10 @@ from kdive.artifacts.store import ArtifactStore
 from kdive.domain import RunRequest
 from kdive.introspect.models import DebugIntrospectFromVmcoreRequest
 from kdive.postmortem.models import DebugPostmortemTriageRequest
+from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.server import (
     debug_introspect_from_vmcore_handler,
+    debug_introspect_from_vmcore_helper_handler,
     debug_postmortem_triage_handler,
 )
 
@@ -46,9 +48,13 @@ def _stage(tmp_path: Path) -> ArtifactStore:
 
 def test_triage_real_core_consistency(tmp_path) -> None:
     _stage(tmp_path)
+
+    def drgn_helper(*, request, runtime):
+        return debug_introspect_from_vmcore_helper_handler(request, artifact_root=runtime.artifact_root)
+
     resp = debug_postmortem_triage_handler(
         DebugPostmortemTriageRequest(run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux"),
-        artifact_root=tmp_path,
+        runtime=PostmortemToolRuntime(artifact_root=tmp_path, drgn_helper_handler=drgn_helper),
     )
     assert resp.ok is True, resp.error
     report = resp.data["report"]

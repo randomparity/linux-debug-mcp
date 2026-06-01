@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -28,7 +27,6 @@ from kdive.postmortem.models import (
 )
 from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.postmortem.triage import CrashOutcome, DrgnOutcome, any_section_ok, assemble_report
-from kdive.providers.ssh import SshRunner
 from kdive.safety.redaction import Redactor
 from kdive.symbols.build_id import read_elf_build_id
 from kdive.symbols.vmcore_build_id import read_vmcore_build_id
@@ -105,7 +103,7 @@ def _run_triage_sources(
     def drgn(name: str) -> ToolResponse:
         try:
             return drgn_helper_handler(
-                DebugIntrospectFromVmcoreHelperRequest(
+                request=DebugIntrospectFromVmcoreHelperRequest(
                     run_id=run_id,
                     vmcore_ref=request.vmcore_ref,
                     vmlinux_ref=request.vmlinux_ref,
@@ -113,10 +111,7 @@ def _run_triage_sources(
                     name=name,
                     timeout_seconds=request.timeout_seconds,
                 ),
-                artifact_root=runtime.artifact_root,
-                runner=runtime.ssh_runner,
-                build_id_reader=runtime.vmlinux_build_id_reader or read_elf_build_id,
-                clock=runtime.clock,
+                runtime=runtime,
             )
         except Exception as exc:  # noqa: BLE001 - triage boundary normalizes subcall exceptions
             return _triage_subcall_failure(run_id=run_id, code="offline_introspect_failed", exc=exc)
@@ -278,47 +273,20 @@ def _persist_successful_triage_report(
 def debug_postmortem_triage_handler(
     request: DebugPostmortemTriageRequest,
     *,
-    runtime: PostmortemToolRuntime | None = None,
-    artifact_root: Path | None = None,
-    drgn_helper_handler: Callable[..., ToolResponse] | None = None,
-    runner: SshRunner | None = None,
-    vmcore_build_id_reader: Callable[[Path], str] = read_vmcore_build_id,
-    vmlinux_build_id_reader: Callable[[Path], str] = read_elf_build_id,
-    clock: Callable[[], datetime] | None = None,
-    crash_handler: Callable[..., ToolResponse] = debug_postmortem_crash_handler,
+    runtime: PostmortemToolRuntime,
 ) -> ToolResponse:
     """Spec §4 / ADR 0027. Compose the crash + drgn offline tiers into one report; no admission gate."""
-    if runtime is not None:
-        artifact_root = runtime.artifact_root
-        runner = runtime.ssh_runner if runner is None else runner
-        vmcore_build_id_reader = runtime.vmcore_build_id_reader or vmcore_build_id_reader
-        vmlinux_build_id_reader = runtime.vmlinux_build_id_reader or vmlinux_build_id_reader
-        clock = runtime.clock or clock
-        crash_handler = runtime.crash_handler or crash_handler
-        drgn_helper_handler = runtime.drgn_helper_handler or drgn_helper_handler
-    if artifact_root is None:
-        raise TypeError("artifact_root is required when runtime is not provided")
-    if drgn_helper_handler is None:
+    if runtime.crash_handler is None:
+        runtime = replace(runtime, crash_handler=debug_postmortem_crash_handler)
+    if runtime.drgn_helper_handler is None:
         raise TypeError("drgn_helper_handler is required")
-    source_runtime = PostmortemToolRuntime(
-        artifact_root=artifact_root,
-        admission=runtime.admission if runtime is not None else None,
-        session_registry=runtime.session_registry if runtime is not None else None,
-        rootfs_profiles=runtime.rootfs_profiles if runtime is not None else None,
-        ssh_runner=runner,
-        crash_handler=crash_handler,
-        drgn_helper_handler=drgn_helper_handler,
-        vmcore_build_id_reader=vmcore_build_id_reader,
-        vmlinux_build_id_reader=vmlinux_build_id_reader,
-        clock=clock,
-    )
     run_id = request.run_id
-    now = source_runtime.clock or _utcnow
+    now = runtime.clock or _utcnow
     ctx, failure = resolve_postmortem_vmcore_context(
         request,
-        artifact_root=source_runtime.artifact_root,
-        vmcore_build_id_reader=source_runtime.vmcore_build_id_reader or read_vmcore_build_id,
-        vmlinux_build_id_reader=source_runtime.vmlinux_build_id_reader or read_elf_build_id,
+        artifact_root=runtime.artifact_root,
+        vmcore_build_id_reader=runtime.vmcore_build_id_reader or read_vmcore_build_id,
+        vmlinux_build_id_reader=runtime.vmlinux_build_id_reader or read_elf_build_id,
     )
     if failure is not None:
         return failure
@@ -332,7 +300,7 @@ def debug_postmortem_triage_handler(
     started_monotonic = time.monotonic()
     sources = _run_triage_sources(
         request,
-        runtime=source_runtime,
+        runtime=runtime,
     )
     duration_ms = int((time.monotonic() - started_monotonic) * 1000)
     state = _build_triage_report_state(

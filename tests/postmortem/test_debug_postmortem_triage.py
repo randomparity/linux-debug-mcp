@@ -28,7 +28,7 @@ def test_triage_handler_lives_in_postmortem_package() -> None:
 def test_triage_handler_uses_request_artifact_root_contract() -> None:
     signature = inspect.signature(triage_handlers.debug_postmortem_triage_handler)
 
-    assert set(signature.parameters) >= {"request", "artifact_root"}
+    assert set(signature.parameters) == {"request", "runtime"}
 
 
 def _run(tmp_path: Path) -> ArtifactStore:
@@ -86,18 +86,34 @@ def _drgn_ok(payload: dict) -> ToolResponse:
 
 
 def _dispatch(dmesg: _Recorder, modules: _Recorder):
-    return lambda req, **kw: (dmesg if req.name == "dmesg" else modules)(req, **kw)
+    def _handler(*, request, **kwargs):
+        return (dmesg if request.name == "dmesg" else modules)(request, **kwargs)
+
+    return _handler
+
+
+def _runtime(
+    tmp_path: Path,
+    *,
+    crash_handler,
+    drgn_helper_handler,
+    vmcore_build_id: str = GOOD_ID,
+    vmlinux_build_id: str = GOOD_ID,
+) -> PostmortemToolRuntime:
+    return PostmortemToolRuntime(
+        artifact_root=tmp_path,
+        crash_handler=crash_handler,
+        drgn_helper_handler=drgn_helper_handler,
+        vmcore_build_id_reader=lambda _p: vmcore_build_id,
+        vmlinux_build_id_reader=lambda _p: vmlinux_build_id,
+    )
 
 
 def test_triage_subcall_exception_becomes_section_failure(tmp_path: Path) -> None:
     _run(tmp_path)
     resp = debug_postmortem_triage_handler(
         DebugPostmortemTriageRequest(run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux"),
-        artifact_root=tmp_path,
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
-        crash_handler=_RaisingHandler(),
-        drgn_helper_handler=_RaisingHandler(),
+        runtime=_runtime(tmp_path, crash_handler=_RaisingHandler(), drgn_helper_handler=_RaisingHandler()),
     )
 
     assert resp.ok is False
@@ -114,11 +130,7 @@ def test_happy_path_full_report(tmp_path) -> None:
     modules = _Recorder(_drgn_ok({"modules": [{"name": "ext4"}], "decode_errors": 0}))
     resp = debug_postmortem_triage_handler(
         DebugPostmortemTriageRequest(run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux"),
-        artifact_root=tmp_path,
-        crash_handler=crash,
-        drgn_helper_handler=_dispatch(dmesg, modules),
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, crash_handler=crash, drgn_helper_handler=_dispatch(dmesg, modules)),
     )
     assert resp.ok is True
     assert resp.data["partial"] is False
@@ -155,8 +167,14 @@ def test_triage_subcalls_use_runtime_boundary(tmp_path) -> None:
     assert isinstance(crash_runtime, PostmortemToolRuntime)
     assert crash_runtime.artifact_root == tmp_path
     assert "artifact_root" not in crash.calls[0]["kwargs"]
-    assert dmesg.calls[0]["kwargs"]["artifact_root"] == tmp_path
-    assert modules.calls[0]["kwargs"]["artifact_root"] == tmp_path
+    dmesg_runtime = dmesg.calls[0]["kwargs"]["runtime"]
+    modules_runtime = modules.calls[0]["kwargs"]["runtime"]
+    assert isinstance(dmesg_runtime, PostmortemToolRuntime)
+    assert isinstance(modules_runtime, PostmortemToolRuntime)
+    assert dmesg_runtime.artifact_root == tmp_path
+    assert modules_runtime.artifact_root == tmp_path
+    assert "artifact_root" not in dmesg.calls[0]["kwargs"]
+    assert "artifact_root" not in modules.calls[0]["kwargs"]
 
 
 def test_partial_crash_down(tmp_path) -> None:
@@ -173,11 +191,7 @@ def test_partial_crash_down(tmp_path) -> None:
     modules = _Recorder(_drgn_ok({"modules": [], "decode_errors": 0}))
     resp = debug_postmortem_triage_handler(
         DebugPostmortemTriageRequest(run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux"),
-        artifact_root=tmp_path,
-        crash_handler=crash,
-        drgn_helper_handler=_dispatch(dmesg, modules),
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, crash_handler=crash, drgn_helper_handler=_dispatch(dmesg, modules)),
     )
     assert resp.ok is True
     assert resp.data["partial"] is True
@@ -193,11 +207,13 @@ def test_build_id_mismatch_no_subcall(tmp_path) -> None:
     drgn = _Recorder(_drgn_ok({"entries": []}))
     resp = debug_postmortem_triage_handler(
         DebugPostmortemTriageRequest(run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux"),
-        artifact_root=tmp_path,
-        crash_handler=crash,
-        drgn_helper_handler=drgn,
-        vmcore_build_id_reader=lambda _p: "a" * 40,
-        vmlinux_build_id_reader=lambda _p: "b" * 40,
+        runtime=_runtime(
+            tmp_path,
+            crash_handler=crash,
+            drgn_helper_handler=drgn,
+            vmcore_build_id="a" * 40,
+            vmlinux_build_id="b" * 40,
+        ),
     )
     assert resp.ok is False
     assert resp.error.category == ErrorCategory.CONFIGURATION_ERROR
@@ -225,11 +241,7 @@ def test_all_sources_down_hard_fail(tmp_path) -> None:
     )
     resp = debug_postmortem_triage_handler(
         DebugPostmortemTriageRequest(run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux"),
-        artifact_root=tmp_path,
-        crash_handler=crash,
-        drgn_helper_handler=drgn,
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, crash_handler=crash, drgn_helper_handler=drgn),
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "triage_all_sources_failed"
@@ -243,11 +255,7 @@ def test_detail_less_failure_does_not_raise(tmp_path) -> None:
     modules = _Recorder(_drgn_ok({"modules": [], "decode_errors": 0}))
     resp = debug_postmortem_triage_handler(
         DebugPostmortemTriageRequest(run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux"),
-        artifact_root=tmp_path,
-        crash_handler=crash,
-        drgn_helper_handler=_dispatch(dmesg, modules),
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, crash_handler=crash, drgn_helper_handler=_dispatch(dmesg, modules)),
     )
     assert resp.ok is True
     assert resp.data["report"]["panic_reason"]["reason"] == "sub_call_failed"
@@ -259,20 +267,19 @@ def test_drgn_subcalls_get_modules_ref_none(tmp_path) -> None:
     (tmp_path / "r1" / "build" / "mods").mkdir(parents=True, exist_ok=True)
     seen = {}
 
-    def _drgn(req, **kw):
-        seen[req.name] = req.modules_ref
-        payload = {"entries": [], "truncated": False} if req.name == "dmesg" else {"modules": [], "decode_errors": 0}
+    def _drgn(*, request, **kw):
+        seen[request.name] = request.modules_ref
+        if request.name == "dmesg":
+            payload = {"entries": [], "truncated": False}
+        else:
+            payload = {"modules": [], "decode_errors": 0}
         return _drgn_ok(payload)
 
     resp = debug_postmortem_triage_handler(
         DebugPostmortemTriageRequest(
             run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux", modules_ref="build/mods"
         ),
-        artifact_root=tmp_path,
-        crash_handler=_Recorder(_crash_ok()),
-        drgn_helper_handler=_drgn,
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, crash_handler=_Recorder(_crash_ok()), drgn_helper_handler=_drgn),
     )
     assert resp.ok is True
     assert seen == {"dmesg": None, "modules": None}
@@ -285,11 +292,7 @@ def test_invalid_timeout_no_subcall(tmp_path) -> None:
         DebugPostmortemTriageRequest(
             run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux", timeout_seconds=4
         ),
-        artifact_root=tmp_path,
-        crash_handler=crash,
-        drgn_helper_handler=_Recorder(_drgn_ok({})),
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, crash_handler=crash, drgn_helper_handler=_Recorder(_drgn_ok({}))),
     )
     assert resp.ok is False
     assert resp.error.details["code"] == "invalid_timeout"
@@ -316,11 +319,7 @@ def test_redaction_masks_secret_in_report(tmp_path) -> None:
     modules = _Recorder(_drgn_ok({"modules": [], "decode_errors": 0}))
     resp = debug_postmortem_triage_handler(
         DebugPostmortemTriageRequest(run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux"),
-        artifact_root=tmp_path,
-        crash_handler=crash,
-        drgn_helper_handler=_dispatch(dmesg, modules),
-        vmcore_build_id_reader=lambda _p: GOOD_ID,
-        vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        runtime=_runtime(tmp_path, crash_handler=crash, drgn_helper_handler=_dispatch(dmesg, modules)),
     )
     assert secret not in repr(resp.data["report"])
     rd = store.run_dir("r1")
