@@ -90,50 +90,14 @@ class SubprocessSshRunner:
                 shell=False,
                 start_new_session=True,
             )
-            stdin_thread: threading.Thread | None = None
-            stdin_write_error: list[BaseException] = []
-            if stdin is not None:
-                if proc.stdin is None:
-                    raise RuntimeError("stdin pipe was not created for ssh subprocess")
-                stdin_handle = proc.stdin
-                payload = stdin
-
-                def _write_stdin() -> None:
-                    try:
-                        stdin_handle.write(payload)
-                    except (BrokenPipeError, ValueError, OSError) as exc:
-                        stdin_write_error.append(exc)
-                    finally:
-                        with contextlib.suppress(Exception):
-                            stdin_handle.close()
-
-                stdin_thread = threading.Thread(target=_write_stdin, daemon=True)
-                stdin_thread.start()
-
-            def terminate_and_wait() -> None:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait()
-
-            def poll_until_stop() -> _SshStopReason:
-                ticks = 0
-                while True:
-                    try:
-                        proc.wait(timeout=0.1)
-                        return "completed"
-                    except subprocess.TimeoutExpired:
-                        ticks += 1
-                    if cancel is not None and cancel.is_set():
-                        terminate_and_wait()
-                        return "cancelled"
-                    if ticks * 0.1 >= timeout:
-                        terminate_and_wait()
-                        return "timed_out"
-                    if max_stdout_bytes is not None and self._stdout_size(stdout_path) > max_stdout_bytes:
-                        terminate_and_wait()
-                        return "oversized"
-
-            stop_reason = poll_until_stop()
+            stdin_thread, stdin_write_error = self._start_stdin_writer(proc, stdin)
+            stop_reason = self._poll_until_stop(
+                proc,
+                timeout=timeout,
+                cancel=cancel,
+                stdout_path=stdout_path,
+                max_stdout_bytes=max_stdout_bytes,
+            )
             if stdin_thread is not None:
                 stdin_thread.join(timeout=2)
         cancelled_flag = stop_reason == "cancelled"
@@ -149,6 +113,60 @@ class SubprocessSshRunner:
             stdin_failed=bool(stdin_write_error),
             oversized_output=oversized_flag,
         )
+
+    def _start_stdin_writer(
+        self, proc: subprocess.Popen[str], payload: str | None
+    ) -> tuple[threading.Thread | None, list[BaseException]]:
+        stdin_write_error: list[BaseException] = []
+        if payload is None:
+            return None, stdin_write_error
+        if proc.stdin is None:
+            raise RuntimeError("stdin pipe was not created for ssh subprocess")
+        stdin_handle = proc.stdin
+
+        def write_stdin() -> None:
+            try:
+                stdin_handle.write(payload)
+            except (BrokenPipeError, ValueError, OSError) as exc:
+                stdin_write_error.append(exc)
+            finally:
+                with contextlib.suppress(Exception):
+                    stdin_handle.close()
+
+        stdin_thread = threading.Thread(target=write_stdin, daemon=True)
+        stdin_thread.start()
+        return stdin_thread, stdin_write_error
+
+    def _terminate_and_wait(self, proc: subprocess.Popen[str]) -> None:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+
+    def _poll_until_stop(
+        self,
+        proc: subprocess.Popen[str],
+        *,
+        timeout: int,
+        cancel: threading.Event | None,
+        stdout_path: Path,
+        max_stdout_bytes: int | None,
+    ) -> _SshStopReason:
+        ticks = 0
+        while True:
+            try:
+                proc.wait(timeout=0.1)
+                return "completed"
+            except subprocess.TimeoutExpired:
+                ticks += 1
+            if cancel is not None and cancel.is_set():
+                self._terminate_and_wait(proc)
+                return "cancelled"
+            if ticks * 0.1 >= timeout:
+                self._terminate_and_wait(proc)
+                return "timed_out"
+            if max_stdout_bytes is not None and self._stdout_size(stdout_path) > max_stdout_bytes:
+                self._terminate_and_wait(proc)
+                return "oversized"
 
     def _stdout_size(self, path: Path) -> int:
         try:

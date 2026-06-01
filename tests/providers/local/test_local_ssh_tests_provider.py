@@ -366,6 +366,22 @@ def test_run_is_killed_when_stdout_exceeds_cap(tmp_path: Path) -> None:
     assert out.stat().st_size > cap
 
 
+def test_run_writes_stdin_payload(tmp_path: Path) -> None:
+    runner = SubprocessSshRunner()
+    out, err = tmp_path / "o", tmp_path / "e"
+    result = runner.run(
+        ["python3", "-c", "import sys; print(sys.stdin.read(), end='')"],
+        timeout=5,
+        stdout_path=out,
+        stderr_path=err,
+        stdin="hello",
+    )
+
+    assert result.exit_status == 0
+    assert result.stdin_failed is False
+    assert result.stdout_snippet == "hello"
+
+
 def _wait_for_file(path: Path, *, attempts: int = 500) -> bool:
     for _ in range(attempts):
         if path.exists():
