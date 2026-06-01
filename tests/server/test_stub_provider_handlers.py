@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from kdive.artifacts.store import ArtifactStore
+from kdive.config import PROVIDER_DESTRUCTIVE_PERMISSIONS
 from kdive.domain import ToolResponse
 from kdive.providers import handlers as provider_handlers
 from kdive.providers import tools as provider_tools
@@ -305,6 +306,38 @@ def test_stub_provider_tool_grouped_metadata_reaches_request_validation() -> Non
     assert response.ok is False
     assert response.error is not None
     assert response.error.category == "configuration_error"
+
+
+def test_destructive_stub_provider_tools_require_acknowledgement() -> None:
+    response = _tool_response(
+        "reservation.request_host",
+        architecture="ppc64le",
+        reservation_pool="lab-a",
+        execution_options={"acknowledged_permissions": []},
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert response.error.details == {
+        "code": "permission_required",
+        "required_permissions": PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.request_host"],
+    }
+
+
+def test_destructive_stub_provider_tools_accept_acknowledgement() -> None:
+    response = _tool_response(
+        "reservation.request_host",
+        architecture="ppc64le",
+        reservation_pool="lab-a",
+        execution_options={
+            "acknowledged_permissions": PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.request_host"],
+        },
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "not_implemented"
 
 
 @pytest.mark.parametrize(("operation", "payload", "provider_name", "_request_type"), VALID_CALLS)

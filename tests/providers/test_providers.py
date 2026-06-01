@@ -3,7 +3,11 @@ from typing import Any, get_args, get_type_hints
 
 import pytest
 
-from kdive.config import TARGET_DESTRUCTIVE_PERMISSIONS, TRANSPORT_DESTRUCTIVE_PERMISSIONS
+from kdive.config import (
+    PROVIDER_DESTRUCTIVE_PERMISSIONS,
+    TARGET_DESTRUCTIVE_PERMISSIONS,
+    TRANSPORT_DESTRUCTIVE_PERMISSIONS,
+)
 from kdive.domain import (
     ImplementationState,
     OperationSemantics,
@@ -454,6 +458,9 @@ def test_default_registry_includes_stub_providers() -> None:
     ]
     assert {capability.operation for capability in operation_capabilities} == destructive_operations
     assert all(capability.destructive_permissions for capability in operation_capabilities)
+    assert {
+        capability.operation: capability.destructive_permissions for capability in operation_capabilities
+    } == PROVIDER_DESTRUCTIVE_PERMISSIONS
 
 
 def test_registry_finds_providers_by_operation_and_architecture_deterministically() -> None:

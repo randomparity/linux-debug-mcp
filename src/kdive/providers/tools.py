@@ -7,7 +7,8 @@ from typing import Any, Protocol, cast, get_type_hints
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
-from kdive.domain import Model
+from kdive.config import PROVIDER_DESTRUCTIVE_PERMISSIONS, missing_destructive_permissions
+from kdive.domain import ErrorCategory, Model, ToolResponse
 from kdive.providers.contracts.models import (
     ConsoleAccessMethod,
     ConsoleReadRequest,
@@ -48,6 +49,7 @@ class ProviderToolContext(Model):
 
 class ProviderExecutionOptions(Model):
     timeout_seconds: int = 300
+    acknowledged_permissions: list[str] | None = None
 
 
 class RemoteBuildArtifactOptions(Model):
@@ -133,6 +135,18 @@ def _register_stub_provider_tool(
                 request = request_factory(*args, **kwargs)
             except ValidationError as exc:
                 return stub_request_validation_failure_response(exc)
+            missing_permissions = missing_destructive_permissions(
+                provider_operation.operation,
+                request.acknowledged_permissions,
+                registry=PROVIDER_DESTRUCTIVE_PERMISSIONS,
+            )
+            if missing_permissions:
+                return ToolResponse.failure(
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                    message=f"{provider_operation.operation} is destructive; acknowledge its required permissions",
+                    details={"code": "permission_required", "required_permissions": missing_permissions},
+                    suggested_next_actions=["providers.list"],
+                ).model_dump(mode="json")
             return stub_provider_operation_handler(request=request, spec=provider_operation).model_dump(mode="json")
 
         tool_wrapper.__name__ = request_factory.__name__

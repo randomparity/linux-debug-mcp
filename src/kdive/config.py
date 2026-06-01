@@ -241,6 +241,14 @@ TARGET_DESTRUCTIVE_PERMISSIONS = {
     ],
     "target.run_tests": ["execute caller-supplied commands over target SSH"],
 }
+PROVIDER_DESTRUCTIVE_PERMISSIONS = {
+    "reservation.request_host": ["reserve shared remote or physical targets"],
+    "reservation.release_host": ["release shared remote or physical targets"],
+    "provision.prepare_target": ["write target storage", "install boot artifacts on target"],
+    "hardware.power_control": ["change target power state"],
+    "hardware.boot_kernel": ["boot physical or remote targets"],
+    "workflow.reserve_provision_boot": ["reserve, provision, and boot target hardware"],
+}
 
 
 def validate_transport_operation(operation: str) -> str:

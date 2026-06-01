@@ -8,6 +8,7 @@ from kdive.config import (
     INTROSPECT_DESTRUCTIVE_PERMISSIONS,
     MAX_INTROSPECT_CALLS_PER_RUN,
     PRELUDE_WARNING_FRACTION_PCT,
+    PROVIDER_DESTRUCTIVE_PERMISSIONS,
     TARGET_DESTRUCTIVE_PERMISSIONS,
     ArtifactPolicy,
     BootOverrides,
@@ -390,6 +391,17 @@ def test_target_destructive_permissions_has_run_tests_entry() -> None:
     assert TARGET_DESTRUCTIVE_PERMISSIONS["target.run_tests"] == ["execute caller-supplied commands over target SSH"]
 
 
+def test_provider_destructive_permissions_cover_stub_operations() -> None:
+    assert PROVIDER_DESTRUCTIVE_PERMISSIONS == {
+        "reservation.request_host": ["reserve shared remote or physical targets"],
+        "reservation.release_host": ["release shared remote or physical targets"],
+        "provision.prepare_target": ["write target storage", "install boot artifacts on target"],
+        "hardware.power_control": ["change target power state"],
+        "hardware.boot_kernel": ["boot physical or remote targets"],
+        "workflow.reserve_provision_boot": ["reserve, provision, and boot target hardware"],
+    }
+
+
 def test_missing_destructive_permissions_introspect_registry() -> None:
     required = INTROSPECT_DESTRUCTIVE_PERMISSIONS["debug.introspect.run"]
     assert (
@@ -412,6 +424,12 @@ def test_missing_destructive_permissions_target_registry() -> None:
     for operation, required in TARGET_DESTRUCTIVE_PERMISSIONS.items():
         assert missing_destructive_permissions(operation, [], registry=TARGET_DESTRUCTIVE_PERMISSIONS) == required
         assert missing_destructive_permissions(operation, required, registry=TARGET_DESTRUCTIVE_PERMISSIONS) == []
+
+
+def test_missing_destructive_permissions_provider_registry() -> None:
+    for operation, required in PROVIDER_DESTRUCTIVE_PERMISSIONS.items():
+        assert missing_destructive_permissions(operation, [], registry=PROVIDER_DESTRUCTIVE_PERMISSIONS) == required
+        assert missing_destructive_permissions(operation, required, registry=PROVIDER_DESTRUCTIVE_PERMISSIONS) == []
 
 
 def test_missing_destructive_permissions_defaults_to_transport_registry() -> None:

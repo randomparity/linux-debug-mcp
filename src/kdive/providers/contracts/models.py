@@ -103,6 +103,7 @@ class ProviderRequest(ProviderContractModel):
     provider_name: str | None = None
     architecture: Arch
     timeout_seconds: int = Field(default=300)
+    acknowledged_permissions: list[str] = Field(default_factory=list)
     operation_label: str | None = None
     run_id: str | None = None
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from kdive.config import PROVIDER_DESTRUCTIVE_PERMISSIONS
 from kdive.domain import (
     ErrorCategory,
     ImplementationState,
@@ -105,7 +106,10 @@ def remote_artifact_sync_stub_capability() -> ProviderCapability:
 
 def reservation_stub_capability() -> ProviderCapability:
     tools = ["reservation-api-client"]
-    permissions = ["reserve shared remote or physical targets", "release shared remote or physical targets"]
+    permissions = [
+        *PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.request_host"],
+        *PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.release_host"],
+    ]
     return _stub_capability(
         name="reservation-stub",
         family="reservation",
@@ -118,13 +122,13 @@ def reservation_stub_capability() -> ProviderCapability:
                 "reservation.request_host",
                 destructive=True,
                 required_host_tools=tools,
-                destructive_permissions=["reserve shared remote or physical targets"],
+                destructive_permissions=PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.request_host"],
             ),
             _operation(
                 "reservation.release_host",
                 destructive=True,
                 required_host_tools=tools,
-                destructive_permissions=["release shared remote or physical targets"],
+                destructive_permissions=PROVIDER_DESTRUCTIVE_PERMISSIONS["reservation.release_host"],
             ),
         ],
     )
@@ -132,7 +136,7 @@ def reservation_stub_capability() -> ProviderCapability:
 
 def provisioning_stub_capability() -> ProviderCapability:
     tools = ["provisioning-cli", "ssh"]
-    permissions = ["write target storage", "install boot artifacts on target"]
+    permissions = PROVIDER_DESTRUCTIVE_PERMISSIONS["provision.prepare_target"]
     return _stub_capability(
         name="provisioning-stub",
         family="provisioning",
@@ -153,7 +157,7 @@ def provisioning_stub_capability() -> ProviderCapability:
 
 def hardware_control_stub_capability() -> ProviderCapability:
     tools = ["power-control-cli", "bmc-api-client"]
-    permissions = ["change target power state"]
+    permissions = PROVIDER_DESTRUCTIVE_PERMISSIONS["hardware.power_control"]
     return _stub_capability(
         name="hardware-control-stub",
         family="hardware",
@@ -190,7 +194,10 @@ def console_access_stub_capability() -> ProviderCapability:
 
 def real_boot_stub_capability() -> ProviderCapability:
     tools = ["boot-orchestrator", "reservation-api-client", "provisioning-cli", "power-control-cli"]
-    permissions = ["boot physical or remote targets", "reserve, provision, and boot target hardware"]
+    permissions = [
+        *PROVIDER_DESTRUCTIVE_PERMISSIONS["hardware.boot_kernel"],
+        *PROVIDER_DESTRUCTIVE_PERMISSIONS["workflow.reserve_provision_boot"],
+    ]
     return _stub_capability(
         name="real-boot-stub",
         family="boot",
@@ -203,13 +210,13 @@ def real_boot_stub_capability() -> ProviderCapability:
                 "hardware.boot_kernel",
                 destructive=True,
                 required_host_tools=tools,
-                destructive_permissions=["boot physical or remote targets"],
+                destructive_permissions=PROVIDER_DESTRUCTIVE_PERMISSIONS["hardware.boot_kernel"],
             ),
             _operation(
                 "workflow.reserve_provision_boot",
                 destructive=True,
                 required_host_tools=tools,
-                destructive_permissions=["reserve, provision, and boot target hardware"],
+                destructive_permissions=PROVIDER_DESTRUCTIVE_PERMISSIONS["workflow.reserve_provision_boot"],
             ),
         ],
     )
