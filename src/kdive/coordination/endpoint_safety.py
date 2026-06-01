@@ -2,12 +2,9 @@ from __future__ import annotations
 
 import ipaddress
 
+from kdive.seams.transport_state import Endpoint, EndpointExposure, TcpEndpoint, UnixSocketEndpoint
 from kdive.transport.core.base import (
-    Endpoint,
-    EndpointExposure,
-    TcpEndpoint,
     TransportCapability,
-    UnixSocketEndpoint,
 )
 
 # Ops that return / depend on a live stop-capable endpoint. A brokered_required transport

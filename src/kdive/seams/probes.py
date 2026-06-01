@@ -17,7 +17,7 @@ from kdive.handlers.shared import configuration_failure_response as configuratio
 from kdive.providers.ssh import SshCommandResult
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import TargetKey
-from kdive.transport.core.base import ExecutionState
+from kdive.seams.transport_state import ExecutionState
 
 PROBE_STDOUT_CAP = 256 * 1024
 

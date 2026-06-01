@@ -19,15 +19,14 @@ from kdive.seams.guard import GuardToken, StopCapableGuard
 from kdive.seams.lifecycle import LifecycleDispatcher, LifecycleEvent
 from kdive.seams.secrets import SecretsResolver
 from kdive.seams.target import TargetKey
-from kdive.transport.core.base import (
-    BackendAttachment,
+from kdive.seams.transport_state import (
     ExecutionState,
     OpenRequest,
     RecordState,
-    Transport,
     TransportSession,
     new_session_id,
 )
+from kdive.transport.core.base import BackendAttachment, Transport
 from kdive.transport.core.bounded import Deadline
 from kdive.transport.core.break_inject import BreakRequestMethod, InjectBreakError, inject_break
 

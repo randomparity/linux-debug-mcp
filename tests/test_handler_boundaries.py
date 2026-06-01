@@ -266,6 +266,28 @@ def test_generic_tools_package_only_contains_shared_adapter_boundary() -> None:
     assert module_names == {"__init__", "adapter_boundary"}
 
 
+def test_coordination_session_state_imports_use_neutral_seam() -> None:
+    coordination_sources = list((ROOT / "src" / "kdive" / "coordination").glob("*.py"))
+    forbidden_state_names = {
+        "DEFAULT_MIN_LEASE_TTL_SECONDS",
+        "ExecutionState",
+        "OpenRequest",
+        "RecordState",
+        "TransportRef",
+        "TransportSession",
+    }
+
+    offenders = {
+        str(source.relative_to(ROOT)): sorted(
+            forbidden_state_names & _imported_names(source, "kdive.transport.core.base")
+        )
+        for source in coordination_sources
+        if forbidden_state_names & _imported_names(source, "kdive.transport.core.base")
+    }
+
+    assert offenders == {}
+
+
 def test_server_public_api_is_explicit_and_composition_scoped() -> None:
     import kdive.server as server
 

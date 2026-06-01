@@ -12,7 +12,7 @@ from enum import StrEnum
 from kdive.domain import ErrorCategory
 from kdive.seams.lifecycle import InvalidationResult, LifecycleDispatcher, LifecycleEvent
 from kdive.seams.target import LeaseInfo, PlatformMetadata, TargetKey, TargetState
-from kdive.transport.core.base import (
+from kdive.seams.transport_state import (
     DEFAULT_MIN_LEASE_TTL_SECONDS,
     ExecutionState,
     OpenRequest,
