@@ -162,6 +162,26 @@ def test_list_dumps_no_python(tmp_path) -> None:
     assert resp.error.details["code"] == "probe_no_python"
 
 
+def test_list_dumps_runner_exception_includes_identity(tmp_path) -> None:
+    run_id = _booted_run(tmp_path)
+
+    @dataclass
+    class _RaisingRunner:
+        def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None, max_stdout_bytes=None):
+            raise TimeoutError("ssh timed out")
+
+    resp = debug_postmortem_list_dumps_handler(
+        DebugPostmortemListDumpsRequest(run_id=run_id, manifest_target_profile="local-qemu"),
+        runtime=_runtime(tmp_path, ssh_runner=_RaisingRunner()),
+    )
+
+    assert resp.ok is False
+    assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert resp.error.details["code"] == "ssh_failure"
+    assert resp.error.details["exception_type"] == "TimeoutError"
+    assert resp.error.details["exception_message"] == "ssh timed out"
+
+
 def test_build_scp_argv_quotes_remote_path() -> None:
     argv = build_scp_argv(
         rootfs_profile=RootfsProfile(name="m", source="/i", access_method="ssh", ssh_host="h", ssh_user="root"),

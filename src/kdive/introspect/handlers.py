@@ -48,6 +48,7 @@ from kdive.safety.redaction import Redactor
 from kdive.seams.probes import (
     PROBE_STDOUT_CAP,
     prepare_probe_dirs,
+    probe_runner_exception_failure,
     reject_if_target_halted,
     resolve_probe_context,
 )
@@ -115,11 +116,11 @@ def debug_introspect_check_prerequisites_handler(
             max_stdout_bytes=PROBE_STDOUT_CAP,
         )
     except Exception as exc:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        return probe_runner_exception_failure(
             run_id=run_id,
-            message=_redact_and_truncate(ctx.redactor, f"ssh probe raised: {exc}", cap=256),
-            details={"code": "ssh_failure"},
+            redactor=ctx.redactor,
+            exc=exc,
+            operation="ssh probe",
         )
     for _path in (stdout_path, stderr_path):
         _chmod_best_effort(_path, 0o600)

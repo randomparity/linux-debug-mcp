@@ -58,6 +58,7 @@ from kdive.seams.probes import (
     configuration_failure,
     parse_probe_stdout,
     prepare_probe_dirs,
+    probe_runner_exception_failure,
     redact_and_truncate,
     reject_if_target_halted,
     resolve_probe_context,
@@ -155,11 +156,11 @@ def _run_dump_enumeration(
             max_stdout_bytes=PROBE_STDOUT_CAP,
         )
     except Exception as exc:
-        return None, ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        return None, probe_runner_exception_failure(
             run_id=run_id,
-            message=redact_and_truncate(ctx.redactor, f"ssh probe raised: {exc}", cap=256),
-            details={"code": "ssh_failure"},
+            redactor=ctx.redactor,
+            exc=exc,
+            operation="ssh probe",
         )
     for path in (stdout_path, stderr_path):
         chmod_best_effort(path, 0o600)
@@ -280,11 +281,11 @@ def _stage_one_file(
             max_stdout_bytes=None,
         )
     except Exception as exc:
-        return None, ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        return None, probe_runner_exception_failure(
             run_id=run_id,
-            message=redact_and_truncate(ctx.redactor, f"scp raised: {exc}", cap=256),
-            details={"code": "ssh_failure"},
+            redactor=ctx.redactor,
+            exc=exc,
+            operation="scp",
         )
     if result.exit_status != 0 or result.timed_out or result.cancelled:
         snippet = redact_and_truncate(ctx.redactor, result.stderr_snippet or "", cap=256)
@@ -382,11 +383,11 @@ def debug_postmortem_check_prereqs_handler(
             max_stdout_bytes=PROBE_STDOUT_CAP,
         )
     except Exception as exc:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        return probe_runner_exception_failure(
             run_id=run_id,
-            message=redact_and_truncate(ctx.redactor, f"ssh probe raised: {exc}", cap=256),
-            details={"code": "ssh_failure"},
+            redactor=ctx.redactor,
+            exc=exc,
+            operation="ssh probe",
         )
     for path in (stdout_path, stderr_path):
         chmod_best_effort(path, 0o600)

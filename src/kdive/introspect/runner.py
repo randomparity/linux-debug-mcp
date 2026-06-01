@@ -42,6 +42,7 @@ from kdive.introspect.wrappers import (
 )
 from kdive.providers.ssh import SSH_TIMEOUT_GRACE_SECONDS, SshCommandResult, SshRunner, build_ssh_argv
 from kdive.safety.redaction import Redactor
+from kdive.seams.probes import probe_runner_exception_failure
 from kdive.seams.target import TargetKey
 
 logger = logging.getLogger(__name__)
@@ -337,11 +338,11 @@ def _run_introspect_sudo_preflight(
             stderr_path=sensitive_preflight_stderr,
         )
     except Exception as exc:
-        return ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        return probe_runner_exception_failure(
             run_id=run_id,
-            message=_redact_and_truncate(redactor, f"sudo preflight raised: {exc}", cap=256),
-            details={"code": "ssh_failure"},
+            redactor=redactor,
+            exc=exc,
+            operation="sudo preflight",
         )
     # Persist a redacted copy in the agent-visible location so forensic tooling sees a stable
     # artifact path even when the raw file is sealed under sensitive/.

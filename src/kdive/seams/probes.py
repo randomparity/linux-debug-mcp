@@ -43,6 +43,30 @@ def redact_and_truncate(redactor: Redactor, text: str, cap: int = 256) -> str:
     return redacted[:cap] + ("..." if len(redacted) > cap else "")
 
 
+def probe_runner_exception_failure(
+    *,
+    run_id: str,
+    redactor: Redactor,
+    exc: Exception,
+    operation: str,
+    code: str = "ssh_failure",
+) -> ToolResponse:
+    message = redact_and_truncate(redactor, f"{operation} raised: {exc}", cap=256)
+    details = redactor.redact_value(
+        {
+            "code": code,
+            "exception_type": type(exc).__name__,
+            "exception_message": redact_and_truncate(redactor, str(exc), cap=256),
+        }
+    )
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        run_id=run_id,
+        message=message,
+        details=details,
+    )
+
+
 def chmod_best_effort(path: Path, mode: int) -> None:
     with contextlib.suppress(OSError):
         path.chmod(mode)

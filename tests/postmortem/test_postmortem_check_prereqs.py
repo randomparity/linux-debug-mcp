@@ -259,6 +259,23 @@ def test_handler_unparseable(tmp_path) -> None:
     assert resp.error.details["code"] == "probe_unparseable"
 
 
+def test_handler_runner_exception_includes_identity(tmp_path) -> None:
+    run_id = _booted_run(tmp_path)
+
+    @dataclass
+    class _RaisingRunner(_FakeRunner):
+        def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None, max_stdout_bytes=None):
+            raise TimeoutError("probe timeout")
+
+    resp = debug_postmortem_check_prereqs_handler(_req(run_id), runtime=_runtime(tmp_path, ssh_runner=_RaisingRunner()))
+
+    assert resp.ok is False
+    assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert resp.error.details["code"] == "ssh_failure"
+    assert resp.error.details["exception_type"] == "TimeoutError"
+    assert resp.error.details["exception_message"] == "probe timeout"
+
+
 def test_handler_halted_fast_reject(tmp_path) -> None:
     run_id = _booted_run(tmp_path)
     resp = debug_postmortem_check_prereqs_handler(

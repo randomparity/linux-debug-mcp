@@ -5,7 +5,7 @@ from kdive.config import RootfsProfile
 from kdive.domain import ErrorCategory
 from kdive.providers.ssh import SshCommandResult
 from kdive.safety.redaction import Redactor
-from kdive.seams.probes import ProbeContext, parse_probe_stdout
+from kdive.seams.probes import ProbeContext, parse_probe_stdout, probe_runner_exception_failure
 
 
 def _probe_context(tmp_path: Path) -> ProbeContext:
@@ -47,3 +47,20 @@ def test_parse_probe_stdout_returns_failure_when_stdout_is_unreadable(tmp_path: 
     assert failure.error.details["exception_type"] == "IsADirectoryError"
     assert "[REDACTED]" in failure.error.details["exception_message"]
     assert "secret-dir" not in str(failure.model_dump(mode="json"))
+
+
+def test_probe_runner_exception_failure_preserves_redacted_identity() -> None:
+    response = probe_runner_exception_failure(
+        run_id="run-1",
+        redactor=Redactor(secret_values=["secret-dir"]),
+        exc=OSError("cannot read secret-dir"),
+        operation="ssh probe",
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert response.error.details["code"] == "ssh_failure"
+    assert response.error.details["exception_type"] == "OSError"
+    assert response.error.details["exception_message"] == "cannot read [REDACTED]"
+    assert "secret-dir" not in str(response.model_dump(mode="json"))

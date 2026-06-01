@@ -339,6 +339,8 @@ def test_runner_raises_is_infrastructure_failure(tmp_path: Path) -> None:
     )
     assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert resp.error.details["code"] == "ssh_failure"
+    assert resp.error.details["exception_type"] == "OSError"
+    assert resp.error.details["exception_message"] == "transport broke"
 
 
 def test_redaction_hides_ssh_key_ref(tmp_path: Path) -> None:

@@ -218,6 +218,33 @@ def test_fetch_incomplete_allowed_with_force(tmp_path) -> None:
     assert resp.ok is True, resp.error
 
 
+def test_fetch_scp_exception_includes_identity(tmp_path) -> None:
+    _booted(tmp_path)
+
+    @dataclass
+    class _ScpRaisingRunner(_FetchRunner):
+        def run(self, argv, *, timeout, stdout_path, stderr_path, cancel=None, stdin=None, max_stdout_bytes=None):
+            if argv[0] == "scp":
+                raise OSError("scp connection reset")
+            return super().run(
+                argv,
+                timeout=timeout,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                cancel=cancel,
+                stdin=stdin,
+                max_stdout_bytes=max_stdout_bytes,
+            )
+
+    resp = _fetch(tmp_path, _ScpRaisingRunner())
+
+    assert resp.ok is False
+    assert resp.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert resp.error.details["code"] == "ssh_failure"
+    assert resp.error.details["exception_type"] == "OSError"
+    assert resp.error.details["exception_message"] == "scp connection reset"
+
+
 def test_fetch_idempotent_skips_work_then_force_redoes_it(tmp_path) -> None:
     _booted(tmp_path)
     runner = _FetchRunner()
