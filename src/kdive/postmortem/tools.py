@@ -22,6 +22,7 @@ from kdive.postmortem.models import (
     DebugPostmortemTriageRequest,
 )
 from kdive.providers.ssh import SshRunner
+from kdive.symbols.build_id import read_elf_build_id
 from kdive.tools.adapter_boundary import adapter_validation_failure, model_arg, optional_model_arg
 
 
@@ -69,7 +70,7 @@ class PostmortemToolRuntime:
     session_registry: SessionRegistry | None = None
     rootfs_profiles: Mapping[str, RootfsProfile] | None = None
     ssh_runner: SshRunner | None = None
-    crash_handler: Callable[..., ToolResponse] | None = None
+    crash_handler: PostmortemCrashHandler | None = None
     drgn_helper_handler: PostmortemDrgnHelperHandler | None = None
     vmcore_build_id_reader: Callable[[Path], str] | None = None
     vmlinux_build_id_reader: Callable[[Path], str] | None = None
@@ -91,6 +92,18 @@ class PostmortemDrgnHelperHandler(Protocol):
         *,
         request: DebugIntrospectFromVmcoreHelperRequest,
         runtime: PostmortemToolRuntime,
+    ) -> ToolResponse: ...
+
+
+class TriageDrgnSourceHandler(Protocol):
+    def __call__(
+        self,
+        request: DebugIntrospectFromVmcoreHelperRequest,
+        *,
+        artifact_root: Path,
+        runner: SshRunner | None = None,
+        build_id_reader: Callable[[Path], str] = read_elf_build_id,
+        clock: Callable[[], datetime] | None = None,
     ) -> ToolResponse: ...
 
 
@@ -152,7 +165,7 @@ def _dump(response: ToolResponse) -> dict[str, Any]:
     return response.model_dump(mode="json")
 
 
-def _adapt_triage_drgn_helper(handler: Callable[..., ToolResponse]) -> PostmortemDrgnHelperHandler:
+def _adapt_triage_drgn_helper(handler: TriageDrgnSourceHandler) -> PostmortemDrgnHelperHandler:
     def wrapped(
         *,
         request: DebugIntrospectFromVmcoreHelperRequest,
@@ -344,7 +357,7 @@ def register_postmortem_tools(
     session_registry: SessionRegistry,
     crash_handler: PostmortemCrashHandler,
     triage_handler: PostmortemTriageHandler,
-    triage_drgn_helper_handler: Callable[..., ToolResponse],
+    triage_drgn_helper_handler: TriageDrgnSourceHandler,
     check_prereqs_handler: PostmortemCheckPrereqsHandler,
     list_dumps_handler: PostmortemListDumpsHandler,
     fetch_handler: PostmortemFetchHandler,
