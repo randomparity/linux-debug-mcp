@@ -136,6 +136,7 @@ def test_shared_probe_boundary_does_not_import_private_transport_handlers() -> N
 
 def test_postmortem_handlers_do_not_import_introspect_execution_internals() -> None:
     assert "kdive.introspect.execution" not in _imported_modules(POSTMORTEM_HANDLERS_SOURCE)
+    assert "kdive.introspect.handlers" not in _imported_modules(POSTMORTEM_HANDLERS_SOURCE)
 
 
 def test_debug_features_do_not_import_private_transport_handler_helpers() -> None:

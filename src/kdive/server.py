@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
@@ -63,8 +63,11 @@ from kdive.postmortem.handlers import (
     debug_postmortem_check_prereqs_handler,
     debug_postmortem_fetch_handler,
     debug_postmortem_list_dumps_handler,
-    debug_postmortem_triage_handler,
 )
+from kdive.postmortem.handlers import (
+    debug_postmortem_triage_handler as _debug_postmortem_triage_handler,
+)
+from kdive.postmortem.models import DebugPostmortemTriageRequest
 from kdive.postmortem.tools import register_postmortem_tools
 from kdive.prereqs.handlers import prerequisites_handler
 from kdive.prereqs.tools import register_prereq_tools
@@ -180,6 +183,16 @@ def _workflow_build_boot_debug_tool_handler(
     *, request: workflow_tools.WorkflowBuildBootDebugHandlerRequest, runtime: workflow_tools.WorkflowToolRuntime
 ) -> ToolResponse:
     return workflow_build_boot_debug_handler(request=request, runtime=runtime)
+
+
+def debug_postmortem_triage_handler(
+    request: DebugPostmortemTriageRequest,
+    *,
+    artifact_root: Path,
+    **kwargs: Any,
+) -> ToolResponse:
+    kwargs.setdefault("drgn_helper_handler", debug_introspect_from_vmcore_helper_handler)
+    return _debug_postmortem_triage_handler(request, artifact_root=artifact_root, **kwargs)
 
 
 def _require_value(value: _RequiredT | None, message: str) -> _RequiredT:

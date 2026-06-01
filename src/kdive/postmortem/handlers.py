@@ -35,7 +35,6 @@ from kdive.domain import (
     ToolResponse,
 )
 from kdive.handlers.shared import _require_value
-from kdive.introspect.handlers import debug_introspect_from_vmcore_helper_handler
 from kdive.postmortem.crash.handler import (
     debug_postmortem_crash_handler,
     resolve_postmortem_vmcore_context,
@@ -890,12 +889,12 @@ def debug_postmortem_triage_handler(
     request: DebugPostmortemTriageRequest,
     *,
     artifact_root: Path,
+    drgn_helper_handler: Callable[..., ToolResponse],
     runner: SshRunner | None = None,
     vmcore_build_id_reader: Callable[[Path], str] = read_vmcore_build_id,
     vmlinux_build_id_reader: Callable[[Path], str] = read_elf_build_id,
     clock: Callable[[], datetime] | None = None,
     crash_handler: Callable[..., ToolResponse] = debug_postmortem_crash_handler,
-    drgn_helper_handler: Callable[..., ToolResponse] = debug_introspect_from_vmcore_helper_handler,
 ) -> ToolResponse:
     """Spec §4 / ADR 0027. Compose the crash + drgn offline tiers into one report; no admission gate."""
     run_id = request.run_id
