@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import socket
 import subprocess
@@ -262,6 +263,32 @@ def test_stub_provider_tool_requests_are_built_by_explicit_wrappers() -> None:
     assert not hasattr(provider_tools, "STUB_PROVIDER_TOOL_REQUEST_SPECS")
     assert not hasattr(provider_tools, "StubProviderToolRequestSpec")
     assert not hasattr(provider_tools, "_stub_provider_request")
+
+
+def test_stub_provider_request_factories_are_module_scoped() -> None:
+    source = Path(provider_tools.__file__).read_text(encoding="utf-8")
+    module = ast.parse(source)
+    register_fn = next(
+        node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "register_provider_tools"
+    )
+    nested_functions = [node.name for node in ast.walk(register_fn) if isinstance(node, ast.FunctionDef)]
+    module_functions = {node.name for node in module.body if isinstance(node, ast.FunctionDef)}
+    expected_factories = {
+        "remote_build_kernel",
+        "remote_sync_artifacts",
+        "reservation_request_host",
+        "reservation_release_host",
+        "provision_prepare_target",
+        "hardware_power_control",
+        "hardware_boot_kernel",
+        "console_open_session",
+        "console_read",
+        "console_write",
+        "workflow_reserve_provision_boot",
+    }
+
+    assert nested_functions == ["register_provider_tools", "providers_list"]
+    assert expected_factories.issubset(module_functions)
 
 
 def test_stub_provider_tool_grouped_metadata_reaches_request_validation() -> None:
