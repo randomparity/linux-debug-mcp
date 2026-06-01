@@ -68,8 +68,8 @@ class VmcoreIntrospectHelperOptions(Model):
 class IntrospectRunHandler(Protocol):
     def __call__(
         self,
-        request: DebugIntrospectRunRequest,
         *,
+        request: DebugIntrospectRunRequest,
         runtime: LiveIntrospectRuntime,
     ) -> ToolResponse: ...
 
@@ -77,8 +77,8 @@ class IntrospectRunHandler(Protocol):
 class IntrospectHelperHandler(Protocol):
     def __call__(
         self,
-        request: DebugIntrospectHelperRequest,
         *,
+        request: DebugIntrospectHelperRequest,
         runtime: LiveIntrospectRuntime,
     ) -> ToolResponse: ...
 
@@ -86,8 +86,8 @@ class IntrospectHelperHandler(Protocol):
 class IntrospectCheckPrereqsHandler(Protocol):
     def __call__(
         self,
-        request: DebugIntrospectCheckPrerequisitesRequest,
         *,
+        request: DebugIntrospectCheckPrerequisitesRequest,
         artifact_root: Path,
         admission: AdmissionService,
         session_registry: SessionRegistry,
@@ -97,8 +97,8 @@ class IntrospectCheckPrereqsHandler(Protocol):
 class VmcoreIntrospectRunHandler(Protocol):
     def __call__(
         self,
-        request: DebugIntrospectFromVmcoreRequest,
         *,
+        request: DebugIntrospectFromVmcoreRequest,
         artifact_root: Path,
     ) -> ToolResponse: ...
 
@@ -106,8 +106,8 @@ class VmcoreIntrospectRunHandler(Protocol):
 class VmcoreIntrospectHelperHandler(Protocol):
     def __call__(
         self,
-        request: DebugIntrospectFromVmcoreHelperRequest,
         *,
+        request: DebugIntrospectFromVmcoreHelperRequest,
         artifact_root: Path,
     ) -> ToolResponse: ...
 
@@ -164,7 +164,7 @@ def _register_live_introspect_run_tool(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                request,
+                request=request,
                 runtime=context.live_runtime(target_model.artifact_root),
             )
         )
@@ -199,7 +199,7 @@ def _register_live_introspect_helper_tool(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                request,
+                request=request,
                 runtime=context.live_runtime(target_model.artifact_root),
             )
         )
@@ -231,7 +231,7 @@ def _register_live_introspect_probe_tool(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                request,
+                request=request,
                 artifact_root=context.artifact_root_path(target_model.artifact_root),
                 admission=context.admission,
                 session_registry=context.session_registry,
@@ -268,7 +268,7 @@ def _register_vmcore_introspect_run_tool(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                request,
+                request=request,
                 artifact_root=context.artifact_root_path(vmcore_model.artifact_root),
             )
         )
@@ -302,7 +302,7 @@ def _register_vmcore_introspect_helper_tool(
             return adapter_validation_failure(exc)
         return _dump(
             handler(
-                request,
+                request=request,
                 artifact_root=context.artifact_root_path(vmcore_model.artifact_root),
             )
         )
