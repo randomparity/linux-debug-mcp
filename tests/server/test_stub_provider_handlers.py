@@ -394,7 +394,21 @@ def test_stub_provider_handler_maps_malformed_requests_to_configuration_error() 
     assert response.ok is False
     assert response.error is not None
     assert response.error.category == "configuration_error"
-    assert response.error.details["validation_errors"]
+    assert "action" in response.error.message
+    assert "reset" in response.error.message
+
+
+def test_stub_provider_tool_missing_argument_returns_tool_response() -> None:
+    response = _tool_response(
+        "remote.build_kernel",
+        architecture="ppc64le",
+        source_ref="linux-src",
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == "configuration_error"
+    assert "build_profile" in response.error.message
 
 
 def test_explicit_provider_selection_never_falls_back() -> None:
@@ -543,9 +557,7 @@ def test_console_open_ipmi_cipher_zero_is_configuration_error() -> None:
     assert response.ok is False
     assert response.error is not None
     assert response.error.category == "configuration_error"
-    fields = [item["field"] for item in response.error.details["validation_errors"]]
-    assert any("ipmi_cipher_suite" in field for field in fields)
-    assert response.suggested_next_actions == ["providers.list"]
+    assert "ipmi_cipher_suite" in response.error.message
 
 
 def test_console_open_ipmi_default_cipher_reaches_not_implemented() -> None:

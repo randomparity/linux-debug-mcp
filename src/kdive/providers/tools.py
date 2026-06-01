@@ -29,8 +29,8 @@ from kdive.providers.handlers import (
     STUB_PROVIDER_OPERATIONS,
     list_providers_handler,
     stub_provider_operation_handler,
-    stub_request_validation_failure_response,
 )
+from kdive.tools.adapter_boundary import adapter_validation_failure
 
 
 class _StubProviderRequestFactory(Protocol):
@@ -143,8 +143,8 @@ def _register_stub_provider_tool(
         def tool_wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
             try:
                 request = request_factory(*args, **kwargs)
-            except ValidationError as exc:
-                return stub_request_validation_failure_response(exc)
+            except (TypeError, ValueError, ValidationError) as exc:
+                return adapter_validation_failure(exc)
             missing_permissions = missing_destructive_permissions(
                 provider_operation.operation,
                 request.acknowledged_permissions,
