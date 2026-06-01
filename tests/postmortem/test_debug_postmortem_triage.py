@@ -11,6 +11,7 @@ from kdive.domain import (
     ToolResponse,
 )
 from kdive.postmortem.models import DebugPostmortemTriageRequest
+from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.postmortem.triage import handlers as triage_handlers
 from kdive.postmortem.triage.handlers import debug_postmortem_triage_handler
 
@@ -130,6 +131,32 @@ def test_happy_path_full_report(tmp_path) -> None:
     rd = store.run_dir("r1")
     assert any((rd / "debug" / "postmortem" / "triage").glob("*/report.json"))
     assert any(n.startswith("postmortem.triage:") for n in store.load_manifest("r1").step_results)
+
+
+def test_triage_subcalls_use_runtime_boundary(tmp_path) -> None:
+    _run(tmp_path)
+    crash = _Recorder(_crash_ok())
+    dmesg = _Recorder(_drgn_ok({"entries": [{"text": "boot"}], "truncated": False}))
+    modules = _Recorder(_drgn_ok({"modules": [], "decode_errors": 0}))
+
+    resp = debug_postmortem_triage_handler(
+        DebugPostmortemTriageRequest(run_id="r1", vmcore_ref="inputs/vmcore", vmlinux_ref="build/vmlinux"),
+        runtime=PostmortemToolRuntime(
+            artifact_root=tmp_path,
+            crash_handler=crash,
+            drgn_helper_handler=_dispatch(dmesg, modules),
+            vmcore_build_id_reader=lambda _p: GOOD_ID,
+            vmlinux_build_id_reader=lambda _p: GOOD_ID,
+        ),
+    )
+
+    assert resp.ok is True
+    crash_runtime = crash.calls[0]["kwargs"]["runtime"]
+    assert isinstance(crash_runtime, PostmortemToolRuntime)
+    assert crash_runtime.artifact_root == tmp_path
+    assert "artifact_root" not in crash.calls[0]["kwargs"]
+    assert dmesg.calls[0]["kwargs"]["artifact_root"] == tmp_path
+    assert modules.calls[0]["kwargs"]["artifact_root"] == tmp_path
 
 
 def test_partial_crash_down(tmp_path) -> None:

@@ -80,18 +80,16 @@ def _triage_subcall_failure(*, run_id: str, code: str, exc: Exception) -> ToolRe
 def _run_triage_sources(
     request: DebugPostmortemTriageRequest,
     *,
-    artifact_root: Path,
-    runner: SshRunner | None,
-    vmcore_build_id_reader: Callable[[Path], str],
-    vmlinux_build_id_reader: Callable[[Path], str],
-    clock: Callable[[], datetime] | None,
-    crash_handler: Callable[..., ToolResponse],
-    drgn_helper_handler: Callable[..., ToolResponse],
+    runtime: PostmortemToolRuntime,
 ) -> _TriageSourceResponses:
     run_id = request.run_id
+    crash_handler = runtime.crash_handler
+    drgn_helper_handler = runtime.drgn_helper_handler
+    if crash_handler is None or drgn_helper_handler is None:
+        raise TypeError("postmortem triage runtime requires crash and drgn helper handlers")
     try:
         crash_resp = crash_handler(
-            DebugPostmortemCrashRequest(
+            request=DebugPostmortemCrashRequest(
                 run_id=run_id,
                 vmcore_ref=request.vmcore_ref,
                 vmlinux_ref=request.vmlinux_ref,
@@ -99,11 +97,7 @@ def _run_triage_sources(
                 commands=list(TRIAGE_CRASH_COMMANDS),
                 timeout_seconds=request.timeout_seconds,
             ),
-            artifact_root=artifact_root,
-            runner=runner,
-            vmcore_build_id_reader=vmcore_build_id_reader,
-            vmlinux_build_id_reader=vmlinux_build_id_reader,
-            clock=clock,
+            runtime=runtime,
         )
     except Exception as exc:  # noqa: BLE001 - triage boundary normalizes subcall exceptions
         crash_resp = _triage_subcall_failure(run_id=run_id, code="postmortem_crash_failed", exc=exc)
@@ -119,10 +113,10 @@ def _run_triage_sources(
                     name=name,
                     timeout_seconds=request.timeout_seconds,
                 ),
-                artifact_root=artifact_root,
-                runner=runner,
-                build_id_reader=vmlinux_build_id_reader,
-                clock=clock,
+                artifact_root=runtime.artifact_root,
+                runner=runtime.ssh_runner,
+                build_id_reader=runtime.vmlinux_build_id_reader or read_elf_build_id,
+                clock=runtime.clock,
             )
         except Exception as exc:  # noqa: BLE001 - triage boundary normalizes subcall exceptions
             return _triage_subcall_failure(run_id=run_id, code="offline_introspect_failed", exc=exc)
@@ -306,13 +300,25 @@ def debug_postmortem_triage_handler(
         raise TypeError("artifact_root is required when runtime is not provided")
     if drgn_helper_handler is None:
         raise TypeError("drgn_helper_handler is required")
-    run_id = request.run_id
-    now = clock or _utcnow
-    ctx, failure = resolve_postmortem_vmcore_context(
-        request,
+    source_runtime = PostmortemToolRuntime(
         artifact_root=artifact_root,
+        admission=runtime.admission if runtime is not None else None,
+        session_registry=runtime.session_registry if runtime is not None else None,
+        rootfs_profiles=runtime.rootfs_profiles if runtime is not None else None,
+        ssh_runner=runner,
+        crash_handler=crash_handler,
+        drgn_helper_handler=drgn_helper_handler,
         vmcore_build_id_reader=vmcore_build_id_reader,
         vmlinux_build_id_reader=vmlinux_build_id_reader,
+        clock=clock,
+    )
+    run_id = request.run_id
+    now = source_runtime.clock or _utcnow
+    ctx, failure = resolve_postmortem_vmcore_context(
+        request,
+        artifact_root=source_runtime.artifact_root,
+        vmcore_build_id_reader=source_runtime.vmcore_build_id_reader or read_vmcore_build_id,
+        vmlinux_build_id_reader=source_runtime.vmlinux_build_id_reader or read_elf_build_id,
     )
     if failure is not None:
         return failure
@@ -326,13 +332,7 @@ def debug_postmortem_triage_handler(
     started_monotonic = time.monotonic()
     sources = _run_triage_sources(
         request,
-        artifact_root=artifact_root,
-        runner=runner,
-        vmcore_build_id_reader=vmcore_build_id_reader,
-        vmlinux_build_id_reader=vmlinux_build_id_reader,
-        clock=clock,
-        crash_handler=crash_handler,
-        drgn_helper_handler=drgn_helper_handler,
+        runtime=source_runtime,
     )
     duration_ms = int((time.monotonic() - started_monotonic) * 1000)
     state = _build_triage_report_state(
