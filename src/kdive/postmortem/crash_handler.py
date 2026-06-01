@@ -10,8 +10,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
+from kdive.artifacts.manifest import RunManifest
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import (
     CRASH_COMMAND_ALLOWLIST,
@@ -44,10 +45,18 @@ SSH_TIMEOUT_GRACE_SECONDS = 10
 _POSTMORTEM_CRASH_STEP_RE = re.compile(r"^postmortem\.crash:[0-9a-f]{32}$")
 
 
+class PostmortemVmcoreRequest(Protocol):
+    run_id: str
+    vmcore_ref: str
+    vmlinux_ref: str
+    modules_ref: str | None
+    timeout_seconds: int
+
+
 @dataclass(frozen=True)
 class PostmortemVmcoreContext:
     store: ArtifactStore
-    manifest: Any
+    manifest: RunManifest
     run_dir: Path
     vmcore_path: Path
     vmlinux_path: Path
@@ -170,7 +179,7 @@ def _crash_build_id_fail_loud(
 
 
 def resolve_postmortem_vmcore_context(
-    request: Any,
+    request: PostmortemVmcoreRequest,
     *,
     artifact_root: Path,
     vmcore_build_id_reader: Callable[[Path], str],

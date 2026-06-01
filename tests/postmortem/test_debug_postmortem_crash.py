@@ -26,6 +26,26 @@ def test_postmortem_vmcore_context_resolver_is_shared() -> None:
     assert postmortem_handlers.resolve_postmortem_vmcore_context is crash_handler.resolve_postmortem_vmcore_context
 
 
+def test_postmortem_vmcore_resolver_has_concrete_request_and_manifest_types() -> None:
+    from typing import get_type_hints
+
+    import kdive.postmortem.crash_handler as crash_handler
+    from kdive.artifacts.manifest import RunManifest
+
+    context_hints = get_type_hints(crash_handler.PostmortemVmcoreContext)
+    resolver_hints = get_type_hints(crash_handler.resolve_postmortem_vmcore_context)
+
+    assert context_hints["manifest"] is RunManifest
+    assert resolver_hints["request"] is crash_handler.PostmortemVmcoreRequest
+    assert set(crash_handler.PostmortemVmcoreRequest.__annotations__) == {
+        "run_id",
+        "vmcore_ref",
+        "vmlinux_ref",
+        "modules_ref",
+        "timeout_seconds",
+    }
+
+
 def test_postmortem_crash_handler_uses_named_execution_phases() -> None:
     source = (Path(__file__).parents[2] / "src" / "kdive" / "postmortem" / "crash_handler.py").read_text(
         encoding="utf-8"
