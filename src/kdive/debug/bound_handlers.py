@@ -52,7 +52,12 @@ from kdive.debug.handlers import (
 from kdive.debug.handlers import (
     debug_step_handler as _debug_step_handler,
 )
-from kdive.debug.module_symbols import debug_load_module_symbols_handler as _debug_load_module_symbols_handler
+from kdive.debug.module_symbols import (
+    ModuleSymbolLoadOptions,
+)
+from kdive.debug.module_symbols import (
+    debug_load_module_symbols_handler as _debug_load_module_symbols_handler,
+)
 from kdive.debug.operations import _debug_operation_response
 from kdive.debug.session_end import debug_end_session_handler as _debug_end_session_handler
 from kdive.debug.session_handlers import debug_start_session_handler as _debug_start_session_handler
@@ -300,16 +305,20 @@ def debug_load_module_symbols_handler(
     return _debug_load_module_symbols_handler(
         artifact_root=request.artifact_root,
         run_id=request.run_id,
-        module=request.module,
-        sections=request.sections,
-        ko_path=request.ko_path,
+        options=ModuleSymbolLoadOptions(
+            module=request.module,
+            sections=request.sections,
+            ko_path=request.ko_path,
+        ),
         debug_session_id=request.debug_session_id,
-        admission=runtime.admission,
-        transaction=runtime.transaction,
-        session_registry=runtime.session_registry,
-        session_guard=runtime.session_guard,
-        gdb_mi_engine=runtime.gdb_mi_engine,
-        gdb_mi_sessions=runtime.gdb_mi_sessions,
+        runtime=DebugRuntime(
+            admission=runtime.admission,
+            transaction=runtime.transaction,
+            session_registry=runtime.session_registry,
+            session_guard=runtime.session_guard,
+            gdb_mi_engine=runtime.gdb_mi_engine,
+            gdb_mi_sessions=runtime.gdb_mi_sessions,
+        ),
     )
 
 

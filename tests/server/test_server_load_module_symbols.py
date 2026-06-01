@@ -18,7 +18,8 @@ from test_server_debug_core_ops import (
 
 from kdive.config import DebugProfile
 from kdive.debug import module_symbols
-from kdive.debug.module_symbols import debug_load_module_symbols_handler
+from kdive.debug.handlers import DebugRuntime
+from kdive.debug.module_symbols import ModuleSymbolLoadOptions, debug_load_module_symbols_handler
 from kdive.domain import ErrorCategory
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry, LoadedModule
 
@@ -79,17 +80,29 @@ def _ko_in_build_tree(artifact_root: Path, name: str = "foo") -> Path:
 
 
 def _call(artifact_root, registry, txn, admission, engine, sessions, session_id, **overrides):
-    kwargs = dict(
-        artifact_root=artifact_root,
-        run_id=RUN_ID,
-        module="foo",
-        debug_session_id=session_id,
-        debug_profiles=_profiles(),
+    options = ModuleSymbolLoadOptions(
+        module=overrides.pop("module", "foo"),
+        sections=overrides.pop("sections", None),
+        ko_path=overrides.pop("ko_path", None),
+        rootfs_profiles=overrides.pop("rootfs_profiles", None),
+        ssh_runner=overrides.pop("ssh_runner", None),
+        module_ko_finder=overrides.pop("module_ko_finder", None),
+    )
+    runtime = DebugRuntime(
+        debug_profiles=overrides.pop("debug_profiles", _profiles()),
         transaction=txn,
         admission=admission,
         session_registry=registry,
+        session_guard=overrides.pop("session_guard", None),
         gdb_mi_engine=engine,
         gdb_mi_sessions=sessions,
+    )
+    kwargs = dict(
+        artifact_root=artifact_root,
+        run_id=RUN_ID,
+        options=options,
+        runtime=runtime,
+        debug_session_id=session_id,
     )
     kwargs.update(overrides)
     return debug_load_module_symbols_handler(**kwargs)

@@ -445,6 +445,28 @@ def test_debug_operation_handlers_accept_runtime_instead_of_dependency_bundle() 
     assert not hasattr(debug_tools, "_gated_debug_runtime_kwargs")
 
 
+def test_debug_load_module_symbols_handler_groups_runtime_and_options() -> None:
+    import inspect
+
+    from kdive.debug import module_symbols
+
+    params = inspect.signature(module_symbols.debug_load_module_symbols_handler).parameters
+    dependency_params = {
+        "admission",
+        "transaction",
+        "session_registry",
+        "session_guard",
+        "gdb_mi_engine",
+        "gdb_mi_sessions",
+    }
+
+    assert "runtime" in params
+    assert "options" in params
+    assert dependency_params.isdisjoint(params)
+    assert all(param.kind is not inspect.Parameter.VAR_KEYWORD for param in params.values())
+    assert hasattr(module_symbols, "ModuleSymbolLoadOptions")
+
+
 def test_debug_bound_handlers_use_request_forwarding_factories() -> None:
     source = Path(debug_bound_handlers.__file__).read_text(encoding="utf-8")
 
