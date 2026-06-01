@@ -23,6 +23,7 @@ from kdive.coordination.admission import (
 )
 from kdive.domain import ErrorCategory, RunRequest, StepResult, StepStatus, ToolResponse
 from kdive.introspect import execution as introspect_execution
+from kdive.introspect import runner as introspect_runner
 from kdive.introspect.execution import RUN_STDOUT_CAP, LiveIntrospectRuntime
 from kdive.introspect.handlers import (
     debug_introspect_helper_handler as _debug_introspect_helper_handler,
@@ -750,7 +751,7 @@ def test_malformed_build_id_rejected_as_provenance_corrupt(tmp_path: Path) -> No
 
 
 def test_call_budget_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("kdive.introspect.execution.MAX_INTROSPECT_CALLS_PER_RUN", 4)
+    monkeypatch.setattr("kdive.introspect.context.MAX_INTROSPECT_CALLS_PER_RUN", 4)
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     for _ in range(4):
         store.record_step_result(
@@ -1329,7 +1330,7 @@ def test_wrapper_render_error_rolls_back_admission(tmp_path: Path, monkeypatch: 
     def _boom(**_kwargs):
         raise WrapperRenderError("test forced render failure")
 
-    monkeypatch.setattr("kdive.introspect.execution.render_wrapper", _boom)
+    monkeypatch.setattr("kdive.introspect.runner.render_wrapper", _boom)
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1687,13 +1688,13 @@ def test_root_ssh_user_omits_sudo_from_remote_argv(tmp_path: Path) -> None:
 
 def test_run_uses_runner_default_caps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
-    orig = introspect_execution.render_wrapper
+    orig = introspect_runner.render_wrapper
 
     def spy(**kwargs):
         captured.update(kwargs)
         return orig(**kwargs)
 
-    monkeypatch.setattr(introspect_execution, "render_wrapper", spy)
+    monkeypatch.setattr(introspect_runner, "render_wrapper", spy)
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()
@@ -1891,13 +1892,13 @@ def test_helper_passes_cap_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     from kdive.introspect.models import DebugIntrospectHelperRequest
 
     captured: dict = {}
-    orig = introspect_execution.render_wrapper
+    orig = introspect_runner.render_wrapper
 
     def spy(**kwargs):
         captured.update(kwargs)
         return orig(**kwargs)
 
-    monkeypatch.setattr(introspect_execution, "render_wrapper", spy)
+    monkeypatch.setattr(introspect_runner, "render_wrapper", spy)
 
     store, run_id, _ = _bootstrap_run_with_build(tmp_path)
     targets, rootfs, debug = _profiles()

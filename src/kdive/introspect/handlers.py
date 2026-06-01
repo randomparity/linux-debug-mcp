@@ -17,27 +17,20 @@ from pydantic import ValidationError
 
 from kdive.artifacts.manifest import RunManifest
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
-from kdive.config import MAX_INTROSPECT_CALLS_PER_RUN, RootfsProfile
+from kdive.config import RootfsProfile
 from kdive.coordination.admission import AdmissionError, AdmissionService
 from kdive.coordination.registry import SessionRegistry
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus, ToolResponse
 from kdive.handlers.shared import _require_value
-from kdive.introspect.execution import (
-    HELPER_CAP_PROFILE,
-    RUN_STDOUT_CAP,
-    SSH_TIMEOUT_GRACE_SECONDS,
-    IntrospectPostValidator,
-    LiveIntrospectRuntime,
-    _chmod_best_effort,
+from kdive.introspect.context import (
+    MAX_INTROSPECT_CALLS_PER_RUN,
     _configuration_failure,
     _count_introspect_calls,
+)
+from kdive.introspect.execution import (
+    LiveIntrospectRuntime,
     _execute_introspect_call,
-    _finalize_introspect_call,
-    _make_helper_post_validator,
-    _record_terminal_introspect_result,
-    _redact_and_truncate,
-    _target_python_remote_argv,
     _utcnow,
 )
 from kdive.introspect.helpers import get_helper_registry
@@ -49,6 +42,20 @@ from kdive.introspect.models import (
     DebugIntrospectRunRequest,
 )
 from kdive.introspect.probes import assemble_introspect_probe_response
+from kdive.introspect.result import (
+    HELPER_CAP_PROFILE,
+    RUN_STDOUT_CAP,
+    IntrospectPostValidator,
+    _chmod_best_effort,
+    _finalize_introspect_call,
+    _make_helper_post_validator,
+    _record_terminal_introspect_result,
+    _redact_and_truncate,
+)
+from kdive.introspect.runner import (
+    SSH_TIMEOUT_GRACE_SECONDS,
+    _target_python_remote_argv,
+)
 from kdive.introspect.wrappers import (
     SCRIPT_BYTE_CAP,
     WrapperRenderError,
