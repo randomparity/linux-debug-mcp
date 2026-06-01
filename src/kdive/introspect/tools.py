@@ -143,7 +143,7 @@ class _IntrospectRegistrationContext:
         )
 
 
-def _dump(response: ToolResponse) -> dict[str, Any]:
+def _tool_response_json(response: ToolResponse) -> dict[str, Any]:
     return response.model_dump(mode="json")
 
 
@@ -176,7 +176,7 @@ def _register_live_introspect_run_tool(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             handler(
                 request=request,
                 runtime=context.live_runtime(target_model.artifact_root),
@@ -211,7 +211,7 @@ def _register_live_introspect_helper_tool(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             handler(
                 request=request,
                 runtime=context.live_runtime(target_model.artifact_root),
@@ -243,7 +243,7 @@ def _register_live_introspect_probe_tool(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             handler(
                 request=request,
                 runtime=context.live_runtime(target_model.artifact_root),
@@ -278,7 +278,7 @@ def _register_vmcore_introspect_run_tool(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             handler(
                 request=request,
                 artifact_root=context.artifact_root_path(vmcore_model.artifact_root),
@@ -312,7 +312,7 @@ def _register_vmcore_introspect_helper_tool(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             handler(
                 request=request,
                 artifact_root=context.artifact_root_path(vmcore_model.artifact_root),

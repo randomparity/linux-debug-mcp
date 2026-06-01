@@ -210,7 +210,7 @@ def _path(value: str) -> Path:
     return Path(value)
 
 
-def _dump(response: ToolResponse) -> dict[str, Any]:
+def _tool_response_json(response: ToolResponse) -> dict[str, Any]:
     return response.model_dump(mode="json")
 
 
@@ -271,7 +271,7 @@ def _register_debug_session_lifecycle_tools(
             start_options = optional_model_arg(options, DebugStartSessionOptions)
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             handlers.start_session(
                 request=DebugStartSessionRequest(
                     artifact_root=artifact_root,
@@ -295,7 +295,7 @@ def _register_debug_session_lifecycle_tools(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             handlers.end_session(
                 request=DebugSessionRequest(
                     artifact_root=artifact_root,
@@ -326,7 +326,7 @@ def _register_registers_query(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             _run_debug_operation(
                 operation=operation,
                 request=DebugRegistersRequest(
@@ -363,7 +363,7 @@ def _register_symbol_query(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             _run_debug_operation(
                 operation=operation,
                 request=DebugSymbolRequest(
@@ -412,7 +412,7 @@ def _register_debug_read_tools(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             _run_debug_operation(
                 operation=handlers.operation,
                 request=DebugMemoryRequest(
@@ -441,7 +441,7 @@ def _register_debug_read_tools(
             evaluate_options = optional_model_arg(options, DebugEvaluateOptions)
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             _run_debug_operation(
                 operation=handlers.operation,
                 request=DebugEvaluateRequest(
@@ -477,7 +477,7 @@ def _register_debug_module_symbol_tools(
             load_options = optional_model_arg(options, DebugLoadModuleSymbolsOptions)
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             handlers.load_module_symbols(
                 request=DebugLoadModuleSymbolsRequest(
                     artifact_root=artifact_root,
@@ -512,7 +512,7 @@ def _register_symbol_control(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             _run_debug_operation(
                 operation=operation,
                 request=DebugSymbolRequest(
@@ -550,7 +550,7 @@ def _register_breakpoint_id_control(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             _run_debug_operation(
                 operation=operation,
                 request=DebugBreakpointIdRequest(
@@ -587,7 +587,7 @@ def _register_gated_query(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             _run_debug_operation(
                 operation=operation,
                 request=DebugSessionRequest(
@@ -669,7 +669,7 @@ def _register_execution_control(
             execution_options = optional_model_arg(options, DebugExecutionOptions)
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             _run_debug_operation(
                 operation=operation,
                 request=DebugExecutionRequest(

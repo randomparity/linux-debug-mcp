@@ -189,7 +189,7 @@ class _PostmortemRegistrationContext:
         )
 
 
-def _dump(response: ToolResponse) -> dict[str, Any]:
+def _tool_response_json(response: ToolResponse) -> dict[str, Any]:
     return response.model_dump(mode="json")
 
 
@@ -245,7 +245,7 @@ def _register_postmortem_crash_tool(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             handler(
                 request=request,
                 runtime=context.runtime(vmcore_model.artifact_root),
@@ -276,7 +276,7 @@ def _register_postmortem_triage_tool(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             handler(
                 request=request,
                 runtime=context.runtime(vmcore_model.artifact_root),
@@ -308,7 +308,7 @@ def _register_postmortem_check_prereqs_tool(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             handler(
                 request=request,
                 runtime=context.runtime(target_model.artifact_root),
@@ -341,7 +341,7 @@ def _register_postmortem_list_dumps_tool(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             handler(
                 request=request,
                 runtime=context.runtime(target_model.artifact_root),
@@ -378,7 +378,7 @@ def _register_postmortem_fetch_tool(
             )
         except (TypeError, ValueError) as exc:
             return adapter_validation_failure(exc)
-        return _dump(
+        return _tool_response_json(
             handler(
                 request=request,
                 runtime=context.runtime(target_model.artifact_root),
