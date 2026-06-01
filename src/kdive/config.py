@@ -97,11 +97,13 @@ def validate_make_variable_map(value: dict[str, str]) -> dict[str, str]:
     return value
 
 
-_ALLOWED_SSH_OPTIONS = {
-    "ConnectTimeout": {"validator": "timeout"},
-    "IdentitiesOnly": {"values": {"yes", "no"}},
-    "LogLevel": {"values": {"ERROR", "QUIET", "VERBOSE"}},
-    "StrictHostKeyChecking": {"values": {"accept-new", "yes"}},
+_CONNECT_TIMEOUT_MIN_SECONDS = 1
+_CONNECT_TIMEOUT_MAX_SECONDS = 3600
+_ALLOWED_SSH_OPTIONS: Mapping[str, frozenset[str] | None] = {
+    "ConnectTimeout": None,
+    "IdentitiesOnly": frozenset({"yes", "no"}),
+    "LogLevel": frozenset({"ERROR", "QUIET", "VERBOSE"}),
+    "StrictHostKeyChecking": frozenset({"accept-new", "yes"}),
 }
 ALLOWED_DEBUG_OPERATIONS = (
     "debug.start_session",
@@ -295,6 +297,23 @@ def validate_optional_ssh_text(value: str | None) -> str | None:
     return value
 
 
+def _validate_connect_timeout(value: str) -> None:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError("ConnectTimeout must be an integer") from exc
+    if not (_CONNECT_TIMEOUT_MIN_SECONDS <= parsed <= _CONNECT_TIMEOUT_MAX_SECONDS):
+        message = (
+            f"ConnectTimeout must be between {_CONNECT_TIMEOUT_MIN_SECONDS} and {_CONNECT_TIMEOUT_MAX_SECONDS} seconds"
+        )
+        raise ValueError(message)
+
+
+def _validate_fixed_ssh_option(key: str, value: str, allowed_values: frozenset[str]) -> None:
+    if value not in allowed_values:
+        raise ValueError(f"invalid SSH option value for {key}")
+
+
 def validate_ssh_options_map(value: dict[str, str]) -> dict[str, str]:
     for key, item in value.items():
         if key not in _ALLOWED_SSH_OPTIONS:
@@ -303,16 +322,11 @@ def validate_ssh_options_map(value: dict[str, str]) -> dict[str, str]:
             raise ValueError("SSH option names must be simple names")
         if not item or _has_control_character(item):
             raise ValueError(f"invalid SSH option value for {key}")
-        rule = _ALLOWED_SSH_OPTIONS[key]
-        if rule.get("validator") == "timeout":
-            try:
-                parsed = int(item)
-            except ValueError as exc:
-                raise ValueError("ConnectTimeout must be an integer") from exc
-            if parsed < 1 or parsed > 3600:
-                raise ValueError("ConnectTimeout must be between 1 and 3600 seconds")
-        elif item not in rule["values"]:
-            raise ValueError(f"invalid SSH option value for {key}")
+        allowed_values = _ALLOWED_SSH_OPTIONS[key]
+        if allowed_values is None:
+            _validate_connect_timeout(item)
+        else:
+            _validate_fixed_ssh_option(key, item, allowed_values)
     return value
 
 
