@@ -24,9 +24,11 @@ from kdive.config import RootfsProfile, TargetProfile
 from kdive.coordination.admission import AdmissionService, SnapshotStore
 from kdive.coordination.registry import SessionRegistry
 from kdive.domain import ArtifactRef, ErrorCategory, StepResult, StepStatus
+from kdive.introspect.context import LiveIntrospectRuntime
 from kdive.introspect.handlers import debug_introspect_run_handler
 from kdive.introspect.models import DebugIntrospectRunRequest
 from kdive.providers.local.test.local_ssh_tests import SubprocessSshRunner, build_ssh_argv
+from kdive.symbols.build_id import read_elf_build_id
 
 MANAGED_DOMAIN_PREFIX = "kdive-"
 
@@ -60,6 +62,7 @@ class BootstrapResult(NamedTuple):
 
     Fields:
         run_id: the run identifier created by create_run_handler.
+        artifact_root: the run's artifact root (passed to LiveIntrospectRuntime).
         store: ArtifactStore bound to the run's artifact_root.
         admission: AdmissionService populated with the boot's READY snapshot.
         session_registry: SessionRegistry for this run.
@@ -69,12 +72,29 @@ class BootstrapResult(NamedTuple):
     """
 
     run_id: str
+    artifact_root: Path
     store: ArtifactStore
     admission: AdmissionService
     session_registry: SessionRegistry
     target_profiles: dict[str, TargetProfile]
     rootfs_profiles: dict[str, RootfsProfile]
     rootfs_profile: RootfsProfile
+
+
+def _live_runtime(ctx: BootstrapResult) -> LiveIntrospectRuntime:
+    """Build the ``LiveIntrospectRuntime`` the introspect handler now requires.
+
+    ``debug_introspect_run_handler``'s boundary is ``(request, *, runtime)``;
+    the boot-derived admission service, session registry, and profile maps are
+    packed into the runtime rather than passed as loose keyword arguments.
+    """
+    return LiveIntrospectRuntime(
+        artifact_root=ctx.artifact_root,
+        target_profiles=ctx.target_profiles,
+        rootfs_profiles=ctx.rootfs_profiles,
+        admission=ctx.admission,
+        session_registry=ctx.session_registry,
+    )
 
 
 def _bootstrap_booted_run(tmp_path: Path) -> BootstrapResult:
@@ -110,6 +130,8 @@ def _bootstrap_booted_run(tmp_path: Path) -> BootstrapResult:
     source = Path(env_source).expanduser()  # type: ignore[arg-type]
     rootfs_path = Path(env_rootfs).expanduser()  # type: ignore[arg-type]
     kernel_image = source / "arch" / "x86" / "boot" / "bzImage"
+    vmlinux = source / "vmlinux"
+    kernel_release_path = source / "include" / "config" / "kernel.release"
     artifact_root = tmp_path / "runs"
     run_id = "run-introspect-integration"
 
@@ -122,6 +144,20 @@ def _bootstrap_booted_run(tmp_path: Path) -> BootstrapResult:
         f"KDIVE_SOURCE must contain a built x86_64 kernel image at {kernel_image}; "
         "build bzImage before running this integration test"
     )
+    assert vmlinux.is_file(), (
+        f"KDIVE_SOURCE must contain the built vmlinux at {vmlinux}; live introspect provenance reads its GNU build-id"
+    )
+    assert kernel_release_path.is_file(), (
+        f"KDIVE_SOURCE must contain {kernel_release_path}; build the kernel before running this test"
+    )
+
+    # Seed the build step with the same provenance ``kernel.build`` records, derived
+    # from the booted kernel's own artifacts so it matches what drgn reports for the
+    # live target. A bare seed (architecture/output_path only) makes
+    # ``target.boot._capture_kernel_provenance`` record ``build_id_unavailable`` and
+    # live introspect provenance resolution fails.
+    build_id = read_elf_build_id(vmlinux)
+    kernel_release = kernel_release_path.read_text(encoding="utf-8").strip()
 
     create_response = create_run_handler(
         artifact_root=artifact_root,
@@ -140,15 +176,23 @@ def _bootstrap_booted_run(tmp_path: Path) -> BootstrapResult:
             step_name="build",
             status=StepStatus.SUCCEEDED,
             summary="seeded integration build result",
-            artifacts=[ArtifactRef(path=str(kernel_image), kind="kernel-image")],
-            details={"architecture": "x86_64", "output_path": str(kernel_image.parent)},
+            artifacts=[
+                ArtifactRef(path=str(kernel_image), kind="kernel-image"),
+                ArtifactRef(path=str(vmlinux), kind="vmlinux"),
+            ],
+            details={
+                "architecture": "x86_64",
+                "output_path": str(kernel_image.parent),
+                "build_id": build_id,
+                "kernel_release": kernel_release,
+            },
         ),
     )
 
     pilot_target = TargetProfile(
         name="pilot-libvirt",
         architecture="x86_64",
-        manifest_target_profile=env_domain,
+        target_ref=env_domain,
         managed_domain=True,
         managed_domain_prefix=MANAGED_DOMAIN_PREFIX,
         libvirt_uri=env_libvirt_uri,
@@ -185,6 +229,7 @@ def _bootstrap_booted_run(tmp_path: Path) -> BootstrapResult:
 
     return BootstrapResult(
         run_id=run_id,
+        artifact_root=artifact_root,
         store=store,
         admission=admission,
         session_registry=session_registry,
@@ -234,14 +279,7 @@ def test_introspect_emit_roundtrip(tmp_path) -> None:
         script='emit({"pid": 1})',
         timeout_seconds=30,
     )
-    response = debug_introspect_run_handler(
-        request,
-        artifact_root=tmp_path / "runs",
-        target_profiles=ctx.target_profiles,
-        rootfs_profiles=ctx.rootfs_profiles,
-        admission=ctx.admission,
-        session_registry=ctx.session_registry,
-    )
+    response = debug_introspect_run_handler(request, runtime=_live_runtime(ctx))
     assert response.ok is True, response.error
     assert response.data["status"] == "ok"
     assert response.data["emits"] == [{"pid": 1}]
@@ -256,14 +294,7 @@ def test_introspect_target_side_timeout(tmp_path) -> None:
         script="while True:\n    pass\n",
         timeout_seconds=5,
     )
-    response = debug_introspect_run_handler(
-        request,
-        artifact_root=tmp_path / "runs",
-        target_profiles=ctx.target_profiles,
-        rootfs_profiles=ctx.rootfs_profiles,
-        admission=ctx.admission,
-        session_registry=ctx.session_registry,
-    )
+    response = debug_introspect_run_handler(request, runtime=_live_runtime(ctx))
     assert response.ok is False
     assert response.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert response.error.details["code"] == "introspect_timeout"
@@ -278,14 +309,7 @@ def test_introspect_build_id_round_trips(tmp_path) -> None:
         script="emit({})",
         timeout_seconds=30,
     )
-    response = debug_introspect_run_handler(
-        request,
-        artifact_root=tmp_path / "runs",
-        target_profiles=ctx.target_profiles,
-        rootfs_profiles=ctx.rootfs_profiles,
-        admission=ctx.admission,
-        session_registry=ctx.session_registry,
-    )
+    response = debug_introspect_run_handler(request, runtime=_live_runtime(ctx))
     assert response.ok is True, response.error
     manifest = ctx.store.load_manifest(ctx.run_id)
     recorded = manifest.step_results["build"].details["build_id"]
@@ -309,14 +333,7 @@ def test_introspect_allow_write_false_blocks_prog_write(tmp_path) -> None:
         timeout_seconds=30,
         allow_write=False,
     )
-    response = debug_introspect_run_handler(
-        request,
-        artifact_root=tmp_path / "runs",
-        target_profiles=ctx.target_profiles,
-        rootfs_profiles=ctx.rootfs_profiles,
-        admission=ctx.admission,
-        session_registry=ctx.session_registry,
-    )
+    response = debug_introspect_run_handler(request, runtime=_live_runtime(ctx))
     assert response.ok is False
     assert response.error.category == ErrorCategory.CONFIGURATION_ERROR
     assert response.error.details["code"] == "write_mode_disabled"
@@ -333,14 +350,7 @@ def test_introspect_allow_write_true_reaches_drgn(tmp_path) -> None:
         allow_write=True,
         acknowledged_permissions=[_WRITE_PERM],
     )
-    response = debug_introspect_run_handler(
-        request,
-        artifact_root=tmp_path / "runs",
-        target_profiles=ctx.target_profiles,
-        rootfs_profiles=ctx.rootfs_profiles,
-        admission=ctx.admission,
-        session_registry=ctx.session_registry,
-    )
+    response = debug_introspect_run_handler(request, runtime=_live_runtime(ctx))
     # Under write mode the guard is absent, so prog.write reaches drgn, which
     # fails on today's read-only live target (no writable target exists yet).
     # The contract asserted here: the call is NOT rejected as write_mode_disabled,
