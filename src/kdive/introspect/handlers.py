@@ -44,6 +44,7 @@ from kdive.introspect.probes import assemble_introspect_probe_response
 from kdive.introspect.result import (
     HELPER_CAP_PROFILE,
     RUN_STDOUT_CAP,
+    IntrospectFinalizationContext,
     IntrospectPostValidator,
     _chmod_best_effort,
     _finalize_introspect_call,
@@ -627,17 +628,19 @@ def _execute_vmcore_introspect_call(
     if run is None:
         raise RuntimeError("vmcore introspect run missing after successful wrapper execution")
     return _finalize_introspect_call(
-        store=ctx.store,
-        run_id=ctx.run_id,
-        workspace=workspace,
-        run=run,
-        redactor=ctx.redactor,
-        expected_build_id=ctx.expected_build_id,
-        request_timeout_seconds=request.timeout_seconds,
-        operation_name=operation_name,
-        drgn_open_message="drgn could not open the vmcore",
-        exec_principal=None,
-        post_validator=post_validator,
+        IntrospectFinalizationContext(
+            store=ctx.store,
+            run_id=ctx.run_id,
+            workspace=workspace,
+            run=run,
+            redactor=ctx.redactor,
+            expected_build_id=ctx.expected_build_id,
+            request_timeout_seconds=request.timeout_seconds,
+            operation_name=operation_name,
+            drgn_open_message="drgn could not open the vmcore",
+            exec_principal=None,
+            post_validator=post_validator,
+        )
     )
 
 

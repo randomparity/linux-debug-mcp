@@ -24,6 +24,7 @@ from kdive.introspect.context import _LiveIntrospectPreAdmissionContext, _requir
 from kdive.introspect.models import DebugIntrospectRunRequest
 from kdive.introspect.result import (
     RUN_STDOUT_CAP,
+    IntrospectFinalizationContext,
     IntrospectPostValidator,
     _chmod_best_effort,
     _finalize_introspect_call,
@@ -596,24 +597,26 @@ def _execute_admitted_introspect_ssh(
         finished_at = now()
         duration_ms = int((time.monotonic() - ssh_run.started_monotonic) * 1000)
         return _finalize_introspect_call(
-            store=store,
-            run_id=run_id,
-            workspace=workspace,
-            run=_IntrospectFinalizedRun(
-                ssh_result=ssh_run.result,
-                started_at=ssh_run.started_at,
-                finished_at=finished_at,
-                duration_ms=duration_ms,
-            ),
-            redactor=redactor,
-            expected_build_id=build_id,
-            request_timeout_seconds=request.timeout_seconds,
-            operation_name=operation_name,
-            drgn_open_message="drgn could not attach to the live target",
-            exec_principal=resolved_rootfs.ssh_user,
-            post_validator=post_validator,
-            allow_write=request.allow_write,
-            acknowledged_permissions=write_mode_permissions,
+            IntrospectFinalizationContext(
+                store=store,
+                run_id=run_id,
+                workspace=workspace,
+                run=_IntrospectFinalizedRun(
+                    ssh_result=ssh_run.result,
+                    started_at=ssh_run.started_at,
+                    finished_at=finished_at,
+                    duration_ms=duration_ms,
+                ),
+                redactor=redactor,
+                expected_build_id=build_id,
+                request_timeout_seconds=request.timeout_seconds,
+                operation_name=operation_name,
+                drgn_open_message="drgn could not attach to the live target",
+                exec_principal=resolved_rootfs.ssh_user,
+                post_validator=post_validator,
+                allow_write=request.allow_write,
+                acknowledged_permissions=write_mode_permissions,
+            )
         )
 
     except Exception:

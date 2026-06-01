@@ -13,7 +13,7 @@ def test_introspect_finalizer_accepts_workspace_and_run_bundles() -> None:
     signature = inspect.signature(execution._finalize_introspect_call)
     params = set(signature.parameters)
 
-    assert {"workspace", "run"}.issubset(params)
+    assert set(params) == {"context"}
     assert {
         "call_id",
         "ssh_result",
@@ -24,4 +24,15 @@ def test_introspect_finalizer_accepts_workspace_and_run_bundles() -> None:
         "started_at",
         "finished_at",
         "duration_ms",
+        "store",
+        "run_id",
+        "redactor",
+        "expected_build_id",
+        "request_timeout_seconds",
+        "operation_name",
+        "drgn_open_message",
+        "exec_principal",
+        "post_validator",
+        "allow_write",
+        "acknowledged_permissions",
     }.isdisjoint(params)

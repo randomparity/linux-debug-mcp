@@ -208,6 +208,23 @@ class _IntrospectFinalizedRun:
     duration_ms: int
 
 
+@dataclass(frozen=True)
+class IntrospectFinalizationContext:
+    store: ArtifactStore
+    run_id: str
+    workspace: IntrospectFinalizationWorkspace
+    run: IntrospectFinalizationRun
+    redactor: Redactor
+    expected_build_id: str
+    request_timeout_seconds: int
+    operation_name: str
+    drgn_open_message: str
+    exec_principal: str | None
+    post_validator: IntrospectPostValidator | None
+    allow_write: bool = False
+    acknowledged_permissions: list[str] | None = None
+
+
 def _persist_introspect_success_artifacts(
     *,
     agent_dir: Path,
@@ -542,50 +559,37 @@ def _map_introspect_wrapper_failure(
 
 def _record_introspect_success(
     *,
-    store: ArtifactStore,
-    run_id: str,
-    call_id: str,
-    ssh_result: SshCommandResult,
-    agent_dir: Path,
-    sensitive_call_dir: Path,
+    context: IntrospectFinalizationContext,
     redacted_payload: Any,
     outcome_status: Any,
     raw_stderr: str,
-    redactor: Redactor,
-    request_timeout_seconds: int,
-    started_at: datetime,
-    finished_at: datetime,
-    duration_ms: int,
-    operation_name: str,
-    exec_principal: str | None,
-    post_validator: IntrospectPostValidator | None,
-    allow_write: bool,
-    acknowledged_permissions: list[str] | None,
 ) -> ToolResponse:
+    workspace = context.workspace
+    run = context.run
     artifacts = _persist_introspect_success_artifacts(
-        agent_dir=agent_dir,
-        sensitive_call_dir=sensitive_call_dir,
+        agent_dir=workspace.agent_dir,
+        sensitive_call_dir=workspace.sensitive_call_dir,
         redacted_payload=redacted_payload,
         raw_stderr=raw_stderr,
-        redactor=redactor,
+        redactor=context.redactor,
     )
     public_artifacts = [artifact for artifact in artifacts if not artifact.sensitive]
     success_response = _build_introspect_success_response(
-        call_id=call_id,
+        call_id=workspace.call_id,
         redacted_payload=redacted_payload,
         outcome_status=outcome_status,
         raw_stderr=raw_stderr,
-        redactor=redactor,
-        request_timeout_seconds=request_timeout_seconds,
-        started_at=started_at,
-        finished_at=finished_at,
-        duration_ms=duration_ms,
+        redactor=context.redactor,
+        request_timeout_seconds=context.request_timeout_seconds,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+        duration_ms=run.duration_ms,
         public_artifacts=public_artifacts,
     )
     truncated = success_response["truncated"]
     prelude_ms = success_response["prelude_ms"]
 
-    verdict = post_validator(redacted_payload) if post_validator is not None else None
+    verdict = context.post_validator(redacted_payload) if context.post_validator is not None else None
     step_status = StepStatus.SUCCEEDED
     step_failure_code = None
     if verdict is not None and not verdict.ok:
@@ -593,91 +597,76 @@ def _record_introspect_success(
         step_failure_code = verdict.failure_code
 
     step_details: dict[str, Any] = {
-        "call_id": call_id,
+        "call_id": workspace.call_id,
         "build_id": redacted_payload.get("build_id") if isinstance(redacted_payload, dict) else None,
-        "timeout_seconds": request_timeout_seconds,
-        "wrapper_exit_code": ssh_result.exit_status,
-        "duration_ms": duration_ms,
+        "timeout_seconds": context.request_timeout_seconds,
+        "wrapper_exit_code": run.ssh_result.exit_status,
+        "duration_ms": run.duration_ms,
         "prelude_ms": prelude_ms,
         "truncated": truncated,
         "outcome_status": outcome_status,
     }
     # exec_principal is None on the vmcore path (no SSH user); omit the key
     # rather than recording a misleading `ssh_user: null` on a non-SSH step.
-    if exec_principal is not None:
-        step_details["ssh_user"] = exec_principal
+    if context.exec_principal is not None:
+        step_details["ssh_user"] = context.exec_principal
     # ADR 0011 / #56 audit: allow_write on every live call; satisfied required
     # permissions only when write mode was used.
-    step_details["allow_write"] = allow_write
-    if allow_write:
-        step_details["acknowledged_permissions"] = list(acknowledged_permissions or [])
+    step_details["allow_write"] = context.allow_write
+    if context.allow_write:
+        step_details["acknowledged_permissions"] = list(context.acknowledged_permissions or [])
     if verdict is not None:
         step_details.update(verdict.extra_step_details)
     if step_status is StepStatus.FAILED:
         step_details["code"] = step_failure_code
 
     summary = (
-        f"introspect call {call_id[:8]} ok"
+        f"introspect call {workspace.call_id[:8]} ok"
         if step_status is StepStatus.SUCCEEDED
-        else f"introspect call {call_id[:8]} failed: {step_failure_code}"
+        else f"introspect call {workspace.call_id[:8]} failed: {step_failure_code}"
     )
     step = StepResult(
-        step_name=f"introspect:{call_id}",
+        step_name=f"introspect:{workspace.call_id}",
         status=step_status,
         summary=summary,
         artifacts=artifacts,
         details=step_details,
     )
-    _record_terminal_introspect_result(store, run_id, step)
+    _record_terminal_introspect_result(context.store, context.run_id, step)
 
     if verdict is not None and not verdict.ok:
         return ToolResponse.failure(
             category=verdict.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
+            run_id=context.run_id,
             message=verdict.failure_message or "post-validator rejected the introspect result",
-            details={"code": verdict.failure_code, "call_id": call_id},
+            details={"code": verdict.failure_code, "call_id": workspace.call_id},
             suggested_next_actions=["artifacts.get_manifest"],
         )
     if verdict is not None and verdict.ok:
         return ToolResponse.success(
-            summary=f"introspect call {call_id[:8]} ok",
-            run_id=run_id,
+            summary=f"introspect call {workspace.call_id[:8]} ok",
+            run_id=context.run_id,
             status=StepStatus.SUCCEEDED,
             artifacts=public_artifacts,
-            suggested_next_actions=["artifacts.get_manifest", operation_name],
+            suggested_next_actions=["artifacts.get_manifest", context.operation_name],
             data={
                 **verdict.extra_response_data,
-                "call_id": call_id,
+                "call_id": workspace.call_id,
                 "truncated": truncated,
                 "prelude_ms": prelude_ms,
             },
         )
     return ToolResponse.success(
-        summary=f"introspect call {call_id[:8]} ok",
-        run_id=run_id,
+        summary=f"introspect call {workspace.call_id[:8]} ok",
+        run_id=context.run_id,
         status=StepStatus.SUCCEEDED,
         artifacts=public_artifacts,
-        suggested_next_actions=["artifacts.get_manifest", operation_name],
+        suggested_next_actions=["artifacts.get_manifest", context.operation_name],
         data=success_response,
     )
 
 
-def _finalize_introspect_call(
-    *,
-    store: ArtifactStore,
-    run_id: str,
-    workspace: IntrospectFinalizationWorkspace,
-    run: IntrospectFinalizationRun,
-    redactor: Redactor,
-    expected_build_id: str,
-    request_timeout_seconds: int,
-    operation_name: str,
-    drgn_open_message: str,
-    exec_principal: str | None,
-    post_validator: IntrospectPostValidator | None,
-    allow_write: bool = False,
-    acknowledged_permissions: list[str] | None = None,
-) -> ToolResponse:
+def _finalize_introspect_call(context: IntrospectFinalizationContext) -> ToolResponse:
     """Shared post-runner stage for both the live (`_execute_introspect_call`)
     and offline (`_execute_vmcore_introspect_call`) paths (spec §7 / ADR 0010).
 
@@ -687,6 +676,8 @@ def _finalize_introspect_call(
     paths; only `expected_build_id`, `exec_principal` (None for vmcore — no SSH
     user), `operation_name`, `drgn_open_message`, and `post_validator` differ.
     """
+    workspace = context.workspace
+    run = context.run
 
     def _fail(
         *,
@@ -700,25 +691,25 @@ def _finalize_introspect_call(
         redacted_payload: dict[str, Any] | None = None,
     ) -> ToolResponse:
         return _record_introspect_failure(
-            store=store,
-            run_id=run_id,
+            store=context.store,
+            run_id=context.run_id,
             call_id=workspace.call_id,
             category=category,
             code=code,
             message=message,
             agent_dir=workspace.agent_dir,
             sensitive_dir=workspace.sensitive_call_dir,
-            redactor=redactor,
+            redactor=context.redactor,
             raw_stderr=raw_stderr,
             ssh_exit=ssh_exit,
-            request_timeout_seconds=request_timeout_seconds,
+            request_timeout_seconds=context.request_timeout_seconds,
             duration_ms=run.duration_ms,
-            ssh_user=exec_principal,
+            ssh_user=context.exec_principal,
             outcome_status_for_forensics=outcome_status_for_forensics,
             include_stdout_json=include_stdout_json,
             redacted_payload=redacted_payload,
-            allow_write=allow_write,
-            acknowledged_permissions=acknowledged_permissions,
+            allow_write=context.allow_write,
+            acknowledged_permissions=context.acknowledged_permissions,
         )
 
     _, raw_stderr, parsed, ssh_exit, terminal = _triage_introspect_runner_output(
@@ -731,7 +722,7 @@ def _finalize_introspect_call(
         return terminal
 
     # JSON parsed. Discriminate on outcome.status per §4.3.
-    redacted_payload = redactor.redact_value(parsed)
+    redacted_payload = context.redactor.redact_value(parsed)
     outcome_obj = redacted_payload.get("outcome") if isinstance(redacted_payload, dict) else None
     outcome_status = outcome_obj.get("status") if isinstance(outcome_obj, dict) else None
 
@@ -739,8 +730,8 @@ def _finalize_introspect_call(
         parsed=parsed,
         redacted_payload=redacted_payload,
         outcome_status=outcome_status,
-        expected_build_id=expected_build_id,
-        drgn_open_message=drgn_open_message,
+        expected_build_id=context.expected_build_id,
+        drgn_open_message=context.drgn_open_message,
         raw_stderr=raw_stderr,
         ssh_exit=ssh_exit,
         fail=_fail,
@@ -749,25 +740,10 @@ def _finalize_introspect_call(
         return terminal
 
     return _record_introspect_success(
-        store=store,
-        run_id=run_id,
-        call_id=workspace.call_id,
-        ssh_result=run.ssh_result,
-        agent_dir=workspace.agent_dir,
-        sensitive_call_dir=workspace.sensitive_call_dir,
+        context=context,
         redacted_payload=redacted_payload,
         outcome_status=outcome_status,
         raw_stderr=raw_stderr,
-        redactor=redactor,
-        request_timeout_seconds=request_timeout_seconds,
-        started_at=run.started_at,
-        finished_at=run.finished_at,
-        duration_ms=run.duration_ms,
-        operation_name=operation_name,
-        exec_principal=exec_principal,
-        post_validator=post_validator,
-        allow_write=allow_write,
-        acknowledged_permissions=acknowledged_permissions,
     )
 
 
