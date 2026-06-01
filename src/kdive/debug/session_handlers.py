@@ -313,6 +313,21 @@ class _DebugStartAttach:
 
 
 @dataclass(frozen=True)
+class _DebugStartRuntime:
+    transaction: TransportTransaction
+    admission: AdmissionService
+    session_registry: SessionRegistry
+    gdb_mi_engine: GdbMiEngine
+    gdb_mi_sessions: GdbMiSessionRegistry
+
+
+@dataclass(frozen=True)
+class _DebugStartReadiness:
+    runtime: _DebugStartRuntime
+    replace_existing_debug: bool
+
+
+@dataclass(frozen=True)
 class _DebugStartPersisted:
     artifacts: list[ArtifactRef]
     details: dict[str, Any]
@@ -455,20 +470,18 @@ def _cleanup_debug_start_session_attach(
     )
 
 
-def _debug_start_session_locked_attach(
+def _debug_start_session_reuse_or_readiness(
     *,
     run_id: str,
     preflight: _DebugStartPreflight,
     new_session: bool,
-    recovery: bool,
     build_id_reader: Callable[[Path], str],
     transaction: TransportTransaction | None,
     admission: AdmissionService | None,
     session_registry: SessionRegistry | None,
-    session_guard: SessionGuard | None,
     gdb_mi_engine: GdbMiEngine | None,
     gdb_mi_sessions: GdbMiSessionRegistry | None,
-) -> tuple[_DebugStartAttach | None, ToolResponse | None]:
+) -> tuple[_DebugStartReadiness | None, ToolResponse | None]:
     store = preflight.store
     redactor = preflight.redactor
     locked_manifest = store.load_manifest(run_id)
@@ -513,7 +526,30 @@ def _debug_start_session_locked_attach(
     session_registry = _require_value(session_registry, "debug session registry missing after availability check")
     gdb_mi_engine = _require_value(gdb_mi_engine, "debug gdb/MI engine missing after availability check")
     gdb_mi_sessions = _require_value(gdb_mi_sessions, "debug gdb/MI registry missing after availability check")
+    return (
+        _DebugStartReadiness(
+            runtime=_DebugStartRuntime(
+                transaction=transaction,
+                admission=admission,
+                session_registry=session_registry,
+                gdb_mi_engine=gdb_mi_engine,
+                gdb_mi_sessions=gdb_mi_sessions,
+            ),
+            replace_existing_debug=replace_existing_debug,
+        ),
+        None,
+    )
 
+
+def _debug_start_session_open_and_probe(
+    *,
+    run_id: str,
+    preflight: _DebugStartPreflight,
+    readiness: _DebugStartReadiness,
+    recovery: bool,
+    session_guard: SessionGuard | None,
+) -> tuple[_DebugStartAttach | None, ToolResponse | None]:
+    runtime = readiness.runtime
     target_key = TargetKey(provisioner="local-qemu", target_id=run_id)
     if session_guard is not None:
         try:
@@ -532,8 +568,12 @@ def _debug_start_session_locked_attach(
                 ),
             )
     try:
-        request = _debug_open_request(run_id=run_id, gdbstub_endpoint=preflight.gdbstub_endpoint, admission=admission)
-        transport_session = transaction.open(request, recovery=recovery)
+        request = _debug_open_request(
+            run_id=run_id,
+            gdbstub_endpoint=preflight.gdbstub_endpoint,
+            admission=runtime.admission,
+        )
+        transport_session = runtime.transaction.open(request, recovery=recovery)
     except (GuardConflict, EndpointSafetyError) as exc:
         return (
             None,
@@ -557,21 +597,25 @@ def _debug_start_session_locked_attach(
             ),
         )
 
-    halt_debug_transport(session=transport_session, admission=admission, session_registry=session_registry)
+    halt_debug_transport(
+        session=transport_session,
+        admission=runtime.admission,
+        session_registry=runtime.session_registry,
+    )
     session_id = f"debug-{uuid.uuid4().hex}"
     probe_failure, mi_probe_details = _run_mi_attach_probe(
-        engine=gdb_mi_engine,
+        engine=runtime.gdb_mi_engine,
         transport_session=transport_session,
         vmlinux_path=Path(preflight.vmlinux.path),
-        run_dir=store.run_dir(run_id),
+        run_dir=preflight.store.run_dir(run_id),
         run_id=run_id,
         session_id=session_id,
-        gdb_mi_sessions=gdb_mi_sessions,
-        transaction=transaction,
-        admission=admission,
-        session_registry=session_registry,
+        gdb_mi_sessions=runtime.gdb_mi_sessions,
+        transaction=runtime.transaction,
+        admission=runtime.admission,
+        session_registry=runtime.session_registry,
         session_guard=session_guard,
-        redactor=redactor,
+        redactor=preflight.redactor,
     )
     if probe_failure is not None:
         return None, probe_failure
@@ -581,9 +625,46 @@ def _debug_start_session_locked_attach(
             transport_session=transport_session,
             session_id=session_id,
             mi_probe_details=mi_probe_details,
-            replace_existing_debug=replace_existing_debug,
+            replace_existing_debug=readiness.replace_existing_debug,
         ),
         None,
+    )
+
+
+def _debug_start_session_locked_attach(
+    *,
+    run_id: str,
+    preflight: _DebugStartPreflight,
+    new_session: bool,
+    recovery: bool,
+    build_id_reader: Callable[[Path], str],
+    transaction: TransportTransaction | None,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+    session_guard: SessionGuard | None,
+    gdb_mi_engine: GdbMiEngine | None,
+    gdb_mi_sessions: GdbMiSessionRegistry | None,
+) -> tuple[_DebugStartAttach | None, ToolResponse | None]:
+    readiness, readiness_failure = _debug_start_session_reuse_or_readiness(
+        run_id=run_id,
+        preflight=preflight,
+        new_session=new_session,
+        build_id_reader=build_id_reader,
+        transaction=transaction,
+        admission=admission,
+        session_registry=session_registry,
+        gdb_mi_engine=gdb_mi_engine,
+        gdb_mi_sessions=gdb_mi_sessions,
+    )
+    if readiness_failure is not None:
+        return None, readiness_failure
+    readiness = _require_value(readiness, "debug readiness missing without failure")
+    return _debug_start_session_open_and_probe(
+        run_id=run_id,
+        preflight=preflight,
+        readiness=readiness,
+        recovery=recovery,
+        session_guard=session_guard,
     )
 
 
