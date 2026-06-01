@@ -7,12 +7,13 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
+from kdive.artifacts.steps import record_append_only_terminal_step
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import (
     DEFAULT_FETCH_MAX_BYTES,
@@ -34,7 +35,6 @@ from kdive.domain import (
     ToolResponse,
 )
 from kdive.handlers.shared import _require_value
-from kdive.introspect.execution import _record_terminal_introspect_result, _utcnow
 from kdive.introspect.handlers import debug_introspect_from_vmcore_helper_handler
 from kdive.postmortem.crash_handler import (
     debug_postmortem_crash_handler,
@@ -78,6 +78,10 @@ from kdive.symbols.build_id import read_elf_build_id
 from kdive.symbols.vmcore_build_id import read_vmcore_build_id
 
 SSH_TIMEOUT_GRACE_SECONDS = 10
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 @dataclass(frozen=True)
@@ -797,7 +801,7 @@ def _record_failed_triage(
             "section_reasons": section_reasons,
         }
     )
-    _record_terminal_introspect_result(
+    record_append_only_terminal_step(
         store,
         run_id,
         StepResult(
@@ -843,7 +847,7 @@ def _persist_successful_triage_report(
             redacted_report["modules"],
         )
     )
-    _record_terminal_introspect_result(
+    record_append_only_terminal_step(
         store,
         run_id,
         StepResult(

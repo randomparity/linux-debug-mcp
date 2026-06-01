@@ -18,6 +18,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from kdive.artifacts.manifest import RunManifest
+from kdive.artifacts.steps import record_append_only_terminal_step as _record_terminal_introspect_result
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import (
     INTROSPECT_DESTRUCTIVE_PERMISSIONS,
@@ -136,11 +137,6 @@ def _chmod_best_effort(path: Path, mode: int) -> None:
     TOCTOU handling here keeps the several sensitive-file tightening sites from each re-deriving it."""
     with contextlib.suppress(FileNotFoundError):
         path.chmod(mode)
-
-
-def _record_terminal_introspect_result(store: ArtifactStore, run_id: str, result: StepResult) -> None:
-    # Spec §5.2 step 13: every introspect:<call_id> is a fresh entry (UUIDv4) — append, never replace.
-    _record_introspect_step_with_retry(store, run_id, result, append=True)
 
 
 def _record_introspect_failure(

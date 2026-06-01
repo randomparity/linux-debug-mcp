@@ -157,6 +157,13 @@ def test_shared_probe_boundary_does_not_import_private_transport_handlers() -> N
     assert "require_target_snapshot" in _imported_names(PROBE_SEAM_SOURCE, "kdive.coordination.admission")
 
 
+def test_postmortem_handlers_do_not_import_introspect_execution_internals() -> None:
+    imported = _imported_names(POSTMORTEM_HANDLERS_SOURCE, "kdive.introspect.execution")
+
+    assert "_record_terminal_introspect_result" not in imported
+    assert "_utcnow" not in imported
+
+
 def test_debug_features_do_not_import_private_transport_handler_helpers() -> None:
     feature_sources = [
         ROOT / "src" / "kdive" / "debug" / "operations.py",
