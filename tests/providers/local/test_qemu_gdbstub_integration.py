@@ -7,7 +7,7 @@ from workflow_helpers import call_workflow_build_boot_debug_handler
 
 from kdive import server
 from kdive.config import RootfsProfile, TargetProfile
-from kdive.debug.handlers import DebugRuntime
+from kdive.debug.contracts import DebugRuntime
 from kdive.debug.session_handlers import _start_session as debug_start_session_handler
 from kdive.providers.local.debug.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
 from kdive.server import _workflow_handler_dependencies, workflow_build_boot_debug_handler

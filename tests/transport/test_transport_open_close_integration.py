@@ -193,7 +193,7 @@ def test_qemu_gdbstub_flow_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     from kdive import server
     from kdive.config import RootfsProfile, TargetProfile
-    from kdive.debug.handlers import DebugRuntime
+    from kdive.debug.contracts import DebugRuntime
     from kdive.providers.local.debug.gdb_mi import GdbMiEngine, GdbMiSessionRegistry
     from kdive.server import (
         _build_transport_machinery,

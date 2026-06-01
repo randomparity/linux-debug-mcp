@@ -85,7 +85,7 @@ from kdive.coordination.registry import (
     SessionRegistry,
 )
 from kdive.coordination.transaction import TransportTransaction
-from kdive.debug.handlers import DebugRuntime
+from kdive.debug.contracts import DebugRuntime
 from kdive.debug.policy import halt_debug_transport
 from kdive.domain import ErrorCategory, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry

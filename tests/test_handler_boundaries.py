@@ -219,32 +219,19 @@ def test_transport_and_prereq_handlers_accept_structured_boundaries_only() -> No
 
 
 def test_debug_handlers_accept_structured_boundaries_only() -> None:
-    from kdive.debug import handlers, module_symbols, session_end, session_handlers
+    import importlib.util
+
+    from kdive.debug import module_symbols, session_end, session_handlers
 
     debug_handlers = [
         session_handlers.debug_start_session_handler,
-        handlers.debug_read_registers_handler,
-        handlers.debug_read_symbol_handler,
-        handlers.debug_read_memory_handler,
-        handlers.debug_evaluate_handler,
         module_symbols.debug_load_module_symbols_handler,
-        handlers.debug_set_breakpoint_handler,
-        handlers.debug_set_watchpoint_handler,
-        handlers.debug_clear_breakpoint_handler,
-        handlers.debug_clear_watchpoint_handler,
-        handlers.debug_list_breakpoints_handler,
-        handlers.debug_backtrace_handler,
-        handlers.debug_list_variables_handler,
-        handlers.debug_continue_handler,
-        handlers.debug_step_handler,
-        handlers.debug_next_handler,
-        handlers.debug_finish_handler,
-        handlers.debug_interrupt_handler,
         session_end.debug_end_session_handler,
     ]
 
     for handler in debug_handlers:
         assert list(inspect.signature(handler).parameters) == ["request", "runtime"]
+    assert importlib.util.find_spec("kdive.debug.handlers") is None
 
 
 def test_target_and_kernel_handlers_accept_structured_boundaries_only() -> None:

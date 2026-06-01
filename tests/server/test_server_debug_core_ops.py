@@ -30,7 +30,6 @@ from kdive.coordination.admission import AdmissionService, publish_ready_snapsho
 from kdive.coordination.registry import SessionRegistry
 from kdive.coordination.transaction import TransportTransaction
 from kdive.debug import contracts as debug_contracts
-from kdive.debug import handlers as debug_handlers
 from kdive.debug import operations as debug_operations
 from kdive.debug import session_end as debug_session_end
 from kdive.debug import session_handlers
@@ -274,7 +273,7 @@ def test_debug_operation_handlers_route_directly_to_core_response() -> None:
     """Public debug.* handlers should be the adapter layer; avoid a second pass-through wrapper tier."""
     assert not hasattr(server_module, "_debug_read_response")
     assert not hasattr(server_module, "_debug_stateful_response")
-    assert not hasattr(debug_handlers, "debug_runtime_from_handler_args")
+    assert not hasattr(debug_tools, "debug_runtime_from_handler_args")
 
 
 def test_debug_start_session_handler_lives_in_debug_layer() -> None:
@@ -320,9 +319,12 @@ def test_debug_start_locked_attach_uses_grouped_runtime_boundary() -> None:
 
 def test_debug_operation_handlers_use_typed_operation_requests() -> None:
     """Handlers should construct typed operation requests instead of string names and kwargs bags."""
-    assert not hasattr(debug_handlers, "DEBUG_HANDLER_OPERATION_SPECS")
-    assert not hasattr(debug_handlers, "DebugHandlerOperationSpec")
-    assert not hasattr(debug_handlers, "debug_operation_arguments")
+    import importlib.util
+
+    assert importlib.util.find_spec("kdive.debug.handlers") is None
+    assert not hasattr(debug_tools, "DEBUG_HANDLER_OPERATION_SPECS")
+    assert not hasattr(debug_tools, "DebugHandlerOperationSpec")
+    assert not hasattr(debug_tools, "debug_operation_arguments")
 
     request = debug_contracts.DebugReadMemoryRequest(address=0x1000, byte_count=16)
     assert request.profile_operation == "debug.read_memory"
@@ -369,16 +371,13 @@ def test_debug_tool_registration_is_split_by_operation_family() -> None:
 
 
 def test_debug_operation_handler_builds_runtime_without_pass_through_layers() -> None:
+    import importlib.util
+
     assert debug_operations.debug_operation_response.__module__ == "kdive.debug.operations"
     assert debug_operations._debug_operation_response is debug_operations.debug_operation_response
     assert debug_contracts.DebugRuntime.__module__ == "kdive.debug.contracts"
     assert debug_operations.DebugRuntime is debug_contracts.DebugRuntime
-    assert not hasattr(debug_handlers, "debug_tool_operation_response")
-    assert not hasattr(debug_handlers, "_runtime_from_operation_args")
-    assert not hasattr(debug_handlers, "_debug_operation_handler")
-    assert not hasattr(debug_handlers, "configure_debug_operation_core")
-    assert not hasattr(debug_handlers, "_DEBUG_OPERATION_CORE")
-    assert not hasattr(debug_handlers, "_default_debug_operation_core")
+    assert importlib.util.find_spec("kdive.debug.handlers") is None
     assert not hasattr(server_module, "debug_handlers")
     assert not hasattr(server_module, "_debug_operation_response")
 
@@ -406,30 +405,9 @@ def test_debug_operation_handlers_accept_runtime_instead_of_dependency_bundle() 
         "gdb_mi_sessions",
     }
 
-    operation_handler_names = (
-        "debug_read_registers_handler",
-        "debug_read_symbol_handler",
-        "debug_read_memory_handler",
-        "debug_evaluate_handler",
-        "debug_set_breakpoint_handler",
-        "debug_set_watchpoint_handler",
-        "debug_clear_breakpoint_handler",
-        "debug_clear_watchpoint_handler",
-        "debug_list_breakpoints_handler",
-        "debug_backtrace_handler",
-        "debug_list_variables_handler",
-        "debug_continue_handler",
-        "debug_step_handler",
-        "debug_next_handler",
-        "debug_finish_handler",
-        "debug_interrupt_handler",
-    )
-
-    for handler_name in operation_handler_names:
-        handler = getattr(debug_handlers, handler_name)
-        params = inspect.signature(handler).parameters
-        assert list(params) == ["request", "runtime"]
-        assert dependency_params.isdisjoint(params)
+    params = inspect.signature(debug_operations.debug_operation_response).parameters
+    assert list(params) == ["artifact_root", "run_id", "debug_session_id", "request", "runtime", "allow_ended"]
+    assert dependency_params.isdisjoint(params)
 
     assert not hasattr(debug_tools, "_debug_runtime_kwargs")
     assert not hasattr(debug_tools, "_gated_debug_runtime_kwargs")
@@ -463,25 +441,20 @@ def test_debug_bound_handler_adapter_module_is_removed() -> None:
 
 
 def test_debug_operation_handlers_accept_request_runtime_boundary() -> None:
-    for handler_name in (
-        "debug_read_registers_handler",
-        "debug_read_symbol_handler",
-        "debug_read_memory_handler",
-        "debug_evaluate_handler",
-    ):
-        assert callable(getattr(debug_handlers, handler_name))
-        assert list(inspect.signature(getattr(debug_handlers, handler_name)).parameters) == ["request", "runtime"]
-    assert not hasattr(debug_handlers, "_make_operation_request_handler")
-    assert not hasattr(debug_handlers, "_debug_read_registers_leaf_handler")
+    params = inspect.signature(debug_operations.debug_operation_response).parameters
+    assert list(params) == ["artifact_root", "run_id", "debug_session_id", "request", "runtime", "allow_ended"]
+    assert params["request"].annotation == "DebugOperationRequest"
 
 
 def test_debug_operation_handlers_hide_explicit_operation_core(tmp_path: Path) -> None:
     with pytest.raises(TypeError, match="unexpected keyword"):
-        debug_handlers.debug_read_registers_handler(
+        debug_operations.debug_operation_response(
             artifact_root=tmp_path / "runs",
             run_id="run-1",
-            registers=["rax"],
+            debug_session_id=None,
+            request=debug_contracts.DebugReadRegistersRequest(registers=["rax"]),
             runtime=debug_contracts.DebugRuntime(),
+            operation=object(),
         )
 
 

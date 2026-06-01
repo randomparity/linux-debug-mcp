@@ -17,7 +17,7 @@ from handler_call_helpers import debug_read_registers_handler
 
 from kdive.artifacts.store import ArtifactStore
 from kdive.config import DebugProfile
-from kdive.debug.handlers import DebugRuntime
+from kdive.debug.contracts import DebugRuntime
 from kdive.debug.session_handlers import _start_session as debug_start_session_handler
 from kdive.domain import ArtifactRef, RunRequest, StepResult, StepStatus
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry

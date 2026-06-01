@@ -42,7 +42,7 @@ from conftest import (
 from handler_call_helpers import debug_continue_handler, debug_read_registers_handler
 
 from kdive.config import RootfsProfile
-from kdive.debug.handlers import DebugRuntime
+from kdive.debug.contracts import DebugRuntime
 from kdive.debug.session_end import _end_session as debug_end_session_handler
 from kdive.domain import ErrorCategory
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry
