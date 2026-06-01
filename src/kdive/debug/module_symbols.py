@@ -3,7 +3,9 @@ from __future__ import annotations
 import contextlib
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import DebugProfile, RootfsProfile
@@ -22,7 +24,14 @@ from kdive.debug.operations import (
 )
 from kdive.default_profiles import DEFAULT_ROOTFS_PROFILES
 from kdive.domain import ErrorCategory, StepResult, StepStatus, ToolResponse
-from kdive.providers.debug import GdbMiEngine, GdbMiError, GdbMiSessionRegistry, ProviderDebugError
+from kdive.providers.debug import (
+    DebugSession,
+    GdbMiEngine,
+    GdbMiError,
+    GdbMiLoadedModule,
+    GdbMiSessionRegistry,
+    ProviderDebugError,
+)
 from kdive.providers.ssh import SshRunner, SubprocessSshRunner, build_ssh_argv
 from kdive.safety.paths import PathSafetyError
 from kdive.safety.redaction import Redactor
@@ -39,6 +48,19 @@ _MODULE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MODULE_SECTION_FILES = (".text", ".data", ".rodata", ".bss")
 # Emitted by the remote reader when /sys/module/<name>/sections is absent (module not loaded).
 _NO_MODULE_SENTINEL = "__NO_MODULE__"
+
+
+@dataclass(frozen=True)
+class _ResolvedModuleSymbolLoadRequest:
+    session: DebugSession
+    attachment: Any
+    sections: dict[str, str]
+    ko_path: Path
+
+
+@dataclass(frozen=True)
+class _CompletedModuleSymbolLoad:
+    loaded_payload: dict[str, object]
 
 
 def _read_module_sections(
@@ -145,117 +167,28 @@ def debug_load_module_symbols_handler(
         )
     redactor = Redactor()
     finder = module_ko_finder or _default_module_ko_finder
-    loaded_payload: dict[str, object] = {}
     try:
-        with store.debug_lock(run_id):
-            session = _load_active_debug_session(store, run_id, debug_session_id)
-            _enforce_debug_ownership_fence(run_id=run_id, admission=admission, session_registry=session_registry)
-            profile = _resolve_debug_profile(profile_name=session.selected_debug_profile, debug_profiles=debug_profiles)
-            _ensure_debug_operation_enabled(profile, "debug.load_module_symbols")
-            if not _MODULE_NAME_RE.match(module):
-                return _configuration_failure(
-                    run_id=run_id,
-                    message=f"module must be a bare module identifier, got {module!r}",
-                    details={"code": "invalid_module_name", "module": module},
-                )
-            attachment = gdb_mi_sessions.require(session.session_id)
-            resolved_sections = _resolve_module_sections(
-                store=store,
-                run_id=run_id,
-                module=module,
-                sections=sections,
-                ssh_runner=ssh_runner,
-                rootfs_profiles=rootfs_profiles,
-            )
-            existing = session.loaded_modules.get(module)
-            if existing is not None:
-                if existing.get(".text") == resolved_sections.get(".text"):
-                    return ToolResponse.success(
-                        summary=f"module {module} symbols already loaded",
-                        run_id=run_id,
-                        data={"loaded_module": {"name": module, "sections": existing}},
-                        suggested_next_actions=["debug.set_breakpoint"],
-                    )
-                return _configuration_failure(
-                    run_id=run_id,
-                    message=f"module {module} .text address changed since it was loaded; re-attach (debug.end_session)",
-                    details={"code": "module_address_changed", "module": module},
-                )
-            build_tree = store.run_dir(run_id) / "build"
-            resolved_ko = _resolve_module_ko(build_tree=build_tree, module=module, ko_path=ko_path, finder=finder)
-            if resolved_ko is None:
-                return _configuration_failure(
-                    run_id=run_id,
-                    message=f"no module object (.ko/.ko.debug) found for {module} under the build tree",
-                    details={
-                        "code": "module_object_not_found",
-                        "module": module,
-                        "spellings_tried": [module, module.replace("_", "-"), module.replace("-", "_")],
-                    },
-                )
-            try:
-                loaded = gdb_mi_engine.load_module_symbols(
-                    attachment,
-                    name=module,
-                    ko_path=resolved_ko,
-                    sections=resolved_sections,
-                )
-            except GdbMiError as exc:
-                if exc.details.get("code") == "transport_stall":
-                    reaped = gdb_mi_sessions.reap(session.session_id)
-                    if reaped is not None:
-                        with contextlib.suppress(Exception):
-                            gdb_mi_engine.force_resume(reaped)
-                    _teardown_stalled_debug_session(
-                        run_id=run_id,
-                        admission=admission,
-                        session_registry=session_registry,
-                        transaction=transaction,
-                        session_guard=session_guard,
-                    )
-                    return ToolResponse.failure(
-                        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                        message=redactor.redact_text(str(exc)),
-                        run_id=run_id,
-                        details={"code": "transport_stall"},
-                        suggested_next_actions=["debug.start_session", "debug.kdb", "debug.introspect.run"],
-                    )
-                raise
-            except ProviderDebugError:
-                raise
-            except Exception as exc:
-                reaped = gdb_mi_sessions.reap(session.session_id)
-                if reaped is not None:
-                    with contextlib.suppress(Exception):
-                        gdb_mi_engine.force_resume(reaped)
-                return ToolResponse.failure(
-                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                    message=redactor.redact_text(f"the gdb/MI engine faulted during debug.load_module_symbols: {exc}"),
-                    run_id=run_id,
-                    details={"code": "debug_engine_faulted"},
-                    suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
-                )
-            ledger = dict(session.loaded_modules)
-            ledger[module] = dict(loaded.sections)
-            updated_session = session.model_copy(update={"loaded_modules": ledger})
-            loaded_payload = loaded.model_dump(mode="json")
-            _persist_mi_debug_session(store=store, run_id=run_id, session=updated_session)
-            details = {
-                **_debug_session_manifest_details(store=store, run_id=run_id, session=updated_session),
-                **_preserved_debug_step_details(store, run_id),
-                "loaded_module": loaded_payload,
-            }
-            store.record_step_result(
-                run_id,
-                StepResult(
-                    step_name="debug",
-                    status=StepStatus.SUCCEEDED,
-                    summary="debug.load_module_symbols succeeded",
-                    artifacts=_mi_session_artifacts(store=store, run_id=run_id, session=updated_session),
-                    details=details,
-                ),
-                replace_succeeded=True,
-            )
+        completed = _locked_module_symbol_load(
+            store=store,
+            run_id=run_id,
+            module=module,
+            sections=sections,
+            ko_path=ko_path,
+            debug_session_id=debug_session_id,
+            debug_profiles=debug_profiles,
+            rootfs_profiles=rootfs_profiles,
+            ssh_runner=ssh_runner,
+            finder=finder,
+            transaction=transaction,
+            admission=admission,
+            session_registry=session_registry,
+            session_guard=session_guard,
+            gdb_mi_engine=gdb_mi_engine,
+            gdb_mi_sessions=gdb_mi_sessions,
+            redactor=redactor,
+        )
+        if isinstance(completed, ToolResponse):
+            return completed
     except ManifestStateError as exc:
         return ToolResponse.failure(category=exc.category, message=str(exc), run_id=run_id)
     except ProviderDebugError as exc:
@@ -285,9 +218,230 @@ def debug_load_module_symbols_handler(
     return ToolResponse.success(
         summary=f"debug.load_module_symbols loaded {module}",
         run_id=run_id,
-        data=redactor.redact_value({"loaded_module": loaded_payload}),
+        data=redactor.redact_value({"loaded_module": completed.loaded_payload}),
         suggested_next_actions=["debug.set_breakpoint"],
     )
+
+
+def _resolve_module_symbol_load_request(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    module: str,
+    sections: dict[str, str] | None,
+    ko_path: str | None,
+    debug_session_id: str | None,
+    debug_profiles: dict[str, DebugProfile] | None,
+    rootfs_profiles: dict[str, RootfsProfile] | None,
+    ssh_runner: SshRunner | None,
+    finder: Callable[[Path, str], Path | None],
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+    gdb_mi_sessions: GdbMiSessionRegistry[Any],
+) -> _ResolvedModuleSymbolLoadRequest | ToolResponse:
+    session = _load_active_debug_session(store, run_id, debug_session_id)
+    _enforce_debug_ownership_fence(run_id=run_id, admission=admission, session_registry=session_registry)
+    profile = _resolve_debug_profile(profile_name=session.selected_debug_profile, debug_profiles=debug_profiles)
+    _ensure_debug_operation_enabled(profile, "debug.load_module_symbols")
+    if not _MODULE_NAME_RE.match(module):
+        return _configuration_failure(
+            run_id=run_id,
+            message=f"module must be a bare module identifier, got {module!r}",
+            details={"code": "invalid_module_name", "module": module},
+        )
+    attachment = gdb_mi_sessions.require(session.session_id)
+    resolved_sections = _resolve_module_sections(
+        store=store,
+        run_id=run_id,
+        module=module,
+        sections=sections,
+        ssh_runner=ssh_runner,
+        rootfs_profiles=rootfs_profiles,
+    )
+    existing = session.loaded_modules.get(module)
+    if existing is not None:
+        if existing.get(".text") == resolved_sections.get(".text"):
+            return ToolResponse.success(
+                summary=f"module {module} symbols already loaded",
+                run_id=run_id,
+                data={"loaded_module": {"name": module, "sections": existing}},
+                suggested_next_actions=["debug.set_breakpoint"],
+            )
+        return _configuration_failure(
+            run_id=run_id,
+            message=f"module {module} .text address changed since it was loaded; re-attach (debug.end_session)",
+            details={"code": "module_address_changed", "module": module},
+        )
+    resolved_ko = _resolve_module_ko(
+        build_tree=store.run_dir(run_id) / "build",
+        module=module,
+        ko_path=ko_path,
+        finder=finder,
+    )
+    if resolved_ko is None:
+        return _configuration_failure(
+            run_id=run_id,
+            message=f"no module object (.ko/.ko.debug) found for {module} under the build tree",
+            details={
+                "code": "module_object_not_found",
+                "module": module,
+                "spellings_tried": [module, module.replace("_", "-"), module.replace("-", "_")],
+            },
+        )
+    return _ResolvedModuleSymbolLoadRequest(
+        session=session,
+        attachment=attachment,
+        sections=resolved_sections,
+        ko_path=resolved_ko,
+    )
+
+
+def _locked_module_symbol_load(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    module: str,
+    sections: dict[str, str] | None,
+    ko_path: str | None,
+    debug_session_id: str | None,
+    debug_profiles: dict[str, DebugProfile] | None,
+    rootfs_profiles: dict[str, RootfsProfile] | None,
+    ssh_runner: SshRunner | None,
+    finder: Callable[[Path, str], Path | None],
+    transaction: TransportTransaction | None,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+    session_guard: SessionGuard | None,
+    gdb_mi_engine: GdbMiEngine[Any],
+    gdb_mi_sessions: GdbMiSessionRegistry[Any],
+    redactor: Redactor,
+) -> _CompletedModuleSymbolLoad | ToolResponse:
+    with store.debug_lock(run_id):
+        resolved = _resolve_module_symbol_load_request(
+            store=store,
+            run_id=run_id,
+            module=module,
+            sections=sections,
+            ko_path=ko_path,
+            debug_session_id=debug_session_id,
+            debug_profiles=debug_profiles,
+            rootfs_profiles=rootfs_profiles,
+            ssh_runner=ssh_runner,
+            finder=finder,
+            admission=admission,
+            session_registry=session_registry,
+            gdb_mi_sessions=gdb_mi_sessions,
+        )
+        if isinstance(resolved, ToolResponse):
+            return resolved
+        try:
+            loaded = gdb_mi_engine.load_module_symbols(
+                resolved.attachment,
+                name=module,
+                ko_path=resolved.ko_path,
+                sections=resolved.sections,
+            )
+        except GdbMiError as exc:
+            if exc.details.get("code") == "transport_stall":
+                return _cleanup_stalled_module_symbol_load(
+                    run_id=run_id,
+                    session=resolved.session,
+                    error=exc,
+                    redactor=redactor,
+                    transaction=transaction,
+                    admission=admission,
+                    session_registry=session_registry,
+                    session_guard=session_guard,
+                    gdb_mi_engine=gdb_mi_engine,
+                    gdb_mi_sessions=gdb_mi_sessions,
+                )
+            raise
+        except ProviderDebugError:
+            raise
+        except Exception as exc:
+            reaped = gdb_mi_sessions.reap(resolved.session.session_id)
+            if reaped is not None:
+                with contextlib.suppress(Exception):
+                    gdb_mi_engine.force_resume(reaped)
+            return ToolResponse.failure(
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                message=redactor.redact_text(f"the gdb/MI engine faulted during debug.load_module_symbols: {exc}"),
+                run_id=run_id,
+                details={"code": "debug_engine_faulted"},
+                suggested_next_actions=["debug.end_session", "artifacts.get_manifest"],
+            )
+        return _record_module_symbol_load_success(
+            store=store,
+            run_id=run_id,
+            module=module,
+            session=resolved.session,
+            loaded=loaded,
+        )
+
+
+def _cleanup_stalled_module_symbol_load(
+    *,
+    run_id: str,
+    session: DebugSession,
+    error: GdbMiError,
+    redactor: Redactor,
+    transaction: TransportTransaction | None,
+    admission: AdmissionService | None,
+    session_registry: SessionRegistry | None,
+    session_guard: SessionGuard | None,
+    gdb_mi_engine: GdbMiEngine[Any],
+    gdb_mi_sessions: GdbMiSessionRegistry[Any],
+) -> ToolResponse:
+    reaped = gdb_mi_sessions.reap(session.session_id)
+    if reaped is not None:
+        with contextlib.suppress(Exception):
+            gdb_mi_engine.force_resume(reaped)
+    _teardown_stalled_debug_session(
+        run_id=run_id,
+        admission=admission,
+        session_registry=session_registry,
+        transaction=transaction,
+        session_guard=session_guard,
+    )
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        message=redactor.redact_text(str(error)),
+        run_id=run_id,
+        details={"code": "transport_stall"},
+        suggested_next_actions=["debug.start_session", "debug.kdb", "debug.introspect.run"],
+    )
+
+
+def _record_module_symbol_load_success(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    module: str,
+    session: DebugSession,
+    loaded: GdbMiLoadedModule,
+) -> _CompletedModuleSymbolLoad:
+    ledger = dict(session.loaded_modules)
+    ledger[module] = dict(loaded.sections)
+    updated_session = session.model_copy(update={"loaded_modules": ledger})
+    loaded_payload = loaded.model_dump(mode="json")
+    _persist_mi_debug_session(store=store, run_id=run_id, session=updated_session)
+    details = {
+        **_debug_session_manifest_details(store=store, run_id=run_id, session=updated_session),
+        **_preserved_debug_step_details(store, run_id),
+        "loaded_module": loaded_payload,
+    }
+    store.record_step_result(
+        run_id,
+        StepResult(
+            step_name="debug",
+            status=StepStatus.SUCCEEDED,
+            summary="debug.load_module_symbols succeeded",
+            artifacts=_mi_session_artifacts(store=store, run_id=run_id, session=updated_session),
+            details=details,
+        ),
+        replace_succeeded=True,
+    )
+    return _CompletedModuleSymbolLoad(loaded_payload=loaded_payload)
 
 
 def _resolve_module_sections(

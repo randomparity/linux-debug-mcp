@@ -17,6 +17,7 @@ from test_server_debug_core_ops import (
 )
 
 from kdive.config import DebugProfile
+from kdive.debug import module_symbols
 from kdive.domain import ErrorCategory
 from kdive.providers.local.debug.gdb_mi import GdbMiSessionRegistry, LoadedModule
 from kdive.server import debug_load_module_symbols_handler
@@ -96,6 +97,16 @@ def _call(artifact_root, registry, txn, admission, engine, sessions, session_id,
 
 def test_debug_load_module_symbols_handler_lives_in_debug_layer() -> None:
     assert debug_load_module_symbols_handler.__module__.startswith("kdive.debug.")
+
+
+def test_debug_load_module_symbols_handler_is_split_into_phases() -> None:
+    for helper in (
+        "_resolve_module_symbol_load_request",
+        "_locked_module_symbol_load",
+        "_cleanup_stalled_module_symbol_load",
+        "_record_module_symbol_load_success",
+    ):
+        assert hasattr(module_symbols, helper)
 
 
 def test_reads_sysfs_sections_and_loads(tmp_path: Path) -> None:
