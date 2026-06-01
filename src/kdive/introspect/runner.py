@@ -97,6 +97,74 @@ class _IntrospectAdmission:
     handle: AdmissionHandle
 
 
+def _introspect_render_failure(
+    *,
+    store: ArtifactStore,
+    run_id: str,
+    call_id: str,
+    agent_dir: Path,
+    sensitive_call_dir: Path,
+    request: DebugIntrospectRunRequest,
+    resolved_rootfs: RootfsProfile,
+    admission: AdmissionService,
+    handle: AdmissionHandle,
+    exc: WrapperRenderError,
+) -> ToolResponse:
+    _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=run_id)
+    shutil.rmtree(agent_dir, ignore_errors=True)
+    shutil.rmtree(sensitive_call_dir, ignore_errors=True)
+    failed = StepResult(
+        step_name=f"introspect:{call_id}",
+        status=StepStatus.FAILED,
+        summary=f"wrapper render error: {exc}",
+        artifacts=[],
+        details={
+            "call_id": call_id,
+            "code": "wrapper_render_error",
+            "ssh_user": resolved_rootfs.ssh_user,
+            "outcome_status": None,
+            "timeout_seconds": request.timeout_seconds,
+            "duration_ms": 0,
+            "wrapper_exit_code": None,
+            "allow_write": request.allow_write,
+        },
+    )
+    _record_terminal_introspect_result(store, run_id, failed)
+    return ToolResponse.failure(
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        run_id=run_id,
+        message=f"wrapper render error: {exc}",
+        details={"code": "wrapper_render_error", "call_id": call_id},
+        suggested_next_actions=["artifacts.get_manifest"],
+    )
+
+
+def _persist_introspect_workspace_files(
+    *,
+    agent_dir: Path,
+    sensitive_call_dir: Path,
+    request: DebugIntrospectRunRequest,
+    wrapper: str,
+    skeleton: str,
+    redactor: Redactor,
+) -> None:
+    wrapper_path = sensitive_call_dir / "wrapper.py"
+    wrapper_fd = os.open(wrapper_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(wrapper_fd, "w", encoding="utf-8") as wrapper_handle:
+            wrapper_handle.write(wrapper)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            wrapper_path.unlink()
+        raise
+    (agent_dir / "wrapper.skeleton.py").write_text(skeleton, encoding="utf-8")
+
+    request_dump = request.model_dump(mode="json")
+    request_dump["script"] = f"sha256:{user_script_sha256(request.script)}"
+    redacted_request = redactor.redact_value(request_dump)
+    (agent_dir / "request.json").write_text(json.dumps(redacted_request), encoding="utf-8")
+
+
 def _prepare_introspect_call_workspace(
     *,
     store: ArtifactStore,
@@ -150,57 +218,34 @@ def _prepare_introspect_call_workspace(
             caps=caps,
         )
     except WrapperRenderError as exc:
-        # R6-F3: render failure before SSH ran. Release the admission handle,
-        # clean up the orphan directories, and write a forensic FAILED
-        # StepResult directly (no SSH means no stderr/stdout to redact via
-        # _record_introspect_failure).
-        _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=run_id)
-        shutil.rmtree(agent_dir, ignore_errors=True)
-        shutil.rmtree(sensitive_call_dir, ignore_errors=True)
-        failed = StepResult(
-            step_name=f"introspect:{call_id}",
-            status=StepStatus.FAILED,
-            summary=f"wrapper render error: {exc}",
-            artifacts=[],
-            details={
-                "call_id": call_id,
-                "code": "wrapper_render_error",
-                "ssh_user": resolved_rootfs.ssh_user,
-                "outcome_status": None,
-                "timeout_seconds": request.timeout_seconds,
-                "duration_ms": 0,
-                "wrapper_exit_code": None,
-                "allow_write": request.allow_write,
-            },
-        )
-        _record_terminal_introspect_result(store, run_id, failed)
-        return None, ToolResponse.failure(
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            run_id=run_id,
-            message=f"wrapper render error: {exc}",
-            details={"code": "wrapper_render_error", "call_id": call_id},
-            suggested_next_actions=["artifacts.get_manifest"],
+        return (
+            None,
+            _introspect_render_failure(
+                store=store,
+                run_id=run_id,
+                call_id=call_id,
+                agent_dir=agent_dir,
+                sensitive_call_dir=sensitive_call_dir,
+                request=request,
+                resolved_rootfs=resolved_rootfs,
+                admission=admission,
+                handle=handle,
+                exc=exc,
+            ),
         )
 
     # Create wrapper.py with mode=0o600 atomically — write_text + chmod leaves
     # a window where the file is umask-default readable.
-    wrapper_path = sensitive_call_dir / "wrapper.py"
-    wrapper_fd = os.open(wrapper_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(wrapper_fd, "w", encoding="utf-8") as wrapper_handle:
-            wrapper_handle.write(wrapper)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            wrapper_path.unlink()
-        raise
-    (agent_dir / "wrapper.skeleton.py").write_text(skeleton, encoding="utf-8")
-
     # Agent-visible request.json must not carry the plaintext script; the
     # protected wrapper.py in sensitive/ is the only source copy.
-    request_dump = request.model_dump(mode="json")
-    request_dump["script"] = f"sha256:{user_script_sha256(request.script)}"
-    redacted_request = redactor.redact_value(request_dump)
-    (agent_dir / "request.json").write_text(json.dumps(redacted_request), encoding="utf-8")
+    _persist_introspect_workspace_files(
+        agent_dir=agent_dir,
+        sensitive_call_dir=sensitive_call_dir,
+        request=request,
+        wrapper=wrapper,
+        skeleton=skeleton,
+        redactor=redactor,
+    )
 
     return (
         _IntrospectCallWorkspace(
