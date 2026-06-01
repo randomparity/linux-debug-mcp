@@ -620,8 +620,10 @@ class TransportTransaction:
         teardown, ADR 0013). MORE forceful than close, NOT a retry: skip the failure-prone
         transport.close and drop only the lines that keep the ssh-tier probe reading HALTED — a
         session-id-fenced delete_record, a FENCED by-token guard release (never revoke — ADR 0002),
-        and a by-token console-lease release. Any still-live backend is reaped by
-        SessionRegistry.reconcile() on next start. Idempotent; an unknown session_id is a no-op."""
+        and a by-token console-lease release. Because the durable ownership record is deleted, this
+        path does not guarantee a later SessionRegistry.reconcile() can identify or reap a still-live
+        backend; callers use it only as a coordination unblock when the normal close/reap path has
+        already failed. Idempotent; an unknown session_id is a no-op."""
         record = next((r for r in self._registry.list_records() if r.session_id == session_id), None)
         if record is None:
             self._tokens.pop(session_id, None)
