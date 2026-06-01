@@ -36,7 +36,10 @@ class ProviderRegistry:
                 limitations=list(plugin_spec.limitations),
             )
 
-    def get(self, name: str) -> ProviderCapability:
+    def get(self, name: str) -> ProviderCapability | None:
+        return self._providers.get(name)
+
+    def require(self, name: str) -> ProviderCapability:
         try:
             return self._providers[name]
         except KeyError as exc:

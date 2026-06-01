@@ -252,7 +252,7 @@ def select_stub_provider(
 ) -> ProviderCapability | ToolResponse:
     if provider_name is not None:
         try:
-            provider = registry.get(provider_name)
+            provider = registry.require(provider_name)
         except KeyError:
             return stub_configuration_error_response(
                 "unknown provider",

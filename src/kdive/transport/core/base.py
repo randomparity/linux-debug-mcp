@@ -426,14 +426,17 @@ class TransportRegistry:
             )
         self._capabilities[capability.provider_name] = capability
 
-    def get(self, provider_name: str) -> TransportCapability:
+    def get(self, provider_name: str) -> TransportCapability | None:
+        return self._capabilities.get(provider_name)
+
+    def require(self, provider_name: str) -> TransportCapability:
         try:
             return self._capabilities[provider_name]
         except KeyError as exc:
             raise KeyError(f"unknown transport provider: {provider_name}") from exc
 
     def endpoint_exposure(self, provider_name: str) -> EndpointExposure:
-        return self.get(provider_name).endpoint_exposure
+        return self.require(provider_name).endpoint_exposure
 
     def list_capabilities(self) -> list[TransportCapability]:
         return list(self._capabilities.values())

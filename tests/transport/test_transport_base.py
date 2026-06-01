@@ -472,7 +472,7 @@ def test_registered_capability_cannot_be_mutated_through_registry():
     )
     registry.register(cap)
     with pytest.raises(ValidationError):
-        registry.get("remote-sol").endpoint_exposure = EndpointExposure.LOOPBACK_LOCAL
+        registry.require("remote-sol").endpoint_exposure = EndpointExposure.LOOPBACK_LOCAL
     assert registry.endpoint_exposure("remote-sol") is EndpointExposure.BROKERED_REQUIRED
 
 
@@ -488,12 +488,14 @@ def test_transport_registry_register_lookup_and_duplicate():
     )
     registry.register(cap)
     assert registry.get("qemu-gdbstub") is cap
+    assert registry.require("qemu-gdbstub") is cap
     assert registry.endpoint_exposure("qemu-gdbstub") is EndpointExposure.LOOPBACK_LOCAL
     assert registry.list_capabilities() == [cap]
     with pytest.raises(ValueError):
         registry.register(cap)
-    with pytest.raises(KeyError):
-        registry.get("missing")
+    assert registry.get("missing") is None
+    with pytest.raises(KeyError, match="unknown transport provider: missing"):
+        registry.require("missing")
 
 
 def test_registry_rejects_loopback_local_from_non_allowlisted_provider():

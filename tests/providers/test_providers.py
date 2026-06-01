@@ -117,7 +117,8 @@ def test_registry_lists_registered_capabilities() -> None:
     registry.register(capability("local-artifacts"))
 
     assert registry.list_capabilities()[0].provider_name == "local-artifacts"
-    assert registry.get("local-artifacts").operations == ["host.check_prerequisites"]
+    assert registry.get("local-artifacts") == capability("local-artifacts")
+    assert registry.require("local-artifacts").operations == ["host.check_prerequisites"]
 
 
 def test_registry_rejects_duplicate_names() -> None:
@@ -209,11 +210,17 @@ def test_debug_attach_status_is_typed_and_rejects_unknown_values() -> None:
         )
 
 
-def test_registry_get_unknown_provider_has_contextual_error() -> None:
+def test_registry_get_unknown_provider_returns_none() -> None:
+    registry = ProviderRegistry()
+
+    assert registry.get("missing-provider") is None
+
+
+def test_registry_require_unknown_provider_has_contextual_error() -> None:
     registry = ProviderRegistry()
 
     with pytest.raises(KeyError, match="unknown provider: missing-provider") as exc_info:
-        registry.get("missing-provider")
+        registry.require("missing-provider")
 
     assert isinstance(exc_info.value.__cause__, KeyError)
 
