@@ -439,7 +439,7 @@ def test_default_registry_includes_stub_providers() -> None:
         "provisioning-stub",
         "hardware-control-stub",
         "console-access-stub",
-        "real-boot-stub",
+        "boot-orchestration-stub",
     }
 
     assert expected_stubs.issubset(providers)

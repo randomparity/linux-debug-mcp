@@ -344,7 +344,7 @@ def test_list_providers_handler_returns_default_capabilities() -> None:
         "provisioning-stub",
         "hardware-control-stub",
         "console-access-stub",
-        "real-boot-stub",
+        "boot-orchestration-stub",
     }.issubset(providers)
     assert providers["local-kernel-build"]["implementation_state"] == "implemented"
     assert providers["remote-build-stub"]["implementation_state"] == "stub"

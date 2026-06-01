@@ -6,6 +6,8 @@ import pytest
 from pydantic import ValidationError
 
 from kdive.providers.contracts.models import (
+    BootOrchestrationRequest,
+    BootOrchestrationResult,
     ConsoleAccessMethod,
     ConsoleReadRequest,
     ConsoleReadResult,
@@ -17,8 +19,6 @@ from kdive.providers.contracts.models import (
     PowerAction,
     ProvisioningRequest,
     ProvisioningResult,
-    RealBootRequest,
-    RealBootResult,
     RemoteArtifactSyncRequest,
     RemoteArtifactSyncResult,
     RemoteBuildRequest,
@@ -174,12 +174,12 @@ def test_provider_request_closed_sets_are_typed() -> None:
             },
         ),
         (
-            RealBootRequest,
+            BootOrchestrationRequest,
             {
                 "architecture": "ppc64le",
                 "target_name": "host-01",
                 "kernel_artifact_ref": "kernel-image",
-                "provider_name": "real-boot-stub",
+                "provider_name": "boot-orchestration-stub",
                 "timeout_seconds": 600,
                 "operation_label": "boot-real-target",
                 "run_id": "run-abc123",
@@ -195,7 +195,7 @@ def test_provider_request_closed_sets_are_typed() -> None:
                 "target_name": "host-01",
                 "provisioning_profile": "fedora-rawhide",
                 "kernel_artifact_ref": "kernel-image",
-                "provider_name": "real-boot-stub",
+                "provider_name": "boot-orchestration-stub",
                 "timeout_seconds": 3600,
                 "operation_label": "reserve-provision-boot",
                 "run_id": "run-abc123",
@@ -286,9 +286,9 @@ def test_request_models_accept_safe_common_fields(model: type, payload: dict) ->
             },
         ),
         (
-            RealBootResult,
+            BootOrchestrationResult,
             {
-                "provider_name": "real-boot-stub",
+                "provider_name": "boot-orchestration-stub",
                 "architecture": "ppc64le",
                 "boot_id": "boot-1",
                 "target_name": "host-01",
@@ -350,7 +350,7 @@ def test_requests_reject_missing_architecture(model: type) -> None:
             },
         ),
         (
-            RealBootRequest,
+            BootOrchestrationRequest,
             {
                 "architecture": "x86_64",
                 "target_name": "../host",
@@ -539,3 +539,15 @@ def test_serial_method_without_cipher_is_accepted() -> None:
 def test_legacy_ipmi_access_method_rejected() -> None:
     payload = {"architecture": "x86_64", "target_name": "vm-01", "access_method": "ipmi"}
     assert_rejects(ConsoleSessionRequest, payload)
+
+
+def test_boot_provider_contract_uses_orchestration_vocabulary() -> None:
+    from kdive.providers import stubs
+    from kdive.providers.contracts import models
+
+    assert not hasattr(models, "RealBootRequest")
+    assert not hasattr(models, "RealBootResult")
+    assert hasattr(models, "BootOrchestrationRequest")
+    assert hasattr(models, "BootOrchestrationResult")
+    assert not hasattr(stubs, "real_boot_stub_capability")
+    assert hasattr(stubs, "boot_orchestration_stub_capability")

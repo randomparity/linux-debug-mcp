@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from kdive.config import PROVIDER_DESTRUCTIVE_PERMISSIONS, missing_destructive_permissions
 from kdive.domain import ErrorCategory, Model, ToolResponse
 from kdive.providers.contracts.models import (
+    BootOrchestrationRequest,
     ConsoleAccessMethod,
     ConsoleReadRequest,
     ConsoleSessionRequest,
@@ -18,7 +19,6 @@ from kdive.providers.contracts.models import (
     PowerAction,
     ProviderRequest,
     ProvisioningRequest,
-    RealBootRequest,
     RemoteArtifactSyncRequest,
     RemoteBuildRequest,
     ReservationReleaseRequest,
@@ -279,8 +279,8 @@ def hardware_boot_kernel(
     provider_context: ProviderToolContext | None = None,
     execution_options: ProviderExecutionOptions | None = None,
     boot_options: HardwareBootOptions | None = None,
-) -> RealBootRequest:
-    return RealBootRequest(
+) -> BootOrchestrationRequest:
+    return BootOrchestrationRequest(
         **_provider_fields(
             architecture=architecture,
             provider_context=provider_context,

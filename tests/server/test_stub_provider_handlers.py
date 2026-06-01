@@ -14,13 +14,13 @@ from kdive.domain import ToolResponse
 from kdive.providers import handlers as provider_handlers
 from kdive.providers import tools as provider_tools
 from kdive.providers.contracts.models import (
+    BootOrchestrationRequest,
     ConsoleReadRequest,
     ConsoleSessionRequest,
     ConsoleWriteRequest,
     HardwareControlRequest,
     ProviderRequest,
     ProvisioningRequest,
-    RealBootRequest,
     RemoteArtifactSyncRequest,
     RemoteBuildRequest,
     ReservationReleaseRequest,
@@ -100,8 +100,8 @@ VALID_CALLS = [
             "target_name": "host-01",
             "kernel_artifact_ref": "kernel-image",
         },
-        "real-boot-stub",
-        RealBootRequest,
+        "boot-orchestration-stub",
+        BootOrchestrationRequest,
     ),
     (
         "console.open_session",
@@ -142,7 +142,7 @@ VALID_CALLS = [
             "provisioning_profile": "fedora",
             "kernel_artifact_ref": "kernel-image",
         },
-        "real-boot-stub",
+        "boot-orchestration-stub",
         ReserveProvisionBootRequest,
     ),
 ]

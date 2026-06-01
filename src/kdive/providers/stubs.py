@@ -192,14 +192,14 @@ def console_access_stub_capability() -> ProviderCapability:
     )
 
 
-def real_boot_stub_capability() -> ProviderCapability:
+def boot_orchestration_stub_capability() -> ProviderCapability:
     tools = ["boot-orchestrator", "reservation-api-client", "provisioning-cli", "power-control-cli"]
     permissions = [
         *PROVIDER_DESTRUCTIVE_PERMISSIONS["hardware.boot_kernel"],
         *PROVIDER_DESTRUCTIVE_PERMISSIONS["workflow.reserve_provision_boot"],
     ]
     return _stub_capability(
-        name="real-boot-stub",
+        name="boot-orchestration-stub",
         family="boot",
         target_kinds=[TargetKind.REMOTE, TargetKind.PHYSICAL],
         transports=["ssh", "bmc", "serial-console", "https-api"],
@@ -230,7 +230,7 @@ def stub_provider_capability_factories() -> list[Callable[[], ProviderCapability
         provisioning_stub_capability,
         hardware_control_stub_capability,
         console_access_stub_capability,
-        real_boot_stub_capability,
+        boot_orchestration_stub_capability,
     ]
 
 

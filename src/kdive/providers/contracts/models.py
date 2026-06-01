@@ -339,7 +339,7 @@ class ConsoleWriteResult(ProviderResult):
     )
 
 
-class RealBootRequest(ProviderRequest):
+class BootOrchestrationRequest(ProviderRequest):
     target_name: str
     kernel_artifact_ref: str
     boot_profile: str | None = None
@@ -354,7 +354,7 @@ class RealBootRequest(ProviderRequest):
     )
 
 
-class RealBootResult(ProviderResult):
+class BootOrchestrationResult(ProviderResult):
     boot_id: str | None = None
     target_name: str | None = None
     console_session_id: str | None = None

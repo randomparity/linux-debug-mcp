@@ -7,13 +7,13 @@ from pydantic import ValidationError
 
 from kdive.domain import ErrorCategory, ToolResponse
 from kdive.providers.contracts.models import (
+    BootOrchestrationRequest,
     ConsoleReadRequest,
     ConsoleSessionRequest,
     ConsoleWriteRequest,
     HardwareControlRequest,
     ProviderRequest,
     ProvisioningRequest,
-    RealBootRequest,
     RemoteArtifactSyncRequest,
     RemoteBuildRequest,
     ReservationReleaseRequest,
@@ -146,7 +146,7 @@ STUB_PROVIDER_OPERATIONS: dict[str, StubProviderOperationSpec] = {
     ),
     "hardware.boot_kernel": StubProviderOperationSpec(
         operation="hardware.boot_kernel",
-        request_type=RealBootRequest,
+        request_type=BootOrchestrationRequest,
     ),
     "console.open_session": StubProviderOperationSpec(
         operation="console.open_session",
