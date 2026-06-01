@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from kdive.artifacts.manifest import RunManifest
 from kdive.artifacts.redaction import redacted_artifacts
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import DebugProfile
@@ -291,7 +292,7 @@ def _verify_gdb_symbol_version_lock(
 @dataclass(frozen=True)
 class _DebugStartPreflight:
     store: ArtifactStore
-    manifest: Any
+    manifest: RunManifest
     build_result: StepResult
     boot_result: StepResult
     vmlinux: ArtifactRef

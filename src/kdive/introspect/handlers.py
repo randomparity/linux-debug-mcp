@@ -7,7 +7,7 @@ import shutil
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +15,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from kdive.artifacts.manifest import RunManifest
 from kdive.artifacts.store import ArtifactStore, ManifestStateError
 from kdive.config import MAX_INTROSPECT_CALLS_PER_RUN, RootfsProfile
 from kdive.coordination.admission import AdmissionError, AdmissionService
@@ -75,7 +76,7 @@ def debug_introspect_check_prerequisites_handler(
     request: DebugIntrospectCheckPrerequisitesRequest,
     *,
     artifact_root: Path,
-    rootfs_profiles: dict[str, RootfsProfile] | None = None,
+    rootfs_profiles: Mapping[str, RootfsProfile] | None = None,
     ssh_runner: SshRunner | None = None,
     admission: AdmissionService | None = None,
     session_registry: SessionRegistry | None = None,
@@ -260,7 +261,7 @@ def _validate_vmcore_introspect_request(
     request: DebugIntrospectFromVmcoreRequest,
     *,
     store: ArtifactStore,
-    manifest: Any,
+    manifest: RunManifest,
 ) -> ToolResponse | None:
     run_id = request.run_id
     if request.allow_write:

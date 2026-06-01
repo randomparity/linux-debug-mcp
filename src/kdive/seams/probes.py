@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import shlex
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -78,7 +79,7 @@ def resolve_probe_context(
     request: _SupportsProbeRequest,
     *,
     artifact_root: Path,
-    rootfs_profiles: dict[str, RootfsProfile],
+    rootfs_profiles: Mapping[str, RootfsProfile],
     timeout_band: tuple[int, int] = (5, 60),
 ) -> tuple[ProbeContext | None, ToolResponse | None]:
     """Shared run/rootfs validation for target-side prerequisite and dump probes."""
