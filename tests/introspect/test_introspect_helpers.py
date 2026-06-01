@@ -2,8 +2,128 @@ import pytest
 
 import kdive.introspect.helpers as helpers_module
 import kdive.server as server_module
+from kdive.artifacts.store import ArtifactStore
+from kdive.config import RootfsProfile
+from kdive.domain import ErrorCategory
 from kdive.introspect.helpers import built_in_helper_specs, get_helper_registry
 from kdive.introspect.helpers.base import HelperSpec
+from kdive.introspect.probes import assemble_introspect_probe_response
+from kdive.providers.ssh import SshCommandResult
+from kdive.safety.redaction import Redactor
+from kdive.target.probes import ProbeContext
+
+
+def _probe_context(tmp_path) -> ProbeContext:
+    return ProbeContext(
+        store=ArtifactStore(tmp_path),
+        run_id="run-1",
+        rootfs=RootfsProfile(
+            name="minimal",
+            source="/rootfs.qcow2",
+            access_method="ssh",
+            ssh_host="127.0.0.1",
+            ssh_user="root",
+        ),
+        host_build_id="abcd",
+        redactor=Redactor(),
+    )
+
+
+def _probe_paths(tmp_path):
+    agent_dir = tmp_path / "agent"
+    sensitive_dir = tmp_path / "sensitive"
+    agent_dir.mkdir()
+    sensitive_dir.mkdir()
+    return agent_dir, sensitive_dir / "stdout.raw", sensitive_dir / "stderr.raw"
+
+
+def test_introspect_probe_timeout_returns_failure(tmp_path) -> None:
+    agent_dir, stdout_path, stderr_path = _probe_paths(tmp_path)
+    stdout_path.write_text("{}", encoding="utf-8")
+
+    response = assemble_introspect_probe_response(
+        _probe_context(tmp_path),
+        ssh_result=SshCommandResult(exit_status=124, timed_out=True),
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        agent_dir=agent_dir,
+        probe_id="probe-1",
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert response.error.details["code"] == "ssh_failure"
+
+
+def test_introspect_probe_unparseable_stdout_returns_failure(tmp_path) -> None:
+    agent_dir, stdout_path, stderr_path = _probe_paths(tmp_path)
+    stdout_path.write_text("[]", encoding="utf-8")
+
+    response = assemble_introspect_probe_response(
+        _probe_context(tmp_path),
+        ssh_result=SshCommandResult(exit_status=0),
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        agent_dir=agent_dir,
+        probe_id="probe-1",
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.details["code"] == "probe_unparseable"
+
+
+def test_introspect_probe_no_python_returns_successful_fallback(tmp_path) -> None:
+    agent_dir, stdout_path, stderr_path = _probe_paths(tmp_path)
+    stdout_path.write_text("", encoding="utf-8")
+
+    response = assemble_introspect_probe_response(
+        _probe_context(tmp_path),
+        ssh_result=SshCommandResult(exit_status=127),
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        agent_dir=agent_dir,
+        probe_id="probe-1",
+    )
+
+    assert response.ok is True
+    assert response.data["introspect_usable"] == "unusable"
+    assert all(artifact.kind != "probe-report" for artifact in response.artifacts)
+
+
+def test_introspect_probe_success_writes_report_artifact(tmp_path) -> None:
+    agent_dir, stdout_path, stderr_path = _probe_paths(tmp_path)
+    stdout_path.write_text(
+        """
+        {
+          "python_version": "3.13",
+          "python_executable": "/usr/bin/python3",
+          "drgn_present": true,
+          "drgn_version": "0.0.30",
+          "running_build_id": "abcd",
+          "vmlinux_debuginfo": {
+            "candidates": [{"path": "/boot/vmlinux", "file_build_id": "abcd"}],
+            "module_debuginfo": true
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    response = assemble_introspect_probe_response(
+        _probe_context(tmp_path),
+        ssh_result=SshCommandResult(exit_status=0),
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        agent_dir=agent_dir,
+        probe_id="probe-1",
+    )
+
+    assert response.ok is True
+    assert response.data["introspect_usable"] == "usable"
+    assert (agent_dir / "probe.json").is_file()
+    assert any(artifact.kind == "probe-report" for artifact in response.artifacts)
 
 
 def test_helpers_live_under_introspect_package() -> None:

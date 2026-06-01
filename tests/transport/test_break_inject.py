@@ -7,6 +7,7 @@ from kdive.domain import ErrorCategory
 from kdive.providers.ssh import SshCommandResult
 from kdive.transport.core.base import BreakMethod, BreakPlan
 from kdive.transport.core.break_inject import InjectBreakError, inject_break
+from kdive.transport.core.break_types import BreakProxy, BreakSshResult, BreakSshRunner
 
 
 class _RecordingProxy:
@@ -42,8 +43,30 @@ class _RecordingSsh:
         return self.result
 
 
+def _exercise_break_protocols(proxy: BreakProxy, runner: BreakSshRunner, tmp_path: Path) -> BreakSshResult:
+    proxy.send_break("handle-1")
+    return runner.run(
+        ["ssh", "vm1"],
+        timeout=10,
+        stdout_path=tmp_path / "out",
+        stderr_path=tmp_path / "err",
+    )
+
+
 def _plan(method):
     return BreakPlan(method=method, channel_id="c0", rationale="test")
+
+
+def test_break_protocol_fakes_cover_proxy_runner_and_result(tmp_path: Path) -> None:
+    proxy = _RecordingProxy()
+    runner = _RecordingSsh()
+
+    result = _exercise_break_protocols(proxy, runner, tmp_path)
+
+    assert proxy.handle == "handle-1"
+    assert result.exit_status == 0
+    assert result.timed_out is False
+    assert runner.stdout_path == tmp_path / "out"
 
 
 def test_auto_dispatches_uart_break_to_proxy_send_break():

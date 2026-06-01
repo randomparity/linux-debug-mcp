@@ -13,8 +13,11 @@ from kdive.domain import (
 )
 from kdive.postmortem.crash.handler import debug_postmortem_crash_handler
 from kdive.postmortem.models import DebugPostmortemCrashRequest
+from kdive.postmortem.probes import assemble_kdump_probe_response, validated_dump_dir
 from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.providers.local.test.local_ssh_tests import SshCommandResult
+from kdive.safety.redaction import Redactor
+from kdive.target.probes import ProbeContext
 
 GOOD_ID = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 
@@ -69,6 +72,112 @@ def _run(tmp_path: Path) -> ArtifactStore:
     (rd / "inputs" / "vmcore").write_bytes(b"core")
     (rd / "build" / "vmlinux").write_bytes(b"elf")
     return store
+
+
+def _probe_context(tmp_path: Path) -> ProbeContext:
+    from kdive.config import RootfsProfile
+
+    return ProbeContext(
+        store=ArtifactStore(tmp_path),
+        run_id="r1",
+        rootfs=RootfsProfile(
+            name="minimal",
+            source="/rootfs.qcow2",
+            access_method="ssh",
+            ssh_host="127.0.0.1",
+            ssh_user="root",
+        ),
+        host_build_id=None,
+        redactor=Redactor(),
+    )
+
+
+def _probe_paths(tmp_path: Path) -> tuple[Path, Path, Path]:
+    agent_dir = tmp_path / "agent"
+    sensitive_dir = tmp_path / "sensitive"
+    agent_dir.mkdir()
+    sensitive_dir.mkdir()
+    return agent_dir, sensitive_dir / "stdout.raw", sensitive_dir / "stderr.raw"
+
+
+class _DumpDirRequest:
+    def __init__(self, dump_dir: str | None) -> None:
+        self.dump_dir = dump_dir
+
+
+def test_kdump_probe_timeout_failure_propagates(tmp_path: Path) -> None:
+    agent_dir, stdout_path, stderr_path = _probe_paths(tmp_path)
+    stdout_path.write_text("{}", encoding="utf-8")
+
+    response = assemble_kdump_probe_response(
+        _probe_context(tmp_path),
+        ssh_result=SshCommandResult(exit_status=124, timed_out=True),
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        agent_dir=agent_dir,
+        probe_id="probe-1",
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert response.error.details["code"] == "ssh_failure"
+
+
+def test_kdump_probe_success_returns_data_and_report_artifact(tmp_path: Path) -> None:
+    agent_dir, stdout_path, stderr_path = _probe_paths(tmp_path)
+    stdout_path.write_text(
+        """
+        {
+          "cmdline_has_crashkernel": true,
+          "kexec_crash_size": 4096,
+          "fadump_enabled": 0,
+          "fadump_registered": 0,
+          "service_active": true,
+          "service_units": {"kdump.service": "active"},
+          "dump_target_directive": "path",
+          "dump_dir": "/var/crash",
+          "dump_dir_exists": true,
+          "dump_dir_writable": true
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    response = assemble_kdump_probe_response(
+        _probe_context(tmp_path),
+        ssh_result=SshCommandResult(exit_status=0),
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        agent_dir=agent_dir,
+        probe_id="probe-1",
+    )
+
+    assert response.ok is True
+    assert response.data["kdump_ready"] is True
+    assert response.data["mechanism"] == "kdump"
+    assert (agent_dir / "probe.json").is_file()
+    assert any(artifact.kind == "probe-report" for artifact in response.artifacts)
+
+
+def test_validated_dump_dir_accepts_default_and_absolute_path() -> None:
+    default_dir, default_failure = validated_dump_dir(_DumpDirRequest(None), "r1")
+    explicit_dir, explicit_failure = validated_dump_dir(_DumpDirRequest("/tmp/crashes"), "r1")
+
+    assert default_failure is None
+    assert default_dir == "/var/crash"
+    assert explicit_failure is None
+    assert explicit_dir == "/tmp/crashes"
+
+
+def test_validated_dump_dir_rejects_relative_path() -> None:
+    dump_dir, failure = validated_dump_dir(_DumpDirRequest("relative/crashes"), "r1")
+
+    assert dump_dir is None
+    assert failure is not None
+    assert failure.error is not None
+    assert failure.error.category is ErrorCategory.CONFIGURATION_ERROR
+    assert failure.error.details["code"] == "invalid_dump_dir"
 
 
 class _FakeRunner:
