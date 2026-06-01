@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 import re
 import threading
 import time
@@ -30,6 +29,7 @@ from kdive.postmortem.crash.parsers import parse_command
 from kdive.postmortem.models import DebugPostmortemCrashRequest
 from kdive.postmortem.tools import PostmortemToolRuntime
 from kdive.providers.ssh import SSH_TIMEOUT_GRACE_SECONDS, SshCommandResult, SshRunner, SubprocessSshRunner
+from kdive.safety.files import atomic_write_text
 from kdive.safety.paths import PathSafetyError, confine_run_relative
 from kdive.safety.redaction import Redactor
 from kdive.seams.target import KernelProvenance
@@ -90,20 +90,6 @@ def _utcnow() -> datetime:
 def _chmod_best_effort(path: Path, mode: int) -> None:
     with contextlib.suppress(FileNotFoundError):
         path.chmod(mode)
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temp_fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(temp_fd, "w", encoding="utf-8") as temp_file:
-            temp_file.write(text)
-            temp_file.flush()
-        os.replace(temp_path, path)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            temp_path.unlink()
-        raise
 
 
 def _record_postmortem_crash_step_with_retry(
@@ -276,7 +262,7 @@ def _prepare_crash_call_workspace(
     stripped_commands = [c.strip() for c in request.commands]
     command_script = build_command_script(stripped_commands, sensitive_call_dir, ctx.modules_path)
     redactor = Redactor(secret_values=[])
-    _atomic_write_text(agent_dir / "request.json", json.dumps(redactor.redact_value(request.model_dump(mode="json"))))
+    atomic_write_text(agent_dir / "request.json", json.dumps(redactor.redact_value(request.model_dump(mode="json"))))
     return _CrashCallWorkspace(
         call_id=call_id,
         agent_dir=agent_dir,
@@ -536,8 +522,8 @@ def _crash_module_symbol_status(
 def _persist_crash_artifacts(context: _CrashFinalizationContext, parsed: _CrashParsedOutput) -> list[ArtifactRef]:
     transcript_path = context.agent_dir / "transcript.txt"
     parsed_path = context.agent_dir / "parsed.json"
-    _atomic_write_text(transcript_path, context.redactor.redact_text(parsed.transcript))
-    _atomic_write_text(parsed_path, json.dumps(parsed.results))
+    atomic_write_text(transcript_path, context.redactor.redact_text(parsed.transcript))
+    atomic_write_text(parsed_path, json.dumps(parsed.results))
     return [
         ArtifactRef(
             path=str(transcript_path.relative_to(context.store.run_dir(context.run_id))),
