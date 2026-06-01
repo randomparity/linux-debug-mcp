@@ -1091,6 +1091,75 @@ def test_ssh_timeout_propagates(tmp_path: Path) -> None:
     assert response.error.details["code"] == "ssh_timeout"
 
 
+@pytest.mark.parametrize(
+    ("exc", "expected_code"),
+    [
+        (OSError("ssh transport failed"), "ssh_failure"),
+        (RuntimeError("runner exploded"), "introspect_runner_failure"),
+    ],
+)
+def test_live_runner_exception_records_failed_step_and_rolls_back(
+    tmp_path: Path,
+    exc: BaseException,
+    expected_code: str,
+) -> None:
+    class RaisingSshRunner(FakeSshRunner):
+        def run(
+            self,
+            argv,
+            *,
+            timeout,
+            stdout_path,
+            stderr_path,
+            cancel=None,
+            stdin=None,
+            max_stdout_bytes=None,
+        ) -> SshCommandResult:
+            self.calls.append(
+                {
+                    "argv": argv,
+                    "timeout": timeout,
+                    "stdout_path": stdout_path,
+                    "stderr_path": stderr_path,
+                    "stdin": stdin,
+                    "cancel": cancel,
+                    "max_stdout_bytes": max_stdout_bytes,
+                }
+            )
+            raise exc
+
+    store, run_id, _ = _bootstrap_run_with_build(tmp_path)
+    targets, rootfs, debug = _profiles()
+    admission = FakeAdmissionService(snapshot=_make_snapshot(run_id))
+
+    response = debug_introspect_run_handler(
+        _make_request(run_id),
+        artifact_root=tmp_path,
+        target_profiles=targets,
+        rootfs_profiles=rootfs,
+        debug_profiles=debug,
+        ssh_runner=RaisingSshRunner(),
+        admission=admission,
+        session_registry=FakeSessionRegistry(),
+    )
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert response.error.details["code"] == expected_code
+    assert admission.rollback_calls == [admission.handle]
+
+    manifest = store.load_manifest(run_id)
+    introspect_steps = {
+        name: result for name, result in manifest.step_results.items() if name.startswith("introspect:")
+    }
+    assert len(introspect_steps) == 1
+    step = next(iter(introspect_steps.values()))
+    assert step.status == StepStatus.FAILED
+    assert step.details["code"] == expected_code
+    assert step.details["wrapper_exit_code"] == -1
+
+
 def test_run_oversized_stdout_streaming_cap_is_infrastructure_failure(tmp_path: Path) -> None:
     # Iter-2 finding (run-path Finding 2): the SSH runner's streaming cap kills
     # a hostile target that floods stdout. The runner signals this with

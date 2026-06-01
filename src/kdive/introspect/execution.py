@@ -971,16 +971,49 @@ def _run_live_wrapper(
             ),
             True,
         )
-    ssh_run = _run_introspect_ssh_with_cancellation(
-        runner=runner,
-        ssh_argv=ssh_argv,
-        handle=handle,
-        timeout_seconds=user_timeout,
-        stdout_path=workspace.stdout_path,
-        stderr_path=workspace.stderr_path,
-        wrapper=workspace.wrapper,
-        now=now,
-    )
+    ssh_started_monotonic = time.monotonic()
+    try:
+        ssh_run = _run_introspect_ssh_with_cancellation(
+            runner=runner,
+            ssh_argv=ssh_argv,
+            handle=handle,
+            timeout_seconds=user_timeout,
+            stdout_path=workspace.stdout_path,
+            stderr_path=workspace.stderr_path,
+            wrapper=workspace.wrapper,
+            now=now,
+        )
+    except Exception as exc:
+        _rollback_introspect_admission(admission, handle, call_id=call_id, run_id=request.run_id)
+        raw_stderr = (
+            workspace.stderr_path.read_text(encoding="utf-8", errors="replace")
+            if workspace.stderr_path.exists()
+            else ""
+        )
+        code = "ssh_failure" if isinstance(exc, OSError) else "introspect_runner_failure"
+        return (
+            None,
+            _record_introspect_failure(
+                store=store,
+                run_id=request.run_id,
+                call_id=call_id,
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                code=code,
+                message=redactor.redact_text(f"live introspect runner failed: {exc}"),
+                agent_dir=agent_dir,
+                sensitive_dir=sensitive_call_dir,
+                redactor=redactor,
+                raw_stderr=raw_stderr,
+                ssh_exit=-1,
+                request_timeout_seconds=request.timeout_seconds,
+                duration_ms=int((time.monotonic() - ssh_started_monotonic) * 1000),
+                ssh_user=resolved_rootfs.ssh_user,
+                outcome_status_for_forensics=None,
+                allow_write=request.allow_write,
+                acknowledged_permissions=write_mode_permissions,
+            ),
+            True,
+        )
     ssh_result = ssh_run.result
     for raw_path in (workspace.stdout_path, workspace.stderr_path):
         _chmod_best_effort(raw_path, 0o600)
