@@ -87,7 +87,7 @@ class _DebugOpFailure:
 def _debug_session_details_from_result(result: StepResult, *, allow_ended: bool = False) -> dict[str, Any] | None:
     if result.status != StepStatus.SUCCEEDED:
         return None
-    if not allow_ended and result.details.get("current_execution_state") == "ended":
+    if not allow_ended and result.details.get("current_execution_state") == DebugSessionState.ENDED.value:
         return None
     return result.details
 

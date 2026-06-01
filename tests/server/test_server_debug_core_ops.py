@@ -373,6 +373,15 @@ def test_debug_operation_handler_builds_runtime_without_pass_through_layers() ->
     assert "operation_core=_debug_operation_response" not in server_source
 
 
+def test_debug_session_details_uses_state_enum_for_ended_filter() -> None:
+    import inspect
+
+    helper_source = inspect.getsource(debug_operations._debug_session_details_from_result)
+
+    assert '== "ended"' not in helper_source
+    assert "DebugSessionState.ENDED.value" in helper_source
+
+
 def test_server_delegates_debug_handler_set_to_debug_package() -> None:
     server_source = Path(server_module.__file__).read_text(encoding="utf-8")
 
